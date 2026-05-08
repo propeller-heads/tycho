@@ -70,43 +70,6 @@ impl MetricState {
             ))
         }
     }
-
-    fn quote_amount_out(
-        &self,
-        amount_in: BigUint,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<(BigUint, BigUint, BigUint), SimulationError> {
-        let direction = self.direction(&token_in.address, &token_out.address)?;
-        let amount_in = amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".into())
-        })?;
-        let amount_in = amount_in / 10_f64.powi(token_in.decimals as i32);
-
-        let (amount_out, max_output) = match direction {
-            MetricDirection::ZeroForOne => {
-                let price = self.bid_ask.bid_price()?;
-                let amount_out = amount_in * price;
-                let max_output = self.bid_ask.total_token1_available()?;
-                (amount_out, max_output)
-            }
-            MetricDirection::OneForZero => {
-                let price = self.bid_ask.ask_price()?;
-                let amount_out = amount_in / price;
-                let max_output = self.bid_ask.total_token0_available()?;
-                (amount_out, max_output)
-            }
-        };
-
-        let amount_out_raw = BigUint::from_f64(amount_out * 10_f64.powi(token_out.decimals as i32))
-            .ok_or_else(|| {
-                SimulationError::RecoverableError("Can't convert amount out to BigUint".into())
-            })?;
-        let capped_amount = amount_out_raw
-            .clone()
-            .min(max_output.clone());
-        Ok((amount_out_raw, capped_amount, max_output))
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,8 +118,31 @@ impl ProtocolSim for MetricState {
             )));
         }
 
-        let (amount_out, capped_amount, max_output) =
-            self.quote_amount_out(amount_in.clone(), token_in, token_out)?;
+        let direction = self.direction(&token_in.address, &token_out.address)?;
+        let amount_in_human = amount_in.to_f64().ok_or_else(|| {
+            SimulationError::RecoverableError("Can't convert amount in to f64".into())
+        })? / 10_f64.powi(token_in.decimals as i32);
+
+        // Stream prices are only indicative; execution asks Metric for a fresh quote later.
+        let (amount_out_human, max_output) = match direction {
+            MetricDirection::ZeroForOne => {
+                let price = self.bid_ask.bid_price()?;
+                (amount_in_human * price, self.bid_ask.total_token1_available()?)
+            }
+            MetricDirection::OneForZero => {
+                let price = self.bid_ask.ask_price()?;
+                (amount_in_human / price, self.bid_ask.total_token0_available()?)
+            }
+        };
+
+        let amount_out =
+            BigUint::from_f64(amount_out_human * 10_f64.powi(token_out.decimals as i32))
+                .ok_or_else(|| {
+                    SimulationError::RecoverableError("Can't convert amount out to BigUint".into())
+                })?;
+        let capped_amount = amount_out
+            .clone()
+            .min(max_output.clone());
         let res = GetAmountOutResult {
             amount: capped_amount.clone(),
             gas: BigUint::from(170_000u64),
@@ -228,6 +214,7 @@ impl ProtocolSim for MetricState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        // RFQ updates arrive as full API snapshots, not block deltas.
         Err(TransitionError::DecodeError(
             "Metric RFQ state is snapshot-based and does not support deltas".into(),
         ))

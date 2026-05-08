@@ -8,7 +8,7 @@ use alloy::primitives::{utils::keccak256, Address, U256};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use num_bigint::BigUint;
-use num_traits::{Pow, ToPrimitive};
+use num_traits::ToPrimitive;
 use reqwest::Client;
 use tokio::time::{interval, timeout, Duration};
 use tracing::{error, info, warn};
@@ -313,35 +313,6 @@ impl MetricClient {
         })
     }
 
-    fn pair_matches_filter(&self, metadata: &MetricMetadata) -> bool {
-        self.tokens.is_empty() ||
-            (self.tokens.contains(&metadata.token0) && self.tokens.contains(&metadata.token1))
-    }
-
-    fn component_id(&self, metadata: &MetricMetadata) -> String {
-        let id = format!("metric_{}_{}", self.chain.id(), metadata.pool_address);
-        keccak256(id.as_bytes()).to_string()
-    }
-
-    fn approximate_tvl(&self, metadata: &MetricMetadata, bid_ask: &MetricBidAskResponse) -> f64 {
-        if !self
-            .quote_tokens
-            .contains(&metadata.token1)
-        {
-            return 0.0;
-        }
-
-        stable_decimals(&metadata.token1)
-            .and_then(|decimals| {
-                bid_ask
-                    .total_token1_available()
-                    .ok()
-                    .and_then(|value| value.to_f64())
-                    .map(|raw| raw / 10_f64.pow(decimals as f64))
-            })
-            .unwrap_or(0.0)
-    }
-
     pub async fn request_binding_quote_for_pool(
         &self,
         metadata: &MetricMetadata,
@@ -359,6 +330,7 @@ impl MetricClient {
                 )));
             };
 
+        // Binding quotes should use fresh Q64 prices, not just the last polling snapshot.
         let bid_ask = self
             .fetch_bid_ask(&metadata.pool_address)
             .await?;
@@ -476,11 +448,21 @@ impl RFQClient for MetricClient {
                 };
 
                 let mut new_components = HashMap::new();
-                for pool in metadata.iter().filter(|pool| client.pair_matches_filter(pool)) {
+                for pool in &metadata {
+                    if !client.tokens.is_empty() &&
+                        (!client.tokens.contains(&pool.token0) ||
+                            !client.tokens.contains(&pool.token1))
+                    {
+                        continue;
+                    }
+
                     let bid_ask = match client.fetch_bid_ask(&pool.pool_address).await {
                         Ok(bid_ask) => bid_ask,
                         Err(e) => {
-                            warn!("Failed to fetch Metric bid/ask for pool {}: {}", pool.pool_address, e);
+                            warn!(
+                                "Failed to fetch Metric bid/ask for pool {}: {}",
+                                pool.pool_address, e
+                            );
                             continue;
                         }
                     };
@@ -488,12 +470,28 @@ impl RFQClient for MetricClient {
                         continue;
                     }
 
-                    let tvl = client.approximate_tvl(pool, &bid_ask);
+                    // Metric gives raw token availability. For filtering, only count token1 when
+                    // it is one of the stable quote tokens we know how to normalize.
+                    let tvl = if client.quote_tokens.contains(&pool.token1) {
+                        stable_decimals(&pool.token1)
+                            .and_then(|decimals| {
+                                bid_ask
+                                    .total_token1_available()
+                                    .ok()
+                                    .and_then(|value| value.to_f64())
+                                    .map(|raw| raw / 10_f64.powi(decimals as i32))
+                            })
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                     if tvl < client.tvl {
                         continue;
                     }
 
-                    let component_id = client.component_id(pool);
+                    let component_key =
+                        format!("metric_{}_{}", client.chain.id(), pool.pool_address);
+                    let component_id = keccak256(component_key.as_bytes()).to_string();
                     new_components.insert(
                         component_id.clone(),
                         client.create_component_with_state(component_id, pool, &bid_ask, tvl),

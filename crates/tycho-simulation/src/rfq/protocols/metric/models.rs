@@ -81,6 +81,8 @@ impl MetricBidAskResponse {
     }
 }
 
+// Metric's APIs return Q64 values as decimal strings. We only convert them for indicative
+// routing; the binding quote path keeps the original Q64 strings for calldata encoding.
 pub fn q64_decimal_to_f64(value: &str) -> Result<f64, RFQError> {
     let raw = parse_biguint(value, "Q64 price")?;
     let raw = raw
@@ -124,6 +126,7 @@ pub struct MetricQuoteResponse {
 
 impl MetricQuoteResponse {
     pub fn amount_out(&self, zero_for_one: bool) -> Result<BigUint, RFQError> {
+        // Deltas are from the pool's point of view, so the trader's output is negative.
         let output_delta = if zero_for_one {
             parse_bigint(&self.amount1_delta, "amount1Delta")?
         } else {

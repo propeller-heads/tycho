@@ -51,6 +51,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
             })?
             .clone();
 
+        // RFQ snapshots do not carry balances; all Metric pricing data is stored as attributes.
         let attrs = snapshot.state.attributes;
         let metadata = MetricMetadata {
             pair: read_string_attr(&attrs, "pair")?,
