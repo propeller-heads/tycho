@@ -4,7 +4,10 @@ use std::{
     time::SystemTime,
 };
 
-use alloy::primitives::{utils::keccak256, Address, U256};
+use alloy::{
+    primitives::{utils::keccak256, Address, Bytes as AlloyBytes, U256},
+    sol_types::SolValue,
+};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use num_bigint::BigUint;
@@ -25,7 +28,8 @@ use crate::{
         errors::RFQError,
         models::TimestampHeader,
         protocols::metric::models::{
-            MetricBidAskResponse, MetricMetadata, MetricQuoteRequest, MetricQuoteResponse,
+            MetricBidAskResponse, MetricMetadata, MetricSignedOracleUpdateResponse,
+            MetricSignedOracleUpdateSlot,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -49,7 +53,6 @@ pub struct MetricClient {
 
 impl MetricClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:metric";
-    const U128_MAX: &'static str = "340282366920938463463374607431768211455";
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -271,35 +274,36 @@ impl MetricClient {
         })
     }
 
-    async fn fetch_quote(
+    async fn fetch_signed_oracle_update(
         &self,
         pool: &Bytes,
-        request: &MetricQuoteRequest,
-    ) -> Result<MetricQuoteResponse, RFQError> {
-        let endpoint = format!("{}/{}/quote", self.chain_endpoint, bytes_to_address_string(pool)?);
+    ) -> Result<MetricSignedOracleUpdateResponse, RFQError> {
+        let endpoint =
+            format!("{}/{}/get_signed_data", self.chain_endpoint, bytes_to_address_string(pool)?);
         let http_client = Client::new();
-        let response = timeout(
-            self.quote_timeout,
-            http_client
-                .post(endpoint)
-                .header("accept", "application/json")
-                .json(request)
-                .send(),
-        )
-        .await
-        .map_err(|_| {
-            RFQError::ConnectionError(format!(
-                "Metric quote request timed out after {} seconds",
-                self.quote_timeout.as_secs()
-            ))
-        })?
-        .map_err(|e| {
-            RFQError::ConnectionError(format!("Failed to send Metric quote request: {e}"))
-        })?;
+        let mut request = http_client
+            .get(endpoint)
+            .header("accept", "application/json");
+
+        if let Some(secret_key) = &self.secret_key {
+            request = request.query(&[("secretKey", secret_key.as_str())]);
+        }
+
+        let response = timeout(self.quote_timeout, request.send())
+            .await
+            .map_err(|_| {
+                RFQError::ConnectionError(format!(
+                    "Metric oracle update request timed out after {} seconds",
+                    self.quote_timeout.as_secs()
+                ))
+            })?
+            .map_err(|e| {
+                RFQError::ConnectionError(format!("Failed to fetch Metric oracle update: {e}"))
+            })?;
 
         if !response.status().is_success() {
             return Err(RFQError::QuoteNotFound(format!(
-                "Metric quote HTTP error {}: {}",
+                "Metric oracle update HTTP error {}: {}",
                 response.status(),
                 response
                     .text()
@@ -309,109 +313,46 @@ impl MetricClient {
         }
 
         response.json().await.map_err(|e| {
-            RFQError::ParsingError(format!("Failed to parse Metric quote response: {e}"))
+            RFQError::ParsingError(format!("Failed to parse Metric oracle update response: {e}"))
         })
     }
 
-    pub async fn request_binding_quote_for_pool(
+    pub async fn request_oracle_update_for_pool(
         &self,
         metadata: &MetricMetadata,
         params: &GetAmountOutParams,
+        amount_out: BigUint,
     ) -> Result<SignedQuote, RFQError> {
-        let zero_for_one =
-            if params.token_in == metadata.token0 && params.token_out == metadata.token1 {
-                true
-            } else if params.token_in == metadata.token1 && params.token_out == metadata.token0 {
-                false
-            } else {
-                return Err(RFQError::InvalidInput(format!(
-                    "Metric token pair mismatch: {} -> {} is not {} / {}",
-                    params.token_in, params.token_out, metadata.token0, metadata.token1
-                )));
-            };
-
-        // Binding quotes should use fresh Q64 prices, not just the last polling snapshot.
-        let bid_ask = self
-            .fetch_bid_ask(&metadata.pool_address)
-            .await?;
-        if !bid_ask.quote_available {
-            return Err(RFQError::QuoteNotFound(format!(
-                "Metric quote unavailable for pool {} at block {}",
-                metadata.pool_address, bid_ask.latest_block
+        if !((params.token_in == metadata.token0 && params.token_out == metadata.token1) ||
+            (params.token_in == metadata.token1 && params.token_out == metadata.token0))
+        {
+            return Err(RFQError::InvalidInput(format!(
+                "Metric token pair mismatch: {} -> {} is not {} / {}",
+                params.token_in, params.token_out, metadata.token0, metadata.token1
             )));
         }
 
-        let price_limit_x64 = if zero_for_one { "0" } else { Self::U128_MAX };
-        let quote_request = MetricQuoteRequest {
-            pool: bytes_to_address_string(&metadata.pool_address)?,
-            zero_for_one,
-            amount_specified: params.amount_in.to_string(),
-            price_limit_x64: price_limit_x64.to_string(),
-            bid_price_x64: bid_ask.bid_adj.clone(),
-            ask_price_x64: bid_ask.ask_adj.clone(),
-        };
-        let quote = self
-            .fetch_quote(&metadata.pool_address, &quote_request)
+        let oracle_update = self
+            .fetch_signed_oracle_update(&metadata.pool_address)
             .await?;
-        quote.validate(params, zero_for_one)?;
-        let amount_out = quote.amount_out(zero_for_one)?;
+        // Metric may return multiple slots, but the API does not expose a reliable
+        // pool-to-slot mapping yet. Use the first signed slot until that rule is clarified.
+        let slot = oracle_update
+            .slots
+            .first()
+            .ok_or_else(|| {
+                RFQError::QuoteNotFound(format!(
+                    "Metric oracle update returned no signed slots for pool {}",
+                    metadata.pool_address
+                ))
+            })?;
 
         let mut quote_attributes = HashMap::new();
-        quote_attributes.insert("pool".to_string(), metadata.pool_address.clone());
         quote_attributes
-            .insert("price_provider".to_string(), metadata.price_provider_address.clone());
-        quote_attributes.insert("quoter".to_string(), metadata.quoter_address.clone());
-        quote_attributes.insert("zero_for_one".to_string(), vec![u8::from(zero_for_one)].into());
+            .insert("oracle_update_target".to_string(), metadata.price_provider_address.clone());
         quote_attributes.insert(
-            "amount_specified".to_string(),
-            params
-                .amount_in
-                .to_string()
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        quote_attributes.insert(
-            "price_limit_x64".to_string(),
-            biguint_decimal_to_u256_bytes(&quote_request.price_limit_x64)?,
-        );
-        quote_attributes.insert(
-            "bid_price_x64".to_string(),
-            biguint_decimal_to_u256_bytes(&quote_request.bid_price_x64)?,
-        );
-        quote_attributes.insert(
-            "ask_price_x64".to_string(),
-            biguint_decimal_to_u256_bytes(&quote_request.ask_price_x64)?,
-        );
-        quote_attributes.insert(
-            "amount0_delta".to_string(),
-            quote
-                .amount0_delta
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        quote_attributes.insert(
-            "amount1_delta".to_string(),
-            quote
-                .amount1_delta
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        quote_attributes.insert(
-            "latest_block".to_string(),
-            U256::from(bid_ask.latest_block)
-                .to_be_bytes::<32>()
-                .to_vec()
-                .into(),
-        );
-        quote_attributes.insert(
-            "quote_expiration".to_string(),
-            U256::from(bid_ask.quote_expiration)
-                .to_be_bytes::<32>()
-                .to_vec()
-                .into(),
+            "oracle_update_0_calldata".to_string(),
+            encode_oracle_update_calldata(&oracle_update.feed_creator, slot)?,
         );
 
         Ok(SignedQuote {
@@ -538,7 +479,7 @@ impl RFQClient for MetricClient {
                 ))
             })?;
 
-        self.request_binding_quote_for_pool(pool, params)
+        self.request_oracle_update_for_pool(pool, params, BigUint::default())
             .await
     }
 }
@@ -563,14 +504,33 @@ fn bytes_to_address_string(address: &Bytes) -> Result<String, RFQError> {
     Ok(Address::from_slice(address).to_checksum(None))
 }
 
-fn biguint_decimal_to_u256_bytes(value: &str) -> Result<Bytes, RFQError> {
+fn bytes_to_alloy_address(address: &Bytes) -> Result<Address, RFQError> {
+    if address.len() != 20 {
+        return Err(RFQError::InvalidInput(format!("Invalid EVM address length: {address}")));
+    }
+    Ok(Address::from_slice(address))
+}
+
+fn encode_oracle_update_calldata(
+    feed_creator: &Bytes,
+    slot: &MetricSignedOracleUpdateSlot,
+) -> Result<Bytes, RFQError> {
+    let args = (
+        bytes_to_alloy_address(feed_creator)?,
+        U256::from(slot.deadline),
+        biguint_decimal_to_u256(&slot.new_slot_value)?,
+        AlloyBytes::from(slot.signature.to_vec()),
+    );
+    let selector = keccak256("updateBySignature(address,uint256,uint256,bytes)".as_bytes());
+    let mut calldata = selector[..4].to_vec();
+    calldata.extend(args.abi_encode());
+    Ok(calldata.into())
+}
+
+fn biguint_decimal_to_u256(value: &str) -> Result<U256, RFQError> {
     let value = BigUint::from_str(value)
         .map_err(|_| RFQError::ParsingError(format!("Failed to parse uint value: {value}")))?;
-    Ok(Bytes::from(
-        biguint_to_u256(&value)
-            .to_be_bytes::<32>()
-            .to_vec(),
-    ))
+    Ok(biguint_to_u256(&value))
 }
 
 fn stable_decimals(address: &Bytes) -> Option<u8> {
@@ -666,5 +626,26 @@ mod tests {
     fn test_stable_decimals() {
         let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         assert_eq!(stable_decimals(&usdc), Some(6));
+    }
+
+    #[test]
+    fn test_encode_oracle_update_calldata() {
+        let feed_creator = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
+        let slot = MetricSignedOracleUpdateSlot {
+            slot_id: 0,
+            deadline: 1_700_000_000,
+            slot_pairs: vec!["weth".to_string(), "usdc".to_string()],
+            new_slot_value: "42".to_string(),
+            signature: Bytes::from_str(
+                "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111b",
+            )
+            .unwrap(),
+            prices: serde_json::json!([]),
+        };
+
+        let calldata = encode_oracle_update_calldata(&feed_creator, &slot).unwrap();
+
+        assert_eq!(&calldata[..4], &[0x78, 0xce, 0x3a, 0xe1]);
+        assert!(calldata.len() > 4);
     }
 }

@@ -9,11 +9,22 @@
     },
     "rfq:liquorice": {
       "balance_manager_address": "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
+    },
+    "rfq:metric": {
+      "request_oracle_update": "true"
     }
   },
-  "base": {},
+  "base": {
+    "rfq:metric": {
+      "request_oracle_update": "false"
+    }
+  },
   "arbitrum": {},
   "polygon": {},
-  "unichain": {},
+  "unichain": {
+    "vm:curve": {
+      "native_token_address": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    }
+  },
   "bsc": {}
 }

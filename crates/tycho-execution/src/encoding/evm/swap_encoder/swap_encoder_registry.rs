@@ -13,7 +13,7 @@ use crate::encoding::{
             etherfi::EtherfiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
             hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            native_wrap::WrapSwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            native_wrap::WrapSwapEncoder, metric::MetricSwapEncoder, rocketpool::RocketpoolSwapEncoder,
             slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
             uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
@@ -138,6 +138,9 @@ impl SwapEncoderRegistry {
             }
             "rfq:liquorice" => {
                 Ok(Box::new(LiquoriceSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "rfq:metric" => {
+                Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "fluid_v1" => {
                 Ok(Box::new(FluidV1SwapEncoder::new(executor_address, self.chain, config)?))

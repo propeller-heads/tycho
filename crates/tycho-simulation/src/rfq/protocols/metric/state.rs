@@ -253,9 +253,20 @@ impl IndicativelyPriced for MetricState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
+        let direction = self.direction(&params.token_in, &params.token_out)?;
+        let (token_in, token_out) = match direction {
+            MetricDirection::ZeroForOne => (&self.base_token, &self.quote_token),
+            MetricDirection::OneForZero => (&self.quote_token, &self.base_token),
+        };
+        let amount_out = self
+            .get_amount_out(params.amount_in.clone(), token_in, token_out)?
+            .amount;
+
+        // Metric's swap path is independent from the quote API. Execution uses this hook to fetch
+        // signed oracle-update calldata that can be submitted before the pool swap.
         Ok(self
             .client
-            .request_binding_quote_for_pool(&self.metadata, &params)
+            .request_oracle_update_for_pool(&self.metadata, &params, amount_out)
             .await?)
     }
 }
@@ -294,26 +305,14 @@ mod tests {
         )
     }
 
-    fn base_weth() -> Token {
+    fn wsteth() -> Token {
         Token::new(
-            &Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap(),
-            "WETH",
+            &Bytes::from_str("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0").unwrap(),
+            "WSTETH",
             18,
             0,
-            &[Some(2300)],
-            Chain::Base,
-            100,
-        )
-    }
-
-    fn base_usdc() -> Token {
-        Token::new(
-            &Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap(),
-            "USDC",
-            6,
-            0,
-            &[Some(1)],
-            Chain::Base,
+            &[Some(2800)],
+            Chain::Ethereum,
             100,
         )
     }
@@ -402,16 +401,16 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "hits Metric's public API"]
-    async fn test_live_metric_api_state_get_amount_out_and_quote() {
-        let weth = base_weth();
-        let usdc = base_usdc();
+    async fn test_live_metric_api_state_get_amount_out_and_oracle_update() {
+        let wsteth = wsteth();
+        let weth = weth();
         let base_url = std::env::var("METRIC_API_URL")
             .unwrap_or_else(|_| "http://54.199.103.16:8080".to_string())
             .trim_end_matches('/')
             .to_string();
         let client = MetricClient::new(
-            Chain::Base,
-            HashSet::from([weth.address.clone(), usdc.address.clone()]),
+            Chain::Ethereum,
+            HashSet::from([wsteth.address.clone(), weth.address.clone()]),
             0.0,
             HashSet::new(),
             base_url.clone(),
@@ -423,7 +422,7 @@ mod tests {
 
         let http_client = reqwest::Client::new();
         let metadata: Vec<MetricMetadata> = http_client
-            .get(format!("{base_url}/base/metadata"))
+            .get(format!("{base_url}/ethereum/metadata"))
             .header("accept", "application/json")
             .send()
             .await
@@ -433,10 +432,10 @@ mod tests {
             .unwrap();
         let metadata = metadata
             .into_iter()
-            .find(|pool| pool.token0 == weth.address && pool.token1 == usdc.address)
-            .expect("Metric live API returned no Base WETH/USDC pool");
+            .find(|pool| pool.token0 == wsteth.address && pool.token1 == weth.address)
+            .expect("Metric live API returned no Ethereum WSTETH/WETH pool");
         let bid_ask: MetricBidAskResponse = http_client
-            .get(format!("{base_url}/base/{}/bid_ask", metadata.pool_address))
+            .get(format!("{base_url}/ethereum/{}/bid_ask", metadata.pool_address))
             .header("accept", "application/json")
             .send()
             .await
@@ -445,7 +444,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state = MetricState::new(weth, usdc, metadata, bid_ask, client);
+        let state = MetricState::new(wsteth, weth, metadata, bid_ask, client);
         assert!(state.bid_ask.quote_available);
 
         let amount_in = BigUint::from(1_000_000_000_000u64);
@@ -468,5 +467,13 @@ mod tests {
         assert!(signed_quote.amount_out > BigUint::from(0u8));
         assert_eq!(signed_quote.base_token, state.base_token.address);
         assert_eq!(signed_quote.quote_token, state.quote_token.address);
+        assert_eq!(
+            signed_quote.quote_attributes["oracle_update_target"],
+            state.metadata.price_provider_address
+        );
+        assert_eq!(
+            &signed_quote.quote_attributes["oracle_update_0_calldata"][..4],
+            &[0x78, 0xce, 0x3a, 0xe1]
+        );
     }
 }
