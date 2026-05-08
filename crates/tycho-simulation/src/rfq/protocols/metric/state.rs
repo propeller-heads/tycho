@@ -294,6 +294,30 @@ mod tests {
         )
     }
 
+    fn base_weth() -> Token {
+        Token::new(
+            &Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(2300)],
+            Chain::Base,
+            100,
+        )
+    }
+
+    fn base_usdc() -> Token {
+        Token::new(
+            &Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap(),
+            "USDC",
+            6,
+            0,
+            &[Some(1)],
+            Chain::Base,
+            100,
+        )
+    }
+
     fn state() -> MetricState {
         let weth = weth();
         let usdc = usdc();
@@ -374,5 +398,75 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, SimulationError::InvalidInput(_, Some(_))));
+    }
+
+    #[tokio::test]
+    #[ignore = "hits Metric's public API"]
+    async fn test_live_metric_api_state_get_amount_out_and_quote() {
+        let weth = base_weth();
+        let usdc = base_usdc();
+        let base_url = std::env::var("METRIC_API_URL")
+            .unwrap_or_else(|_| "http://54.199.103.16:8080".to_string())
+            .trim_end_matches('/')
+            .to_string();
+        let client = MetricClient::new(
+            Chain::Base,
+            HashSet::from([weth.address.clone(), usdc.address.clone()]),
+            0.0,
+            HashSet::new(),
+            base_url.clone(),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let http_client = reqwest::Client::new();
+        let metadata: Vec<MetricMetadata> = http_client
+            .get(format!("{base_url}/base/metadata"))
+            .header("accept", "application/json")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let metadata = metadata
+            .into_iter()
+            .find(|pool| pool.token0 == weth.address && pool.token1 == usdc.address)
+            .expect("Metric live API returned no Base WETH/USDC pool");
+        let bid_ask: MetricBidAskResponse = http_client
+            .get(format!("{base_url}/base/{}/bid_ask", metadata.pool_address))
+            .header("accept", "application/json")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let state = MetricState::new(weth, usdc, metadata, bid_ask, client);
+        assert!(state.bid_ask.quote_available);
+
+        let amount_in = BigUint::from(1_000_000_000_000u64);
+        let indicative_quote = state
+            .get_amount_out(amount_in.clone(), &state.base_token, &state.quote_token)
+            .unwrap();
+        let trader = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
+        let signed_quote = state
+            .request_signed_quote(GetAmountOutParams {
+                amount_in,
+                token_in: state.base_token.address.clone(),
+                token_out: state.quote_token.address.clone(),
+                sender: trader.clone(),
+                receiver: trader,
+            })
+            .await
+            .unwrap();
+
+        assert!(indicative_quote.amount > BigUint::from(0u8));
+        assert!(signed_quote.amount_out > BigUint::from(0u8));
+        assert_eq!(signed_quote.base_token, state.base_token.address);
+        assert_eq!(signed_quote.quote_token, state.quote_token.address);
     }
 }

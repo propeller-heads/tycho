@@ -15,9 +15,17 @@ pub struct MetricMetadata {
     pub pair: String,
     #[serde(rename = "poolAddress", deserialize_with = "deserialize_address")]
     pub pool_address: Bytes,
-    #[serde(rename = "priceProvider_address", deserialize_with = "deserialize_address")]
+    #[serde(
+        rename = "priceProvider_address",
+        alias = "priceProviderAddress",
+        deserialize_with = "deserialize_address"
+    )]
     pub price_provider_address: Bytes,
-    #[serde(rename = "quoterAddress", deserialize_with = "deserialize_address")]
+    #[serde(
+        rename = "quoterAddress",
+        alias = "routerAddress",
+        deserialize_with = "deserialize_address"
+    )]
     pub quoter_address: Bytes,
     #[serde(deserialize_with = "deserialize_address")]
     pub token0: Bytes,

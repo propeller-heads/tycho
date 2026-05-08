@@ -244,11 +244,11 @@ impl MetricClient {
             format!("{}/{}/bid_ask", self.chain_endpoint, bytes_to_address_string(pool)?);
         let http_client = Client::new();
         let mut request = http_client
-            .post(endpoint)
+            .get(endpoint)
             .header("accept", "application/json");
 
         if let Some(secret_key) = &self.secret_key {
-            request = request.form(&[("secretKey", secret_key.as_str())]);
+            request = request.query(&[("secretKey", secret_key.as_str())]);
         }
 
         let response = request.send().await.map_err(|e| {
@@ -283,7 +283,7 @@ impl MetricClient {
             http_client
                 .post(endpoint)
                 .header("accept", "application/json")
-                .form(request)
+                .json(request)
                 .send(),
         )
         .await
