@@ -68,6 +68,7 @@ contract MetricExecutor is IExecutor, ICallback {
         }
 
         if (shouldUpdateOracle) {
+            // slither-disable-next-line unused-return
             oracleTarget.functionCall(oracleCalldata);
         }
 
