@@ -34,8 +34,9 @@ contract MetricExecutor is IExecutor, ICallback {
     // Metric finalizes the public callback naming.
     bytes4 private constant _COOL_CALLBACK_SELECTOR = 0xa4b618b2;
 
+    // keccak256("MetricExecutor#CURRENT_METRIC_POOL")
     bytes32 private constant _CURRENT_METRIC_POOL_SLOT =
-        0x680ea5c1857f782d9caf44a6f1020e0d3bb55355ec15df645080b605b3154b99;
+        0x4d22bc52e1e7b4ceea27d9d7b99b3dc629ed6f14191a4839f79502a7ee831121;
 
     constructor() {}
 
