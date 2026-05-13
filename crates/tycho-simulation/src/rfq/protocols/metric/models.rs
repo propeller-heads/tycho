@@ -68,7 +68,26 @@ pub struct MetricBidAskResponse {
     #[serde(rename = "quoteExpiration")]
     pub quote_expiration: u64,
     #[serde(default)]
-    pub depth: serde_json::Value,
+    pub depth: MetricDepth,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MetricDepth {
+    #[serde(default)]
+    pub asks: Vec<MetricDepthBin>,
+    #[serde(default)]
+    pub bids: Vec<MetricDepthBin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricDepthBin {
+    #[serde(rename = "binIdx")]
+    pub bin_idx: i64,
+    pub price: String,
+    #[serde(rename = "cumulativeVolume")]
+    pub cumulative_volume: String,
+    #[serde(rename = "priceImpactE6")]
+    pub price_impact_e6: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +134,16 @@ impl MetricBidAskResponse {
     }
 }
 
+impl MetricDepthBin {
+    pub fn price(&self) -> Result<f64, RFQError> {
+        q64_decimal_to_f64(&self.price)
+    }
+
+    pub fn cumulative_volume(&self) -> Result<BigUint, RFQError> {
+        parse_biguint(&self.cumulative_volume, "depth.cumulativeVolume")
+    }
+}
+
 // Metric's APIs return Q64 values as decimal strings. We only convert them for indicative
 // routing; the binding quote path keeps the original Q64 strings for calldata encoding.
 pub fn q64_decimal_to_f64(value: &str) -> Result<f64, RFQError> {
@@ -138,5 +167,46 @@ mod tests {
     fn test_q64_decimal_to_f64() {
         let one = "18446744073709551616";
         assert_eq!(q64_decimal_to_f64(one).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_bid_ask_deserializes_depth_bins() {
+        let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
+            "pair": "wethusdc",
+            "bidAdj": "55340232221128654848000",
+            "askAdj": "55524699661865750400000",
+            "quoteAvailable": true,
+            "totalToken0Available": "1000000000000000000",
+            "totalToken1Available": "3000000000",
+            "latestBlock": 0,
+            "blockTs": 0,
+            "serverTs": 1,
+            "quoteExpiration": 0,
+            "depth": {
+                "asks": [{
+                    "binIdx": 0,
+                    "price": "57184906628499610009600",
+                    "cumulativeVolume": "1000000000000000000",
+                    "priceImpactE6": "33333"
+                }],
+                "bids": [{
+                    "binIdx": -1,
+                    "price": "53495557813757699686400",
+                    "cumulativeVolume": "3000000000",
+                    "priceImpactE6": "33333"
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.depth.asks.len(), 1);
+        assert_eq!(response.depth.bids[0].bin_idx, -1);
+        assert_eq!(response.depth.asks[0].price().unwrap(), 3100.0);
+        assert_eq!(
+            response.depth.bids[0]
+                .cumulative_volume()
+                .unwrap(),
+            BigUint::from(3_000_000_000u64)
+        );
     }
 }

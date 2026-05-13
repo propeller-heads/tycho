@@ -5,7 +5,7 @@ use tycho_common::{models::token::Token, Bytes};
 
 use super::{
     client_builder::MetricClientBuilder,
-    models::{MetricBidAskResponse, MetricMetadata},
+    models::{MetricBidAskResponse, MetricDepth, MetricMetadata},
     state::MetricState,
 };
 use crate::{
@@ -74,7 +74,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
             block_ts: read_u64_attr(&attrs, "block_ts")?,
             server_ts: read_u64_attr(&attrs, "server_ts")?,
             quote_expiration: read_u64_attr(&attrs, "quote_expiration")?,
-            depth: read_optional_json_attr(&attrs, "depth")?,
+            depth: read_optional_depth_attr(&attrs, "depth")?,
         };
 
         let client = MetricClientBuilder::new(snapshot.component.chain.into())
@@ -127,14 +127,14 @@ fn read_optional_f64_attr(
     }
 }
 
-fn read_optional_json_attr(
+fn read_optional_depth_attr(
     attrs: &HashMap<String, Bytes>,
     name: &str,
-) -> Result<serde_json::Value, InvalidSnapshotError> {
+) -> Result<MetricDepth, InvalidSnapshotError> {
     match attrs.get(name) {
         Some(bytes) => serde_json::from_slice(bytes)
             .map_err(|e| InvalidSnapshotError::ValueError(format!("Invalid {name} JSON: {e}"))),
-        None => Ok(serde_json::json!({})),
+        None => Ok(MetricDepth::default()),
     }
 }
 
@@ -221,7 +221,7 @@ mod tests {
         attrs.insert("block_ts".to_string(), "1700000000".as_bytes().to_vec().into());
         attrs.insert("server_ts".to_string(), "1700000001".as_bytes().to_vec().into());
         attrs.insert("quote_expiration".to_string(), "1700000005".as_bytes().to_vec().into());
-        attrs.insert("depth".to_string(), "{}".as_bytes().to_vec().into());
+        attrs.insert("depth".to_string(), r#"{"asks":[],"bids":[]}"#.as_bytes().to_vec().into());
 
         let snapshot = ComponentWithState {
             state: ResponseProtocolState {

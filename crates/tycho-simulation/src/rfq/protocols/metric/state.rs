@@ -2,7 +2,7 @@ use std::{any::Any, collections::HashMap, fmt};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -17,7 +17,7 @@ use tycho_common::{
 
 use crate::rfq::protocols::metric::{
     client::MetricClient,
-    models::{MetricBidAskResponse, MetricMetadata},
+    models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,12 +70,68 @@ impl MetricState {
             ))
         }
     }
+
+    fn quote_with_depth(
+        &self,
+        direction: MetricDirection,
+        amount_in_human: f64,
+        token_out_decimals: u32,
+        max_output: &BigUint,
+    ) -> Result<Option<DepthQuote>, SimulationError> {
+        let (start_price, bins) = match direction {
+            MetricDirection::ZeroForOne => (self.bid_ask.bid_price()?, &self.bid_ask.depth.bids),
+            MetricDirection::OneForZero => (self.bid_ask.ask_price()?, &self.bid_ask.depth.asks),
+        };
+
+        // Some pools still return an empty depth object. In that case the top-of-book quote is
+        // the best signal we have, so keep the old flat-price path.
+        let Some(depth_max_output) = depth_max_output(bins)? else {
+            return Ok(None);
+        };
+
+        let effective_max_output = depth_max_output.min(max_output.clone());
+        if effective_max_output.is_zero() {
+            return Ok(Some(DepthQuote {
+                amount_out_human: 0.0,
+                max_output: effective_max_output,
+                exhausted: amount_in_human > 0.0,
+            }));
+        }
+
+        let max_output_human =
+            raw_to_human(&effective_max_output, token_out_decimals, "depth max output")?;
+        let depth_fill = depth_output_for_input(
+            direction,
+            bins,
+            start_price,
+            amount_in_human,
+            token_out_decimals,
+            max_output_human,
+        )?;
+
+        Ok(Some(DepthQuote {
+            amount_out_human: depth_fill.output_human,
+            max_output: effective_max_output,
+            exhausted: depth_fill.exhausted,
+        }))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum MetricDirection {
     ZeroForOne,
     OneForZero,
+}
+
+struct DepthQuote {
+    amount_out_human: f64,
+    max_output: BigUint,
+    exhausted: bool,
+}
+
+struct DepthFill {
+    output_human: f64,
+    exhausted: bool,
 }
 
 #[typetag::serde]
@@ -123,8 +179,7 @@ impl ProtocolSim for MetricState {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())
         })? / 10_f64.powi(token_in.decimals as i32);
 
-        // Stream prices are only indicative; execution asks Metric for a fresh quote later.
-        let (amount_out_human, max_output) = match direction {
+        let (flat_amount_out_human, max_output) = match direction {
             MetricDirection::ZeroForOne => {
                 let price = self.bid_ask.bid_price()?;
                 (amount_in_human * price, self.bid_ask.total_token1_available()?)
@@ -134,6 +189,14 @@ impl ProtocolSim for MetricState {
                 (amount_in_human / price, self.bid_ask.total_token0_available()?)
             }
         };
+        // Prefer size-aware depth when Metric exposes it, otherwise use best bid/ask with only
+        // the aggregate inventory cap.
+        let depth_quote =
+            self.quote_with_depth(direction, amount_in_human, token_out.decimals, &max_output)?;
+        let (amount_out_human, effective_max_output, exhausted) = match depth_quote {
+            Some(quote) => (quote.amount_out_human, quote.max_output, quote.exhausted),
+            None => (flat_amount_out_human, max_output.clone(), false),
+        };
 
         let amount_out =
             BigUint::from_f64(amount_out_human * 10_f64.powi(token_out.decimals as i32))
@@ -142,18 +205,18 @@ impl ProtocolSim for MetricState {
                 })?;
         let capped_amount = amount_out
             .clone()
-            .min(max_output.clone());
+            .min(effective_max_output.clone());
         let res = GetAmountOutResult {
             amount: capped_amount.clone(),
             gas: BigUint::from(170_000u64),
             new_state: self.clone_box(),
         };
 
-        if amount_out > max_output {
+        if exhausted || amount_out > effective_max_output {
             return Err(SimulationError::InvalidInput(
                 format!(
                     "Metric pool has not enough liquidity. Requested output {}, available {}",
-                    amount_out, max_output
+                    amount_out, effective_max_output
                 ),
                 Some(res),
             ));
@@ -247,6 +310,228 @@ impl ProtocolSim for MetricState {
     }
 }
 
+fn depth_max_output(bins: &[MetricDepthBin]) -> Result<Option<BigUint>, SimulationError> {
+    let mut max_output = None;
+    for bin in bins {
+        max_output = Some(bin.cumulative_volume()?);
+    }
+    Ok(max_output)
+}
+
+fn depth_output_for_input(
+    direction: MetricDirection,
+    bins: &[MetricDepthBin],
+    start_price: f64,
+    input_human: f64,
+    output_decimals: u32,
+    max_output_human: f64,
+) -> Result<DepthFill, SimulationError> {
+    if input_human == 0.0 || max_output_human == 0.0 {
+        return Ok(DepthFill { output_human: 0.0, exhausted: input_human > 0.0 });
+    }
+
+    let mut current_price = start_price;
+    let mut previous_volume = 0.0;
+    let mut remaining_input = input_human;
+    let mut output_human = 0.0;
+
+    for bin in bins {
+        let bin_price = bin.price()?;
+        // Metric reports cumulative depth in output-token units for the side being walked.
+        // Adjacent differences give the volume available in each linear price segment.
+        let cumulative =
+            raw_to_human(&bin.cumulative_volume()?, output_decimals, "depth cumulative volume")?;
+        let volume_in_bin = cumulative - previous_volume;
+        previous_volume = cumulative;
+
+        if volume_in_bin <= 0.0 {
+            current_price = bin_price;
+            continue;
+        }
+
+        let output_capacity = max_output_human - output_human;
+        if output_capacity <= 0.0 {
+            break;
+        }
+        let fillable_volume = volume_in_bin.min(output_capacity);
+        // If the aggregate liquidity cap cuts this bin short, the segment can end before bin_price.
+        let segment_exit_price =
+            current_price + (bin_price - current_price) * fillable_volume / volume_in_bin;
+        // First price this whole segment. If the remaining input can pay that cost, the quote
+        // consumes fillable_volume completely and then continues into the next depth bin.
+        let full_segment_input = depth_segment_input_required(
+            direction,
+            fillable_volume,
+            current_price,
+            segment_exit_price,
+        )?;
+
+        if remaining_input >= full_segment_input {
+            output_human += fillable_volume;
+            remaining_input -= full_segment_input;
+            current_price = segment_exit_price;
+            continue;
+        }
+
+        // The remaining input is not enough for the whole segment, so the trade stops between
+        // current_price and segment_exit_price. Invert this segment's price formula to compute
+        // the partial output bought by remaining_input.
+        output_human += depth_segment_output_for_input(
+            direction,
+            remaining_input,
+            fillable_volume,
+            current_price,
+            segment_exit_price,
+        )?;
+        remaining_input = 0.0;
+        break;
+    }
+
+    if remaining_input > 1e-12 && output_human < max_output_human - 1e-12 {
+        return Err(SimulationError::RecoverableError(
+            "Metric depth has not enough cumulative volume".into(),
+        ));
+    }
+
+    Ok(DepthFill {
+        output_human: output_human.min(max_output_human),
+        exhausted: remaining_input > 1e-12,
+    })
+}
+
+fn depth_segment_input_required(
+    direction: MetricDirection,
+    output_human: f64,
+    entry_price: f64,
+    exit_price: f64,
+) -> Result<f64, SimulationError> {
+    let average_price = depth_segment_average_price(entry_price, exit_price)?;
+    match direction {
+        MetricDirection::ZeroForOne => Ok(output_human / average_price),
+        MetricDirection::OneForZero => Ok(output_human * average_price),
+    }
+}
+
+fn depth_segment_output_for_input(
+    direction: MetricDirection,
+    input_human: f64,
+    segment_output_human: f64,
+    entry_price: f64,
+    exit_price: f64,
+) -> Result<f64, SimulationError> {
+    if segment_output_human <= 0.0 || entry_price <= 0.0 {
+        return Err(SimulationError::RecoverableError(
+            "Metric depth has invalid price curve".into(),
+        ));
+    }
+
+    // Variables for this segment:
+    //   V  = segment_output_human, the max output available in this segment.
+    //   p0 = entry_price, the price at x = 0.
+    //   p1 = exit_price, the price at x = V.
+    //   x  = output filled inside this segment, where 0 <= x <= V.
+    //   I  = input_human, the input available for this partial segment.
+    //
+    // Metric linearly interpolates the price reached after filling x output:
+    //   exit_price_at_x = p0 + (p1 - p0) * x / V
+    //
+    // Metric prices the partial fill by averaging the start price and that exit price:
+    //   avg_price(x) = (p0 + exit_price_at_x) / 2
+    //
+    // Substitute exit_price_at_x:
+    //   avg_price(x) = (p0 + p0 + (p1 - p0) * x / V) / 2
+    //                = p0 + (p1 - p0) * x / (2 * V)
+    //
+    // Store the x coefficient as average_slope:
+    //   average_slope = (p1 - p0) / (2 * V)
+    //   avg_price(x) = p0 + average_slope * x
+    let average_slope = (exit_price - entry_price) / (2.0 * segment_output_human);
+    let output = match direction {
+        MetricDirection::ZeroForOne => {
+            // ZeroForOne sells base for quote, so price is quote/base and:
+            //
+            //   I = x / avg_price(x)
+            //
+            // Substitute avg_price(x):
+            //   I = x / (p0 + average_slope * x)
+            //
+            // Solve for x:
+            //   x = I * p0 / (1 - I * average_slope)
+            let denominator = 1.0 - input_human * average_slope;
+            if denominator <= 0.0 {
+                return Err(SimulationError::RecoverableError(
+                    "Metric depth has invalid price curve".into(),
+                ));
+            }
+            input_human * entry_price / denominator
+        }
+        MetricDirection::OneForZero => {
+            // OneForZero sells quote for base, so price is quote/base and:
+            //
+            //   I = x * avg_price(x)
+            //
+            // Substitute avg_price(x):
+            //   I = x * (p0 + average_slope * x)
+            //   I = p0 * x + average_slope * x^2
+            //
+            // Rearrange into the standard quadratic form a*x^2 + b*x + c = 0:
+            //   average_slope * x^2 + p0 * x - I = 0
+            //
+            // Here:
+            //   a = average_slope
+            //   b = p0
+            //   c = -I
+            //
+            // The quadratic formula uses sqrt(b^2 - 4*a*c):
+            //   b^2 - 4*a*c = p0^2 + 4 * average_slope * I
+            //
+            // The valid solution is the root inside [0, segment_output_human].
+            if average_slope.abs() < 1e-18 {
+                input_human / entry_price
+            } else {
+                let discriminant =
+                    entry_price.mul_add(entry_price, 4.0 * average_slope * input_human);
+                if discriminant < 0.0 {
+                    return Err(SimulationError::RecoverableError(
+                        "Metric depth has invalid price curve".into(),
+                    ));
+                }
+                let root_a = (-entry_price + discriminant.sqrt()) / (2.0 * average_slope);
+                let root_b = (-entry_price - discriminant.sqrt()) / (2.0 * average_slope);
+                [root_a, root_b]
+                    .into_iter()
+                    .find(|root| {
+                        root.is_finite() && *root >= -1e-12 && *root <= segment_output_human + 1e-12
+                    })
+                    .ok_or_else(|| {
+                        SimulationError::RecoverableError(
+                            "Metric depth has invalid price curve".into(),
+                        )
+                    })?
+            }
+        }
+    };
+
+    Ok(output.clamp(0.0, segment_output_human))
+}
+
+fn depth_segment_average_price(entry_price: f64, exit_price: f64) -> Result<f64, SimulationError> {
+    let average_price = (entry_price + exit_price) / 2.0;
+    if average_price <= 0.0 {
+        return Err(SimulationError::RecoverableError(
+            "Metric depth has non-positive average price".into(),
+        ));
+    }
+    Ok(average_price)
+}
+
+fn raw_to_human(amount: &BigUint, decimals: u32, field: &str) -> Result<f64, SimulationError> {
+    let amount = amount.to_f64().ok_or_else(|| {
+        SimulationError::RecoverableError(format!("Can't convert {field} to f64"))
+    })?;
+    Ok(amount / 10_f64.powi(decimals as i32))
+}
+
 #[async_trait]
 impl IndicativelyPriced for MetricState {
     async fn request_signed_quote(
@@ -279,7 +564,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::metric::client::MetricClient;
+    use crate::rfq::protocols::metric::{client::MetricClient, models::MetricDepth};
 
     fn weth() -> Token {
         Token::new(
@@ -300,18 +585,6 @@ mod tests {
             6,
             0,
             &[Some(1)],
-            Chain::Ethereum,
-            100,
-        )
-    }
-
-    fn wsteth() -> Token {
-        Token::new(
-            &Bytes::from_str("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0").unwrap(),
-            "WSTETH",
-            18,
-            0,
-            &[Some(2800)],
             Chain::Ethereum,
             100,
         )
@@ -344,7 +617,7 @@ mod tests {
             block_ts: 1_700_000_000,
             server_ts: 1_700_000_001,
             quote_expiration: 1_700_000_005,
-            depth: serde_json::json!({}),
+            depth: MetricDepth::default(),
         };
         let client = MetricClient::new(
             Chain::Ethereum,
@@ -399,18 +672,114 @@ mod tests {
         assert!(matches!(err, SimulationError::InvalidInput(_, Some(_))));
     }
 
+    #[test]
+    fn test_get_amount_out_walks_bid_depth() {
+        let mut state = state();
+        state.bid_ask.depth.bids = vec![MetricDepthBin {
+            bin_idx: 0,
+            // 2900 * 2^64
+            price: "53495557813757699686400".to_string(),
+            cumulative_volume: "3000000000".to_string(),
+            price_impact_e6: "33333".to_string(),
+        }];
+
+        let result = state
+            .get_amount_out(
+                BigUint::from(1_000_000_000_000_000_000u128),
+                &state.base_token,
+                &state.quote_token,
+            )
+            .unwrap();
+
+        assert!(result.amount < BigUint::from(3_000_000_000u64));
+        assert!(result.amount > BigUint::from(2_950_000_000u64));
+    }
+
+    #[test]
+    fn test_get_amount_out_walks_ask_depth() {
+        let mut state = state();
+        state.bid_ask.depth.asks = vec![MetricDepthBin {
+            bin_idx: 0,
+            // 3100 * 2^64
+            price: "57184906628499610009600".to_string(),
+            cumulative_volume: "1000000000000000000".to_string(),
+            price_impact_e6: "33333".to_string(),
+        }];
+
+        let result = state
+            .get_amount_out(BigUint::from(3_000_000_000u64), &state.quote_token, &state.base_token)
+            .unwrap();
+
+        assert!(result.amount < BigUint::from(1_000_000_000_000_000_000u128));
+        assert!(result.amount > BigUint::from(980_000_000_000_000_000u128));
+    }
+
+    #[test]
+    fn test_depth_output_for_input_partially_fills_bid_bin() {
+        let bins = vec![MetricDepthBin {
+            bin_idx: 0,
+            // 2900 * 2^64
+            price: "53495557813757699686400".to_string(),
+            cumulative_volume: "3000000000".to_string(),
+            price_impact_e6: "33333".to_string(),
+        }];
+
+        let fill =
+            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 1.0, 6, 3000.0)
+                .unwrap();
+
+        assert!((fill.output_human - 2950.8196721311474).abs() < 1e-9);
+        assert!(!fill.exhausted);
+    }
+
+    #[test]
+    fn test_depth_output_for_input_partially_fills_ask_bin() {
+        let bins = vec![MetricDepthBin {
+            bin_idx: 0,
+            // 3100 * 2^64
+            price: "57184906628499610009600".to_string(),
+            cumulative_volume: "1000000000000000000".to_string(),
+            price_impact_e6: "33333".to_string(),
+        }];
+
+        let fill =
+            depth_output_for_input(MetricDirection::OneForZero, &bins, 3010.0, 3000.0, 18, 1.0)
+                .unwrap();
+
+        assert!((fill.output_human - 0.9822534928279816).abs() < 1e-12);
+        assert!(!fill.exhausted);
+    }
+
+    #[test]
+    fn test_depth_output_for_input_exhausts_available_depth() {
+        let bins = vec![MetricDepthBin {
+            bin_idx: 0,
+            // 2900 * 2^64
+            price: "53495557813757699686400".to_string(),
+            cumulative_volume: "3000000000".to_string(),
+            price_impact_e6: "33333".to_string(),
+        }];
+
+        let fill =
+            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 2.0, 6, 3000.0)
+                .unwrap();
+
+        assert_eq!(fill.output_human, 3000.0);
+        assert!(fill.exhausted);
+    }
+
     #[tokio::test]
     #[ignore = "hits Metric's public API"]
     async fn test_live_metric_api_state_get_amount_out_and_oracle_update() {
-        let wsteth = wsteth();
         let weth = weth();
+        let usdc = usdc();
         let base_url = std::env::var("METRIC_API_URL")
             .unwrap_or_else(|_| "http://54.199.103.16:8080".to_string())
             .trim_end_matches('/')
             .to_string();
         let client = MetricClient::new(
             Chain::Ethereum,
-            HashSet::from([wsteth.address.clone(), weth.address.clone()]),
+            HashSet::from([weth.address.clone(), usdc.address.clone()]),
             0.0,
             HashSet::new(),
             base_url.clone(),
@@ -430,24 +799,40 @@ mod tests {
             .json()
             .await
             .unwrap();
-        let metadata = metadata
-            .into_iter()
-            .find(|pool| pool.token0 == wsteth.address && pool.token1 == weth.address)
-            .expect("Metric live API returned no Ethereum WSTETH/WETH pool");
-        let bid_ask: MetricBidAskResponse = http_client
-            .get(format!("{base_url}/ethereum/{}/bid_ask", metadata.pool_address))
-            .header("accept", "application/json")
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
 
-        let state = MetricState::new(wsteth, weth, metadata, bid_ask, client);
+        let mut selected = None;
+        for pool in metadata
+            .into_iter()
+            .filter(|pool| pool.token0 == weth.address && pool.token1 == usdc.address)
+        {
+            let bid_ask: MetricBidAskResponse = http_client
+                .get(format!("{base_url}/ethereum/{}/bid_ask", pool.pool_address))
+                .header("accept", "application/json")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let has_enough_quote_liquidity = bid_ask
+                .total_token1_available()
+                .map(|available| available > BigUint::from(10u8))
+                .unwrap_or(false);
+            if bid_ask.quote_available && has_enough_quote_liquidity {
+                selected = Some((pool, bid_ask));
+                break;
+            }
+        }
+
+        let Some((metadata, bid_ask)) = selected else {
+            eprintln!("Metric live API returned no liquid Ethereum WETH/USDC pool; skipping");
+            return;
+        };
+
+        let state = MetricState::new(weth, usdc, metadata, bid_ask, client);
         assert!(state.bid_ask.quote_available);
 
-        let amount_in = BigUint::from(1_000_000_000_000u64);
+        let amount_in = BigUint::from(1_000_000_000u64);
         let indicative_quote = state
             .get_amount_out(amount_in.clone(), &state.base_token, &state.quote_token)
             .unwrap();

@@ -555,7 +555,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use crate::rfq::protocols::metric::models::MetricBidAskResponse;
+    use crate::rfq::protocols::metric::models::{MetricBidAskResponse, MetricDepth};
 
     fn client() -> MetricClient {
         MetricClient::new(
@@ -567,6 +567,22 @@ mod tests {
             None,
             Duration::from_secs(1),
             Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
+    fn live_client() -> MetricClient {
+        let base_url = std::env::var("METRIC_API_URL")
+            .unwrap_or_else(|_| "http://54.199.103.16:8080".to_string());
+        MetricClient::new(
+            Chain::Ethereum,
+            HashSet::new(),
+            0.0,
+            HashSet::new(),
+            base_url,
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .unwrap()
     }
@@ -597,7 +613,7 @@ mod tests {
             block_ts: 1_700_000_000,
             server_ts: 1_700_000_001,
             quote_expiration: 1_700_000_005,
-            depth: serde_json::json!({}),
+            depth: MetricDepth::default(),
         }
     }
 
@@ -620,6 +636,66 @@ mod tests {
             String::from_utf8(component.state.attributes["bid_adj"].to_vec()).unwrap(),
             "55340232221128654848000"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "hits Metric's public API"]
+    async fn test_live_metric_api_fetch_bid_ask_latest_fields() {
+        let client = live_client();
+        let metadata = client.fetch_metadata().await.unwrap();
+        assert!(!metadata.is_empty());
+
+        let mut last_error = None;
+        let mut selected = None;
+        for pool in &metadata {
+            match client
+                .fetch_bid_ask(&pool.pool_address)
+                .await
+            {
+                Ok(bid_ask) => {
+                    if bid_ask.quote_available &&
+                        !bid_ask.depth.asks.is_empty() &&
+                        !bid_ask.depth.bids.is_empty()
+                    {
+                        selected = Some((pool, bid_ask));
+                        break;
+                    }
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+
+        let Some((pool, bid_ask)) = selected else {
+            panic!(
+                "Metric live API returned no quoteAvailable bid_ask response with ask and bid depth across {} pools; last error: {:?}",
+                metadata.len(),
+                last_error
+            );
+        };
+
+        assert_eq!(bid_ask.pair, pool.pair);
+        let bid_price = bid_ask.bid_price().unwrap();
+        let ask_price = bid_ask.ask_price().unwrap();
+        assert!(bid_price.is_finite() && bid_price > 0.0);
+        assert!(ask_price.is_finite() && ask_price >= bid_price);
+        assert!(bid_ask.total_token0_available().is_ok());
+        assert!(bid_ask.total_token1_available().is_ok());
+        assert!(bid_ask.latest_block > 0);
+        assert!(bid_ask.block_ts > 0);
+        assert!(bid_ask.server_ts > 0);
+        assert!(bid_ask.quote_expiration > 0);
+
+        for bin in bid_ask
+            .depth
+            .asks
+            .iter()
+            .chain(bid_ask.depth.bids.iter())
+            .take(6)
+        {
+            assert!(bin.price().unwrap().is_finite());
+            assert!(bin.cumulative_volume().is_ok());
+            assert!(BigUint::from_str(&bin.price_impact_e6).is_ok());
+        }
     }
 
     #[test]
