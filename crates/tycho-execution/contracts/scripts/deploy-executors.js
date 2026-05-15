@@ -148,6 +148,23 @@ const executors_to_deploy = {
         // PANCAKESWAP V3 - Args: (none)
         { exchange: "UniswapV3Executor", args: [] },
     ],
+    "polygon": [
+        // USV2 - Args: Fee BPS
+        { exchange: "UniswapV2Executor", args: [30] },
+        // QUICKSWAP V2 - Args: (none)
+        { exchange: "UniswapV2Executor", args: [30] },
+        // USV3 - Args: (none)
+        { exchange: "UniswapV3Executor", args: [] },
+        // USV4 - Args: Pool manager, Angstrom hook
+        {
+            exchange: "UniswapV4Executor", args: [
+                "0x67366782805870060151383f4bbff9dab53e5cd6",
+                // This is the Angstrom address for ethereum. There isn't one for
+                // polygon
+                "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+            ]
+        },
+    ],
 }
 
 async function main() {
