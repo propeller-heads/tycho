@@ -1,14 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tokio::time::Duration;
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::{
+    models::{token::Token, Chain},
+    Bytes,
+};
 
 use super::client::MetricClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    constants::get_metric_config, errors::RFQError,
+    protocols::utils::default_quote_tokens_for_chain,
+};
 
 pub struct MetricClientBuilder {
     chain: Chain,
     tokens: HashSet<Bytes>,
+    token_metadata: HashMap<Bytes, Token>,
     tvl: f64,
     quote_tokens: Option<HashSet<Bytes>>,
     base_url: String,
@@ -19,13 +26,15 @@ pub struct MetricClientBuilder {
 
 impl MetricClientBuilder {
     pub fn new(chain: Chain) -> Self {
+        let config = get_metric_config();
         Self {
             chain,
             tokens: HashSet::new(),
+            token_metadata: HashMap::new(),
             tvl: 0.0,
             quote_tokens: None,
-            base_url: "http://54.199.103.16:8080".to_string(),
-            secret_key: None,
+            base_url: config.base_url,
+            secret_key: config.secret_key,
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
         }
@@ -33,6 +42,15 @@ impl MetricClientBuilder {
 
     pub fn tokens(mut self, tokens: HashSet<Bytes>) -> Self {
         self.tokens = tokens;
+        self
+    }
+
+    /// Provide Tycho token metadata for Metric TVL normalization.
+    ///
+    /// The `tokens` filter above controls which RFQ pairs are emitted. This metadata is broader:
+    /// Metric may need token decimals for a one-hop quote-token pool that is not itself emitted.
+    pub fn token_metadata(mut self, tokens: HashMap<Bytes, Token>) -> Self {
+        self.token_metadata = tokens;
         self
     }
 
@@ -72,9 +90,10 @@ impl MetricClientBuilder {
             None => default_quote_tokens_for_chain(&self.chain)?,
         };
 
-        MetricClient::new(
+        MetricClient::new_with_token_metadata(
             self.chain,
             self.tokens,
+            self.token_metadata,
             self.tvl,
             quote_tokens,
             self.base_url,

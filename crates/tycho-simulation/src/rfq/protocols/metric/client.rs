@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
+    sync::OnceLock,
     time::SystemTime,
 };
 
@@ -16,7 +17,7 @@ use reqwest::Client;
 use tokio::time::{interval, timeout, Duration};
 use tracing::{error, info, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
+    models::{protocol::GetAmountOutParams, token::Token, Chain},
     simulation::indicatively_priced::SignedQuote,
     Bytes,
 };
@@ -36,19 +37,46 @@ use crate::{
     tycho_common::dto::{ProtocolComponent, ResponseProtocolState},
 };
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MetricClient {
     chain: Chain,
     metadata_endpoint: String,
     // Prefix ending at /{chain}; pool-specific endpoints are derived from it.
     chain_endpoint: String,
     tokens: HashSet<Bytes>,
+    #[serde(default)]
+    token_metadata: HashMap<Bytes, Token>,
     tvl: f64,
     quote_tokens: HashSet<Bytes>,
     #[serde(skip_serializing, default)]
     secret_key: Option<String>,
+    #[serde(skip, default = "OnceLock::new")]
+    http_client: OnceLock<Client>,
     poll_time: Duration,
     quote_timeout: Duration,
+}
+
+impl Clone for MetricClient {
+    fn clone(&self) -> Self {
+        let http_client = OnceLock::new();
+        if let Some(client) = self.http_client.get() {
+            let _ = http_client.set(client.clone());
+        }
+
+        Self {
+            chain: self.chain,
+            metadata_endpoint: self.metadata_endpoint.clone(),
+            chain_endpoint: self.chain_endpoint.clone(),
+            tokens: self.tokens.clone(),
+            token_metadata: self.token_metadata.clone(),
+            tvl: self.tvl,
+            quote_tokens: self.quote_tokens.clone(),
+            secret_key: self.secret_key.clone(),
+            http_client,
+            poll_time: self.poll_time,
+            quote_timeout: self.quote_timeout,
+        }
+    }
 }
 
 impl MetricClient {
@@ -65,6 +93,31 @@ impl MetricClient {
         poll_time: Duration,
         quote_timeout: Duration,
     ) -> Result<Self, RFQError> {
+        Self::new_with_token_metadata(
+            chain,
+            tokens,
+            HashMap::new(),
+            tvl,
+            quote_tokens,
+            base_url,
+            secret_key,
+            poll_time,
+            quote_timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_token_metadata(
+        chain: Chain,
+        tokens: HashSet<Bytes>,
+        token_metadata: HashMap<Bytes, Token>,
+        tvl: f64,
+        quote_tokens: HashSet<Bytes>,
+        base_url: String,
+        secret_key: Option<String>,
+        poll_time: Duration,
+        quote_timeout: Duration,
+    ) -> Result<Self, RFQError> {
         let chain_path = chain_to_metric_path(chain)?;
         let base_url = base_url.trim_end_matches('/');
         let chain_endpoint = format!("{base_url}/{chain_path}");
@@ -73,12 +126,19 @@ impl MetricClient {
             metadata_endpoint: format!("{chain_endpoint}/metadata"),
             chain_endpoint,
             tokens,
+            token_metadata,
             tvl,
             quote_tokens,
             secret_key,
+            http_client: OnceLock::new(),
             poll_time,
             quote_timeout,
         })
+    }
+
+    fn http_client(&self) -> &Client {
+        self.http_client
+            .get_or_init(Client::new)
     }
 
     pub fn create_component_with_state(
@@ -108,80 +168,58 @@ impl MetricClient {
         attributes
             .insert("price_provider_address".to_string(), metadata.price_provider_address.clone());
         attributes.insert("quoter_address".to_string(), metadata.quoter_address.clone());
-        attributes.insert(
-            "bid_adj".to_string(),
-            bid_ask
-                .bid_adj
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "ask_adj".to_string(),
-            bid_ask
-                .ask_adj
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "total_token0_available".to_string(),
-            bid_ask
-                .total_token0_available
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "total_token1_available".to_string(),
-            bid_ask
-                .total_token1_available
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "latest_block".to_string(),
-            bid_ask
-                .latest_block
-                .to_string()
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "block_ts".to_string(),
-            bid_ask
-                .block_ts
-                .to_string()
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "server_ts".to_string(),
-            bid_ask
-                .server_ts
-                .to_string()
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "quote_expiration".to_string(),
-            bid_ask
-                .quote_expiration
-                .to_string()
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        attributes.insert(
-            "depth".to_string(),
-            serde_json::to_vec(&bid_ask.depth)
-                .unwrap_or_default()
-                .into(),
-        );
+
+        let entries: [(&str, Vec<u8>); 9] = [
+            ("bid_adj", bid_ask.bid_adj.as_bytes().to_vec()),
+            ("ask_adj", bid_ask.ask_adj.as_bytes().to_vec()),
+            (
+                "total_token0_available",
+                bid_ask
+                    .total_token0_available
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                "total_token1_available",
+                bid_ask
+                    .total_token1_available
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                "latest_block",
+                bid_ask
+                    .latest_block
+                    .to_string()
+                    .into_bytes(),
+            ),
+            (
+                "block_ts",
+                bid_ask
+                    .block_ts
+                    .to_string()
+                    .into_bytes(),
+            ),
+            (
+                "server_ts",
+                bid_ask
+                    .server_ts
+                    .to_string()
+                    .into_bytes(),
+            ),
+            (
+                "quote_expiration",
+                bid_ask
+                    .quote_expiration
+                    .to_string()
+                    .into_bytes(),
+            ),
+            ("depth", serde_json::to_vec(&bid_ask.depth).unwrap_or_default()),
+        ];
+
+        for (key, bytes) in entries {
+            attributes.insert(key.to_string(), bytes.into());
+        }
 
         if let Some(cex_step) = metadata.cex_step {
             attributes.insert(
@@ -216,8 +254,40 @@ impl MetricClient {
         }
     }
 
+    fn normalize_tvl(
+        &self,
+        pool: &MetricMetadata,
+        bid_ask: &MetricBidAskResponse,
+        pool_quotes: &[(MetricMetadata, MetricBidAskResponse)],
+    ) -> Option<f64> {
+        // Metric availability is raw ERC20 units. Token metadata comes from Tycho so customers can
+        // add new quote tokens without a source-code change.
+        let token1_amount = metric_available_human(
+            bid_ask.total_token1_available(),
+            self.token_metadata
+                .get(&pool.token1)?
+                .decimals,
+        )?;
+
+        if self.quote_tokens.contains(&pool.token1) {
+            return Some(token1_amount);
+        }
+
+        // For non-configured token1 values, normalize through one Metric pool that prices token1
+        // in a configured quote token.
+        metric_price_in_quote_token(
+            &pool.token1,
+            pool_quotes,
+            &self.quote_tokens,
+            &self.token_metadata,
+        )
+        .map(|price| token1_amount * price)
+        .filter(|tvl| tvl.is_finite() && *tvl >= 0.0)
+    }
+
     async fn fetch_metadata(&self) -> Result<Vec<MetricMetadata>, RFQError> {
-        let response = Client::new()
+        let response = self
+            .http_client()
             .get(&self.metadata_endpoint)
             .header("accept", "application/json")
             .send()
@@ -245,8 +315,8 @@ impl MetricClient {
     async fn fetch_bid_ask(&self, pool: &Bytes) -> Result<MetricBidAskResponse, RFQError> {
         let endpoint =
             format!("{}/{}/bid_ask", self.chain_endpoint, bytes_to_address_string(pool)?);
-        let http_client = Client::new();
-        let mut request = http_client
+        let mut request = self
+            .http_client()
             .get(endpoint)
             .header("accept", "application/json");
 
@@ -280,8 +350,8 @@ impl MetricClient {
     ) -> Result<MetricSignedOracleUpdateResponse, RFQError> {
         let endpoint =
             format!("{}/{}/get_signed_data", self.chain_endpoint, bytes_to_address_string(pool)?);
-        let http_client = Client::new();
-        let mut request = http_client
+        let mut request = self
+            .http_client()
             .get(endpoint)
             .header("accept", "application/json");
 
@@ -388,15 +458,11 @@ impl RFQClient for MetricClient {
                     }
                 };
 
-                let mut new_components = HashMap::new();
+                // Fetch every Metric pool first, even when `tokens` later filters emitted
+                // components. Non-emitted pools can still provide one-hop quote-token prices for
+                // TVL normalization, e.g. rETH/WETH using WETH/USDC.
+                let mut pool_quotes = Vec::new();
                 for pool in &metadata {
-                    if !client.tokens.is_empty() &&
-                        (!client.tokens.contains(&pool.token0) ||
-                            !client.tokens.contains(&pool.token1))
-                    {
-                        continue;
-                    }
-
                     let bid_ask = match client.fetch_bid_ask(&pool.pool_address).await {
                         Ok(bid_ask) => bid_ask,
                         Err(e) => {
@@ -411,21 +477,21 @@ impl RFQClient for MetricClient {
                         continue;
                     }
 
-                    // Metric gives raw token availability. For filtering, only count token1 when
-                    // it is one of the stable quote tokens we know how to normalize.
-                    let tvl = if client.quote_tokens.contains(&pool.token1) {
-                        stable_decimals(&pool.token1)
-                            .and_then(|decimals| {
-                                bid_ask
-                                    .total_token1_available()
-                                    .ok()
-                                    .and_then(|value| value.to_f64())
-                                    .map(|raw| raw / 10_f64.powi(decimals as i32))
-                            })
-                            .unwrap_or(0.0)
-                    } else {
-                        0.0
-                    };
+                    pool_quotes.push((pool.clone(), bid_ask));
+                }
+
+                let mut new_components = HashMap::new();
+                for (pool, bid_ask) in &pool_quotes {
+                    if !client.tokens.is_empty() &&
+                        (!client.tokens.contains(&pool.token0) ||
+                            !client.tokens.contains(&pool.token1))
+                    {
+                        continue;
+                    }
+
+                    let tvl = client
+                        .normalize_tvl(pool, bid_ask, &pool_quotes)
+                        .unwrap_or(0.0);
                     if tvl < client.tvl {
                         continue;
                     }
@@ -435,7 +501,7 @@ impl RFQClient for MetricClient {
                     let component_id = keccak256(component_key.as_bytes()).to_string();
                     new_components.insert(
                         component_id.clone(),
-                        client.create_component_with_state(component_id, pool, &bid_ask, tvl),
+                        client.create_component_with_state(component_id, pool, bid_ask, tvl),
                     );
                 }
 
@@ -533,29 +599,86 @@ fn biguint_decimal_to_u256(value: &str) -> Result<U256, RFQError> {
     Ok(biguint_to_u256(&value))
 }
 
-fn stable_decimals(address: &Bytes) -> Option<u8> {
-    let address = Address::from_slice(address)
-        .to_checksum(None)
-        .to_lowercase();
-    match address.as_str() {
-        // Ethereum USDC / Base USDC
-        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" |
-        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" |
-        // Ethereum USDT / Base USDT
-        "0xdac17f958d2ee523a2206206994597c13d831ec7" |
-        "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2" => Some(6),
-        // Ethereum DAI
-        "0x6b175474e89094c44da98b954eedeac495271d0f" => Some(18),
-        _ => None,
+fn metric_price_in_quote_token(
+    token: &Bytes,
+    pool_quotes: &[(MetricMetadata, MetricBidAskResponse)],
+    quote_tokens: &HashSet<Bytes>,
+    token_metadata: &HashMap<Bytes, Token>,
+) -> Option<f64> {
+    let mut best: Option<(f64, f64)> = None;
+
+    for (pool, bid_ask) in pool_quotes {
+        let Some(mid_price) = metric_mid_price(bid_ask) else {
+            continue;
+        };
+        let candidate = if &pool.token0 == token && quote_tokens.contains(&pool.token1) {
+            let Some(quote_token) = token_metadata.get(&pool.token1) else {
+                continue;
+            };
+            let Some(quote_tvl) =
+                metric_available_human(bid_ask.total_token1_available(), quote_token.decimals)
+            else {
+                continue;
+            };
+            Some((mid_price, quote_tvl))
+        } else if &pool.token1 == token && quote_tokens.contains(&pool.token0) {
+            let Some(quote_token) = token_metadata.get(&pool.token0) else {
+                continue;
+            };
+            let Some(quote_tvl) =
+                metric_available_human(bid_ask.total_token0_available(), quote_token.decimals)
+            else {
+                continue;
+            };
+            Some((1.0 / mid_price, quote_tvl))
+        } else {
+            None
+        };
+
+        if let Some((price, quote_tvl)) = candidate {
+            // Multiple Metric pools can price the same token in a configured quote token. Use the
+            // pool with the largest quote-side availability as the most liquid pricing source.
+            if price.is_finite() &&
+                price > 0.0 &&
+                quote_tvl.is_finite() &&
+                quote_tvl > 0.0 &&
+                best.as_ref()
+                    .is_none_or(|(_, best_quote_tvl)| quote_tvl > *best_quote_tvl)
+            {
+                best = Some((price, quote_tvl));
+            }
+        }
     }
+
+    best.map(|(price, _)| price)
+}
+
+fn metric_mid_price(bid_ask: &MetricBidAskResponse) -> Option<f64> {
+    let bid = bid_ask.bid_price().ok()?;
+    let ask = bid_ask.ask_price().ok()?;
+    let mid = (bid + ask) / 2.0;
+    (mid.is_finite() && mid > 0.0).then_some(mid)
+}
+
+fn metric_available_human(amount: Result<BigUint, RFQError>, decimals: u32) -> Option<f64> {
+    amount
+        .ok()?
+        .to_f64()
+        .map(|raw| raw / 10_f64.powi(decimals as i32))
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
+    use tycho_common::models::token::Token;
+
     use super::*;
-    use crate::rfq::protocols::metric::models::{MetricBidAskResponse, MetricDepth};
+    use crate::rfq::protocols::metric::{
+        client_builder::MetricClientBuilder,
+        models::{MetricBidAskResponse, MetricDepth},
+    };
 
     fn client() -> MetricClient {
         MetricClient::new(
@@ -587,6 +710,24 @@ mod tests {
         .unwrap()
     }
 
+    fn client_with_tvl_config(
+        quote_tokens: HashSet<Bytes>,
+        token_metadata: HashMap<Bytes, Token>,
+    ) -> MetricClient {
+        MetricClient::new_with_token_metadata(
+            Chain::Ethereum,
+            HashSet::new(),
+            token_metadata,
+            0.0,
+            quote_tokens,
+            "http://localhost:8080".to_string(),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
     fn metadata() -> MetricMetadata {
         MetricMetadata {
             pair: "ethusdc".to_string(),
@@ -597,6 +738,27 @@ mod tests {
             token0: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
             token1: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
             cex_step: Some(0.0002),
+            dex_step: Some(0.0),
+        }
+    }
+
+    fn metric_address(seed: u8) -> Bytes {
+        Bytes::from(vec![seed; 20])
+    }
+
+    fn q64_price(price: u64) -> String {
+        (BigUint::from(price) << 64usize).to_string()
+    }
+
+    fn metadata_for_pair(pair: &str, token0: Bytes, token1: Bytes, seed: u8) -> MetricMetadata {
+        MetricMetadata {
+            pair: pair.to_string(),
+            pool_address: metric_address(seed),
+            price_provider_address: metric_address(seed + 1),
+            quoter_address: metric_address(seed + 2),
+            token0,
+            token1,
+            cex_step: Some(0.0),
             dex_step: Some(0.0),
         }
     }
@@ -615,6 +777,105 @@ mod tests {
             quote_expiration: 1_700_000_005,
             depth: MetricDepth::default(),
         }
+    }
+
+    fn bid_ask_with_prices(
+        bid: u64,
+        ask: u64,
+        total_token0_available: &str,
+        total_token1_available: &str,
+    ) -> MetricBidAskResponse {
+        MetricBidAskResponse {
+            pair: "test".to_string(),
+            bid_adj: q64_price(bid),
+            ask_adj: q64_price(ask),
+            quote_available: true,
+            total_token0_available: total_token0_available.to_string(),
+            total_token1_available: total_token1_available.to_string(),
+            latest_block: 100,
+            block_ts: 1_700_000_000,
+            server_ts: 1_700_000_001,
+            quote_expiration: 1_700_000_005,
+            depth: MetricDepth::default(),
+        }
+    }
+
+    #[test]
+    fn test_builder_uses_token_metadata_decimals() {
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let all_tokens = HashMap::from([(
+            usdc.clone(),
+            Token::new(&usdc, "USDC", 6, 0, &[], Chain::Ethereum, 100),
+        )]);
+
+        let client = MetricClientBuilder::new(Chain::Ethereum)
+            .token_metadata(all_tokens)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            client
+                .token_metadata
+                .get(&usdc)
+                .map(|token| token.decimals),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn test_normalize_tvl_uses_configured_quote_decimals() {
+        let pool = metadata();
+        let bid_ask = bid_ask();
+        let quote_tokens = HashSet::from([pool.token1.clone()]);
+        let token_metadata = HashMap::from([(
+            pool.token1.clone(),
+            Token::new(&pool.token1, "USDC", 6, 0, &[], Chain::Ethereum, 100),
+        )]);
+        let pool_quotes = vec![(pool.clone(), bid_ask.clone())];
+        let client = client_with_tvl_config(quote_tokens, token_metadata);
+
+        let tvl = client
+            .normalize_tvl(&pool, &bid_ask, &pool_quotes)
+            .unwrap();
+
+        assert_eq!(tvl, 3000.0);
+    }
+
+    #[test]
+    fn test_normalize_tvl_uses_best_one_hop_quote_pool() {
+        let reth = metric_address(10);
+        let weth = metric_address(20);
+        let usdc = metric_address(30);
+
+        let target = metadata_for_pair("rethweth", reth, weth.clone(), 1);
+        let target_bid_ask =
+            bid_ask_with_prices(1, 1, "100000000000000000000", "2000000000000000000");
+        let low_liquidity_quote = metadata_for_pair("wethusdc_low", weth.clone(), usdc.clone(), 4);
+        let low_liquidity_bid_ask =
+            bid_ask_with_prices(3000, 3000, "1000000000000000000", "1000000000");
+        let high_liquidity_quote =
+            metadata_for_pair("wethusdc_high", weth.clone(), usdc.clone(), 7);
+        // The higher-liquidity WETH/USDC pool has a different price. The expected TVL below proves
+        // normalization chooses it by quote-side availability, not by first match.
+        let high_liquidity_bid_ask =
+            bid_ask_with_prices(3100, 3100, "1000000000000000000", "5000000000");
+        let pool_quotes = vec![
+            (target.clone(), target_bid_ask.clone()),
+            (low_liquidity_quote, low_liquidity_bid_ask),
+            (high_liquidity_quote, high_liquidity_bid_ask),
+        ];
+        let quote_tokens = HashSet::from([usdc.clone()]);
+        let token_metadata = HashMap::from([
+            (weth.clone(), Token::new(&weth, "WETH", 18, 0, &[], Chain::Ethereum, 100)),
+            (usdc.clone(), Token::new(&usdc, "USDC", 6, 0, &[], Chain::Ethereum, 100)),
+        ]);
+        let client = client_with_tvl_config(quote_tokens, token_metadata);
+
+        let tvl = client
+            .normalize_tvl(&target, &target_bid_ask, &pool_quotes)
+            .unwrap();
+
+        assert_eq!(tvl, 6200.0);
     }
 
     #[test]
@@ -696,12 +957,6 @@ mod tests {
             assert!(bin.cumulative_volume().is_ok());
             assert!(BigUint::from_str(&bin.price_impact_e6).is_ok());
         }
-    }
-
-    #[test]
-    fn test_stable_decimals() {
-        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-        assert_eq!(stable_decimals(&usdc), Some(6));
     }
 
     #[test]
