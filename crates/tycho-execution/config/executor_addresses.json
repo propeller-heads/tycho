@@ -31,12 +31,12 @@
     "weth": "0x8aE978713c6952041d058D8a3fe3a2568f1e1aE1"
   },
   "unichain": {
-    "uniswap_v2": "0x6794ce07fddc3bb5f747b4510d0ebb0d11a03f2c",
-    "uniswap_v3": "0x7270991eb529c7e45a3ec98de542b01e4da32d82",
-    "uniswap_v4": "0x45356073646354f162982bed83c71ef0f310e201",
-    "velodrome_slipstreams": "0xb208092276fde05cff20341049f1e384b1b31112",
-    "vm:curve": "0xbc4d9e944ad40480a34ebaf38cd2acf6e1dc0def",
-    "weth": "0x13AcF9532C173753484ed1Bef86C98cBfe83Ba90"
+    "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
+    "uniswap_v3": "0x0847Ec6467499a6F31FDd06B7dEB766649B2739B",
+    "uniswap_v4": "0x3AE67e7DCFa6c5aB36DA9dE3B67B7496956E0874",
+    "velodrome_slipstreams": "0xd9Ee40C6895De968b41b96253970B48Fe852e5eF",
+    "vm:curve": "0x685733eDB7654e540aB537eabC28b554646b69d0",
+    "weth": "0x50905E0f94350f9e533Cd275667AFC728265960D"
   },
   "arbitrum": {
     "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",

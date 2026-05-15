@@ -1,39 +1,34 @@
 # How to deploy
 
+- `cd ./crates/tycho-execution/contracts`
 - Install dependencies `npm install`
-- `cd contracts`
 
-## Deploy on a Tenderly fork
+## [optional test] Deploy on a Tenderly fork
 
 1. Make a new [fork](https://dashboard.tenderly.co/) in tenderly dashboard for the
    chain that you wish to deploy on.
 2. Set the following environment variables:
-
-```
-export RPC_URL=<fork-rpc-from-tenderly>
-export DEPLOY_WALLET=<wallet-address>
-export PRIVATE_KEY=<private-key>
-```
+   ```bash
+   export RPC_URL=<fork-rpc-from-tenderly>
+   export DEPLOY_WALLET=<wallet-address>
+   export PRIVATE_KEY=<private-key>
+   ```
 
 3. Fund wallet: `npx hardhat run scripts/fund-wallet-tenderly-fork.js --network tenderly`
 
-## Deploy on Ethereum Mainnet or other EVM chains
+## Deploy on an EVM chain
 
 Make sure to run `unset HISTFILE` in your terminal before setting the private key. This will prevent the private key
 from being stored in the shell history.
 
 1. Set the following environment variables:
-
-```
-export RPC_URL=<chain-rpc-url>
-export PRIVATE_KEY=<private-key>
-export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
-```
+   ```bash
+   export RPC_URL=<chain-rpc-url>
+   export PRIVATE_KEY=<private-key>
+   export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
+   ```
 
 ## Deploy Tycho Router
-
-For each of the following, you must select one of `tenderly_ethereum`, `tenderly_base`,
-`ethereum`, `base`, or `unichain` as the network.
 
 ### Deploy FeeCalculator
 
@@ -43,10 +38,9 @@ The FeeCalculator must be deployed **before** the TychoRouter, as the router req
    ```
    export ROUTER_FEE_SETTER=<address-to-grant-fee-setter-role>
    ```
+   `ROUTER_FEE_SETTER` receives `ROUTER_FEE_SETTER_ROLE` to manage fee configuration.
 2. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
 3. Note the deployed address — you will need it in the next step.
-
-`ROUTER_FEE_SETTER` receives `ROUTER_FEE_SETTER_ROLE` to manage fee configuration.
 
 ### Deploy executors
 
@@ -63,11 +57,14 @@ The FeeCalculator must be deployed **before** the TychoRouter, as the router req
    export FEE_CALCULATOR=<fee-calculator-address-from-previous-step>
    ```
 3. Deploy router: `npx hardhat run scripts/deploy-router.js --network NETWORK`
+4. Fill in the router address in `config/router_addresses.json`
 
 Via the safe wallet UI:
-4. Set the executors addresses
-5. Set fee amounts and router fee receiver in FeeCalculator
-6. Set the pauser wallets
+
+5. Set the executors addresses
+6. Set fee amounts and router fee receiver in FeeCalculator
+7. Set the pauser wallets
+
 ### Revoke roles
 
 1. If you wish to revoke a role for a certain address, run: `npx hardhat run scripts/revoke-role.js --network NETWORK`
