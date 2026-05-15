@@ -677,8 +677,11 @@ async fn process_update(
 
         // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
         // standard endpoints use `latest` (confirmed blocks only).
-        let block_tag =
-            if cli.partial_blocks { BlockNumberOrTag::Pending } else { BlockNumberOrTag::Latest };
+        let block_tag = if cli.partial_blocks && update.update.is_partial {
+            BlockNumberOrTag::Pending
+        } else {
+            BlockNumberOrTag::Latest
+        };
         let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
         let poll_result = poll_rpc_for_block(
@@ -777,7 +780,7 @@ async fn process_update(
             .map(|(validator, id, _protocol)| (*validator, id.clone()))
             .collect();
 
-        let validation_block_id = if cli.partial_blocks {
+        let validation_block_id = if update.update.is_partial {
             BlockId::pending()
         } else {
             BlockId::from(block.header.number)
