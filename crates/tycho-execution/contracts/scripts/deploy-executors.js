@@ -9,7 +9,7 @@ const executors_to_deploy = {
         { exchange: "UniswapV2Executor", args: [30] },
         // PANCAKESWAP V2 - Args: Fee BPS
         { exchange: "UniswapV2Executor", args: [25] },
-        // PANCAKESWAP V3 - Args: (none)
+        // USV3 & PANCAKESWAP V3 - Args: (none)
         { exchange: "UniswapV3Executor", args: [] },
         // Args: Pool manager, Angstrom hook
         {
@@ -134,7 +134,7 @@ const executors_to_deploy = {
     "arbitrum": [
         // USV2 - Args: Fee BPS
         { exchange: "UniswapV2Executor", args: [30] },
-        // USV3 - Args: (none)
+        // USV3 & PANCAKESWAP V3 - Args: (none)
         { exchange: "UniswapV3Executor", args: [] },
         // USV4 - Args: Pool manager, Angstrom hook
         {
@@ -145,13 +145,9 @@ const executors_to_deploy = {
                 "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
             ]
         },
-        // PANCAKESWAP V3 - Args: (none)
-        { exchange: "UniswapV3Executor", args: [] },
     ],
     "polygon": [
-        // USV2 - Args: Fee BPS
-        { exchange: "UniswapV2Executor", args: [30] },
-        // QUICKSWAP V2 - Args: (none)
+        // USV2 & QUICKSWAP V2 - Args: Fee BPS
         { exchange: "UniswapV2Executor", args: [30] },
         // USV3 - Args: (none)
         { exchange: "UniswapV3Executor", args: [] },
