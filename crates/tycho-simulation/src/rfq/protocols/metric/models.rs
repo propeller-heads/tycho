@@ -4,11 +4,35 @@ use alloy::primitives::Address;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use tycho_common::Bytes;
+use tycho_common::{models::Chain, Bytes};
 
 use crate::rfq::errors::RFQError;
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
+
+pub const ORACLE_UPDATE_POLICY_ATTR: &str = "oracle_update_policy";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MetricOracleUpdatePolicy {
+    #[default]
+    Never = 0,
+    Always = 1,
+    RetryOnRevert = 2,
+}
+
+impl MetricOracleUpdatePolicy {
+    pub fn default_for_chain(chain: Chain) -> Self {
+        match chain {
+            Chain::Ethereum => Self::Always,
+            _ => Self::Never,
+        }
+    }
+
+    pub fn as_attribute_value(self) -> Bytes {
+        vec![self as u8].into()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricMetadata {

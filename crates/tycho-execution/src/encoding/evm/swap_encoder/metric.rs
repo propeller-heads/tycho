@@ -16,13 +16,54 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
+const ORACLE_ADDRESS_CONFIG: &str = "oracle_address";
+const ORACLE_UPDATE_POLICY_ATTR: &str = "oracle_update_policy";
+
 #[derive(Clone)]
 pub struct MetricSwapEncoder {
     executor_address: Bytes,
-    request_oracle_update: bool,
+    oracle_address: Bytes,
     runtime_handle: Handle,
     #[allow(dead_code)]
     runtime: SafeRuntime,
+}
+
+// Encoded into MetricExecutor calldata as one byte. Keep these values in sync with
+// tycho-simulation's MetricOracleUpdatePolicy and MetricExecutor's mode constants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum MetricOracleUpdatePolicy {
+    Never = 0,
+    Always = 1,
+    RetryOnRevert = 2,
+}
+
+impl MetricOracleUpdatePolicy {
+    fn requires_oracle_update(self) -> bool {
+        // RetryOnRevert still needs signed oracle calldata encoded up front; the executor decides
+        // on-chain whether to call it after the first swap attempt.
+        matches!(self, Self::Always | Self::RetryOnRevert)
+    }
+
+    fn from_byte(value: u8, source: &str) -> Result<Self, EncodingError> {
+        match value {
+            0 => Ok(Self::Never),
+            1 => Ok(Self::Always),
+            2 => Ok(Self::RetryOnRevert),
+            _ => Err(EncodingError::InvalidInput(format!(
+                "Metric oracle update policy from {source} must be 0, 1, or 2, got {value}"
+            ))),
+        }
+    }
+
+    fn from_attribute(value: &Bytes) -> Result<Self, EncodingError> {
+        if value.len() != 1 {
+            return Err(EncodingError::InvalidInput(format!(
+                "Metric {ORACLE_UPDATE_POLICY_ATTR} attribute must be exactly one byte"
+            )));
+        }
+        Self::from_byte(value[0], ORACLE_UPDATE_POLICY_ATTR)
+    }
 }
 
 impl SwapEncoder for MetricSwapEncoder {
@@ -31,10 +72,9 @@ impl SwapEncoder for MetricSwapEncoder {
         _chain: Chain,
         config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
-        let request_oracle_update =
-            parse_bool_config(config.as_ref(), "request_oracle_update")?.unwrap_or(false);
+        let oracle_address = configured_oracle_address(config)?;
         let (runtime_handle, runtime) = create_encoding_runtime()?;
-        Ok(Self { executor_address, request_oracle_update, runtime_handle, runtime })
+        Ok(Self { executor_address, oracle_address, runtime_handle, runtime })
     }
 
     fn encode_swap(
@@ -52,7 +92,9 @@ impl SwapEncoder for MetricSwapEncoder {
         let zero_for_one = zero_for_one(swap)?;
         let price_limit_x64 =
             if zero_for_one { Bytes::zero(32) } else { u256_bytes(&BigUint::from(u128::MAX)) };
-        let oracle_update = if self.request_oracle_update {
+
+        let oracle_update_policy = oracle_update_policy(swap)?;
+        let oracle_update = if oracle_update_policy.requires_oracle_update() {
             Some(self.request_oracle_update(swap, encoding_context)?)
         } else {
             None
@@ -65,7 +107,8 @@ impl SwapEncoder for MetricSwapEncoder {
         encoded.extend_from_slice(&metric_router);
         encoded.push(u8::from(zero_for_one));
         encoded.extend_from_slice(&price_limit_x64);
-        encoded.push(u8::from(oracle_update.is_some()));
+        // Byte 113 is the oracle update policy consumed by MetricExecutor.
+        encoded.push(oracle_update_policy as u8);
 
         if let Some(update) = oracle_update {
             let calldata_len = u32::try_from(update.calldata.len()).map_err(|_| {
@@ -73,7 +116,6 @@ impl SwapEncoder for MetricSwapEncoder {
                     "Metric oracle update calldata is too large to encode".to_string(),
                 )
             })?;
-            encoded.extend_from_slice(&update.target);
             encoded.extend_from_slice(&calldata_len.to_be_bytes());
             encoded.extend_from_slice(&update.calldata);
         }
@@ -92,7 +134,6 @@ impl SwapEncoder for MetricSwapEncoder {
 
 #[derive(Debug)]
 struct MetricOracleUpdate {
-    target: Bytes,
     calldata: Bytes,
 }
 
@@ -148,6 +189,12 @@ impl MetricSwapEncoder {
             ))?
             .clone();
         bytes_to_address(&target)?;
+        if target != self.oracle_address {
+            return Err(EncodingError::InvalidInput(format!(
+                "Metric oracle update target {} does not match configured oracle {}",
+                target, self.oracle_address
+            )));
+        }
 
         let calldata = signed_oracle_update
             .quote_attributes
@@ -162,24 +209,45 @@ impl MetricSwapEncoder {
             ));
         }
 
-        Ok(MetricOracleUpdate { target, calldata })
+        Ok(MetricOracleUpdate { calldata })
     }
 }
 
-fn parse_bool_config(
-    config: Option<&HashMap<String, String>>,
-    key: &str,
-) -> Result<Option<bool>, EncodingError> {
-    let Some(value) = config.and_then(|config| config.get(key)) else {
-        return Ok(None);
-    };
-    match value.as_str() {
-        "true" | "1" => Ok(Some(true)),
-        "false" | "0" => Ok(Some(false)),
-        _ => Err(EncodingError::InvalidInput(format!(
-            "Metric config {key} must be true/false or 1/0, got {value}"
-        ))),
-    }
+fn configured_oracle_address(
+    config: Option<HashMap<String, String>>,
+) -> Result<Bytes, EncodingError> {
+    let config = config.ok_or_else(|| {
+        EncodingError::FatalError(format!("Metric config missing {ORACLE_ADDRESS_CONFIG}"))
+    })?;
+    let oracle_address = config
+        .get(ORACLE_ADDRESS_CONFIG)
+        .ok_or_else(|| {
+            EncodingError::FatalError(format!("Metric config missing {ORACLE_ADDRESS_CONFIG}"))
+        })
+        .and_then(|oracle_address| {
+            oracle_address
+                .parse::<Bytes>()
+                .map_err(|_| {
+                    EncodingError::FatalError(format!(
+                        "Invalid Metric {ORACLE_ADDRESS_CONFIG}: expected an EVM address"
+                    ))
+                })
+        })?;
+    bytes_to_address(&oracle_address)?;
+    Ok(oracle_address)
+}
+
+fn oracle_update_policy(swap: &Swap) -> Result<MetricOracleUpdatePolicy, EncodingError> {
+    // No config fallback: Metric components must carry the policy explicitly.
+    swap.component()
+        .static_attributes
+        .get(ORACLE_UPDATE_POLICY_ATTR)
+        .ok_or_else(|| {
+            EncodingError::FatalError(format!(
+                "Metric component missing {ORACLE_UPDATE_POLICY_ATTR} static attribute"
+            ))
+        })
+        .and_then(MetricOracleUpdatePolicy::from_attribute)
 }
 
 fn contract_address(swap: &Swap, index: usize, name: &str) -> Result<Bytes, EncodingError> {
@@ -239,7 +307,11 @@ mod tests {
         models::default_token,
     };
 
-    fn component(token0: &Bytes, token1: &Bytes) -> ProtocolComponent {
+    fn component_with_policy(
+        token0: &Bytes,
+        token1: &Bytes,
+        policy: MetricOracleUpdatePolicy,
+    ) -> ProtocolComponent {
         ProtocolComponent {
             id: "metric-rfq".to_string(),
             protocol_system: "rfq:metric".to_string(),
@@ -249,6 +321,10 @@ mod tests {
                 Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap(),
                 Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap(),
             ],
+            static_attributes: HashMap::from([(
+                ORACLE_UPDATE_POLICY_ATTR.to_string(),
+                vec![policy as u8].into(),
+            )]),
             ..Default::default()
         }
     }
@@ -263,25 +339,31 @@ mod tests {
         }
     }
 
-    fn config(request_oracle_update: bool) -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(
-            "request_oracle_update".to_string(),
-            request_oracle_update.to_string(),
-        )]))
+    fn metric_config(oracle_address: &Bytes) -> HashMap<String, String> {
+        HashMap::from([(ORACLE_ADDRESS_CONFIG.to_string(), oracle_address.to_string())])
+    }
+
+    fn encoder(oracle_address: &Bytes) -> MetricSwapEncoder {
+        MetricSwapEncoder::new(
+            Bytes::zero(20),
+            Chain::Ethereum,
+            Some(metric_config(oracle_address)),
+        )
+        .unwrap()
     }
 
     #[test]
     fn test_encode_metric_without_oracle_update() {
         let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let oracle_target = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
         let swap = Swap::new(
-            component(&token_in, &token_out),
+            component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::Never),
             default_token(token_in.clone()),
             default_token(token_out.clone()),
             BigUint::ZERO,
         );
-        let encoder =
-            MetricSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, config(false)).unwrap();
+        let encoder = encoder(&oracle_target);
 
         let encoded_swap = encoder
             .encode_swap(&swap, &context())
@@ -304,13 +386,14 @@ mod tests {
     fn test_encode_metric_one_for_zero_uses_max_price_limit() {
         let token0 = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         let token1 = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let oracle_target = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
         let swap = Swap::new(
-            component(&token0, &token1),
+            component_with_policy(&token0, &token1, MetricOracleUpdatePolicy::Never),
             default_token(token1.clone()),
             default_token(token0.clone()),
             BigUint::ZERO,
         );
-        let encoder = MetricSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).unwrap();
+        let encoder = encoder(&oracle_target);
 
         let encoded_swap = encoder
             .encode_swap(&swap, &context())
@@ -340,29 +423,85 @@ mod tests {
             ]),
         };
         let swap = Swap::new(
-            component(&token_in, &token_out),
+            component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::Always),
             default_token(token_in.clone()),
             default_token(token_out.clone()),
             BigUint::ZERO,
         )
         .with_estimated_amount_in(BigUint::from(3_000_000_000u64))
         .with_protocol_state(Arc::new(quote_state));
-        let encoder =
-            MetricSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, config(true)).unwrap();
+        let encoder = encoder(&oracle_target);
 
         let encoded_swap = encoder
             .encode_swap(&swap, &context())
             .unwrap();
         let hex_swap = encode(&encoded_swap);
 
-        let expected_suffix = String::from(concat!(
-            "01",
-            "2222222222222222222222222222222222222222",
-            "00000008",
-            "78ce3ae1aabbccdd",
-        ));
+        let expected_suffix = String::from(concat!("01", "00000008", "78ce3ae1aabbccdd",));
         assert!(hex_swap.ends_with(&expected_suffix));
         assert!(!hex_swap.contains("78ce3ae111223344"));
+    }
+
+    #[test]
+    fn test_encode_metric_with_retry_oracle_update() {
+        let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let oracle_target = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+        let oracle_calldata = Bytes::from_str("0x78ce3ae1aabbccdd").unwrap();
+        let quote_state = MockRFQState {
+            quote_amount_out: BigUint::from(1u64),
+            quote_data: HashMap::from([
+                ("oracle_update_target".to_string(), oracle_target.clone()),
+                ("oracle_update_0_calldata".to_string(), oracle_calldata.clone()),
+            ]),
+        };
+        let swap = Swap::new(
+            component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::RetryOnRevert),
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(BigUint::from(3_000_000_000u64))
+        .with_protocol_state(Arc::new(quote_state));
+        let encoder = encoder(&oracle_target);
+
+        let encoded_swap = encoder
+            .encode_swap(&swap, &context())
+            .unwrap();
+        let hex_swap = encode(&encoded_swap);
+
+        let expected_suffix = String::from(concat!("02", "00000008", "78ce3ae1aabbccdd",));
+        assert!(hex_swap.ends_with(&expected_suffix));
+    }
+
+    #[test]
+    fn test_metric_missing_oracle_update_policy_fails() {
+        let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let swap = Swap::new(
+            ProtocolComponent {
+                id: "metric-rfq".to_string(),
+                protocol_system: "rfq:metric".to_string(),
+                tokens: vec![token_in.clone(), token_out.clone()],
+                contract_addresses: vec![
+                    Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+                    Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap(),
+                    Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap(),
+                ],
+                ..Default::default()
+            },
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
+        let oracle_target = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+        let encoder = encoder(&oracle_target);
+
+        let err = encoder
+            .encode_swap(&swap, &context())
+            .unwrap_err();
+
+        assert!(matches!(err, EncodingError::FatalError(_)));
     }
 
     #[test]
@@ -370,18 +509,52 @@ mod tests {
         let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let swap = Swap::new(
-            component(&token_in, &token_out),
+            component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::Always),
             default_token(token_in.clone()),
             default_token(token_out.clone()),
             BigUint::ZERO,
         );
-        let encoder =
-            MetricSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, config(true)).unwrap();
+        let oracle_target = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+        let encoder = encoder(&oracle_target);
 
         let err = encoder
             .encode_swap(&swap, &context())
             .unwrap_err();
 
         assert!(matches!(err, EncodingError::FatalError(_)));
+    }
+
+    #[test]
+    fn test_metric_oracle_target_must_match_config() {
+        let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let quote_target = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+        let configured_oracle =
+            Bytes::from_str("0x9999999999999999999999999999999999999999").unwrap();
+        let quote_state = MockRFQState {
+            quote_amount_out: BigUint::from(1u64),
+            quote_data: HashMap::from([
+                ("oracle_update_target".to_string(), quote_target),
+                (
+                    "oracle_update_0_calldata".to_string(),
+                    Bytes::from_str("0x78ce3ae1aabbccdd").unwrap(),
+                ),
+            ]),
+        };
+        let swap = Swap::new(
+            component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::Always),
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(BigUint::from(3_000_000_000u64))
+        .with_protocol_state(Arc::new(quote_state));
+        let encoder = encoder(&configured_oracle);
+
+        let err = encoder
+            .encode_swap(&swap, &context())
+            .unwrap_err();
+
+        assert!(matches!(err, EncodingError::InvalidInput(_)));
     }
 }

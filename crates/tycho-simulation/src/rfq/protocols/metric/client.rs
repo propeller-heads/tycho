@@ -29,8 +29,9 @@ use crate::{
         errors::RFQError,
         models::TimestampHeader,
         protocols::metric::models::{
-            MetricBidAskResponse, MetricMetadata, MetricSignedOracleUpdateResponse,
-            MetricSignedOracleUpdateSlot,
+            MetricBidAskResponse, MetricMetadata, MetricOracleUpdatePolicy,
+            MetricSignedOracleUpdateResponse, MetricSignedOracleUpdateSlot,
+            ORACLE_UPDATE_POLICY_ATTR,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -54,6 +55,7 @@ pub struct MetricClient {
     http_client: OnceLock<Client>,
     poll_time: Duration,
     quote_timeout: Duration,
+    oracle_update_policy: MetricOracleUpdatePolicy,
 }
 
 impl Clone for MetricClient {
@@ -75,6 +77,7 @@ impl Clone for MetricClient {
             http_client,
             poll_time: self.poll_time,
             quote_timeout: self.quote_timeout,
+            oracle_update_policy: self.oracle_update_policy,
         }
     }
 }
@@ -103,6 +106,7 @@ impl MetricClient {
             secret_key,
             poll_time,
             quote_timeout,
+            MetricOracleUpdatePolicy::default_for_chain(chain),
         )
     }
 
@@ -117,6 +121,7 @@ impl MetricClient {
         secret_key: Option<String>,
         poll_time: Duration,
         quote_timeout: Duration,
+        oracle_update_policy: MetricOracleUpdatePolicy,
     ) -> Result<Self, RFQError> {
         let chain_path = chain_to_metric_path(chain)?;
         let base_url = base_url.trim_end_matches('/');
@@ -133,6 +138,7 @@ impl MetricClient {
             http_client: OnceLock::new(),
             poll_time,
             quote_timeout,
+            oracle_update_policy,
         })
     }
 
@@ -148,6 +154,13 @@ impl MetricClient {
         bid_ask: &MetricBidAskResponse,
         tvl: f64,
     ) -> ComponentWithState {
+        let mut static_attributes = HashMap::new();
+        static_attributes.insert(
+            ORACLE_UPDATE_POLICY_ATTR.to_string(),
+            self.oracle_update_policy
+                .as_attribute_value(),
+        );
+
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
@@ -159,6 +172,7 @@ impl MetricClient {
                 metadata.price_provider_address.clone(),
                 metadata.quoter_address.clone(),
             ],
+            static_attributes,
             ..Default::default()
         };
 
@@ -724,6 +738,7 @@ mod tests {
             None,
             Duration::from_secs(1),
             Duration::from_secs(1),
+            MetricOracleUpdatePolicy::default_for_chain(Chain::Ethereum),
         )
         .unwrap()
     }
@@ -890,12 +905,36 @@ mod tests {
         assert_eq!(component.component.protocol_system, MetricClient::PROTOCOL_SYSTEM);
         assert_eq!(component.component.tokens, vec![metadata().token0, metadata().token1]);
         assert_eq!(
+            component.component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
+            MetricOracleUpdatePolicy::Always.as_attribute_value()
+        );
+        assert_eq!(
             component.state.attributes["pool_address"],
             Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap()
         );
         assert_eq!(
             String::from_utf8(component.state.attributes["bid_adj"].to_vec()).unwrap(),
             "55340232221128654848000"
+        );
+    }
+
+    #[test]
+    fn test_builder_sets_oracle_update_policy_attribute() {
+        let client = MetricClientBuilder::new(Chain::Ethereum)
+            .oracle_update_policy(MetricOracleUpdatePolicy::RetryOnRevert)
+            .build()
+            .unwrap();
+
+        let component = client.create_component_with_state(
+            "metric_ethusdc".to_string(),
+            &metadata(),
+            &bid_ask(),
+            3000.0,
+        );
+
+        assert_eq!(
+            component.component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
+            MetricOracleUpdatePolicy::RetryOnRevert.as_attribute_value()
         );
     }
 

@@ -11,12 +11,7 @@
       "balance_manager_address": "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
     },
     "rfq:metric": {
-      "request_oracle_update": "true"
-    }
-  },
-  "base": {
-    "rfq:metric": {
-      "request_oracle_update": "false"
+      "oracle_address": "0xbD321D18a7ce5fb91F8b16e026e3258f7b310598"
     }
   },
   "arbitrum": {},

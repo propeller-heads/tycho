@@ -102,6 +102,8 @@ contract MockMetricPool {
 }
 
 contract MetricExecutorExposed is MetricExecutor {
+    constructor(address oracle_) MetricExecutor(oracle_) {}
+
     function metricOmmSwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
@@ -201,6 +203,10 @@ contract MetricDispatcherHarness {
 }
 
 contract MetricExecutorTest is Test {
+    uint8 constant ORACLE_UPDATE_NEVER = 0;
+    uint8 constant ORACLE_UPDATE_ALWAYS = 1;
+    uint8 constant ORACLE_UPDATE_RETRY_ON_REVERT = 2;
+
     MetricToken token0;
     MetricToken token1;
     MockMetricOracle oracle;
@@ -213,12 +219,13 @@ contract MetricExecutorTest is Test {
         token0 = new MetricToken("Token 0", "TK0");
         token1 = new MetricToken("Token 1", "TK1");
         oracle = new MockMetricOracle();
-        executor = new MetricExecutorExposed();
+        executor = new MetricExecutorExposed(address(oracle));
     }
 
     function testGetTransferData() public {
         MockMetricPool pool = _pool(false);
-        bytes memory data = _encodeData(address(pool), true, false, "");
+        bytes memory data =
+            _encodeData(address(pool), true, ORACLE_UPDATE_NEVER, "");
 
         (
             TransferManager.TransferType transferType,
@@ -242,7 +249,9 @@ contract MetricExecutorTest is Test {
         token1.mint(address(pool), amountIn * 2);
 
         executor.swap(
-            amountIn, _encodeData(address(pool), true, false, ""), receiver
+            amountIn,
+            _encodeData(address(pool), true, ORACLE_UPDATE_NEVER, ""),
+            receiver
         );
 
         assertEq(token0.balanceOf(address(pool)), amountIn);
@@ -263,7 +272,9 @@ contract MetricExecutorTest is Test {
 
         executor.swap(
             amountIn,
-            _encodeData(address(pool), true, true, oracleCalldata),
+            _encodeData(
+                address(pool), true, ORACLE_UPDATE_ALWAYS, oracleCalldata
+            ),
             receiver
         );
 
@@ -271,9 +282,65 @@ contract MetricExecutorTest is Test {
         assertEq(token1.balanceOf(receiver), amountIn * 2);
     }
 
+    function testSwapRetriesWithOracleUpdate() public {
+        MockMetricPool pool = _pool(true);
+        uint256 amountIn = 50 ether;
+        token0.mint(address(executor), amountIn);
+        token1.mint(address(pool), amountIn * 2);
+
+        bytes memory oracleCalldata = abi.encodeCall(
+            MockMetricOracle.updateBySignature,
+            (address(this), uint256(0), uint256(block.timestamp + 1), "")
+        );
+
+        executor.swap(
+            amountIn,
+            _encodeData(
+                address(pool),
+                true,
+                ORACLE_UPDATE_RETRY_ON_REVERT,
+                oracleCalldata
+            ),
+            receiver
+        );
+
+        assertTrue(oracle.updated());
+        assertEq(token0.balanceOf(address(pool)), amountIn);
+        assertEq(token1.balanceOf(receiver), amountIn * 2);
+        assertEq(token0.balanceOf(address(executor)), 0);
+    }
+
+    function testRetryModeDoesNotUpdateOracleWhenFirstSwapSucceeds() public {
+        MockMetricPool pool = _pool(false);
+        uint256 amountIn = 50 ether;
+        token0.mint(address(executor), amountIn);
+        token1.mint(address(pool), amountIn * 2);
+
+        bytes memory oracleCalldata = abi.encodeCall(
+            MockMetricOracle.updateBySignature,
+            (address(this), uint256(0), uint256(block.timestamp + 1), "")
+        );
+
+        executor.swap(
+            amountIn,
+            _encodeData(
+                address(pool),
+                true,
+                ORACLE_UPDATE_RETRY_ON_REVERT,
+                oracleCalldata
+            ),
+            receiver
+        );
+
+        assertFalse(oracle.updated());
+        assertEq(token0.balanceOf(address(pool)), amountIn);
+        assertEq(token1.balanceOf(receiver), amountIn * 2);
+        assertEq(token0.balanceOf(address(executor)), 0);
+    }
+
     function testSwapThroughDispatcherHarness() public {
         MetricDispatcherHarness harness = new MetricDispatcherHarness();
-        MetricExecutor implementation = new MetricExecutor();
+        MetricExecutor implementation = new MetricExecutor(address(oracle));
         MockMetricPool pool = _pool(false);
         uint256 amountIn = 25 ether;
         token0.mint(address(harness), amountIn);
@@ -282,7 +349,7 @@ contract MetricExecutorTest is Test {
         harness.execute(
             address(implementation),
             amountIn,
-            _encodeData(address(pool), true, false, ""),
+            _encodeData(address(pool), true, ORACLE_UPDATE_NEVER, ""),
             receiver
         );
 
@@ -296,7 +363,6 @@ contract MetricExecutorTest is Test {
         bytes memory invalid = abi.encodePacked(
             _baseData(address(pool), true),
             bytes1(uint8(1)),
-            address(oracle),
             uint32(99),
             hex"1234"
         );
@@ -326,20 +392,20 @@ contract MetricExecutorTest is Test {
     function _encodeData(
         address pool,
         bool zeroForOne,
-        bool shouldUpdateOracle,
+        uint8 oracleUpdateMode,
         bytes memory oracleCalldata
     ) internal view returns (bytes memory) {
         bytes memory data = abi.encodePacked(
-            _baseData(pool, zeroForOne),
-            bytes1(uint8(shouldUpdateOracle ? 1 : 0))
+            _baseData(pool, zeroForOne), bytes1(oracleUpdateMode)
         );
-        if (!shouldUpdateOracle) {
+        if (oracleUpdateMode == ORACLE_UPDATE_NEVER) {
             return data;
         }
 
-        return abi.encodePacked(
-            data, address(oracle), uint32(oracleCalldata.length), oracleCalldata
-        );
+        return
+            abi.encodePacked(
+                data, uint32(oracleCalldata.length), oracleCalldata
+            );
     }
 
     function _baseData(address pool, bool zeroForOne)

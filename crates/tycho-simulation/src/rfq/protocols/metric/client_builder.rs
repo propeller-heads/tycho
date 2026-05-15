@@ -6,7 +6,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::client::MetricClient;
+use super::{client::MetricClient, models::MetricOracleUpdatePolicy};
 use crate::rfq::{
     constants::get_metric_config, errors::RFQError,
     protocols::utils::default_quote_tokens_for_chain,
@@ -22,11 +22,13 @@ pub struct MetricClientBuilder {
     secret_key: Option<String>,
     poll_time: Duration,
     quote_timeout: Duration,
+    oracle_update_policy: MetricOracleUpdatePolicy,
 }
 
 impl MetricClientBuilder {
     pub fn new(chain: Chain) -> Self {
         let config = get_metric_config();
+        let oracle_update_policy = MetricOracleUpdatePolicy::default_for_chain(chain);
         Self {
             chain,
             tokens: HashSet::new(),
@@ -37,6 +39,7 @@ impl MetricClientBuilder {
             secret_key: config.secret_key,
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
+            oracle_update_policy,
         }
     }
 
@@ -84,6 +87,11 @@ impl MetricClientBuilder {
         self
     }
 
+    pub fn oracle_update_policy(mut self, policy: MetricOracleUpdatePolicy) -> Self {
+        self.oracle_update_policy = policy;
+        self
+    }
+
     pub fn build(self) -> Result<MetricClient, RFQError> {
         let quote_tokens = match self.quote_tokens {
             Some(tokens) => tokens,
@@ -100,6 +108,7 @@ impl MetricClientBuilder {
             self.secret_key,
             self.poll_time,
             self.quote_timeout,
+            self.oracle_update_policy,
         )
     }
 }
