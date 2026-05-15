@@ -43,5 +43,12 @@
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f"
+  },
+  "bsc": {
+    "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
+    "pancake_v2": "0x0ECbE4a09eff3F4d054723720f60b55EE52bD99E",
+    "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
+    "pancake_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
+    "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed"
   }
 }

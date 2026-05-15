@@ -42,5 +42,16 @@
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
     ]
+  },
+  "bsc": {
+    "EXECUTOR_SETTER_ROLE": [
+      "0x613112ACD43d95d4bE257Dae562Fb8Ea4d7ED455"
+    ],
+    "UNPAUSER_ROLE": [
+      "0x0e27D232A79dd76FBcB17830F45374c6d45bc1Cf"
+    ],
+    "ROUTER_FEE_SETTER": [
+      "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ]
   }
 }

@@ -29,6 +29,9 @@ async function main() {
     } else if (network === "arbitrum") {
         // permit2 address is the same as on ethereum
         permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+    } else if (network === "bsc") {
+        // permit2 address is the same as on ethereum
+        permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
     } else {
         throw new Error(`Unsupported network: ${network}`);
     }
