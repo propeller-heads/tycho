@@ -150,7 +150,9 @@ impl ProtocolStreamProcessor {
         if self.partial_blocks {
             protocol_stream = protocol_stream.enable_partial_blocks();
         }
-        let infinite_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(10));
+        // 1 s cooldown: must stay below the state-sync cooldown (≥ 2 s on every chain)
+        // so synchronizers don't exhaust their retries while the WS is reconnecting.
+        let infinite_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(1));
         protocol_stream
             .auth_key(Some(self.tycho_api_key.clone()))
             .skip_state_decode_failures(true)
