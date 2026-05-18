@@ -1,3 +1,11 @@
+## [0.296.2](https://github.com/propeller-heads/tycho-indexer/compare/0.296.1...0.296.2) (2026-05-18)
+
+
+### Bug Fixes
+
+* **rpc:** retry null result DeserError and log RPC failures ([74823d6](https://github.com/propeller-heads/tycho-indexer/commit/74823d693de92b677889942ce662e3b356891767))
+* **rpc:** retry null result DeserError and log RPC failures ([#1024](https://github.com/propeller-heads/tycho-indexer/issues/1024)) ([b5a2ce2](https://github.com/propeller-heads/tycho-indexer/commit/b5a2ce26e07443d4a25bfd24792cc36e27a90cf8))
+
 ## [0.296.1](https://github.com/propeller-heads/tycho-indexer/compare/0.296.0...0.296.1) (2026-05-18)
 
 
