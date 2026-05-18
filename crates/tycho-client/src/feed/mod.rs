@@ -102,8 +102,12 @@ impl HeaderLike for BlockHeader {
 
 #[derive(Error, Debug)]
 pub enum BlockSynchronizerError {
-    #[error("Failed to initialize synchronizer: {0}")]
-    InitializationError(#[from] SynchronizerError),
+    #[error("Failed to initialize extractor '{extractor}': {source}")]
+    InitializationError {
+        extractor: ExtractorIdentity,
+        #[source]
+        source: SynchronizerError,
+    },
 
     #[error("Failed to process new block: {0}")]
     BlockHistoryError(#[from] BlockHistoryError),
@@ -685,7 +689,12 @@ where
                     warn!(%extractor_id, %reason, "Extractor not recognised by server, skipping");
                     to_skip.push(extractor_id);
                 }
-                Err(e) => return Err(BlockSynchronizerError::InitializationError(e)),
+                Err(e) => {
+                    return Err(BlockSynchronizerError::InitializationError {
+                        extractor: extractor_id,
+                        source: e,
+                    })
+                }
             }
         }
         for id in &to_skip {
