@@ -40,6 +40,7 @@ pub mod protocol_cache;
 pub mod protocol_extractor;
 pub mod reorg_buffer;
 pub mod runner;
+pub mod supervisor;
 pub mod token_analysis_cron;
 mod u256_num;
 
@@ -73,6 +74,28 @@ pub enum ExtractionError {
     AccountExtractionError(String),
     #[error("DCI cache error: {0}")]
     DCICacheError(#[from] DCICacheError),
+}
+
+impl ExtractionError {
+    /// Returns a static label for each variant, used as a Prometheus metric label.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Setup(_) => "setup",
+            Self::DecodeError(_) => "decode",
+            Self::ProtobufError(_) => "protobuf",
+            Self::Empty => "empty",
+            Self::Unknown(_) => "unknown",
+            Self::Storage(_) => "storage",
+            Self::SubstreamsError(_) => "substreams",
+            Self::ServiceError(_) => "service",
+            Self::MergeError(_) => "merge",
+            Self::ReorgBufferError(_) => "reorg_buffer",
+            Self::PartialBlockBufferError(_) => "partial_block_buffer",
+            Self::TracingError(_) => "tracing",
+            Self::AccountExtractionError(_) => "account_extraction",
+            Self::DCICacheError(_) => "dci_cache",
+        }
+    }
 }
 
 #[derive(Error, Debug)]

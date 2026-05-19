@@ -187,6 +187,20 @@ impl Chain {
         }
     }
 
+    /// Returns the block time in seconds for the chain.
+    pub fn block_time(&self) -> f64 {
+        match self {
+            Chain::Ethereum => 12.0,
+            Chain::ZkSync => 1.0,
+            Chain::Arbitrum => 0.25,
+            Chain::Base => 2.0,
+            Chain::Bsc => 0.45,
+            Chain::Unichain => 1.0,
+            Chain::Polygon => 2.0,
+            Chain::Starknet => 4.0,
+        }
+    }
+
     /// Returns a default TVL threshold in native token units for the given tier.
     ///
     /// Values are approximate and target a USD-equivalent range, not a precise conversion.

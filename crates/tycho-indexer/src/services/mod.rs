@@ -54,6 +54,10 @@ pub struct ServicesBuilder<G> {
     dci_protocols: Vec<String>,
     /// Active protocol systems derived from extractor config.
     protocol_systems: Vec<String>,
+    /// Pre-built receivers for PendingDeltas (one per extractor).
+    pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::ExtractorMsg>>,
+    /// Channel for supervisors to signal PendingDeltas to reset a buffer.
+    reset_rx: Option<tokio::sync::mpsc::Receiver<String>>,
 }
 
 impl<G> ServicesBuilder<G>
@@ -72,6 +76,8 @@ where
             plans_config: PlansConfig::default(),
             dci_protocols: Vec::new(),
             protocol_systems: Vec::new(),
+            pending_deltas_rxs: Vec::new(),
+            reset_rx: None,
         }
     }
 
@@ -120,6 +126,17 @@ where
         self
     }
 
+    /// Sets the pre-built receivers and reset channel for PendingDeltas.
+    pub fn pending_deltas(
+        mut self,
+        rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::ExtractorMsg>>,
+        reset_rx: tokio::sync::mpsc::Receiver<String>,
+    ) -> Self {
+        self.pending_deltas_rxs = rxs;
+        self.reset_rx = Some(reset_rx);
+        self
+    }
+
     /// Starts the Tycho server. Returns a tuple containing a handle for the server and a Tokio
     /// handle for the tasks. If no extractor tasks are registered, it starts the server without
     /// running the delta tasks.
@@ -141,7 +158,7 @@ where
     /// Runs the server with both RPC and WebSocket services, and spawns tasks for handling
     /// pending delta processing.
     fn start_server_with_deltas(
-        self,
+        mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let pending_deltas = PendingDeltas::new(
@@ -149,15 +166,18 @@ where
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
         );
-        let extractor_handles_clone = self
-            .extractor_handles
-            .clone()
-            .into_values();
+
+        let pending_deltas_rxs = std::mem::take(&mut self.pending_deltas_rxs);
+        let reset_rx = self.reset_rx.take().unwrap_or_else(|| {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            rx
+        });
+
         let pending_deltas_clone = pending_deltas.clone();
         let (start_tx, start_rx) = mpsc::sync_channel::<()>(1);
         let deltas_task = tokio::spawn(async move {
             pending_deltas_clone
-                .run(extractor_handles_clone, start_tx)
+                .run(pending_deltas_rxs, reset_rx, start_tx)
                 .await
                 .map_err(|err| ExtractionError::Unknown(err.to_string()))
         });
