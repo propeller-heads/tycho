@@ -23,7 +23,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 typetag = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 # Error handling
 thiserror = { workspace = true }
