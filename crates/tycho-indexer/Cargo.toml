@@ -52,7 +52,7 @@ tracing-subscriber = { version = "0.3.17", default-features = false, features = 
 tycho-common.workspace = true
 tycho-ethereum.workspace = true
 tycho-storage.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 # Pinned: actix-web 4.12+ uses actix-http methods not present in 3.11.x; keep at last working set
 actix-web = { version = "=4.11.0", default-features = false, features = [
     "macros",

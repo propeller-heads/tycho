@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMessage, HeaderLike};
 use tycho_common::{
     dto::{ChangeType, ProtocolStateDelta},
-    models::{token::Token, Chain},
+    models::{blockchain::BlockAggregatedChanges, token::Token, Chain},
     simulation::protocol_sim::{Balances, ProtocolSim},
     Bytes,
 };
@@ -61,6 +61,8 @@ struct DecoderState {
     // again TODO: handle more gracefully inside tycho-client. We could fetch the snapshot and
     // try to decode it again.
     failed_components: HashSet<String>,
+    // The block number of the last confirmed block decoded via `decode()`.
+    current_block_number: u64,
 }
 
 type DecodeFut =
@@ -897,6 +899,8 @@ where
             .states
             .extend(updated_states.clone());
 
+        state_guard.current_block_number = block_number_or_timestamp;
+
         // Add new components to persistent state
         for (id, component) in new_pairs.iter() {
             state_guard
@@ -921,6 +925,72 @@ where
         Ok(Update::new(block_number_or_timestamp, updated_states, new_pairs)
             .set_removed_pairs(removed_pairs)
             .set_sync_states(msg.sync_states.clone()))
+    }
+
+    /// Applies pending deltas from one or more `TxDeltaIndexer`s against the current confirmed
+    /// state and returns an ephemeral `Update`.
+    ///
+    /// This is the read-only counterpart of `decode()`. It clones pool states, applies the
+    /// supplied `pending_deltas`, and returns the result — **without writing back** to
+    /// `DecoderState`. Calling this method twice with the same input produces identical results.
+    ///
+    /// Only native protocols are supported: VM protocols that require `update_engine()` are
+    /// silently skipped (their pools will not appear in the returned `Update`).
+    ///
+    /// # Parameters
+    /// * `pending_deltas` — map from extractor name to the `BlockAggregatedChanges` produced by the
+    ///   corresponding `TxDeltaIndexer::generate_deltas()` call.
+    /// * `header` — the target block header. Its `block_number_or_timestamp()` is stamped on the
+    ///   returned [`Update`]; its `block_number` and `block_timestamp` are injected into each state
+    ///   delta so that protocols relying on block context (e.g. aerodrome slipstreams, etherfi)
+    ///   receive correct values.
+    pub async fn apply_deltas_ephemeral(
+        &self,
+        pending_deltas: &HashMap<String, BlockAggregatedChanges>,
+        header: H,
+    ) -> Result<Update, StreamDecodeError> {
+        let block_number_or_timestamp = header
+            .clone()
+            .block_number_or_timestamp();
+        let current_block = header.block();
+        let state_guard = self.state.read().await;
+
+        let mut updated_states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        for deltas in pending_deltas.values() {
+            let all_balances = Balances {
+                component_balances: deltas
+                    .component_balances
+                    .iter()
+                    .map(|(pool_id, bals)| {
+                        let balances = bals
+                            .iter()
+                            .map(|(t, b)| (t.clone(), b.balance.clone()))
+                            .collect();
+                        (pool_id.clone(), balances)
+                    })
+                    .collect(),
+                account_balances: HashMap::new(),
+            };
+
+            for (id, state_delta) in &deltas.state_deltas {
+                let dto_delta = Self::add_block_info_to_delta(
+                    ProtocolStateDelta::from(state_delta.clone()),
+                    current_block.clone(),
+                );
+                if let Err(e) = Self::apply_update(
+                    id,
+                    dto_delta,
+                    &mut updated_states,
+                    &state_guard,
+                    &all_balances,
+                ) {
+                    warn!(pool = id, error = %e, "EphemeralDeltaTransitionError");
+                }
+            }
+        }
+
+        Ok(Update::new(block_number_or_timestamp, updated_states, HashMap::new()))
     }
 
     /// Add block information (number and timestamp) to a ProtocolStateDelta
