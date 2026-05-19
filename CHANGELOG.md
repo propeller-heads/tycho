@@ -1,3 +1,11 @@
+## [0.296.4](https://github.com/propeller-heads/tycho-indexer/compare/0.296.3...0.296.4) (2026-05-19)
+
+
+### Bug Fixes
+
+* **univ4:** Address review comments from [#1009](https://github.com/propeller-heads/tycho-indexer/issues/1009) ([d0b627a](https://github.com/propeller-heads/tycho-indexer/commit/d0b627a56132b7df7bf199a1f1841cdf5bd79bfb))
+* **univ4:** Address review comments from [#1009](https://github.com/propeller-heads/tycho-indexer/issues/1009) ([#1022](https://github.com/propeller-heads/tycho-indexer/issues/1022)) ([fe6a4f5](https://github.com/propeller-heads/tycho-indexer/commit/fe6a4f5f957db3a61f2a871026bf54095aeda897))
+
 ## [0.296.3](https://github.com/propeller-heads/tycho-indexer/compare/0.296.2...0.296.3) (2026-05-18)
 
 
