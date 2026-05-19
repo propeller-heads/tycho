@@ -246,6 +246,10 @@ where
             .clone()
             .block_number_or_timestamp();
         let current_block = header.clone().block();
+        let is_partial = current_block
+            .as_ref()
+            .map(|h| h.partial_block_index.is_some())
+            .unwrap_or(false);
 
         for (protocol, protocol_msg) in msg.state_msgs.iter() {
             // Add any new tokens
@@ -919,6 +923,7 @@ where
 
         // Send the tick with all updated states
         Ok(Update::new(block_number_or_timestamp, updated_states, new_pairs)
+            .set_is_partial(is_partial)
             .set_removed_pairs(removed_pairs)
             .set_sync_states(msg.sync_states.clone()))
     }

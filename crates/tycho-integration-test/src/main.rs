@@ -35,7 +35,7 @@ use tycho_simulation::{
         hashflow::{client::HashflowClient, state::HashflowState},
         liquorice::{client::LiquoriceClient, state::LiquoriceState},
     },
-    tycho_common::models::Chain,
+    tycho_common::models::{Chain, TvlThresholdTier},
     utils::load_all_tokens,
 };
 use tycho_test::{
@@ -57,9 +57,10 @@ use crate::{
 
 #[derive(Parser, Clone)]
 struct Cli {
-    /// The tvl threshold in ETH/native token units to filter the graph by
-    #[arg(long, default_value_t = 100.0)]
-    tvl_threshold: f64,
+    /// The TVL threshold in native token units to filter the graph by.
+    /// Defaults to a chain-appropriate value targeting ~$200K USD equivalent (Medium tier).
+    #[arg(long)]
+    tvl_threshold: Option<f64>,
 
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
@@ -165,6 +166,11 @@ struct Cli {
     /// Router fee on output in bps (defaults to 10 bps)
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..))]
     router_fee: u16,
+
+    /// Disable on-chain swap execution validation (RPC simulation only, no swap encoding or
+    /// execution). Useful for diagnosing stream latency without execution overhead.
+    #[arg(long, default_value_t = false)]
+    disable_execution: bool,
 }
 
 impl Debug for Cli {
@@ -259,8 +265,11 @@ async fn main() -> miette::Result<()> {
 async fn run(cli: Cli) -> miette::Result<()> {
     info!("Starting integration test");
 
-    let cli = Arc::new(cli);
     let chain = cli.chain;
+    let tvl_threshold = cli
+        .tvl_threshold
+        .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
+    let cli = Arc::new(cli);
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
 
@@ -292,7 +301,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             chain,
             cli.tycho_url.clone(),
             cli.tycho_api_key.clone(),
-            cli.tvl_threshold,
+            tvl_threshold,
             cli.tvl_buffer_ratio,
             cli.protocols.clone(),
             cli.partial_blocks,
@@ -307,7 +316,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     if !cli.disable_rfq {
         if let Ok(rfq_stream_processor) = RFQStreamProcessor::new(
             chain,
-            cli.tvl_threshold,
+            tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
         ) {
@@ -668,8 +677,11 @@ async fn process_update(
 
         // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
         // standard endpoints use `latest` (confirmed blocks only).
-        let block_tag =
-            if cli.partial_blocks { BlockNumberOrTag::Pending } else { BlockNumberOrTag::Latest };
+        let block_tag = if cli.partial_blocks && update.update.is_partial {
+            BlockNumberOrTag::Pending
+        } else {
+            BlockNumberOrTag::Latest
+        };
         let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
         let poll_result = poll_rpc_for_block(
@@ -768,7 +780,7 @@ async fn process_update(
             .map(|(validator, id, _protocol)| (*validator, id.clone()))
             .collect();
 
-        let validation_block_id = if cli.partial_blocks {
+        let validation_block_id = if update.update.is_partial {
             BlockId::pending()
         } else {
             BlockId::from(block.header.number)
@@ -864,6 +876,10 @@ async fn process_update(
 
     if block_execution_info.is_empty() {
         warn!("No simulations were gathered for block {}", block.number());
+        return Ok(());
+    }
+
+    if cli.disable_execution {
         return Ok(());
     }
 

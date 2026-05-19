@@ -175,6 +175,9 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
     pub block_number_or_timestamp: u64,
+    /// True when this update is for a partial (pre-confirmation) block, false for full blocks.
+    #[serde(default)]
+    pub is_partial: bool,
     /// Synchronization state per protocol
     pub sync_states: HashMap<String, SynchronizerState>,
     /// The new and updated states of this block.
@@ -196,11 +199,17 @@ impl Update {
     ) -> Self {
         Update {
             block_number_or_timestamp: block_number,
+            is_partial: false,
             sync_states: HashMap::new(),
             states,
             new_pairs,
             removed_pairs: HashMap::new(),
         }
+    }
+
+    pub fn set_is_partial(mut self, is_partial: bool) -> Self {
+        self.is_partial = is_partial;
+        self
     }
 
     pub fn set_removed_pairs(mut self, pairs: HashMap<String, ProtocolComponent>) -> Self {
