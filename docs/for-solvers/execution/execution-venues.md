@@ -11,8 +11,7 @@ To solve orders on <a href="https://docs.cow.fi/cow-protocol/tutorials/solvers" 
 First, initialize the encoder:
 
 ```rust
-let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
-    .add_default_encoders(None)
+let swap_encoder_registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)
     .expect("Failed to get default SwapEncoderRegistry");
 
 let encoder = TychoRouterEncoderBuilder::new()

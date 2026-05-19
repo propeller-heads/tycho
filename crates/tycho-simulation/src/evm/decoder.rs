@@ -259,16 +259,7 @@ where
                         t.quality >= self.min_token_quality &&
                             !state_guard.tokens.contains_key(*addr)
                     })
-                    .filter_map(|(addr, t)| {
-                        t.clone()
-                            .try_into()
-                            .map(|token| (addr.clone(), token))
-                            .inspect_err(|e| {
-                                warn!("Failed decoding token {e:?} {addr:#044x}");
-                                *e
-                            })
-                            .ok()
-                    })
+                    .map(|(addr, t)| (addr.clone(), t.clone()))
                     .collect::<HashMap<Bytes, Token>>();
 
                 if !new_tokens.is_empty() {
@@ -336,10 +327,7 @@ where
                     .get_vm_storage()
                     .iter()
                 {
-                    let account: ResponseAccount = value
-                        .clone()
-                        .try_into()
-                        .map_err(|e| StreamDecodeError::Fatal(format!("{e}")))?;
+                    let account: ResponseAccount = value.clone().into();
 
                     if state_guard.tokens.contains_key(key) {
                         let original_address = account.address;
@@ -364,7 +352,7 @@ where
                                 // tracked again.
                                 let proxy_state = AccountUpdate::new(
                                     original_address,
-                                    value.chain.into(),
+                                    value.chain,
                                     account.slots.clone(),
                                     Some(account.native_balance),
                                     None,
@@ -388,7 +376,7 @@ where
                                     original_address,
                                     Some(impl_addr),
                                     &account.slots,
-                                    value.chain.into(),
+                                    value.chain,
                                     Some(account.native_balance),
                                 );
 
@@ -453,10 +441,14 @@ where
                 .get_vm_storage()
                 .iter()
                 .filter_map(|(addr, acc)| {
-                    let balances = acc.token_balances.clone();
-                    if balances.is_empty() {
+                    if acc.token_balances.is_empty() {
                         return None;
                     }
+                    let balances = acc
+                        .token_balances
+                        .iter()
+                        .map(|(token_addr, ab)| (token_addr.clone(), ab.balance.clone()))
+                        .collect::<HashMap<Bytes, Bytes>>();
                     Some((addr.clone(), balances))
                 })
                 .collect::<AccountBalances>();
@@ -515,7 +507,7 @@ where
                                             token_address,
                                             None,
                                             &HashMap::new(),
-                                            snapshot.component.chain.into(),
+                                            snapshot.component.chain,
                                             None,
                                         ),
                                     );
@@ -640,11 +632,8 @@ where
                 let mut account_update_by_address: HashMap<Address, AccountUpdate> = HashMap::new();
                 // New proxy token accounts that must overwrite any existing placeholder.
                 let mut new_proxy_accounts: Vec<AccountUpdate> = Vec::new();
-                for (key, value) in deltas.account_updates.iter() {
-                    let mut update: AccountUpdate = value
-                        .clone()
-                        .try_into()
-                        .map_err(|e| StreamDecodeError::Fatal(format!("{e}")))?;
+                for (key, value) in deltas.account_deltas.iter() {
+                    let mut update: AccountUpdate = value.clone().into();
 
                     // TEMP PATCH (ENG-4993)
                     //
@@ -726,7 +715,7 @@ where
                 drop(state_guard);
 
                 let state_guard = self.state.read().await;
-                info!("Updating engine with {} contract deltas", deltas.account_updates.len());
+                info!("Updating engine with {} contract deltas", deltas.account_deltas.len());
                 update_engine(
                     SHARED_TYCHO_DB.clone(),
                     header.clone().block(),
@@ -746,7 +735,7 @@ where
 
                 // Collect all pools related to the updated accounts
                 let mut pools_to_update = HashSet::new();
-                for (account, _update) in deltas.account_updates {
+                for (account, _update) in deltas.account_deltas {
                     // get new pools related to the account updated
                     pools_to_update.extend(
                         contracts_map
@@ -771,7 +760,7 @@ where
                         .iter()
                         .map(|(pool_id, bals)| {
                             let mut balances = HashMap::new();
-                            for (t, b) in &bals.0 {
+                            for (t, b) in bals {
                                 balances.insert(t.clone(), b.balance.clone());
                             }
                             pools_to_update.insert(pool_id.clone());
@@ -798,10 +787,12 @@ where
                 };
 
                 // update states with protocol state deltas (attribute changes etc.)
-                for (id, update) in deltas.state_updates {
+                for (id, update) in deltas.state_deltas {
                     // TODO: is this needed?
-                    let update_with_block =
-                        Self::add_block_info_to_delta(update, current_block.clone());
+                    let update_with_block = Self::add_block_info_to_delta(
+                        ProtocolStateDelta::from(update),
+                        current_block.clone(),
+                    );
                     match Self::apply_update(
                         &id,
                         update_with_block,
@@ -1133,7 +1124,7 @@ impl ProtocolSim for MockProtocolSim {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, str::FromStr};
+    use std::str::FromStr;
 
     use alloy::primitives::address;
     use mockall::predicate::*;
@@ -1167,10 +1158,15 @@ mod tests {
     }
 
     fn load_test_msg(name: &str) -> FeedMessage<BlockHeader> {
+        use std::{fs, path::Path};
+
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
         let asset_path = Path::new(project_root).join(format!("tests/assets/decoder/{name}.json"));
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
-        serde_json::from_str(&json_data).expect("Failed to deserialize FeedMsg json!")
+        let feed_msg: dto::FeedMessage<BlockHeader> =
+            serde_json::from_str(&json_data).expect("Failed to deserialize FeedMsg json!");
+        FeedMessage::from(feed_msg)
     }
 
     #[tokio::test]

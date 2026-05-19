@@ -34,6 +34,11 @@ impl SwapEncoderRegistry {
         Self { chain, encoders: HashMap::new() }
     }
 
+    /// Creates a new registry pre-populated with all default encoders for the given chain.
+    pub fn new_with_defaults(chain: Chain) -> Result<Self, EncodingError> {
+        Self::new(chain).add_default_encoders(None)
+    }
+
     /// Populates the registry with the default `SwapEncoders` for the given blockchain by
     /// parsing the executors' addresses in the file at the given path.
     pub fn add_default_encoders(

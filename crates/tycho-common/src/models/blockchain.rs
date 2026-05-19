@@ -166,6 +166,81 @@ impl BlockAggregatedChanges {
     pub fn is_partial(&self) -> bool {
         self.partial_block_index.is_some()
     }
+
+    pub fn get_block(&self) -> &Block {
+        &self.block
+    }
+
+    pub fn n_changes(&self) -> usize {
+        self.account_deltas.len() + self.state_deltas.len()
+    }
+
+    pub fn filter_by_component<F: Fn(&str) -> bool>(&mut self, keep: F) {
+        self.state_deltas.retain(|k, _| keep(k));
+        self.component_balances
+            .retain(|k, _| keep(k));
+        self.component_tvl
+            .retain(|k, _| keep(k));
+    }
+
+    pub fn filter_by_contract<F: Fn(&Bytes) -> bool>(&mut self, keep: F) {
+        self.account_deltas
+            .retain(|k, _| keep(k));
+        self.account_balances
+            .retain(|k, _| keep(k));
+    }
+
+    /// Merges this update with another one, consuming both.
+    ///
+    /// `other` is assumed to be a more recent update than `self`.
+    pub fn merge(mut self, other: Self) -> Self {
+        for (k, v) in other.account_deltas {
+            match self.account_deltas.entry(k) {
+                Entry::Occupied(mut e) => {
+                    // best-effort: ignore merge errors (address mismatch is a bug)
+                    let _ = e.get_mut().merge(v);
+                }
+                Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+            }
+        }
+
+        for (k, v) in other.state_deltas {
+            match self.state_deltas.entry(k) {
+                Entry::Occupied(mut e) => {
+                    let _ = e.get_mut().merge(v);
+                }
+                Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+            }
+        }
+
+        for (component_id, balances) in other.component_balances {
+            self.component_balances
+                .entry(component_id)
+                .or_default()
+                .extend(balances);
+        }
+
+        for (account, balances) in other.account_balances {
+            self.account_balances
+                .entry(account)
+                .or_default()
+                .extend(balances);
+        }
+
+        self.component_tvl
+            .extend(other.component_tvl);
+        self.new_protocol_components
+            .extend(other.new_protocol_components);
+        self.deleted_protocol_components
+            .extend(other.deleted_protocol_components);
+        self.revert = other.revert;
+        self.block = other.block;
+        self
+    }
 }
 
 impl std::fmt::Display for BlockAggregatedChanges {
@@ -196,11 +271,197 @@ impl From<dto::Block> for Block {
     }
 }
 
+impl From<dto::AddressStorageLocation> for AddressStorageLocation {
+    fn from(value: dto::AddressStorageLocation) -> Self {
+        Self { key: value.key, offset: value.offset }
+    }
+}
+
+impl From<dto::TracingResult> for TracingResult {
+    fn from(value: dto::TracingResult) -> Self {
+        Self {
+            retriggers: value
+                .retriggers
+                .into_iter()
+                .map(|(addr, loc)| (addr, loc.into()))
+                .collect(),
+            accessed_slots: value.accessed_slots,
+        }
+    }
+}
+
+impl From<dto::DCIUpdate> for DCIUpdate {
+    fn from(value: dto::DCIUpdate) -> Self {
+        Self {
+            new_entrypoints: value
+                .new_entrypoints
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k,
+                        v.into_iter()
+                            .map(EntryPoint::from)
+                            .collect(),
+                    )
+                })
+                .collect(),
+            new_entrypoint_params: value
+                .new_entrypoint_params
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k,
+                        v.into_iter()
+                            .map(|(p, c)| (TracingParams::from(p), c))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            trace_results: value
+                .trace_results
+                .into_iter()
+                .map(|(k, v)| (k, TracingResult::from(v)))
+                .collect(),
+        }
+    }
+}
+
+impl From<dto::BlockAggregatedChanges> for BlockAggregatedChanges {
+    fn from(value: dto::BlockAggregatedChanges) -> Self {
+        use crate::models::{
+            contract::{AccountBalance, AccountDelta},
+            protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
+            token::Token,
+        };
+        Self {
+            extractor: value.extractor,
+            chain: value.chain.into(),
+            block: value.block.into(),
+            finalized_block_height: value.finalized_block_height,
+            db_committed_block_height: None,
+            revert: value.revert,
+            state_deltas: value
+                .state_updates
+                .into_iter()
+                .map(|(k, v)| (k, ProtocolComponentStateDelta::from(v)))
+                .collect(),
+            account_deltas: value
+                .account_updates
+                .into_iter()
+                .map(|(k, v)| (k, AccountDelta::from(v)))
+                .collect(),
+            new_tokens: value
+                .new_tokens
+                .into_iter()
+                .map(|(k, v)| (k, Token::from(v)))
+                .collect(),
+            new_protocol_components: value
+                .new_protocol_components
+                .into_iter()
+                .map(|(k, v)| (k, ProtocolComponent::from(v)))
+                .collect(),
+            deleted_protocol_components: value
+                .deleted_protocol_components
+                .into_iter()
+                .map(|(k, v)| (k, ProtocolComponent::from(v)))
+                .collect(),
+            component_balances: value
+                .component_balances
+                .into_iter()
+                .map(|(component_id, token_balances)| {
+                    (
+                        component_id,
+                        token_balances
+                            .0
+                            .into_iter()
+                            .map(|(k, v)| (k, ComponentBalance::from(v)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            account_balances: value
+                .account_balances
+                .into_iter()
+                .map(|(account, balances)| {
+                    (
+                        account,
+                        balances
+                            .into_iter()
+                            .map(|(k, v)| (k, AccountBalance::from(v)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            component_tvl: value.component_tvl,
+            dci_update: DCIUpdate::from(value.dci_update),
+            partial_block_index: value.partial_block_index,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, DeepSizeOf)]
 pub struct DCIUpdate {
     pub new_entrypoints: HashMap<ComponentId, HashSet<EntryPoint>>,
     pub new_entrypoint_params: HashMap<EntryPointId, HashSet<(TracingParams, ComponentId)>>,
     pub trace_results: HashMap<EntryPointId, TracingResult>,
+}
+
+/// Traced entry points for a set of components, as returned by the Tycho RPC.
+///
+/// Maps each component ID to the list of `(EntryPointWithTracingParams, TracingResult)` pairs
+/// produced by the tracer for that component.
+pub type TracedEntryPoints =
+    HashMap<ComponentId, Vec<(EntryPointWithTracingParams, TracingResult)>>;
+
+impl From<TracedEntryPoints> for DCIUpdate {
+    fn from(traced_entry_points: TracedEntryPoints) -> Self {
+        let mut new_entrypoints: HashMap<ComponentId, HashSet<EntryPoint>> = HashMap::new();
+        let mut new_entrypoint_params: HashMap<
+            EntryPointId,
+            HashSet<(TracingParams, ComponentId)>,
+        > = HashMap::new();
+        let mut trace_results: HashMap<EntryPointId, TracingResult> = HashMap::new();
+
+        for (component_id, traces) in traced_entry_points {
+            let mut entrypoints = HashSet::new();
+
+            for (ep_with_params, trace) in traces {
+                let ep_id = ep_with_params
+                    .entry_point
+                    .external_id
+                    .clone();
+
+                entrypoints.insert(ep_with_params.entry_point.clone());
+
+                new_entrypoint_params
+                    .entry(ep_id.clone())
+                    .or_default()
+                    .insert((ep_with_params.params, component_id.clone()));
+
+                trace_results
+                    .entry(ep_id)
+                    .and_modify(|existing: &mut TracingResult| {
+                        existing
+                            .retriggers
+                            .extend(trace.retriggers.clone());
+                        for (address, slots) in trace.accessed_slots.clone() {
+                            existing
+                                .accessed_slots
+                                .entry(address)
+                                .or_default()
+                                .extend(slots);
+                        }
+                    })
+                    .or_insert(trace);
+            }
+
+            if !entrypoints.is_empty() {
+                new_entrypoints.insert(component_id, entrypoints);
+            }
+        }
+
+        DCIUpdate { new_entrypoints, new_entrypoint_params, trace_results }
+    }
 }
 
 /// Changes grouped by their respective transaction.

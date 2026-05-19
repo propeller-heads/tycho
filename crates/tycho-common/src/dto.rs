@@ -20,10 +20,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    models::{
-        self, blockchain::BlockAggregatedChanges, Address, Balance, Code, ComponentId, StoreKey,
-        StoreVal,
-    },
+    models::{self, Address, Balance, Code, ComponentId, StoreKey, StoreVal},
     serde_primitives::{
         hex_bytes, hex_bytes_option, hex_hashmap_key, hex_hashmap_key_value, hex_hashmap_value,
     },
@@ -247,7 +244,7 @@ pub enum Response {
 #[derive(Serialize, Deserialize, Debug, Display, Clone)]
 #[serde(untagged)]
 pub enum WebSocketMessage {
-    BlockChanges { subscription_id: Uuid, deltas: BlockChanges },
+    BlockAggregatedChanges { subscription_id: Uuid, deltas: BlockAggregatedChanges },
     Response(Response),
 }
 
@@ -314,7 +311,7 @@ impl Transaction {
 
 /// A container for updates grouped by account/component.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
-pub struct BlockChanges {
+pub struct BlockAggregatedChanges {
     pub extractor: String,
     pub chain: Chain,
     pub block: Block,
@@ -337,7 +334,7 @@ pub struct BlockChanges {
     pub partial_block_index: Option<u32>,
 }
 
-impl BlockChanges {
+impl BlockAggregatedChanges {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         extractor: &str,
@@ -353,7 +350,7 @@ impl BlockChanges {
         account_balances: HashMap<Bytes, HashMap<Bytes, AccountBalance>>,
         dci_update: DCIUpdate,
     ) -> Self {
-        BlockChanges {
+        BlockAggregatedChanges {
             extractor: extractor.to_owned(),
             chain,
             block,
@@ -520,8 +517,8 @@ impl From<models::contract::AccountBalance> for AccountBalance {
     }
 }
 
-impl From<BlockAggregatedChanges> for BlockChanges {
-    fn from(value: BlockAggregatedChanges) -> Self {
+impl From<models::blockchain::BlockAggregatedChanges> for BlockAggregatedChanges {
+    fn from(value: models::blockchain::BlockAggregatedChanges) -> Self {
         Self {
             extractor: value.extractor,
             chain: value.chain.into(),
@@ -1119,6 +1116,16 @@ impl DeepSizeOf for VersionParam {
 impl VersionParam {
     pub fn new(timestamp: Option<NaiveDateTime>, block: Option<BlockParam>) -> Self {
         Self { timestamp, block }
+    }
+
+    pub fn at_block(chain: Chain, block_number: u64) -> Self {
+        Self::new(
+            None,
+            Some({
+                #[allow(deprecated)]
+                BlockParam { hash: None, chain: Some(chain), number: Some(block_number as i64) }
+            }),
+        )
     }
 }
 
@@ -2037,57 +2044,6 @@ pub struct TracedEntryPointRequestResponse {
         HashMap<ComponentId, Vec<(EntryPointWithTracingParams, TracingResult)>>,
     pub pagination: PaginationResponse,
 }
-impl From<TracedEntryPointRequestResponse> for DCIUpdate {
-    fn from(response: TracedEntryPointRequestResponse) -> Self {
-        let mut new_entrypoints = HashMap::new();
-        let mut new_entrypoint_params = HashMap::new();
-        let mut trace_results = HashMap::new();
-
-        for (component, traces) in response.traced_entry_points {
-            let mut entrypoints = HashSet::new();
-
-            for (entrypoint, trace) in traces {
-                let entrypoint_id = entrypoint
-                    .entry_point
-                    .external_id
-                    .clone();
-
-                // Collect entrypoints
-                entrypoints.insert(entrypoint.entry_point.clone());
-
-                // Collect entrypoint params
-                new_entrypoint_params
-                    .entry(entrypoint_id.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert((entrypoint.params, component.clone()));
-
-                // Collect trace results
-                trace_results
-                    .entry(entrypoint_id)
-                    .and_modify(|existing_trace: &mut TracingResult| {
-                        // Merge traces for the same entrypoint
-                        existing_trace
-                            .retriggers
-                            .extend(trace.retriggers.clone());
-                        for (address, slots) in trace.accessed_slots.clone() {
-                            existing_trace
-                                .accessed_slots
-                                .entry(address)
-                                .or_default()
-                                .extend(slots);
-                        }
-                    })
-                    .or_insert(trace);
-            }
-
-            if !entrypoints.is_empty() {
-                new_entrypoints.insert(component, entrypoints);
-            }
-        }
-
-        DCIUpdate { new_entrypoints, new_entrypoint_params, trace_results }
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, ToSchema, Eq, Clone)]
 pub struct AddEntryPointRequestBody {
@@ -2315,8 +2271,8 @@ mod test {
             json_value["partial_block_index"] = json!(partial_value);
         }
 
-        let block_changes: BlockChanges =
-            serde_json::from_value(json_value).expect("Failed to deserialize BlockChanges");
+        let block_changes: BlockAggregatedChanges = serde_json::from_value(json_value)
+            .expect("Failed to deserialize BlockAggregatedChanges");
 
         assert_eq!(block_changes.partial_block_index, expected);
     }
@@ -2696,7 +2652,7 @@ mod test {
     #[test]
     fn test_serialize_deserialize_block_changes() {
         // Test that models::BlockAggregatedChanges serialized as json can be deserialized as
-        // dto::BlockChanges.
+        // dto::BlockAggregatedChanges.
 
         // Create a models::BlockAggregatedChanges instance
         let block_entity_changes = create_models_block_changes();
@@ -2704,8 +2660,8 @@ mod test {
         // Serialize the struct into JSON
         let json_data = serde_json::to_string(&block_entity_changes).expect("Failed to serialize");
 
-        // Deserialize the JSON back into a dto::BlockChanges struct
-        serde_json::from_str::<BlockChanges>(&json_data).expect("parsing failed");
+        // Deserialize the JSON back into a dto::BlockAggregatedChanges struct
+        serde_json::from_str::<BlockAggregatedChanges>(&json_data).expect("parsing failed");
     }
 
     #[test]
@@ -2817,7 +2773,7 @@ mod test {
         }
         "#;
 
-        serde_json::from_str::<BlockChanges>(json_data).expect("parsing failed");
+        serde_json::from_str::<BlockAggregatedChanges>(json_data).expect("parsing failed");
     }
 
     #[test]
@@ -2826,7 +2782,7 @@ mod test {
         {
             "subscription_id": "5d23bfbe-89ad-4ea3-8672-dc9e973ac9dc",
             "deltas": {
-                "type": "BlockChanges",
+                "type": "BlockAggregatedChanges",
                 "extractor": "uniswap_v2",
                 "chain": "ethereum",
                 "block": {
@@ -3071,21 +3027,21 @@ mod test {
         .into_iter()
         .collect();
         // Create initial and new BlockAccountChanges instances
-        let block_account_changes_initial = BlockChanges {
+        let block_account_changes_initial = BlockAggregatedChanges {
             extractor: "extractor1".to_string(),
             revert: false,
             account_updates: old_account_updates,
             ..Default::default()
         };
 
-        let block_account_changes_new = BlockChanges {
+        let block_account_changes_new = BlockAggregatedChanges {
             extractor: "extractor2".to_string(),
             revert: true,
             account_updates: new_account_updates,
             ..Default::default()
         };
 
-        // Merge the new BlockChanges into the initial one
+        // Merge the new BlockAggregatedChanges into the initial one
         let res = block_account_changes_initial.merge(block_account_changes_new);
 
         // Create the expected result of the merge operation
@@ -3105,7 +3061,7 @@ mod test {
         )]
         .into_iter()
         .collect();
-        let block_account_changes_expected = BlockChanges {
+        let block_account_changes_expected = BlockAggregatedChanges {
             extractor: "extractor1".to_string(),
             revert: true,
             account_updates: expected_account_updates,
@@ -3116,8 +3072,8 @@ mod test {
 
     #[test]
     fn test_block_entity_changes_merge() {
-        // Initialize two BlockChanges instances with different details
-        let block_entity_changes_result1 = BlockChanges {
+        // Initialize two BlockAggregatedChanges instances with different details
+        let block_entity_changes_result1 = BlockAggregatedChanges {
             extractor: String::from("extractor1"),
             revert: false,
             state_updates: hashmap! { "state1".to_string() => ProtocolStateDelta::default() },
@@ -3145,7 +3101,7 @@ mod test {
             component_tvl: hashmap! { "tvl1".to_string() => 1000.0 },
             ..Default::default()
         };
-        let block_entity_changes_result2 = BlockChanges {
+        let block_entity_changes_result2 = BlockAggregatedChanges {
             extractor: String::from("extractor2"),
             revert: true,
             state_updates: hashmap! { "state2".to_string() => ProtocolStateDelta::default() },
@@ -3161,7 +3117,7 @@ mod test {
 
         let res = block_entity_changes_result1.merge(block_entity_changes_result2);
 
-        let expected_block_entity_changes_result = BlockChanges {
+        let expected_block_entity_changes_result = BlockAggregatedChanges {
             extractor: String::from("extractor1"),
             revert: true,
             state_updates: hashmap! {
@@ -3260,42 +3216,43 @@ mod test {
 
     #[test]
     fn test_websocket_error_conversion_from_models() {
-        use crate::models::error::WebsocketError as ModelsError;
+        use crate::models::error;
 
         let extractor_id =
             crate::models::ExtractorIdentity::new(crate::models::Chain::Ethereum, "test");
         let subscription_id = Uuid::new_v4();
 
         // Test ExtractorNotFound conversion
-        let models_error = ModelsError::ExtractorNotFound(extractor_id.clone());
+        let models_error = error::WebsocketError::ExtractorNotFound(extractor_id.clone());
         let dto_error: WebsocketError = models_error.into();
         assert_eq!(dto_error, WebsocketError::ExtractorNotFound(extractor_id.clone().into()));
 
         // Test SubscriptionNotFound conversion
-        let models_error = ModelsError::SubscriptionNotFound(subscription_id);
+        let models_error = error::WebsocketError::SubscriptionNotFound(subscription_id);
         let dto_error: WebsocketError = models_error.into();
         assert_eq!(dto_error, WebsocketError::SubscriptionNotFound(subscription_id));
 
         // Test ParseError conversion - create a real JSON parse error
         let json_result: Result<serde_json::Value, _> = serde_json::from_str("{invalid json");
         let json_error = json_result.unwrap_err();
-        let models_error = ModelsError::ParseError("{invalid json".to_string(), json_error);
+        let models_error =
+            error::WebsocketError::ParseError("{invalid json".to_string(), json_error);
         let dto_error: WebsocketError = models_error.into();
-        if let WebsocketError::ParseError(msg, error) = dto_error {
+        if let WebsocketError::ParseError(msg, error_msg) = dto_error {
             // Just check that we have a non-empty error message
-            assert!(!error.is_empty(), "Error message should not be empty, got: '{}'", msg);
+            assert!(!error_msg.is_empty(), "Error message should not be empty, got: '{}'", msg);
         } else {
             panic!("Expected ParseError variant");
         }
 
         // Test SubscribeError conversion
-        let models_error = ModelsError::SubscribeError(extractor_id.clone());
+        let models_error = error::WebsocketError::SubscribeError(extractor_id.clone());
         let dto_error: WebsocketError = models_error.into();
         assert_eq!(dto_error, WebsocketError::SubscribeError(extractor_id.into()));
 
         // Test CompressionError conversion
         let io_error = std::io::Error::other("Compression failed");
-        let models_error = ModelsError::CompressionError(subscription_id, io_error);
+        let models_error = error::WebsocketError::CompressionError(subscription_id, io_error);
         let dto_error: WebsocketError = models_error.into();
         if let WebsocketError::CompressionError(sub_id, msg) = &dto_error {
             assert_eq!(*sub_id, subscription_id);

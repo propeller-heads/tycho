@@ -34,7 +34,7 @@ use crate::{
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::dto::{ProtocolComponent, ResponseProtocolState},
+    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
 fn bytes_to_address(address: &Bytes) -> Result<Address, RFQError> {
@@ -113,9 +113,9 @@ impl BebopClient {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "bebop_pool".to_string(),
-            chain: self.chain.into(),
+            chain: self.chain,
             tokens,
-            contract_ids: vec![], // empty for RFQ
+            contract_addresses: vec![], // empty for RFQ
             static_attributes: Default::default(),
             change: Default::default(),
             creation_tx: Default::default(),
@@ -147,11 +147,7 @@ impl BebopClient {
         }
 
         ComponentWithState {
-            state: ResponseProtocolState {
-                component_id: component_id.clone(),
-                attributes,
-                balances: HashMap::new(),
-            },
+            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],
@@ -626,10 +622,7 @@ mod tests {
                                     .protocol_type_name,
                                 "bebop_pool"
                             );
-                            assert_eq!(
-                                component_with_state.component.chain,
-                                Chain::Ethereum.into()
-                            );
+                            assert_eq!(component_with_state.component.chain, Chain::Ethereum);
 
                             let attributes = &component_with_state.state.attributes;
 

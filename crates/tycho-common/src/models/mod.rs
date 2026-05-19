@@ -114,6 +114,17 @@ impl From<dto::Chain> for Chain {
     }
 }
 
+impl From<dto::ChangeType> for ChangeType {
+    fn from(value: dto::ChangeType) -> Self {
+        match value {
+            dto::ChangeType::Update => ChangeType::Update,
+            dto::ChangeType::Creation => ChangeType::Creation,
+            dto::ChangeType::Deletion => ChangeType::Deletion,
+            dto::ChangeType::Unspecified => ChangeType::Update,
+        }
+    }
+}
+
 fn native_eth(chain: Chain) -> Token {
     Token::new(
         &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),

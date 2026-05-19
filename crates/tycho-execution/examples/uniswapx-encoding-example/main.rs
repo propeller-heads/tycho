@@ -2,7 +2,7 @@ use std::{collections::HashMap, str::FromStr};
 
 use alloy::{
     hex::encode,
-    primitives::{Address, Keccak256, U256},
+    primitives::{Address, Keccak256},
     sol_types::SolValue,
 };
 use num_bigint::{BigInt, BigUint};
@@ -17,7 +17,7 @@ use tycho_execution::encoding::{
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{biguint_to_u256, bytes_to_address},
     },
-    models::{Solution, Swap},
+    models::{ClientFeeParams, Solution, Swap},
 };
 
 /// Encodes the input data for a function call to the given function selector.
@@ -133,10 +133,7 @@ fn main() {
     let checked_token = bytes_to_address(solution.token_out()).unwrap();
     let receiver = bytes_to_address(solution.receiver()).unwrap();
 
-    // Empty ClientFeeParams: (clientFeeBps, clientFeeReceiver, maxClientContribution, deadline,
-    // sig)
-    let client_fee_params: (u16, Address, U256, U256, Vec<u8>) =
-        (0u16, Address::ZERO, U256::ZERO, U256::ZERO, vec![]);
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
 
     let method_calldata = (
         given_amount,

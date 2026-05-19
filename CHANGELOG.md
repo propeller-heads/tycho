@@ -1,3 +1,72 @@
+## [0.296.4](https://github.com/propeller-heads/tycho-indexer/compare/0.296.3...0.296.4) (2026-05-19)
+
+
+### Bug Fixes
+
+* **univ4:** Address review comments from [#1009](https://github.com/propeller-heads/tycho-indexer/issues/1009) ([d0b627a](https://github.com/propeller-heads/tycho-indexer/commit/d0b627a56132b7df7bf199a1f1841cdf5bd79bfb))
+* **univ4:** Address review comments from [#1009](https://github.com/propeller-heads/tycho-indexer/issues/1009) ([#1022](https://github.com/propeller-heads/tycho-indexer/issues/1022)) ([fe6a4f5](https://github.com/propeller-heads/tycho-indexer/commit/fe6a4f5f957db3a61f2a871026bf54095aeda897))
+
+## [0.296.3](https://github.com/propeller-heads/tycho-indexer/compare/0.296.2...0.296.3) (2026-05-18)
+
+
+### Bug Fixes
+
+* **client:** initialization failure didn't name the failing extractor ([c68f592](https://github.com/propeller-heads/tycho-indexer/commit/c68f592b92a99ddaa0630014e9d97444ae7fc95c))
+* **integration-test:** ws retry cooldown exceeded state-sync cooldown ([fe01c0f](https://github.com/propeller-heads/tycho-indexer/commit/fe01c0f9e41d12084ad91da2e78b12054eb1fffc))
+* preserve UnknownExtractor through paginated fetch + ws retry cooldown ([#1025](https://github.com/propeller-heads/tycho-indexer/issues/1025)) ([9406bb7](https://github.com/propeller-heads/tycho-indexer/commit/9406bb7db935763bde8ae62aa08d7a2ea5f0e1d9))
+* **rpc:** unknown extractor swallowed by Fatal during paginated fetch ([9b5c600](https://github.com/propeller-heads/tycho-indexer/commit/9b5c6002a915dc18dfc8df17ce659fbf5cc790d2))
+
+## [0.296.2](https://github.com/propeller-heads/tycho-indexer/compare/0.296.1...0.296.2) (2026-05-18)
+
+
+### Bug Fixes
+
+* **rpc:** retry null result DeserError and log RPC failures ([74823d6](https://github.com/propeller-heads/tycho-indexer/commit/74823d693de92b677889942ce662e3b356891767))
+* **rpc:** retry null result DeserError and log RPC failures ([#1024](https://github.com/propeller-heads/tycho-indexer/issues/1024)) ([b5a2ce2](https://github.com/propeller-heads/tycho-indexer/commit/b5a2ce26e07443d4a25bfd24792cc36e27a90cf8))
+
+## [0.296.1](https://github.com/propeller-heads/tycho-indexer/compare/0.296.0...0.296.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **integration-test:** Handle router fee when computing slippage ([e410366](https://github.com/propeller-heads/tycho-indexer/commit/e4103665ca49e0175c3fbae72cca34b8b04b73c2))
+* **integration-test:** Handle router fee when computing slippage ([#1023](https://github.com/propeller-heads/tycho-indexer/issues/1023)) ([0fb1b2a](https://github.com/propeller-heads/tycho-indexer/commit/0fb1b2ab5bfb433aae13ec488d462723c9320996))
+
+## [0.296.0](https://github.com/propeller-heads/tycho-indexer/compare/0.295.0...0.296.0) (2026-05-18)
+
+
+### Features
+
+* **tycho-client:** add Page<T> wrapper and params structs for paginated RPCClient methods ([8e28e9c](https://github.com/propeller-heads/tycho-indexer/commit/8e28e9c3cab25ab76dcb853eeca4388e6188a452))
+* **tycho-client:** add serializable dto wrappers for feed pipeline types ([c3e9bca](https://github.com/propeller-heads/tycho-indexer/commit/c3e9bca1f3748a61dcbca87da1aad834166e2ce7))
+* **tycho-client:** replace dto types with model types in public API ([#999](https://github.com/propeller-heads/tycho-indexer/issues/999)) ([2d37a17](https://github.com/propeller-heads/tycho-indexer/commit/2d37a17bb30948c0ea7fcab80c057589569d6862))
+
+
+### Bug Fixes
+
+* address post-review CI failures ([4b0b769](https://github.com/propeller-heads/tycho-indexer/commit/4b0b769723060ed5a55dac2fd38ea9cbd51da5a0))
+* resolve ws.rs import collision and apply nightly fmt ([2fed1e3](https://github.com/propeller-heads/tycho-indexer/commit/2fed1e3d1da44ab0375189cd49b95e397ad7f867))
+* **tycho-simulation:** move impl blocks before test module ([0cd39ed](https://github.com/propeller-heads/tycho-indexer/commit/0cd39ed85833a8f6fbd2e9e8207ee49659a7f7e0))
+* **tycho-simulation:** restore uniswap v3/v4 tests using ComponentWithStateDto ([cd94e85](https://github.com/propeller-heads/tycho-indexer/commit/cd94e8545a72e3be2ddc7163c7b0b2d7bb0ab6fc))
+* use infallible into() and fix ws test DummyDelta type ([8becda7](https://github.com/propeller-heads/tycho-indexer/commit/8becda7a55563408846fe67d282f2f04943ae3ea))
+
+## [0.295.0](https://github.com/propeller-heads/tycho-indexer/compare/0.294.0...0.295.0) (2026-05-18)
+
+
+### Features
+
+* add SwapEncoderRegistry::new_with_defaults and update docs ([edfffa8](https://github.com/propeller-heads/tycho-indexer/commit/edfffa8f1730193fe4f6073e09e86c525f7700cc))
+* **encoding:** add ClientFeeParams struct with into_abi_params conversion ([e02e368](https://github.com/propeller-heads/tycho-indexer/commit/e02e3685918f7d5e74bcd24bca174fab34388b4f))
+* **tycho-executor:** extend interface for convenience ([#1001](https://github.com/propeller-heads/tycho-indexer/issues/1001)) ([5b562d1](https://github.com/propeller-heads/tycho-indexer/commit/5b562d1e0895fcfa02778ca70add8c83c8e65a75))
+
+## [0.294.0](https://github.com/propeller-heads/tycho-indexer/compare/0.293.0...0.294.0) (2026-05-18)
+
+
+### Features
+
+* **gas-estimations:** Add router overhead gas ([e1e7320](https://github.com/propeller-heads/tycho-indexer/commit/e1e7320c40463bb7eca2d1e400e6b8e5d0fa79d8))
+* **gas-estimations:** Add router overhead gas ([#1019](https://github.com/propeller-heads/tycho-indexer/issues/1019)) ([c8f7a7c](https://github.com/propeller-heads/tycho-indexer/commit/c8f7a7c1f900e6c956c04141ad8269795f4f8e1d))
+
 ## [0.293.0](https://github.com/propeller-heads/tycho-indexer/compare/0.292.0...0.293.0) (2026-05-15)
 
 

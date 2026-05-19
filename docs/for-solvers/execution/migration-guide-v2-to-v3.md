@@ -22,7 +22,7 @@ Router V3.
 
 **New fields:**
 
-<table><thead><tr><th width="210">Field</th><th width="210">Type</th><th width="280">Description</th></tr></thead><tbody><tr><td><code>user_transfer_type</code></td><td><code>UserTransferType</code></td><td>How user funds enter the router. Moved here from the encoder builder.</td></tr><tr><td><code>client_fee_bps</code></td><td><code>u16</code></td><td>Fee in basis points charged by the client (0–10000).</td></tr><tr><td><code>client_fee_receiver</code></td><td><code>Bytes</code></td><td>Address to receive the client fee.</td></tr><tr><td><code>max_client_contribution</code></td><td><code>BigUint</code></td><td>Maximum amount the client will subsidize from their vault if slippage reduces the output below <code>min_amount_out</code>.</td></tr></tbody></table>
+<table><thead><tr><th width="210">Field</th><th width="210">Type</th><th width="280">Description</th></tr></thead><tbody><tr><td><code>user_transfer_type</code></td><td><code>UserTransferType</code></td><td>How user funds enter the router. Moved here from the encoder builder.</td></tr></tbody></table>
 
 **Private fields with getters/setters:**
 
@@ -52,10 +52,7 @@ amount,      // amount_in
 min_out,     // min_amount_out
 vec![swap],  // swaps
 )
-.with_user_transfer_type(UserTransferType::TransferFrom)
-.with_client_fee_bps(50)
-.with_client_fee_receiver(fee_addr)
-.with_max_client_contribution(BigUint::from(0u64));
+.with_user_transfer_type(UserTransferType::TransferFrom);
 ```
 
 #### UserTransferType Moved to Solution
@@ -223,8 +220,7 @@ let registry = SwapEncoderRegistry::new()
 .add_default_encoders(executors_addresses)?;
 
 // V3
-let registry = SwapEncoderRegistry::new(Chain::Ethereum)
-.add_default_encoders(executors_addresses)?;
+let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)?;
 ```
 
 ### Execution Changes
@@ -245,6 +241,22 @@ struct ClientFeeParams {
 
 When constructing calldata yourself (recommended), encode this struct as part of the function arguments. Even if you are
 not charging fees, you must pass this parameter with zero values.
+
+A `ClientFeeParams` Rust struct matching this Solidity struct is available in `tycho-execution`. Clients are
+responsible for constructing and signing it — the encoder does not use it internally. Call `.into_abi_params()` to
+convert it to the ABI-encodable tuple:
+
+```rust
+// No fee (zero values)
+let client_fee_params = ClientFeeParams::default().into_abi_params();
+
+// With a fee
+let client_fee_params = ClientFeeParams {
+    client_fee_bps: 50,
+    client_fee_receiver: fee_receiver_bytes,
+    ..ClientFeeParams::default()
+}.into_abi_params();
+```
 
 #### Vault Integration
 

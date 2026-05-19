@@ -45,6 +45,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--block-wait-time`        | `12`       | Time to wait (seconds) for block N+1 before executing debug_traceCall                                            |
 | `--always-test-components` | -          | Comma-separated list of component IDs to test every block                                                        |
 | `--max-blocks`             | `0`        | Maximum number of blocks to process before exiting (0 = run indefinitely). When set, prints a summary at the end |
+| `--router-fee`             | `10`       | Router fee on output in bps (must be ≥ 1). Deducted from the executed amount before slippage is calculated       |
 
 ## Running Locally
 

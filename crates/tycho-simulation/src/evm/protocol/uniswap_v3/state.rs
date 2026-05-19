@@ -869,14 +869,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_limits() {
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
         let asset_path =
             Path::new(project_root).join("tests/assets/decoder/uniswap_v3_snapshot.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let usv3_state = UniswapV3State::try_from_with_header(
             state,
@@ -911,7 +912,7 @@ mod tests {
             .get_limits(t0.address.clone(), t1.address.clone())
             .unwrap();
 
-        assert_eq!(&res.0, &BigUint::from_u128(155144999154).unwrap()); // Crazy amount because of this tick: "ticks/-887272/net-liquidity": "0x10d73d"
+        assert_eq!(&res.0, &BigUint::from_u128(155144999154).unwrap());
 
         let out = usv3_state
             .get_amount_out(res.0, &t0, &t1)
@@ -1430,25 +1431,28 @@ mod tests {
 
 #[cfg(test)]
 mod tests_forks {
-    use std::{fs, path::Path, str::FromStr};
+    use std::str::FromStr;
 
-    use serde_json::Value;
     use tycho_client::feed::synchronizer::ComponentWithState;
-    use tycho_common::models::Chain;
+    use tycho_common::{hex_bytes::Bytes, models::Chain};
 
     use super::*;
     use crate::protocol::models::{DecoderContext, TryFromWithBlock};
 
     #[tokio::test]
     async fn test_pancakeswap_get_amount_out() {
+        use std::{fs, path::Path};
+
+        use serde_json::Value;
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
         let asset_path =
             Path::new(project_root).join("tests/assets/decoder/pancakeswap_v3_snapshot.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let pool_state = UniswapV3State::try_from_with_header(
             state,
@@ -1479,7 +1483,6 @@ mod tests_forks {
             100,
         );
 
-        // Swap from https://etherscan.io/tx/0x641b1e98990ae49fd00157a29e1530ff6403706b2864aa52b1c30849ce020b2c#eventlog
         let res = pool_state
             .get_amount_out(BigUint::from_str("5976361609").unwrap(), &usdt, &usdc)
             .unwrap();

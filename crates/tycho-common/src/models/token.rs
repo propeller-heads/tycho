@@ -104,19 +104,17 @@ impl From<Arc<Token>> for Address {
     }
 }
 
-impl TryFrom<ResponseToken> for Token {
-    type Error = ();
-
-    fn try_from(value: ResponseToken) -> Result<Self, Self::Error> {
-        Ok(Self {
+impl From<ResponseToken> for Token {
+    fn from(value: ResponseToken) -> Self {
+        Self {
+            chain: value.chain.into(),
             address: value.address,
+            symbol: value.symbol,
             decimals: value.decimals,
-            symbol: value.symbol.to_string(),
-            gas: value.gas,
-            chain: Chain::from(value.chain),
             tax: value.tax,
+            gas: value.gas,
             quality: value.quality,
-        })
+        }
     }
 }
 

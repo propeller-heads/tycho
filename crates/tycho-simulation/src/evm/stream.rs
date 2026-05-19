@@ -181,7 +181,7 @@ impl ProtocolStreamBuilder {
     pub fn new(tycho_url: &str, chain: Chain) -> Self {
         Self {
             decoder: TychoStreamDecoder::new(),
-            stream_builder: TychoStreamBuilder::new(tycho_url, chain.into()),
+            stream_builder: TychoStreamBuilder::new(tycho_url, chain),
             stream_end_policy: StreamEndPolicy::default(),
         }
     }

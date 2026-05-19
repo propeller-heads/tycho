@@ -21,7 +21,7 @@ use tycho_execution::encoding::{
         encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
-    models::{EncodedSolution, Solution, Swap},
+    models::{ClientFeeParams, EncodedSolution, Solution, Swap},
 };
 use tycho_simulation::{
     evm::protocol::u256_num::biguint_to_u256, protocol::models::ProtocolComponent,
@@ -133,8 +133,7 @@ fn encoded_transaction(
     let token_in = Address::from_slice(solution.token_in());
     let token_out = Address::from_slice(solution.token_out());
     let receiver = Address::from_slice(solution.receiver());
-    let client_fee_params: (u16, Address, U256, U256, Vec<u8>) =
-        (0, Address::ZERO, U256::ZERO, U256::ZERO, vec![]);
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
 
     let method_calldata = (
         amount_in,

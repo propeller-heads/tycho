@@ -9,6 +9,7 @@ import "@src/executors/UniswapV4Executor.sol";
 import {Constants} from "../Constants.sol";
 import {SafeCallback} from "@uniswap/v4-periphery/src/base/SafeCallback.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 contract UniswapV4ExecutorExposed is UniswapV4Executor {
     using SafeERC20 for IERC20;
@@ -782,11 +783,10 @@ contract ExternalSettlerMock {
         // slither-disable-next-line low-level-calls
         (bool success, bytes memory result) = tychoRouter.call(tychoCalldata);
         if (!success) {
-            revert(
-                string(
-                    result.length > 0 ? result : abi.encodePacked("Fill failed")
-                )
-            );
+            if (result.length == 0) revert("Fill failed");
+            assembly {
+                revert(add(result, 0x20), mload(result))
+            }
         }
 
         // 4. Repay loans
@@ -1149,7 +1149,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         Loan[] memory loans = new Loan[](1);
         loans[0] = Loan({token: USDE_ADDR, amount: loanAmount});
 
-        vm.expectRevert();
+        vm.expectRevert(IPoolManager.SwapAmountCannotBeZero.selector);
         settler.settle(loans, USDE_ADDR, USDE_ADDR, swapAmount, tychoCalldata);
     }
 }

@@ -9,6 +9,7 @@ use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dto,
     models::{
         token::Token, Address, AttrStoreKey, Balance, Chain, ChangeType, ComponentId, MergeError,
         StoreVal, TxHash,
@@ -264,6 +265,55 @@ pub struct GetAmountOutParams {
     pub token_out: Bytes,
     pub sender: Bytes,
     pub receiver: Bytes,
+}
+
+impl From<dto::ProtocolStateDelta> for ProtocolComponentStateDelta {
+    fn from(value: dto::ProtocolStateDelta) -> Self {
+        Self {
+            component_id: value.component_id,
+            updated_attributes: value.updated_attributes,
+            deleted_attributes: value.deleted_attributes,
+        }
+    }
+}
+
+impl From<dto::ComponentBalance> for ComponentBalance {
+    fn from(value: dto::ComponentBalance) -> Self {
+        Self {
+            token: value.token,
+            balance: value.balance,
+            balance_float: value.balance_float,
+            modify_tx: value.modify_tx,
+            component_id: value.component_id,
+        }
+    }
+}
+
+impl From<dto::ProtocolComponent> for ProtocolComponent {
+    fn from(value: dto::ProtocolComponent) -> Self {
+        Self {
+            id: value.id,
+            protocol_system: value.protocol_system,
+            protocol_type_name: value.protocol_type_name,
+            chain: value.chain.into(),
+            tokens: value.tokens,
+            contract_addresses: value.contract_ids,
+            static_attributes: value.static_attributes,
+            change: value.change.into(),
+            creation_tx: value.creation_tx,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<dto::ResponseProtocolState> for ProtocolComponentState {
+    fn from(value: dto::ResponseProtocolState) -> Self {
+        Self {
+            component_id: value.component_id,
+            attributes: value.attributes,
+            balances: value.balances,
+        }
+    }
 }
 
 #[cfg(test)]

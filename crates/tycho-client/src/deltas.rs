@@ -58,8 +58,9 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, error, info, instrument, trace, warn};
-use tycho_common::dto::{
-    BlockChanges, Command, ExtractorIdentity, Response, WebSocketMessage, WebsocketError,
+use tycho_common::{
+    dto::{self, Command, Response, WebSocketMessage, WebsocketError},
+    models::{blockchain::BlockAggregatedChanges, ExtractorIdentity},
 };
 use uuid::Uuid;
 use zstd;
@@ -77,7 +78,7 @@ pub enum DeltasError {
     SubscriptionAlreadyPending,
 
     #[error("The server replied with an error: {0}")]
-    ServerError(String, #[source] WebsocketError),
+    ServerError(String),
 
     /// A message failed to send via an internal channel or through the websocket channel.
     /// This is typically a fatal error and might indicate a bug in the implementation.
@@ -157,7 +158,7 @@ pub trait DeltasClient {
         &self,
         extractor_id: ExtractorIdentity,
         options: SubscriptionOptions,
-    ) -> Result<(Uuid, Receiver<BlockChanges>), DeltasError>;
+    ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError>;
 
     /// Unsubscribe from an subscription
     async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError>;
@@ -210,7 +211,9 @@ type WebSocketSink =
 #[derive(Debug)]
 enum SubscriptionInfo {
     /// Subscription was requested we wait for server confirmation and uuid assignment.
-    RequestedSubscription(oneshot::Sender<Result<(Uuid, Receiver<BlockChanges>), DeltasError>>),
+    RequestedSubscription(
+        oneshot::Sender<Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError>>,
+    ),
     /// Subscription is active.
     Active,
     /// Unsubscription was requested, we wait for server confirmation.
@@ -223,13 +226,13 @@ struct Inner {
     sink: WebSocketSink,
     /// Command channel sender handle.
     cmd_tx: Sender<()>,
-    /// Currently pending subscriptions.
+    /// Currently pending subscriptions, keyed by model-layer extractor identity.
     pending: HashMap<ExtractorIdentity, SubscriptionInfo>,
     /// Active subscriptions.
     subscriptions: HashMap<Uuid, SubscriptionInfo>,
     /// For eachs subscription we keep a sender handle, the receiver is returned to the caller of
     /// subscribe.
-    sender: HashMap<Uuid, Sender<BlockChanges>>,
+    sender: HashMap<Uuid, Sender<BlockAggregatedChanges>>,
     /// How many messages to buffer per subscription before starting to drop new messages.
     buffer_size: usize,
 }
@@ -254,7 +257,7 @@ impl Inner {
     fn new_subscription(
         &mut self,
         id: &ExtractorIdentity,
-        ready_tx: oneshot::Sender<Result<(Uuid, Receiver<BlockChanges>), DeltasError>>,
+        ready_tx: oneshot::Sender<Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError>>,
     ) -> Result<(), DeltasError> {
         if self.pending.contains_key(id) {
             return Err(DeltasError::SubscriptionAlreadyPending);
@@ -267,8 +270,8 @@ impl Inner {
     /// Transitions a pending subscription to active.
     ///
     /// Will ignore any request to do so for subscriptions that are not pending.
-    fn mark_active(&mut self, extractor_id: &ExtractorIdentity, subscription_id: Uuid) {
-        if let Some(info) = self.pending.remove(extractor_id) {
+    fn mark_active(&mut self, extractor_id: ExtractorIdentity, subscription_id: Uuid) {
+        if let Some(info) = self.pending.remove(&extractor_id) {
             if let SubscriptionInfo::RequestedSubscription(ready_tx) = info {
                 let (tx, rx) = mpsc::channel(self.buffer_size);
                 self.sender.insert(subscription_id, tx);
@@ -302,7 +305,7 @@ impl Inner {
 
     /// Sends a message to a subscription's receiver.
     #[allow(clippy::result_large_err)]
-    fn send(&mut self, id: &Uuid, msg: BlockChanges) -> Result<(), DeltasError> {
+    fn send(&mut self, id: &Uuid, msg: BlockAggregatedChanges) -> Result<(), DeltasError> {
         if let Some(sender) = self.sender.get_mut(id) {
             sender
                 .try_send(msg)
@@ -373,15 +376,14 @@ impl Inner {
         Ok(())
     }
 
-    fn cancel_pending(&mut self, extractor_id: &ExtractorIdentity, error: &WebsocketError) {
-        if let Some(sub_info) = self.pending.remove(extractor_id) {
+    fn cancel_pending(&mut self, extractor_id: ExtractorIdentity, error: &WebsocketError) {
+        if let Some(sub_info) = self.pending.remove(&extractor_id) {
             match sub_info {
                 SubscriptionInfo::RequestedSubscription(tx) => {
                     let _ = tx
-                        .send(Err(DeltasError::ServerError(
-                            format!("Subscription failed: {error}"),
-                            error.clone(),
-                        )))
+                        .send(Err(DeltasError::ServerError(format!(
+                            "Subscription failed: {error}"
+                        ))))
                         .map_err(|_| debug!("Cancel pending failed: receiver deallocated!"));
                 }
                 _ => {
@@ -532,8 +534,9 @@ impl WsDeltasClient {
             {
                 Ok(value) => match serde_json::from_value::<WebSocketMessage>(value) {
                     Ok(ws_message) => match ws_message {
-                        WebSocketMessage::BlockChanges { subscription_id, deltas } => {
-                            Self::handle_block_changes_msg(&mut guard, subscription_id, deltas).await?;
+                        WebSocketMessage::BlockAggregatedChanges { subscription_id, deltas } => {
+                            Self::handle_block_changes_msg(&mut guard, subscription_id, deltas)
+                                .await?;
                         }
                         WebSocketMessage::Response(Response::NewSubscription {
                             extractor_id,
@@ -543,7 +546,7 @@ impl WsDeltasClient {
                             let inner = guard
                                 .as_mut()
                                 .ok_or_else(|| DeltasError::NotConnected)?;
-                            inner.mark_active(&extractor_id, subscription_id);
+                            inner.mark_active(extractor_id.into(), subscription_id);
                         }
                         WebSocketMessage::Response(Response::SubscriptionEnded {
                             subscription_id,
@@ -559,7 +562,7 @@ impl WsDeltasClient {
                                 let inner = guard
                                     .as_mut()
                                     .ok_or_else(|| DeltasError::NotConnected)?;
-                                inner.cancel_pending(extractor_id, &error);
+                                inner.cancel_pending(extractor_id.clone().into(), &error);
                             }
                             WebsocketError::SubscriptionNotFound(subscription_id) => {
                                 debug!("Received subscription not found, removing subscription");
@@ -569,26 +572,21 @@ impl WsDeltasClient {
                                 inner.remove_subscription(*subscription_id)?;
                             }
                             WebsocketError::ParseError(raw, e) => {
-                                return Err(DeltasError::ServerError(
-                                    format!(
-                                        "Server failed to parse client message: {e}, msg: {raw}"
-                                    ),
-                                    error.clone(),
-                                ))
+                                return Err(DeltasError::ServerError(format!(
+                                    "Server failed to parse client message: {e}, msg: {raw}"
+                                )))
                             }
                             WebsocketError::CompressionError(subscription_id, e) => {
-                                return Err(DeltasError::ServerError(
-                                    format!(
-                                        "Server failed to compress message for subscription: {subscription_id}, error: {e}"
-                                    ),
-                                    error.clone(),
-                                ))
+                                return Err(DeltasError::ServerError(format!(
+                                    "Server failed to compress message for subscription: \
+                                     {subscription_id}, error: {e}"
+                                )))
                             }
                             WebsocketError::SubscribeError(extractor_id) => {
                                 let inner = guard
                                     .as_mut()
                                     .ok_or_else(|| DeltasError::NotConnected)?;
-                                inner.cancel_pending(extractor_id, &error);
+                                inner.cancel_pending(extractor_id.clone().into(), &error);
                             }
                         },
                     },
@@ -608,38 +606,49 @@ impl WsDeltasClient {
             },
             Ok(tungstenite::protocol::Message::Binary(data)) => {
                 // Decompress the zstd-compressed data,
-                // Note that we only support compressed BlockChanges messages for now.
+                // Note that we only support compressed BlockAggregatedChanges messages for now.
                 match zstd::decode_all(data.as_slice()) {
-                    Ok(decompressed) => match serde_json::from_slice::<serde_json::Value>(decompressed.as_slice()) {
-                                Ok(value) => match serde_json::from_value::<WebSocketMessage>(value.clone()) {
+                    Ok(decompressed) => {
+                        match serde_json::from_slice::<serde_json::Value>(decompressed.as_slice()) {
+                            Ok(value) => {
+                                match serde_json::from_value::<WebSocketMessage>(value.clone()) {
                                     Ok(ws_message) => match ws_message {
-                                        WebSocketMessage::BlockChanges { subscription_id, deltas } => {
-                                            Self::handle_block_changes_msg(&mut guard, subscription_id, deltas).await?;
+                                        WebSocketMessage::BlockAggregatedChanges {
+                                            subscription_id,
+                                            deltas,
+                                        } => {
+                                            Self::handle_block_changes_msg(
+                                                &mut guard,
+                                                subscription_id,
+                                                deltas,
+                                            )
+                                            .await?;
                                         }
                                         _ => {
                                             error!(
                                                 "Received unsupported compressed WebSocketMessage variant. \nMessage: {ws_message:?}",
                                             );
                                         }
-
                                     },
                                     Err(e) => {
                                         error!(
                                             "Failed to deserialize compressed WebSocketMessage: {e}. \nMessage: {value:?}",
                                         );
                                     }
-                                },
-                                Err(e) => {
-                                    error!(
-                                        "Failed to deserialize compressed message: invalid JSON. {e}",
-                                    );
                                 }
-                            },
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to deserialize compressed message: invalid JSON. {e}",
+                                );
+                            }
+                        }
+                    }
                     Err(e) => {
                         error!("Failed to decompress zstd data: {}", e);
                     }
                 }
-            },
+            }
             Ok(tungstenite::protocol::Message::Ping(_)) => {
                 // Respond to pings with pongs.
                 let inner = guard
@@ -657,7 +666,9 @@ impl WsDeltasClient {
             }
             Ok(tungstenite::protocol::Message::Close(frame)) => {
                 match &frame {
-                    Some(f) => warn!(code = ?f.code, reason = %f.reason, "WebSocket closed by server"),
+                    Some(f) => {
+                        warn!(code = ?f.code, reason = %f.reason, "WebSocket closed by server")
+                    }
                     None => warn!("WebSocket closed by server (no close frame)"),
                 }
                 return Err(DeltasError::ConnectionClosed);
@@ -686,13 +697,13 @@ impl WsDeltasClient {
     async fn handle_block_changes_msg(
         guard: &mut MutexGuard<'_, Option<Inner>>,
         subscription_id: Uuid,
-        deltas: BlockChanges,
+        deltas: dto::BlockAggregatedChanges,
     ) -> Result<(), DeltasError> {
         trace!(?deltas, "Received a block state change, sending to channel");
         let inner = guard
             .as_mut()
             .ok_or_else(|| DeltasError::NotConnected)?;
-        match inner.send(&subscription_id, deltas) {
+        match inner.send(&subscription_id, BlockAggregatedChanges::from(deltas)) {
             Err(DeltasError::BufferFull) => {
                 error!(?subscription_id, "Buffer full, unsubscribing!");
                 Self::force_unsubscribe(subscription_id, inner).await;
@@ -768,7 +779,7 @@ impl DeltasClient for WsDeltasClient {
         &self,
         extractor_id: ExtractorIdentity,
         options: SubscriptionOptions,
-    ) -> Result<(Uuid, Receiver<BlockChanges>), DeltasError> {
+    ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
         trace!("Starting subscribe");
         self.ensure_connection().await?;
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -780,7 +791,7 @@ impl DeltasClient for WsDeltasClient {
             trace!("Sending subscribe command");
             inner.new_subscription(&extractor_id, ready_tx)?;
             let cmd = Command::Subscribe {
-                extractor_id,
+                extractor_id: extractor_id.into(),
                 include_state: options.include_state,
                 compression: options.compression,
                 partial_blocks: options.partial_blocks,
@@ -1037,7 +1048,7 @@ mod tests {
     use std::{net::SocketAddr, str::FromStr};
 
     use tokio::{net::TcpListener, time::timeout};
-    use tycho_common::dto::Chain;
+    use tycho_common::models::Chain;
 
     use super::*;
 
@@ -1819,7 +1830,7 @@ mod tests {
 
         // Test ExtractorNotFound error
         let error_response = WebSocketMessage::Response(Response::Error(
-            WebsocketError::ExtractorNotFound(extractor_id.clone()),
+            WebsocketError::ExtractorNotFound(extractor_id.clone().into()),
         ));
         let error_json = serde_json::to_string(&error_response).unwrap();
 
@@ -1845,7 +1856,7 @@ mod tests {
 
         // Verify that we get a ServerError
         assert!(result.is_err());
-        if let Err(DeltasError::ServerError(msg, _)) = result {
+        if let Err(DeltasError::ServerError(msg)) = result {
             assert!(msg.contains("Subscription failed"));
             assert!(msg.contains("Extractor not found"));
         } else {
@@ -1963,7 +1974,7 @@ mod tests {
             .await
             .expect("ws loop should complete");
         assert!(result.is_err());
-        if let Err(DeltasError::ServerError(message, _)) = result {
+        if let Err(DeltasError::ServerError(message)) = result {
             assert!(message.contains("Server failed to parse client message"));
         } else {
             panic!("Expected DeltasError::ServerError, got: {:?}", result);
@@ -2013,7 +2024,7 @@ mod tests {
             .await
             .expect("ws loop should complete");
         assert!(result.is_err());
-        if let Err(DeltasError::ServerError(message, _)) = result {
+        if let Err(DeltasError::ServerError(message)) = result {
             assert!(message.contains("Server failed to compress message for subscription"));
         } else {
             panic!("Expected DeltasError::ServerError, got: {:?}", result);
@@ -2029,7 +2040,7 @@ mod tests {
         let extractor_id = ExtractorIdentity::new(Chain::Ethereum, "vm:ambient");
 
         let error_response = WebSocketMessage::Response(Response::Error(
-            WebsocketError::SubscribeError(extractor_id.clone()),
+            WebsocketError::SubscribeError(extractor_id.clone().into()),
         ));
         let error_json = serde_json::to_string(&error_response).unwrap();
 
@@ -2055,7 +2066,7 @@ mod tests {
 
         // Verify that we get a ServerError for subscribe failure
         assert!(result.is_err());
-        if let Err(DeltasError::ServerError(msg, _)) = result {
+        if let Err(DeltasError::ServerError(msg)) = result {
             assert!(msg.contains("Subscription failed"));
             assert!(msg.contains("Failed to subscribe to extractor"));
         } else {
@@ -2080,7 +2091,7 @@ mod tests {
         let extractor_id = ExtractorIdentity::new(Chain::Ethereum, "vm:ambient");
 
         let error_response = WebSocketMessage::Response(Response::Error(
-            WebsocketError::ExtractorNotFound(extractor_id.clone()),
+            WebsocketError::ExtractorNotFound(extractor_id.clone().into()),
         ));
         let error_json = serde_json::to_string(&error_response).unwrap();
 
@@ -2128,7 +2139,7 @@ mod tests {
 
         if let Err(DeltasError::SubscriptionAlreadyPending) = result2 {
             // This is expected for the second subscription
-        } else if let Err(DeltasError::ServerError(_, _)) = result1 {
+        } else if let Err(DeltasError::ServerError(_)) = result1 {
             // This is expected for the first subscription that gets the server error
         } else {
             panic!("Expected one SubscriptionAlreadyPending and one ServerError");

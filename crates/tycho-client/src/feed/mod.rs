@@ -19,7 +19,7 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 use tycho_common::{
     display::opt,
-    dto::{BlockChanges, ExtractorIdentity},
+    models::{blockchain::BlockAggregatedChanges, ExtractorIdentity},
     Bytes,
 };
 
@@ -30,6 +30,7 @@ use crate::feed::{
 
 mod block_history;
 pub mod component_tracker;
+pub mod dto;
 pub mod synchronizer;
 
 /// A trait representing a minimal interface for types that behave like a block header.
@@ -75,8 +76,8 @@ impl Display for BlockHeader {
     }
 }
 
-impl From<&BlockChanges> for BlockHeader {
-    fn from(block_changes: &BlockChanges) -> Self {
+impl From<&BlockAggregatedChanges> for BlockHeader {
+    fn from(block_changes: &BlockAggregatedChanges) -> Self {
         let block = &block_changes.block;
         Self {
             hash: block.hash.clone(),
@@ -101,8 +102,12 @@ impl HeaderLike for BlockHeader {
 
 #[derive(Error, Debug)]
 pub enum BlockSynchronizerError {
-    #[error("Failed to initialize synchronizer: {0}")]
-    InitializationError(#[from] SynchronizerError),
+    #[error("Failed to initialize extractor '{extractor}': {source}")]
+    InitializationError {
+        extractor: ExtractorIdentity,
+        #[source]
+        source: SynchronizerError,
+    },
 
     #[error("Failed to process new block: {0}")]
     BlockHistoryError(#[from] BlockHistoryError),
@@ -557,7 +562,7 @@ impl SynchronizerStream {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct FeedMessage<H = BlockHeader>
 where
     H: HeaderLike,
@@ -684,7 +689,12 @@ where
                     warn!(%extractor_id, %reason, "Extractor not recognised by server, skipping");
                     to_skip.push(extractor_id);
                 }
-                Err(e) => return Err(BlockSynchronizerError::InitializationError(e)),
+                Err(e) => {
+                    return Err(BlockSynchronizerError::InitializationError {
+                        extractor: extractor_id,
+                        source: e,
+                    })
+                }
             }
         }
         for id in &to_skip {
@@ -1057,7 +1067,7 @@ mod tests {
     use async_trait::async_trait;
     use test_log::test;
     use tokio::sync::{oneshot, Mutex};
-    use tycho_common::dto::Chain;
+    use tycho_common::models::Chain;
 
     use super::*;
     use crate::feed::synchronizer::{SyncResult, SynchronizerTaskHandle};

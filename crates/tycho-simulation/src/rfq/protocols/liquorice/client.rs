@@ -29,7 +29,7 @@ use crate::{
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::dto::{ProtocolComponent, ResponseProtocolState},
+    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -121,9 +121,9 @@ impl LiquoriceClient {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "liquorice_pool".to_string(),
-            chain: self.chain.into(),
+            chain: self.chain,
             tokens,
-            contract_ids: vec![],
+            contract_addresses: vec![],
             ..Default::default()
         };
 
@@ -133,11 +133,7 @@ impl LiquoriceClient {
         attributes.insert("prices".to_string(), prices_json.as_bytes().to_vec().into());
 
         ComponentWithState {
-            state: ResponseProtocolState {
-                component_id: component_id.clone(),
-                attributes,
-                balances: HashMap::new(),
-            },
+            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],

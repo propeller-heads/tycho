@@ -545,7 +545,6 @@ where
     }
 
     #[cfg(test)]
-    #[deprecated]
     pub fn get_balance_owner(&self) -> Option<Address> {
         self.balance_owner
     }

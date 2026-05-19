@@ -116,7 +116,7 @@ impl ProtocolComponent {
     }
 
     pub fn from_with_tokens(
-        core_model: tycho_common::dto::ProtocolComponent,
+        core_model: tycho_common::models::protocol::ProtocolComponent,
         tokens: Vec<Token>,
     ) -> Self {
         let id = Bytes::from(core_model.id.as_str());
@@ -124,9 +124,9 @@ impl ProtocolComponent {
             id.clone(),
             core_model.protocol_system,
             core_model.protocol_type_name,
-            core_model.chain.into(),
+            core_model.chain,
             tokens,
-            core_model.contract_ids,
+            core_model.contract_addresses,
             core_model.static_attributes,
             core_model.creation_tx,
             core_model.created_at,

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+#[cfg(feature = "evm")]
+use alloy::primitives::{Address, U256};
 use clap::ValueEnum;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,88 @@ pub enum UserTransferType {
     #[default]
     TransferFrom,
     UseVaultsFunds,
+}
+
+/// Client fee parameters passed to the router, matching the Solidity `ClientFeeParams` struct.
+///
+/// The default value (all zeros) represents no fee. Clients are responsible for constructing
+/// and signing this struct; `tycho-execution` does not use it internally.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ClientFeeParams {
+    /// Fee in basis points charged by the client (0–10000).
+    client_fee_bps: u16,
+    /// Address that identifies the client and receives any client fee.
+    client_fee_receiver: Bytes,
+    /// Maximum amount the client will contribute from their vault if slippage reduces the output
+    /// below `min_amount_out`.
+    #[serde(with = "biguint_string")]
+    max_client_contribution: BigUint,
+    /// Deadline for the fee signature as a unix timestamp.
+    #[serde(with = "biguint_string")]
+    deadline: BigUint,
+    /// EIP-712 signature over the fee parameters and swap intent.
+    client_signature: Bytes,
+}
+
+impl ClientFeeParams {
+    /// Creates params that identify the client and charge a fee in basis points.
+    pub fn new(
+        client_fee_receiver: Bytes,
+        client_signature: Bytes,
+        deadline: BigUint,
+        client_fee_bps: u16,
+    ) -> Self {
+        Self {
+            client_fee_bps,
+            client_fee_receiver,
+            max_client_contribution: BigUint::ZERO,
+            deadline,
+            client_signature,
+        }
+    }
+
+    /// Creates params that identify the client for router fee discounts without charging a fee.
+    pub fn new_without_fee(
+        client_fee_receiver: Bytes,
+        client_signature: Bytes,
+        deadline: BigUint,
+    ) -> Self {
+        Self {
+            client_fee_bps: 0,
+            client_fee_receiver,
+            max_client_contribution: BigUint::ZERO,
+            deadline,
+            client_signature,
+        }
+    }
+
+    pub fn with_max_client_contribution(mut self, max_client_contribution: BigUint) -> Self {
+        self.max_client_contribution = max_client_contribution;
+        self
+    }
+}
+
+#[cfg(feature = "evm")]
+impl ClientFeeParams {
+    /// Converts into the ABI-encodable tuple matching the Solidity `ClientFeeParams` struct.
+    pub fn into_abi_params(self) -> (u16, Address, U256, U256, Vec<u8>) {
+        let receiver = if self.client_fee_receiver.is_empty() {
+            Address::ZERO
+        } else {
+            Address::from_slice(&self.client_fee_receiver)
+        };
+        (
+            self.client_fee_bps,
+            receiver,
+            U256::from_be_slice(
+                &self
+                    .max_client_contribution
+                    .to_bytes_be(),
+            ),
+            U256::from_be_slice(&self.deadline.to_bytes_be()),
+            self.client_signature.to_vec(),
+        )
+    }
 }
 
 /// Represents a solution containing details describing an order, and instructions for filling
@@ -414,6 +498,7 @@ pub struct EncodingContext {
     pub group_token_out: Bytes,
 }
 
+#[derive(PartialEq)]
 pub(crate) enum Strategy {
     Single,
     Sequential,

@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand};
 use dotenv::dotenv;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tracing_subscriber::EnvFilter;
-use tycho_simulation::tycho_common::dto::Chain;
+use tycho_simulation::tycho_common::models::Chain;
 
 use crate::test_runner::{TestRunner, TestType, TestTypeFull, TestTypeRange};
 

@@ -13,7 +13,7 @@ use actix_web_actors::ws;
 use metrics::{counter, gauge};
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
-    dto::{BlockChanges, Command, Response, WebSocketMessage},
+    dto::{BlockAggregatedChanges, Command, Response, WebSocketMessage},
     models::{error::WebsocketError, ExtractorIdentity},
 };
 use uuid::Uuid;
@@ -419,18 +419,18 @@ impl Actor for WsActor {
 }
 
 /// Handle incoming messages from the extractor and forward them to the WS connection
-impl StreamHandler<Result<(Uuid, BlockChanges), ws::ProtocolError>> for WsActor {
+impl StreamHandler<Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>> for WsActor {
     #[instrument(skip_all, fields(WsActor.id = %self.id))]
     fn handle(
         &mut self,
-        msg: Result<(Uuid, BlockChanges), ws::ProtocolError>,
+        msg: Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>,
         ctx: &mut Self::Context,
     ) {
         trace!("Message received from extractor");
         match msg {
             Ok((subscription_id, deltas)) => {
                 trace!("Forwarding message to client");
-                let msg = WebSocketMessage::BlockChanges { deltas, subscription_id };
+                let msg = WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id };
                 let json_str = serde_json::to_string(&msg).unwrap();
 
                 // Check if compression is enabled for this subscription
@@ -580,7 +580,7 @@ mod tests {
     };
     use tracing::{debug, info_span, Instrument};
     use tycho_common::{
-        dto::{BlockChanges, Response},
+        dto::{self, Response},
         models::{
             blockchain::{Block, BlockAggregatedChanges},
             Chain,
@@ -742,7 +742,7 @@ mod tests {
     struct DummyDelta {
         #[allow(dead_code)]
         subscription_id: Uuid,
-        deltas: BlockChanges,
+        deltas: dto::BlockAggregatedChanges,
     }
 
     async fn wait_for_dummy_message(

@@ -161,6 +161,10 @@ struct Cli {
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     #[arg(long, default_value_t = 30)]
     stale_threshold_secs: u64,
+
+    /// Router fee on output in bps (defaults to 10 bps)
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..))]
+    router_fee: u16,
 }
 
 impl Debug for Cli {
@@ -915,6 +919,7 @@ async fn process_update(
             &mut n_reverts,
             &mut n_failures,
             statistics.clone(),
+            cli.router_fee,
         );
 
         // Record statistics
@@ -1320,6 +1325,7 @@ fn process_execution_result(
     n_reverts: &mut i32,
     n_failures: &mut i32,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
+    router_fee: u16,
 ) {
     match result {
         TychoExecutionResult::Success {
@@ -1337,17 +1343,24 @@ fn process_execution_result(
 
             metrics::record_simulation_execution_success(&execution_info.protocol_system);
 
+            // Remove the router fee from the expected simulated amount out.
+            let simulated_amount_out_without_fee = execution_info
+                .expected_amount_out
+                .clone() -
+                (execution_info.expected_amount_out * BigUint::from(router_fee)) /
+                    BigUint::from(10000u64);
+
             // Calculate slippage: positive = simulated > expected, negative = simulated <
             // expected
-            let slippage = if amount_out >= &execution_info.expected_amount_out {
-                let diff = amount_out - &execution_info.expected_amount_out;
-                ((diff.clone() * BigUint::from(10000u32)) / &execution_info.expected_amount_out)
+            let slippage = if amount_out >= &simulated_amount_out_without_fee {
+                let diff = amount_out - &simulated_amount_out_without_fee;
+                ((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
             } else {
-                let diff = &execution_info.expected_amount_out - amount_out;
-                -((diff.clone() * BigUint::from(10000u32)) / &execution_info.expected_amount_out)
+                let diff = &simulated_amount_out_without_fee - amount_out;
+                -((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
@@ -1375,8 +1388,8 @@ fn process_execution_result(
                     token_in = %execution_info.token_in,
                     token_out = %execution_info.token_out,
                     amount_in = %execution_info.solution.amount_in(),
-                    simulated_amount  = %amount_out,
-                    executed_amount = %execution_info.expected_amount_out,
+                    executed_amount  = %amount_out,
+                    simulated_amount = %simulated_amount_out_without_fee,
                     slippage_ratio = slippage,
                     tenderly = tenderly_url,
                     overwrites = %overwrites_string,
@@ -1389,8 +1402,8 @@ fn process_execution_result(
                     event_type = "execution_slippage",
                     token_in = %execution_info.token_in,
                     token_out = %execution_info.token_out,
-                    simulated_amount  = %amount_out,
-                    executed_amount = %execution_info.expected_amount_out,
+                    executed_amount  = %amount_out,
+                    simulated_amount = %simulated_amount_out_without_fee,
                     slippage_ratio = slippage,
                     tenderly = tenderly_url,
                     overwrites = %overwrites_string,

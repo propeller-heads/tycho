@@ -22,7 +22,7 @@ The `Solution` struct defines your order and how it should be filled. This is th
 {% tab title="UserTransferType" %}
 Specifies how user funds (the input token) enter the router:
 
-<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouter to spend your tokens.</td></tr><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>UseVaultsFunds</strong></td><td>No transfer is performed. Uses tokens already deposited in the TychoRouter vault.</td></tr></tbody></table>
+<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouter to spend your tokens.</td></tr><tr><td align="center"><strong>UseVaultsFunds</strong></td><td>No transfer is performed. Uses tokens already deposited in the TychoRouter vault.</td></tr></tbody></table>
 {% endtab %}
 
 {% tab title="Swap" %}
@@ -127,16 +127,15 @@ split swaps.
 
 Builder options:
 
-* `swap_encoder_registry` — Registry of protocol-specific `SwapEncoder` s used during encoding.
-  Use `add_default_encoders` for built-in support, or add custom encoders for protocols you've implemented locally.
+* `swap_encoder_registry` — Registry of protocol-specific `SwapEncoder`s used during encoding.
+  Use `new_with_defaults` for built-in support, or add custom encoders for protocols you've implemented locally.
 * `router_address` — Router address for execution. Defaults to the deployed address for the given chain (
   see [Tycho addresses](../contract-addresses.md)).
 
 #### **Builder Example Usage**
 
 ```rust
-let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
-.add_default_encoders(None)
+let swap_encoder_registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)
 .expect("Failed to get default SwapEncoderRegistry");
 
 let encoder = TychoRouterEncoderBuilder::new()
@@ -150,9 +149,7 @@ let encoder = TychoRouterEncoderBuilder::new()
 
 Each protocol needs its own `SwapEncoder` to define how the protocol encodes swaps into calldata.
 
-The `SwapEncoderRegistry` manages these encoders. Call `add_default_encoders()` to use the built-in implementations.
-This method accepts an optional `executors_addresses` JSON string with executor addresses for encoding. Pass `None` to
-default to `config/executor_addresses.json`.
+The `SwapEncoderRegistry` manages these encoders. Use `SwapEncoderRegistry::new_with_defaults(chain)` to get a registry pre-populated with all built-in encoders. If you need to supply custom executor addresses, use `SwapEncoderRegistry::new(chain).add_default_encoders(Some(addresses_json))` instead.
 
 If you need to add custom protocol support, register your own encoder implementation:
 
@@ -181,7 +178,21 @@ The full method call includes the following parameters, which act as **execution
 
 The `ClientFeeParams` struct is defined as:
 
-<table><thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead><tbody><tr><td><code>clientFeeBps</code></td><td>Fee percentage in basis points. <code>100</code> = 1%. Set to <code>0</code> to disable</td></tr><tr><td><code>clientFeeReceiver</code></td><td>Address that receives the client's portion of the fee (credited to their vault balance)</td></tr><tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr><tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr><tr><td><code>clientSignature</code></td><td>EIP-712 signature over all other fields, signed by <code>clientFeeReceiver</code></td></tr></tbody></table>
+<table><thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead><tbody><tr><td><code>clientFeeBps</code></td><td>Fee percentage in basis points. <code>100</code> = 1%. Set to <code>0</code> to take no fee</td></tr><tr><td><code>clientFeeReceiver</code></td><td>Address that receives the client fee (credited to their vault balance)</td></tr><tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr><tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr><tr><td><code>clientSignature</code></td><td>EIP-712 signature over all other fields, signed by <code>clientFeeReceiver</code></td></tr></tbody></table>
+
+The `tycho-execution` crate provides a `ClientFeeParams` Rust struct that mirrors this. Callers are responsible for
+constructing and signing it — the encoder does not use it internally. Call `.into_abi_params()` to convert it to the
+ABI-encodable tuple for calldata construction.
+
+```rust
+// No fee
+let params = ClientFeeParams::default().into_abi_params();
+
+// With a fee
+let params = ClientFeeParams::new(receiver, signature, deadline, fee_bps)
+    .with_max_client_contribution(max_contribution)
+    .into_abi_params();
+```
 
 These **execution guardrails** protect against MEV exploits. Setting them correctly gives you full control over swap
 security.
@@ -195,12 +206,8 @@ The encoder automatically bridges ETH↔WETH gaps anywhere in the swap path — 
 
 #### Client Fee Signature
 
-If you don't want fees, pass all-zero
-values: `clientFeeBps: 0`, `clientFeeReceiver: address(0)`, `maxClientContribution: 0`, `deadline: 0`, and an
-empty `clientSignature`.
-
-If you do want fees, the `clientFeeReceiver` must sign the fee parameters using EIP-712. This prevents third parties
-from spoofing fee configurations. The signature covers the following typed struct:
+Only required when charging a fee. The `clientFeeReceiver` must sign the fee parameters using EIP-712 — this prevents
+third parties from spoofing fee configurations. The signature covers the following typed struct:
 
 ```solidity
 ClientFee(uint16 clientFeeBps, address clientFeeReceiver, uint256 maxClientContribution, uint256 deadline)
