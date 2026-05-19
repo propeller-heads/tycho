@@ -499,7 +499,7 @@ pub struct EncodingContext {
 }
 
 #[derive(PartialEq)]
-pub(crate) enum Strategy {
+pub enum Strategy {
     Single,
     Sequential,
     Split,

@@ -46,7 +46,7 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   captured by `get_amount_out`, computed via `estimate_transfer_overhead`.
 /// - **Router overhead**: the user input transfer (transferFrom / Permit2 / vault), and — when
 ///   `ROUTER_FEES_ACTIVE` — the extra output transfer added by the fee path.
-pub(crate) fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
+pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     let mut total_gas = BigUint::ZERO;
     for swap in solution.swaps() {
         // TODO: sequential swap with optimized transfers
