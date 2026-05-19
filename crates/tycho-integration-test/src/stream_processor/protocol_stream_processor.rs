@@ -152,12 +152,14 @@ impl ProtocolStreamProcessor {
         }
         // 1 s cooldown: must stay below the state-sync cooldown (≥ 2 s on every chain)
         // so synchronizers don't exhaust their retries while the WS is reconnecting.
-        let infinite_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(1));
+        let infinite_ws_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(1));
+        let infinite_sync_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(3));
         protocol_stream
             .auth_key(Some(self.tycho_api_key.clone()))
             .skip_state_decode_failures(true)
             .startup_timeout(Duration::from_secs(500))
-            .websocket_retry_config(&infinite_retries)
+            .websocket_retry_config(&infinite_ws_retries)
+            .state_synchronizer_retry_config(&infinite_sync_retries)
             .set_tokens(all_tokens.clone())
             .await
             .build()
