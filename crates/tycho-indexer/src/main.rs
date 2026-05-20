@@ -53,10 +53,9 @@ use tycho_ethereum::{
 use tycho_indexer::{
     cli::{AnalyzeTokenArgs, Cli, Command, GlobalArgs, IndexArgs, RunSpkgArgs, SubstreamsArgs},
     extractor::{
+        factory::ExtractorFactory,
         runner::ExtractorHandle,
-        supervisor::{
-            DCIType, ExtractorConfig, ExtractorFactory, ExtractorSupervisor, ProtocolTypeConfig,
-        },
+        supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
