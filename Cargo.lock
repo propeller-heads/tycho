@@ -2702,10 +2702,8 @@ checksum = "c469d952047f47f91b68d1cba3f10d63c11d73e4636f24f08daf0278abf01c4d"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link 0.1.3",
 ]
 
@@ -9918,7 +9916,7 @@ dependencies = [
  "tycho-common",
  "tycho-ethereum",
  "tycho-storage",
- "tycho-substreams",
+ "tycho-substreams 0.6.0",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -10053,6 +10051,23 @@ dependencies = [
  "itertools 0.12.1",
  "num-bigint",
  "prost 0.11.9",
+ "serde",
+ "serde_json",
+ "substreams",
+ "substreams-ethereum",
+]
+
+[[package]]
+name = "tycho-substreams"
+version = "0.8.0"
+dependencies = [
+ "base64 0.22.1",
+ "ethabi 18.0.0",
+ "hex",
+ "itertools 0.12.1",
+ "num-bigint",
+ "prost 0.11.9",
+ "rstest 0.24.0",
  "serde",
  "serde_json",
  "substreams",
@@ -10239,6 +10254,27 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "uniswap-v3-core"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "dotenv",
+ "ethabi 18.0.0",
+ "getrandom 0.2.16",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "prost 0.11.9",
+ "substreams",
+ "substreams-ethereum",
+ "tokio",
+ "tokio-stream",
+ "tycho-common",
+ "tycho-indexer",
+ "tycho-substreams 0.8.0",
+]
 
 [[package]]
 name = "unsafe-libyaml"

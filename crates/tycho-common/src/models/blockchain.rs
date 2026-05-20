@@ -64,6 +64,92 @@ impl Transaction {
     }
 }
 
+/// Raw EVM log emitted by a contract during transaction execution.
+///
+/// Used as the primary input to [`TxDeltaIndexer`] implementations.
+///
+/// [`TxDeltaIndexer`]: crate::traits::TxDeltaIndexer
+#[derive(Debug, Clone)]
+pub struct LogInput {
+    address: Bytes,
+    topics: Vec<Bytes>,
+    data: Bytes,
+    log_index: u32,
+}
+
+impl LogInput {
+    pub fn new(address: Bytes, topics: Vec<Bytes>, data: Bytes, log_index: u32) -> Self {
+        Self { address, topics, data, log_index }
+    }
+
+    pub fn address(&self) -> &Bytes {
+        &self.address
+    }
+
+    pub fn topics(&self) -> &[Bytes] {
+        &self.topics
+    }
+
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    pub fn log_index(&self) -> u32 {
+        self.log_index
+    }
+}
+
+/// Raw EVM transaction with its associated logs.
+///
+/// The `succeeded` flag allows callers to pass all transactions in a block and
+/// have the processor skip reverted ones, avoiding a separate pre-filter.
+#[derive(Debug, Clone)]
+pub struct TxInput {
+    hash: Bytes,
+    from: Bytes,
+    to: Bytes,
+    index: u64,
+    logs: Vec<LogInput>,
+    succeeded: bool,
+}
+
+impl TxInput {
+    pub fn new(
+        hash: Bytes,
+        from: Bytes,
+        to: Bytes,
+        index: u64,
+        logs: Vec<LogInput>,
+        succeeded: bool,
+    ) -> Self {
+        Self { hash, from, to, index, logs, succeeded }
+    }
+
+    pub fn hash(&self) -> &Bytes {
+        &self.hash
+    }
+
+    pub fn from(&self) -> &Bytes {
+        &self.from
+    }
+
+    pub fn to(&self) -> &Bytes {
+        &self.to
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    pub fn logs(&self) -> &[LogInput] {
+        &self.logs
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.succeeded
+    }
+}
+
 pub struct BlockTransactionDeltas<T> {
     pub extractor: String,
     pub chain: Chain,

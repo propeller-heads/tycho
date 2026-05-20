@@ -114,19 +114,21 @@ use tracing::{debug, error, warn};
 use tycho_client::{
     feed::{
         component_tracker::ComponentFilter, synchronizer::ComponentWithState, BlockHeader,
-        SynchronizerState,
+        FeedMessage, SynchronizerState,
     },
     stream::{RetryConfiguration, StreamError, TychoStreamBuilder},
 };
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
+    traits::TxDeltaIndexer,
     Bytes,
 };
 
 use crate::{
     evm::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
+        pending::PendingBlockProcessor,
         protocol::uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
     },
     protocol::{
@@ -172,6 +174,8 @@ pub struct ProtocolStreamBuilder {
     decoder: TychoStreamDecoder<BlockHeader>,
     stream_builder: TychoStreamBuilder,
     stream_end_policy: StreamEndPolicy,
+    chain: Chain,
+    pending_indexers: HashMap<String, Box<dyn TxDeltaIndexer>>,
 }
 
 impl ProtocolStreamBuilder {
@@ -183,6 +187,8 @@ impl ProtocolStreamBuilder {
             decoder: TychoStreamDecoder::new(),
             stream_builder: TychoStreamBuilder::new(tycho_url, chain),
             stream_end_policy: StreamEndPolicy::default(),
+            chain,
+            pending_indexers: HashMap::new(),
         }
     }
 
@@ -441,6 +447,94 @@ impl ProtocolStreamBuilder {
 
     pub fn get_decoder(&self) -> &TychoStreamDecoder<BlockHeader> {
         &self.decoder
+    }
+
+    /// Registers a [`TxDeltaIndexer`] for ephemeral pending-block simulation.
+    ///
+    /// The indexer is associated with `extractor` (the protocol synchronizer name, e.g.
+    /// `"uniswap_v3"`). Use [`build_with_pending`](Self::build_with_pending) to obtain both
+    /// the confirmed stream and the pending processor.
+    pub fn with_pending_indexer(
+        mut self,
+        extractor: &str,
+        indexer: Box<dyn TxDeltaIndexer>,
+    ) -> Self {
+        self.pending_indexers
+            .insert(extractor.to_string(), indexer);
+        self
+    }
+
+    /// Builds the confirmed protocol stream and a [`PendingBlockProcessor`] that stays
+    /// in sync with it automatically.
+    ///
+    /// The stream pipeline forwards every confirmed [`FeedMessage`] to the processor via an
+    /// internal unbounded channel — it never blocks waiting for the consumer. The consumer
+    /// owns the returned `PendingBlockProcessor` exclusively and may wrap it in whatever
+    /// synchronisation primitive suits their use case (e.g. `Mutex` for shared access,
+    /// nothing for single-threaded use).
+    ///
+    /// Call [`generate_pending_update`](PendingBlockProcessor::generate_pending_update) to
+    /// simulate a candidate bundle; it drains the channel automatically before computing.
+    pub async fn build_with_pending(
+        self,
+    ) -> Result<
+        (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
+        StreamError,
+    > {
+        initialize_hook_handlers().map_err(|e| {
+            StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
+        })?;
+        let (_, rx) = self.stream_builder.build().await?;
+        let decoder = Arc::new(self.decoder);
+
+        let (advance_tx, advance_rx) =
+            tokio::sync::mpsc::unbounded_channel::<FeedMessage<BlockHeader>>();
+        let pending = PendingBlockProcessor::new(
+            self.pending_indexers,
+            decoder.clone(),
+            self.chain,
+            advance_rx,
+        );
+
+        let stream_end_policy = self.stream_end_policy;
+        let stream = Box::pin(
+            ReceiverStream::new(rx)
+                .take_while(move |msg| match msg {
+                    Ok(msg) => {
+                        let states = msg.sync_states.values();
+                        if stream_end_policy.should_end(states) {
+                            error!(
+                                "Block stream ended due to {:?}: {:?}",
+                                stream_end_policy, msg.sync_states
+                            );
+                            futures::future::ready(false)
+                        } else {
+                            futures::future::ready(true)
+                        }
+                    }
+                    Err(e) => {
+                        error!("Block stream ended with terminal error: {e}");
+                        futures::future::ready(false)
+                    }
+                })
+                .then({
+                    let decoder = decoder.clone();
+                    move |msg| {
+                        let decoder = decoder.clone();
+                        let advance_tx = advance_tx.clone();
+                        async move {
+                            let msg = msg.expect("Safe since stream ends if we receive an error");
+                            // Non-blocking: if the receiver is gone we just skip the send.
+                            let _ = advance_tx.send(msg.clone());
+                            decoder.decode(&msg).await.map_err(|e| {
+                                debug!(msg=?msg, "Decode error: {}", e);
+                                e
+                            })
+                        }
+                    }
+                }),
+        );
+        Ok((stream, pending))
     }
 
     /// Builds and returns the configured protocol stream.

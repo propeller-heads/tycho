@@ -31,6 +31,13 @@ members = [
 ]
 resolver = "2"
 
+# Redirect crates.io tycho-substreams to the local workspace crate so that
+# uniswap-v3-core (root workspace member) and the substreams modules all share
+# the same types when compiled together.
+[patch.crates-io]
+tycho-substreams = { path = "crates/tycho-substreams" }
+substreams-helper = { path = "crates/substreams-helper" }
+
 [profile.release]
 lto = true
 opt-level = 's'
