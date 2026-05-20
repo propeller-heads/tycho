@@ -289,14 +289,23 @@ impl MetricClient {
 
         // For non-configured token1 values, normalize through one Metric pool that prices token1
         // in a configured quote token.
-        metric_price_in_quote_token(
+        let price = metric_price_in_quote_token(
             &pool.token1,
             pool_quotes,
             &self.quote_tokens,
             &self.token_metadata,
-        )
-        .map(|price| token1_amount * price)
-        .filter(|tvl| tvl.is_finite() && *tvl >= 0.0)
+        );
+        if price.is_none() {
+            warn!(
+                pool = ?pool.pool_address,
+                token1 = ?pool.token1,
+                "Metric one-hop TVL price not found for non-quote token"
+            );
+        }
+
+        price
+            .map(|price| token1_amount * price)
+            .filter(|tvl| tvl.is_finite() && *tvl >= 0.0)
     }
 
     async fn fetch_metadata(&self) -> Result<Vec<MetricMetadata>, RFQError> {
@@ -649,18 +658,20 @@ fn metric_price_in_quote_token(
             None
         };
 
-        if let Some((price, quote_tvl)) = candidate {
-            // Multiple Metric pools can price the same token in a configured quote token. Use the
-            // pool with the largest quote-side availability as the most liquid pricing source.
-            if price.is_finite() &&
-                price > 0.0 &&
-                quote_tvl.is_finite() &&
-                quote_tvl > 0.0 &&
-                best.as_ref()
-                    .is_none_or(|(_, best_quote_tvl)| quote_tvl > *best_quote_tvl)
-            {
-                best = Some((price, quote_tvl));
-            }
+        let Some((price, quote_tvl)) = candidate else {
+            continue;
+        };
+
+        // Multiple Metric pools can price the same token in a configured quote token. Use the
+        // pool with the largest quote-side availability as the most liquid pricing source.
+        if price.is_finite() &&
+            price > 0.0 &&
+            quote_tvl.is_finite() &&
+            quote_tvl > 0.0 &&
+            best.as_ref()
+                .is_none_or(|(_, best_quote_tvl)| quote_tvl > *best_quote_tvl)
+        {
+            best = Some((price, quote_tvl));
         }
     }
 
