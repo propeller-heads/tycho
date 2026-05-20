@@ -1,0 +1,39 @@
+[package]
+name = "uniswap-v3-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared UniswapV3 indexing logic for native and WASM builds"
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = { path = "../../substreams/crates/tycho-substreams" }
+tycho-common = { path = "../../../crates/tycho-common" }
+ethabi = "18.0.0"
+hex = "0.4.3"
+num-bigint = "0.4.4"
+num-traits = { workspace = true }
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+
+[dev-dependencies]
+# Substreams streaming client (same workspace crate).
+tycho-indexer.workspace = true
+# Async runtime and stream utilities.
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+# Archive RPC calls (slot0, liquidity, token0/1, eth_getLogs).
+alloy = { workspace = true, features = [
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    "sol-types",
+    "contract",
+    "network",
+] }
+# .env file loading for CI credentials.
+dotenv.workspace = true
+hex.workspace = true
+num-bigint.workspace = true
+prost = "0.11"
