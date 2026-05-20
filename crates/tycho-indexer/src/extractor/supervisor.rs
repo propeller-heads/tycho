@@ -158,7 +158,7 @@ pub struct ExtractorFactory {
 
 impl ExtractorFactory {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub async fn create(
         config: ExtractorConfig,
         endpoint_url: String,
         s3_bucket: Option<String>,

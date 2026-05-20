@@ -554,7 +554,7 @@ async fn build_all_extractors(
             .cloned()
             .unwrap_or_else(|| tokio::runtime::Handle::current());
 
-        let factory = ExtractorFactory::new(
+        let factory = ExtractorFactory::create(
             extractor_config.clone(),
             endpoint_url.to_owned(),
             s3_bucket.map(ToString::to_string),
