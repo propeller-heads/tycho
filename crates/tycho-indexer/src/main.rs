@@ -454,9 +454,6 @@ async fn create_indexing_tasks(
         settlement_contract,
     );
 
-    // Create the reset channel shared by all supervisors
-    let (reset_tx, reset_rx) = tokio::sync::mpsc::channel::<String>(32);
-
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
         chains,
@@ -469,7 +466,6 @@ async fn create_indexing_tasks(
         &rpc_client,
         extraction_runtime,
         substreams_args.enable_partial_blocks,
-        reset_tx,
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
@@ -489,7 +485,7 @@ async fn create_indexing_tasks(
             .dci_protocols(dci_protocols)
             .protocol_systems(protocol_systems)
             .register_extractors(extractor_handles.clone())
-            .pending_deltas(pending_deltas_rxs, reset_rx)
+            .pending_deltas(pending_deltas_rxs)
             .run()?;
     info!(server_url, "Http and Ws server started");
 
@@ -521,12 +517,11 @@ async fn build_all_extractors(
     rpc_client: &EthereumRpcClient,
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
-    reset_tx: tokio::sync::mpsc::Sender<String>,
 ) -> Result<
     (
         Vec<ExtractorSupervisor>,
         Vec<ExtractorHandle>,
-        Vec<tokio::sync::mpsc::Receiver<tycho_indexer::extractor::ExtractorMsg>>,
+        Vec<tokio::sync::mpsc::Receiver<tycho_indexer::extractor::DeltaCommand>>,
     ),
     ExtractionError,
 > {
@@ -575,8 +570,7 @@ async fn build_all_extractors(
         // WS subscription map — shared between supervisor and runner
         let ws_subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
-        let supervisor =
-            ExtractorSupervisor::new(factory, ws_subscriptions, pd_tx, reset_tx.clone());
+        let supervisor = ExtractorSupervisor::new(factory, ws_subscriptions, pd_tx);
         let handle = supervisor.handle();
 
         supervisors.push(supervisor);

@@ -39,7 +39,7 @@ use crate::{
             compute_start_block, ControlMessage, DCIPlugin, ExtractorHandle, ExtractorRunner,
             SubscriptionsMap,
         },
-        ExtractionError, Extractor, ExtractorMsg,
+        DeltaCommand, ExtractionError, Extractor,
     },
     pb::sf::substreams::v1::Package,
     substreams::{stream::SubstreamsStream, SubstreamsEndpoint},
@@ -124,6 +124,10 @@ impl ExtractorConfig {
             dci_plugin,
             max_restarts,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -213,7 +217,7 @@ impl ExtractorFactory {
     pub async fn build_runner(
         &self,
         ws_subscriptions: Arc<Mutex<SubscriptionsMap>>,
-        pending_deltas_tx: Option<Sender<ExtractorMsg>>,
+        pending_deltas_tx: Option<Sender<DeltaCommand>>,
         stop_rx: oneshot::Receiver<()>,
     ) -> Result<ExtractorRunner, ExtractionError> {
         let fresh_gw = self.cached_gw.new_instance();
@@ -445,8 +449,7 @@ pub struct ExtractorSupervisor {
     ctrl_tx: Sender<ControlMessage>,
     control_rx: Receiver<ControlMessage>,
     ws_subscriptions: Arc<Mutex<SubscriptionsMap>>,
-    pending_deltas_tx: Sender<ExtractorMsg>,
-    reset_tx: Sender<String>,
+    pending_deltas_tx: Sender<DeltaCommand>,
     id: ExtractorIdentity,
     max_restarts: Option<u32>,
     next_subscriber_id: u64,
@@ -456,8 +459,7 @@ impl ExtractorSupervisor {
     pub fn new(
         factory: ExtractorFactory,
         ws_subscriptions: Arc<Mutex<SubscriptionsMap>>,
-        pending_deltas_tx: Sender<ExtractorMsg>,
-        reset_tx: Sender<String>,
+        pending_deltas_tx: Sender<DeltaCommand>,
     ) -> Self {
         let id = factory.extractor_id();
         let max_restarts: Option<u32> = factory.config.max_restarts;
@@ -468,7 +470,6 @@ impl ExtractorSupervisor {
             control_rx,
             ws_subscriptions,
             pending_deltas_tx,
-            reset_tx,
             id,
             max_restarts,
             next_subscriber_id: 0,
@@ -623,15 +624,17 @@ impl ExtractorSupervisor {
             }
 
             // Signal PendingDeltas to reset its buffer for this extractor.
+            // Sent on the same per-extractor channel as block messages, so it is guaranteed to
+            // arrive after all blocks the runner emitted before failing.
             if let Err(err) = self
-                .reset_tx
-                .send(self.id.name.clone())
+                .pending_deltas_tx
+                .send(DeltaCommand::ExtractorRestarted(self.id.name.clone()))
                 .await
             {
                 warn!(
                     extractor = %self.id,
                     error = %err,
-                    "Failed to send reset signal to PendingDeltas"
+                    "Failed to send ExtractorRestarted to PendingDeltas"
                 );
             }
 

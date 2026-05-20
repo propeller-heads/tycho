@@ -21,7 +21,10 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer};
+use crate::extractor::{
+    reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer},
+    DeltaCommand,
+};
 
 /// The `PendingDeltas` struct manages access to the reorg buffers maintained by each extractor.
 ///
@@ -248,13 +251,11 @@ impl PendingDeltas {
 
     /// Runs the PendingDeltas message loop.
     ///
-    /// Accepts pre-built receivers from the supervisor (one per extractor) and a reset
-    /// channel. When a reset signal arrives for an extractor, its buffer is cleared so that
-    /// restarted extractors can replay blocks without hitting parent-hash mismatches.
+    /// Accepts one receiver per extractor. Each receiver carries [`DeltaCommand`]s: block
+    /// messages and restart notifications on the same channel.
     pub async fn run(
         self,
-        receivers: Vec<tokio::sync::mpsc::Receiver<crate::extractor::ExtractorMsg>>,
-        mut reset_rx: tokio::sync::mpsc::Receiver<String>,
+        receivers: Vec<tokio::sync::mpsc::Receiver<DeltaCommand>>,
         start_tx: SyncSender<()>,
     ) -> anyhow::Result<()> {
         let rxs: Vec<ReceiverStream<_>> = receivers
@@ -280,17 +281,17 @@ impl PendingDeltas {
         let mut all_messages = stream::select_all(rxs);
 
         loop {
-            tokio::select! {
-                Some(message) = all_messages.next() => {
+            match all_messages.next().await {
+                Some(DeltaCommand::Block(message)) => {
                     // Skip partial messages - only full-block updates go to the reorg buffer.
                     if message.partial_block_index.is_none() {
-                            self.insert(message).map_err(|e| {
-                                error!(error = %e, "Failed to insert into PendingDeltas buffer");
-                                e
-                            })?;
-                        }
+                        self.insert(message).map_err(|e| {
+                            error!(error = %e, "Failed to insert into PendingDeltas buffer");
+                            e
+                        })?;
+                    }
                 }
-                Some(extractor_name) = reset_rx.recv() => {
+                Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
                     debug!(extractor = %extractor_name, "Resetting PendingDeltas buffer for extractor");
                     if let Some(buffer) = self.buffers.get(&extractor_name) {
                         match buffer.lock() {
@@ -304,14 +305,18 @@ impl PendingDeltas {
                                     error = %err,
                                     "Failed to lock buffer for reset"
                                 );
-                                return Err(PendingDeltasError::LockError(extractor_name.to_string(), err.to_string()).into());
+                                return Err(PendingDeltasError::LockError(
+                                    extractor_name,
+                                    err.to_string(),
+                                )
+                                .into());
                             }
                         }
                     } else {
                         warn!(extractor = %extractor_name, "No buffer found for reset — extractor unknown");
                     }
                 }
-                else => {
+                None => {
                     info!("All PendingDeltas streams ended");
                     break;
                 }

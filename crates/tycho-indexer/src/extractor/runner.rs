@@ -27,7 +27,7 @@ use crate::{
         dynamic_contract_indexer::{
             dci::DynamicContractIndexer, hooks::hook_dci::UniswapV4HookDCI,
         },
-        ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
+        DeltaCommand, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::rpc::v2::BlockScopedData,
     substreams::stream::{BlockResponse, SubstreamsStream},
@@ -159,7 +159,7 @@ pub struct ExtractorRunner {
     /// WS subscribers — managed by the supervisor, shared across restarts.
     ws_subscriptions: Arc<Mutex<SubscriptionsMap>>,
     /// Dedicated channel for PendingDeltasBuffer — survives restarts.
-    pending_deltas_tx: Option<Sender<ExtractorMsg>>,
+    pending_deltas_tx: Option<Sender<DeltaCommand>>,
     /// Oneshot stop signal from the supervisor.
     stop_rx: oneshot::Receiver<()>,
     /// Handle of the tokio runtime on which the extraction tasks will be run.
@@ -173,7 +173,7 @@ impl ExtractorRunner {
         extractor: Arc<dyn Extractor>,
         substreams: SubstreamsStream,
         ws_subscriptions: Arc<Mutex<SubscriptionsMap>>,
-        pending_deltas_tx: Option<Sender<ExtractorMsg>>,
+        pending_deltas_tx: Option<Sender<DeltaCommand>>,
         stop_rx: oneshot::Receiver<()>,
         runtime_handle: Option<Handle>,
         partial_blocks: bool,
@@ -394,13 +394,13 @@ impl ExtractorRunner {
     #[instrument(skip_all, fields(subscriber_count))]
     async fn propagate_msg(
         subscribers: &Arc<Mutex<SubscriptionsMap>>,
-        pending_deltas_tx: Option<&Sender<ExtractorMsg>>,
+        pending_deltas_tx: Option<&Sender<DeltaCommand>>,
         message: ExtractorMsg,
     ) {
         trace!(msg = %message, "Propagating message to subscribers.");
 
         if let Some(tx) = pending_deltas_tx {
-            if let Err(err) = tx.send(message.clone()).await {
+            if let Err(err) = tx.send(DeltaCommand::Block(message.clone())).await {
                 error!(error = %err, "Failed to send to PendingDeltas channel");
             }
         }

@@ -55,9 +55,7 @@ pub struct ServicesBuilder<G> {
     /// Active protocol systems derived from extractor config.
     protocol_systems: Vec<String>,
     /// Pre-built receivers for PendingDeltas (one per extractor).
-    pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::ExtractorMsg>>,
-    /// Channel for supervisors to signal PendingDeltas to reset a buffer.
-    reset_rx: Option<tokio::sync::mpsc::Receiver<String>>,
+    pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
 }
 
 impl<G> ServicesBuilder<G>
@@ -77,7 +75,6 @@ where
             dci_protocols: Vec::new(),
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
-            reset_rx: None,
         }
     }
 
@@ -126,14 +123,12 @@ where
         self
     }
 
-    /// Sets the pre-built receivers and reset channel for PendingDeltas.
+    /// Sets the pre-built receivers for PendingDeltas (one per extractor).
     pub fn pending_deltas(
         mut self,
-        rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::ExtractorMsg>>,
-        reset_rx: tokio::sync::mpsc::Receiver<String>,
+        rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     ) -> Self {
         self.pending_deltas_rxs = rxs;
-        self.reset_rx = Some(reset_rx);
         self
     }
 
@@ -168,16 +163,12 @@ where
         );
 
         let pending_deltas_rxs = std::mem::take(&mut self.pending_deltas_rxs);
-        let reset_rx = self.reset_rx.take().unwrap_or_else(|| {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            rx
-        });
 
         let pending_deltas_clone = pending_deltas.clone();
         let (start_tx, start_rx) = mpsc::sync_channel::<()>(1);
         let deltas_task = tokio::spawn(async move {
             pending_deltas_clone
-                .run(pending_deltas_rxs, reset_rx, start_tx)
+                .run(pending_deltas_rxs, start_tx)
                 .await
                 .map_err(|err| ExtractionError::Unknown(err.to_string()))
         });
