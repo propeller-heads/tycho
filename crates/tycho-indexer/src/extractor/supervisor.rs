@@ -695,14 +695,19 @@ async fn download_file_from_s3(
         .send()
         .await?;
 
-    let data = resp.body.collect().await.unwrap();
+    let data = resp
+        .body
+        .collect()
+        .await
+        .with_context(|| format!("Failed to read S3 response body for {key}"))?;
 
     if let Some(parent) = download_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directories for {parent:?}"))?;
     }
 
-    std::fs::write(download_path, data.into_bytes()).unwrap();
+    std::fs::write(download_path, data.into_bytes())
+        .with_context(|| format!("Failed to write {download_path:?}"))?;
 
     Ok(())
 }
