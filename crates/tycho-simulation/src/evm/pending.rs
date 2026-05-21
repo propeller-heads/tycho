@@ -41,6 +41,8 @@ pub enum PendingError {
     ParentNotYetConfirmed { needed: u64, current: u64 },
     #[error("decoder error: {0}")]
     Decoder(#[from] StreamDecodeError),
+    #[error("indexer error for extractor '{extractor}': {message}")]
+    Indexer { extractor: String, message: String },
 }
 
 /// Wires one or more [`TxDeltaIndexer`]s to an existing [`TychoStreamDecoder`], enabling
@@ -120,8 +122,8 @@ impl PendingBlockProcessor {
     /// Only needed when using the processor standalone (without
     /// [`ProtocolStreamBuilder::build_with_pending`](crate::evm::stream::ProtocolStreamBuilder::build_with_pending)).
     /// When using `build_with_pending`, confirmed blocks are forwarded automatically.
-    pub fn advance(&mut self, msg: &FeedMessage<BlockHeader>) {
-        self.advance_inner(msg);
+    pub fn advance(&mut self, msg: &FeedMessage<BlockHeader>) -> Result<(), PendingError> {
+        self.advance_inner(msg)
     }
 
     /// Simulates `txs` against the confirmed parent state of `target_block` and returns an
@@ -151,7 +153,7 @@ impl PendingBlockProcessor {
     ) -> Result<PendingUpdate, PendingError> {
         // Drain any confirmed blocks that have arrived since our last call.
         while let Ok(msg) = self.block_rx.try_recv() {
-            self.advance_inner(&msg);
+            self.advance_inner(&msg)?;
         }
 
         let parent = target_header.number.saturating_sub(1);
@@ -175,7 +177,7 @@ impl PendingBlockProcessor {
         Ok(PendingUpdate { label, update })
     }
 
-    fn advance_inner(&mut self, msg: &FeedMessage<BlockHeader>) {
+    fn advance_inner(&mut self, msg: &FeedMessage<BlockHeader>) -> Result<(), PendingError> {
         let msg_block = msg
             .state_msgs
             .values()
@@ -195,11 +197,15 @@ impl PendingBlockProcessor {
                     &state_msg.header,
                     self.chain,
                 );
-                indexer.apply_block(&block_changes);
+                indexer
+                    .apply_block(&block_changes)
+                    .map_err(|e| PendingError::Indexer { extractor: extractor.clone(), message: format!("{e:#}") })?;
             }
 
             if let Some(deltas) = &state_msg.deltas {
-                indexer.apply_block(deltas);
+                indexer
+                    .apply_block(deltas)
+                    .map_err(|e| PendingError::Indexer { extractor: extractor.clone(), message: format!("{e:#}") })?;
             }
         }
 
@@ -208,6 +214,7 @@ impl PendingBlockProcessor {
             // Receivers that have been dropped are silently ignored.
             let _ = self.confirmed_block_tx.send(msg_block);
         }
+        Ok(())
     }
 }
 

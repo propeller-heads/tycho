@@ -454,14 +454,22 @@ impl ProtocolStreamBuilder {
     /// The indexer is associated with `extractor` (the protocol synchronizer name, e.g.
     /// `"uniswap_v3"`). Use [`build_with_pending`](Self::build_with_pending) to obtain both
     /// the confirmed stream and the pending processor.
+    ///
+    /// Returns an error if `extractor` names a VM protocol (prefix `"vm:"`), which requires
+    /// `update_engine()` and cannot be simulated natively.
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,
         indexer: Box<dyn TxDeltaIndexer>,
-    ) -> Self {
+    ) -> Result<Self, StreamError> {
+        if extractor.starts_with("vm:") {
+            return Err(StreamError::SetUpError(format!(
+                "extractor '{extractor}' is a VM protocol; TxDeltaIndexer only supports native protocols"
+            )));
+        }
         self.pending_indexers
             .insert(extractor.to_string(), indexer);
-        self
+        Ok(self)
     }
 
     /// Builds the confirmed protocol stream and a [`PendingBlockProcessor`] that stays

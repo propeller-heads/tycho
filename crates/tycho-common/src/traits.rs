@@ -50,7 +50,7 @@ pub trait TxDeltaIndexer: Send {
     /// * `block` — a finalised [`BlockAggregatedChanges`] as received from the Tycho client. On the
     ///   first call this carries the full component and state snapshot; on later calls it carries
     ///   only the changed attributes and balances.
-    fn apply_block(&mut self, block: &BlockAggregatedChanges);
+    fn apply_block(&mut self, block: &BlockAggregatedChanges) -> anyhow::Result<()>;
 
     /// Applies a batch of in-flight transactions against the current state and
     /// returns the protocol state deltas they would produce.

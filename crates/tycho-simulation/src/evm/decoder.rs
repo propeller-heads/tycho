@@ -934,8 +934,8 @@ where
     /// supplied `pending_deltas`, and returns the result — **without writing back** to
     /// `DecoderState`. Calling this method twice with the same input produces identical results.
     ///
-    /// Only native protocols are supported: VM protocols that require `update_engine()` are
-    /// silently skipped (their pools will not appear in the returned `Update`).
+    /// Only native protocols are supported. VM protocols (extractor prefix `"vm:"`) are rejected
+    /// at registration time in [`with_pending_indexer`](crate::evm::stream::ProtocolStreamBuilder::with_pending_indexer).
     ///
     /// # Parameters
     /// * `pending_deltas` — map from extractor name to the `BlockAggregatedChanges` produced by the
