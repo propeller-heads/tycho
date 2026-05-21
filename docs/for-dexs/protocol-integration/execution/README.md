@@ -194,6 +194,22 @@ If your protocol uses `address(0)` (e.g., UniswapV4, Ekubo) or another sentinel 
 
 Balance checks before and after token transfers mean fee-on-transfer tokens and rebasing tokens work on most protocols. The exception is Uniswap V3-like protocols, which require declaring the exact input amount upfront but only transfer it inside a callback.
 
+## Security Requirements
+
+TychoRouter calls executors via `delegatecall`, so executor code runs within TychoRouter's context — it can freely transfer the router's assets and write to the router's storage, including users' vault balances. Follow this checklist when building or reviewing an executor.
+
+{% hint style="danger" %}
+**Executors run with TychoRouter's full privileges.** A bug or malicious executor can steal all router assets.
+{% endhint %}
+
+* **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Communicate transfer intent through `getTransferData` and `getCallbackTransferData` instead — TychoRouter performs the actual transfers with its own safeguards. The only exception is for native ETH transfers: this transfers must be handled inside the Executor and have a `transferType` of `TransferNativeInExecutor`.
+* **Never do ERC20 token approvals**. These are all handled by the TychoRouter.
+* **Never assign to a state variable** or perform any operation that writes to TychoRouter's storage.
+* **Do not execute `delegatecall`.** If a protocol makes it unavoidable, ensure the caller cannot control the `delegatecall` target — attacker-controlled targets enable arbitrary code execution within TychoRouter's context.
+* **Avoid trusting data sent via callback.** If necessary, call `verifyCallback` within `handleCallback` to confirm `msg.sender` is a valid pool from the expected protocol.
+* **`handleCallback`'s `data` argument** contains raw ABI-encoded calldata that the executor must decode manually.
+* **`handleCallback`'s return value** must be raw ABI-encoded return data that the executor encodes manually.
+
 ## Testing
 
 Each new integration must be thoroughly tested in both Rust and Solidity. This includes:

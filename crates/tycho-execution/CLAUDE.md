@@ -277,6 +277,27 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 6. Add integration tests in both `contracts/test/protocols/` and `tests/`
 7. Add test setup in `contracts/test/TychoRouterTestSetup.sol`
 
+## Security
+
+### Using TychoRouter (caller checklist)
+
+When writing code that calls TychoRouter swap functions:
+
+- **Always set `minAmountOut`** to the minimum acceptable output. Example: 1000 USDC at 5% slippage → `950 * 10**6`. Setting it to `1` may result in receiving just `1` due to faulty swap sequences, slippage, or an attack.
+- **Verify price data** for `minAmountOut` against at least one independent source. Incorrect price data may set `minAmountOut` too low.
+- **Never approve infinite allowances**, including Permit2. Set Permit2 allowance and deadline as low as practical.
+
+### Building Executors (executor checklist)
+
+Executors run via `delegatecall` inside TychoRouter — they have full access to the router's assets and storage.
+
+- **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Return transfer intent through `getTransferData`/`getCallbackTransferData`; TychoRouter performs the actual transfers.
+- **Never write to state variables.** Any storage write in an executor writes to TychoRouter's storage.
+- **Do not execute `delegatecall`.** If unavoidable, ensure the caller cannot control the target address.
+- **Verify callback origin.** Call `verifyCallback` inside `handleCallback` to confirm `msg.sender` is a valid pool.
+- `handleCallback`'s `data` argument is raw ABI-encoded calldata the executor must decode manually.
+- `handleCallback`'s return value must be raw ABI-encoded data the executor encodes manually.
+
 ## Conventions
 
 ### Solidity

@@ -6,10 +6,6 @@ description: Execute swaps through any protocol.
 
 <figure><img src="../../.gitbook/assets/image (8).png" alt=""><figcaption></figcaption></figure>
 
-{% hint style="danger" %}
-**Router V3 is still undergoing an audit.** Use at your own discretion. Funds stored in the router (including vault deposits) might be lost.
-{% endhint %}
-
 Tycho Execution provides tools for **encoding and executing swaps** against Tycho Router and protocol executors. It is divided into two main components:
 
 * **Encoding**: A Rust crate that encodes swaps and generates calldata for execution.
@@ -51,10 +47,17 @@ More on the Vault [here](vault.md).
 
 ## Security and Audits
 
-The Tycho Router V2 has been audited by <a href="https://snd.github.io/" target="_blank" rel="noopener noreferrer">Maximilian Krüger</a>. Past audits are <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/docs/audits" target="_blank" rel="noopener noreferrer">here</a>.
+The Tycho Router V2 and V3 have been audited by <a href="https://snd.github.io/" target="_blank" rel="noopener noreferrer">Maximilian Krüger</a>. Past audits are <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-execution/docs/audits" target="_blank" rel="noopener noreferrer">here</a>.
 
-{% hint style="danger" %}
-**Router V3 is still undergoing an audit.** Use at your own discretion. Funds stored in the router (including vault deposits) might be lost.
-{% endhint %}
+### Security Checklist
+
+Follow this checklist when using TychoRouter. It covers essential security requirements but is not exhaustive.
+
+* **Always set `minAmountOut`** on TychoRouter's `swap...` functions to the minimum acceptable output amount.
+  * Example: if you expect 1000 USDC and accept 5% slippage, set `minAmountOut` to `950 * 10**6`.
+  * Setting `minAmountOut` to `1` means you may receive just `1` due to faulty swap sequences, slippage or an attack.
+* **Verify the price data used for `minAmountOut`** against at least one other independent price source. Incorrect price data may set `minAmountOut` too low, resulting in significant losses.
+* **Never approve infinite allowances**, including those for Permit2.
+* **Set Permit2 allowance and deadline as low as is practical.**
 
 If you discover potential security issues or have suggestions for improvements, please reach out through our official channels.

@@ -1,41 +1,60 @@
 {
   "ethereum": {
-    "uniswap_v2": "0x79087ADB525a6D4e20799AE68Ac06dE0a15c278E",
-    "sushiswap_v2": "0x79087ADB525a6D4e20799AE68Ac06dE0a15c278E",
-    "pancakeswap_v2": "0x3201ea6B93731F30e55Cb87660eEd70B369fadC7",
-    "uniswap_v3": "0xc7d47F3C3f755ed977f3C19F4C1f007CbEd109b0",
-    "pancakeswap_v3": "0xc7d47F3C3f755ed977f3C19F4C1f007CbEd109b0",
-    "uniswap_v4": "0xA942c54f2E58153eCdD4DD24B9bF98F57c9D7d55",
-    "vm:balancer_v2": "0x9D517d5a3A3266fbD75b1Ad4fe6CfC40087Cfdc0",
-    "ekubo_v2": "0x25b670A94a376254Bac2B5f16B0Dc040Df44d1EC",
-    "vm:curve": "0xAF0E1ac9EA1A81120bf4f285340ac70e41c9D65f",
-    "vm:maverick_v2": "0x95E8D6E3997D98170ab7243DFeCF93B5f5e25BED",
-    "vm:balancer_v3": "0x8594ac3486B6c68DF5Bf5F9aDd25FdcaC69F2588",
-    "rfq:bebop": "0xD74644F4ed013DC5f63fe2a576e5fBF6070AEC00",
-    "rfq:hashflow": "0x93Fc40cD88B54f2CBCbF182fa1c78522805B213A",
-    "fluid_v1": "0xAE3ceee21CB9Be4C6C70dE0912947B537bC00b61",
-    "rocketpool": "0x6Ad86dec4c9b897640730eaEdF8ff4659A3be8BE",
-    "erc4626": "0x11C1951e404e1a2A18a046F22501019a02C23D0B",
-    "ekubo_v3": "0x128BA676f1426D0260f7f1EEDD799777dbe12fdb",
-    "weth": "0x8b2042d7be0be18303464362d39d667ca5e74d42",
-    "rfq:liquorice": "0xAC51c531555b7154Fe1BCB7cF4508E93A3BEDa75",
+    "uniswap_v2": "0x0017c84f2B3414514B67Bfc9a63830c8E0E690d0",
+    "sushiswap_v2": "0x0017c84f2B3414514B67Bfc9a63830c8E0E690d0",
+    "pancakeswap_v2": "0xFb89Ca30E5Ff1863237dD24aAF2189bD1cA6CC0D",
+    "uniswap_v3": "0x667cB014F2b3C470b53089d984c3CCA840d23052",
+    "pancakeswap_v3": "0x667cB014F2b3C470b53089d984c3CCA840d23052",
+    "uniswap_v4": "0xD2798b649E965E5d33FD7D36C87b1fD6709d0B04",
+    "vm:balancer_v2": "0x38e6Dca40C5c96Ca4F5e3F7583571E723F11836f",
+    "ekubo_v2": "0xfee95e97db5FdFcde672B9A06F4be87032Dd7689",
+    "vm:curve": "0xF7561795536Ede0f4122BeD2Cc9328511E1f7135",
+    "vm:maverick_v2": "0xeCD7D651C0D5E477018c0949a01a46350461c8ED",
+    "vm:balancer_v3": "0xf9AE8127E35612DA9d750058fCf61f326E00cA10",
+    "rfq:bebop": "0x1f6ECC09b7753B1f637Ed702Ade44B5Ba034DD5A",
+    "rfq:hashflow": "0xBc7C1E078865bb81938aDDDf24582EeDD17324c7",
+    "fluid_v1": "0xAB081CBB3c88219A030928Ece277feAd99cAB742",
+    "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
+    "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
+    "ekubo_v3": "0xc77A1a9B8ebecc6bFB386720E0A37Bc900860f5b",
+    "weth": "0x67DD87c719D0EA8499346693978CBEE1a743eEC9",
+    "rfq:liquorice": "0x3Bd39a3606b9DC0afD07Ea1c865C4583d94cBa60",
     "vm:liquidityparty": "0x1F8b52899DCf1Be69eaFc754cA3E099Ff15F03aE"
   },
   "base": {
-    "uniswap_v2": "0xD689b184C250E543eB3938D524733Ff6B4cfC296",
-    "uniswap_v3": "0x6e644B877c1247c8ab8613fE0787a7B444768d23",
-    "pancakeswap_v3": "0x6e644B877c1247c8ab8613fE0787a7B444768d23",
-    "uniswap_v4": "0x711EA5D03541AB0ee84711D1ED92B5De0bB178c1",
-    "rfq:bebop": "0xbfb5fBfD4C4182D3A1df91CEd45335C543BED3f0",
-    "aerodrome_slipstreams": "0x8fccDb466b71B715355919b3Db0f6B14bfba9dD7",
-    "weth": "0xa2f2d75F08cdf36AdD125Da906D42737527E4E30"
+    "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
+    "uniswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
+    "pancakeswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
+    "uniswap_v4": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
+    "rfq:bebop": "0xcDf4E28676b9f2e8C6a722Eb163e0c2f9c0716B7",
+    "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
+    "weth": "0x8aE978713c6952041d058D8a3fe3a2568f1e1aE1"
   },
   "unichain": {
-    "uniswap_v2": "0x6794ce07fddc3bb5f747b4510d0ebb0d11a03f2c",
-    "uniswap_v3": "0x7270991eb529c7e45a3ec98de542b01e4da32d82",
-    "uniswap_v4": "0x45356073646354f162982bed83c71ef0f310e201",
-    "velodrome_slipstreams": "0xb208092276fde05cff20341049f1e384b1b31112",
-    "vm:curve": "0xbc4d9e944ad40480a34ebaf38cd2acf6e1dc0def",
-    "weth": "0x13AcF9532C173753484ed1Bef86C98cBfe83Ba90"
+    "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
+    "uniswap_v3": "0x0847Ec6467499a6F31FDd06B7dEB766649B2739B",
+    "uniswap_v4": "0x3AE67e7DCFa6c5aB36DA9dE3B67B7496956E0874",
+    "velodrome_slipstreams": "0xd9Ee40C6895De968b41b96253970B48Fe852e5eF",
+    "vm:curve": "0x685733eDB7654e540aB537eabC28b554646b69d0",
+    "weth": "0x50905E0f94350f9e533Cd275667AFC728265960D"
+  },
+  "arbitrum": {
+    "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
+    "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
+    "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
+    "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f"
+  },
+  "bsc": {
+    "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
+    "pancakeswap_v2": "0x0ECbE4a09eff3F4d054723720f60b55EE52bD99E",
+    "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
+    "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
+    "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed"
+  },
+  "polygon": {
+    "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
+    "quickswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
+    "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
+    "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA"
   }
 }
