@@ -641,15 +641,15 @@ where
 
                     // TEMP PATCH (ENG-4993)
                     //
-                    // The indexer emits deltas without code marked as creations, which crashes
-                    // TychoDB. Until fixed, treat them as updates (since EVM code cannot be
-                    // deleted).
+                    // The indexer may emit Creation deltas with no code for EOA addresses.
+                    // Treat them as EOAs (empty code) rather than downgrading to Update, which
+                    // would skip init_account and cause "uninitialized account" warnings.
                     if update.code.is_none() && matches!(update.change, ChangeType::Creation) {
                         error!(
                             update = ?update,
                             "FaultyCreationDelta"
                         );
-                        update.change = ChangeType::Update;
+                        update.code = Some(vec![]);
                     }
 
                     if state_guard.tokens.contains_key(key) {
