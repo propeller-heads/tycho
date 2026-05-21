@@ -1,0 +1,117 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_fermiswap"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_fermiswap.wasm
+
+network: mainnet
+networks:
+  mainnet:
+    initialBlock:
+      map_pair_changes: 24950669
+      store_pairs: 24950669
+      map_protocol_components: 24950669
+      store_protocol_tokens: 24950669
+      store_token_pairs: 24950669
+      map_vault_balance_deltas: 24950669
+      store_vault_token_balances: 24950669
+      map_protocol_changes: 24950669
+    params:
+      map_pair_changes: "engine_address=1038C87766E36D1925889e6F26D10e0012D50Fed&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&start_block=24950669&init_tx_hash=0xf8d76e714bb13d817cd04ca92d530f5bdc9a3ad614bb94991c29bbcfaa7dcc31"
+      map_vault_balance_deltas: "engine_address=1038C87766E36D1925889e6F26D10e0012D50Fed&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&start_block=24950669&init_tx_hash=0xf8d76e714bb13d817cd04ca92d530f5bdc9a3ad614bb94991c29bbcfaa7dcc31"
+      map_protocol_changes: "engine_address=1038C87766E36D1925889e6F26D10e0012D50Fed&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&start_block=24950669&init_tx_hash=0xf8d76e714bb13d817cd04ca92d530f5bdc9a3ad614bb94991c29bbcfaa7dcc31"
+
+params:
+  map_pair_changes: "engine_address=1038C87766E36D1925889e6F26D10e0012D50Fed&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&start_block=24950669&init_tx_hash=0xf8d76e714bb13d817cd04ca92d530f5bdc9a3ad614bb94991c29bbcfaa7dcc31"
+  map_vault_balance_deltas: "engine_address=1038C87766E36D1925889e6F26D10e0012D50Fed&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&start_block=24950669&init_tx_hash=0xf8d76e714bb13d817cd04ca92d530f5bdc9a3ad614bb94991c29bbcfaa7dcc31"
+  map_protocol_changes: "engine_address=1038C87766E36D1925889e6F26D10e0012D50Fed&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&start_block=24950669&init_tx_hash=0xf8d76e714bb13d817cd04ca92d530f5bdc9a3ad614bb94991c29bbcfaa7dcc31"
+
+modules:
+  - name: map_pair_changes
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pairs
+    kind: store
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_pair_changes
+
+  - name: map_protocol_components
+    kind: map
+    inputs:
+      - map: map_pair_changes
+      - store: store_pairs
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_protocol_tokens
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: int64
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_token_pairs
+    kind: store
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_vault_balance_deltas
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_tokens
+        mode: deltas
+      - store: store_protocol_tokens
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_vault_token_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_vault_balance_deltas
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pair_changes
+      - map: map_protocol_components
+      - map: map_vault_balance_deltas
+      - store: store_vault_token_balances
+        mode: get
+      - store: store_vault_token_balances
+        mode: deltas
+      - store: store_pairs
+        mode: get
+      - store: store_token_pairs
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
