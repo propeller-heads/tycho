@@ -38,7 +38,7 @@ use tycho_execution::encoding::{
         ROUTER_ETH_ADDRESS,
     },
     models,
-    models::{EncodedSolution, Solution, Swap, UserTransferType},
+    models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
     evm::{
@@ -720,9 +720,7 @@ fn encode_tycho_router_call(
     let is_native_in =
         solution.token_in() == &native_address || *solution.token_in() == *ROUTER_ETH_ADDRESS;
 
-    // ClientFeeParams: (clientFeeBps, clientFeeReceiver, maxClientContribution,
-    // deadline, clientSignature). Pass zeros for no-fee swaps.
-    let client_fee_params = (0u16, Address::ZERO, U256::ZERO, U256::ZERO, Vec::<u8>::new());
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
 
     let method_calldata = if is_native_in {
         // singleSwap (payable, no permit2)
