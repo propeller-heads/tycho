@@ -38,6 +38,9 @@ struct Cli {
     /// The target blockchain
     #[clap(long, default_value = "ethereum")]
     pub chain: String,
+    /// Disable TLS (for local/self-hosted Tycho instances)
+    #[arg(long, default_value_t = false)]
+    no_tls: bool,
 }
 
 fn register_exchanges(
@@ -89,6 +92,20 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
+        Chain::Polygon => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Arbitrum => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
         _ => {}
     }
     builder
@@ -107,11 +124,12 @@ async fn main() {
         get_default_url(&chain).unwrap_or_else(|| panic!("Unknown URL for chain {}", cli.chain))
     });
 
-    let tycho_api_key: String =
-        env::var("TYCHO_API_KEY").unwrap_or_else(|_| "sampletoken".to_string());
+    let tycho_api_key: Option<String> = env::var("TYCHO_API_KEY").ok();
+    let no_tls = cli.no_tls;
+    if no_tls {
+        eprintln!("Warning: TLS is disabled. Only use this for local/self-hosted Tycho instances.");
+    }
 
-    // Perform an early check to ensure `RPC_URL` is set.
-    // This prevents errors from occurring later during UI interactions for curve.
     if chain == Chain::Ethereum {
         env::var("RPC_URL").expect("RPC_URL env variable should be set");
     }
@@ -122,8 +140,8 @@ async fn main() {
     let tycho_message_processor: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         let all_tokens = load_all_tokens(
             tycho_url.as_str(),
-            false,
-            Some(tycho_api_key.as_str()),
+            no_tls,
+            tycho_api_key.as_deref(),
             true,
             chain,
             None,
@@ -137,7 +155,8 @@ async fn main() {
         let tvl_filter = ComponentFilter::with_tvl_range(tvl_threshold, tvl_threshold);
         let mut protocol_stream =
             register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter)
-                .auth_key(Some(tycho_api_key.clone()))
+                .auth_key(tycho_api_key.clone())
+                .no_tls(no_tls)
                 .skip_state_decode_failures(true)
                 .set_tokens(all_tokens)
                 .await

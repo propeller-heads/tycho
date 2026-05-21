@@ -82,6 +82,9 @@ struct Cli {
     tvl_threshold: Option<f64>,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
+    /// Disable TLS (for local/self-hosted Tycho instances)
+    #[arg(long, default_value_t = false)]
+    no_tls: bool,
     /// Path to blocklist TOML config file
     #[arg(long)]
     blocklist_file: Option<std::path::PathBuf>,
@@ -96,6 +99,8 @@ impl Cli {
                 "ethereum" => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
                 "base" => "0x4200000000000000000000000000000000000006".to_string(),
                 "unichain" => "0x4200000000000000000000000000000000000006".to_string(),
+                "polygon" => "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270".to_string(),
+                "arbitrum" => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -105,6 +110,8 @@ impl Cli {
                 "ethereum" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                 "base" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
                 "unichain" => "0x078d782b760474a361dda0af3839290b0ef57ad6".to_string(),
+                "polygon" => "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359".to_string(),
+                "arbitrum" => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -129,8 +136,11 @@ async fn main() {
             .unwrap_or_else(|| panic!("Unknown URL for chain {chain}", chain = cli.chain))
     });
 
-    let tycho_api_key: String =
-        env::var("TYCHO_API_KEY").unwrap_or_else(|_| "sampletoken".to_string());
+    let tycho_api_key: Option<String> = env::var("TYCHO_API_KEY").ok();
+    let no_tls = cli.no_tls;
+    if no_tls {
+        eprintln!("Warning: TLS is disabled. Only use this for local/self-hosted Tycho instances.");
+    }
 
     let tvl_threshold = cli
         .tvl_threshold
@@ -142,8 +152,8 @@ async fn main() {
     println!("Loading tokens from Tycho... {url}", url = tycho_url.as_str());
     let all_tokens = load_all_tokens(
         tycho_url.as_str(),
-        false,
-        Some(tycho_api_key.as_str()),
+        no_tls,
+        tycho_api_key.as_deref(),
         true,
         chain,
         None,
@@ -234,6 +244,20 @@ async fn main() {
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
+        Chain::Polygon => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Arbitrum => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
         _ => {}
     }
 
@@ -242,7 +266,8 @@ async fn main() {
     protocol_stream = protocol_stream.blocklist_components(blocklist);
 
     let mut protocol_stream = protocol_stream
-        .auth_key(Some(tycho_api_key.clone()))
+        .auth_key(tycho_api_key.clone())
+        .no_tls(no_tls)
         .skip_state_decode_failures(true)
         .set_tokens(all_tokens.clone())
         .await
