@@ -166,8 +166,11 @@ mod test {
         let changes = get_block_storage_changes(&block);
 
         let mut balance_map: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let mut storage_map: HashMap<String, HashMap<String, HashMap<String, (String, String)>>> =
-            HashMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut storage_map: HashMap<
+            String,
+            HashMap<String, HashMap<String, (String, String)>>,
+        > = HashMap::new();
         for change in changes {
             let tx_hash = change.tx.unwrap().hash.clone();
             let balance_tx_entry = balance_map

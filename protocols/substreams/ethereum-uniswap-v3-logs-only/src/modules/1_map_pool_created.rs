@@ -6,7 +6,7 @@ use substreams_ethereum::pb::eth::v2::{self as eth};
 
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 
-use crate::abi::factory::events::PoolCreated;
+use uniswap_v3_core::abi::factory::events::PoolCreated;
 
 use tycho_substreams::prelude::*;
 

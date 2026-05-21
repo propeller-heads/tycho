@@ -16,8 +16,9 @@ num-bigint = "0.4.4"
 prost = "0.11"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
-substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.4.0" }
-tycho-substreams = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.4.0" }
+substreams-helper = { path = "../crates/substreams-helper" }
+tycho-substreams = { path = "../crates/tycho-substreams" }
+uniswap-v3-core = { path = "../../crates/uniswap-v3" }
 
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
