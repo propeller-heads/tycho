@@ -1,3 +1,26 @@
+## [0.299.0](https://github.com/propeller-heads/tycho-indexer/compare/0.298.0...0.299.0) (2026-05-21)
+
+
+### Features
+
+* add arbitrum executors to deployment script ([b7f82f1](https://github.com/propeller-heads/tycho-indexer/commit/b7f82f1efc385116afc6804107f1b3cde98db15a))
+* Base deployment ([246b7cb](https://github.com/propeller-heads/tycho-indexer/commit/246b7cb191dc08faca807212437689efb5b6d6e8))
+* bsc executor deployment params ([88aee49](https://github.com/propeller-heads/tycho-indexer/commit/88aee494402c480e27ab31445301e418d065be0a))
+* polygon deployment ([8f08f95](https://github.com/propeller-heads/tycho-indexer/commit/8f08f95a0a3f826388966aa21c8bfb7e07e966d1))
+* Router V3 Deployment ([#1020](https://github.com/propeller-heads/tycho-indexer/issues/1020)) ([924c511](https://github.com/propeller-heads/tycho-indexer/commit/924c5111de0a6caf6939672f87f04e515286b347))
+* **router-v3:** Deploy on Arbitrum ([149610d](https://github.com/propeller-heads/tycho-indexer/commit/149610d44914a3413471f0fc6d0564c670b52040))
+* **router-v3:** Deploy on BSC ([15eb8f8](https://github.com/propeller-heads/tycho-indexer/commit/15eb8f8c5e0b69a97ae7d18a18177f4f5df98d34))
+* **router-v3:** Deploy on ethereum ([f6d5879](https://github.com/propeller-heads/tycho-indexer/commit/f6d58797c2dd267d83d87212f549a39b4adc7f92))
+* **router-v3:** Deploy on Unichain ([e2681a7](https://github.com/propeller-heads/tycho-indexer/commit/e2681a70efa5407e8f77cf07379412a00b1273de))
+
+
+### Bug Fixes
+
+* **integration-test:** add infinite retries for state synchronizer ([5461461](https://github.com/propeller-heads/tycho-indexer/commit/546146134dba0609f35432ee5b761e9bb7d833ee))
+* **integration-test:** add infinite retries for state synchronizer ([#1027](https://github.com/propeller-heads/tycho-indexer/issues/1027)) ([a3ac0ae](https://github.com/propeller-heads/tycho-indexer/commit/a3ac0aecf915022270af7b64e9de2967d421e4ae))
+* **integration-test:** increase startup timeout to 1000s for slow extractors ([cb3c1b0](https://github.com/propeller-heads/tycho-indexer/commit/cb3c1b04c46b1f1d733e462c0436308f83801ad0))
+* **quickstart:** support router v3 ([81de012](https://github.com/propeller-heads/tycho-indexer/commit/81de01241d79cbfb772093263b34e5ce20ccbb21))
+
 ## [0.298.0](https://github.com/propeller-heads/tycho-indexer/compare/0.297.2...0.298.0) (2026-05-21)
 
 

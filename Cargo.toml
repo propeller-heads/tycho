@@ -17,7 +17,7 @@ members = [
 # protocols/substreams/ is intentionally excluded — separate WASM workspace, different toolchain
 
 [workspace.package]
-version = "0.298.0"
+version = "0.299.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/propeller-heads/tycho"
@@ -29,16 +29,16 @@ readme = "README.md"
 
 [workspace.dependencies]
 # --- Internal crates (path deps) ---
-tycho                  = { path = "crates/tycho",                  version = "0.298.0" }
-tycho-common           = { path = "crates/tycho-common",           version = "0.298.0" }
-tycho-client           = { path = "crates/tycho-client",           version = "0.298.0" }
-tycho-storage          = { path = "crates/tycho-storage",          version = "0.298.0" }
-tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.298.0" }
-tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.298.0" }
-tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.298.0" }
-tycho-test             = { path = "crates/tycho-test",             version = "0.298.0" }
-tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.298.0" }
-tycho-execution        = { path = "crates/tycho-execution",        version = "0.298.0" }
+tycho                  = { path = "crates/tycho",                  version = "0.299.0" }
+tycho-common           = { path = "crates/tycho-common",           version = "0.299.0" }
+tycho-client           = { path = "crates/tycho-client",           version = "0.299.0" }
+tycho-storage          = { path = "crates/tycho-storage",          version = "0.299.0" }
+tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.299.0" }
+tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.299.0" }
+tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.299.0" }
+tycho-test             = { path = "crates/tycho-test",             version = "0.299.0" }
+tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.299.0" }
+tycho-execution        = { path = "crates/tycho-execution",        version = "0.299.0" }
 
 # --- Serialization/Deserialization ---
 serde = { version = "1.0.204", features = ["rc", "derive"] }
