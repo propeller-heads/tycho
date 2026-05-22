@@ -118,14 +118,14 @@ jobs:
           cargo publish -p tycho-storage --locked --dry-run
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
-      - name: Publish tycho-simulation
-        run: >
-          cargo publish -p tycho-simulation --locked
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
       - name: Publish tycho-execution
         run: >
           cargo publish -p tycho-execution --locked
+          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+
+      - name: Publish tycho-simulation
+        run: >
+          cargo publish -p tycho-simulation --locked
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index wave 3
