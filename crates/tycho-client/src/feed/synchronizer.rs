@@ -128,9 +128,10 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     compression: bool,
     partial_blocks: bool,
     uses_dci: bool,
-    /// Background snapshot tasks spawned for new components. Drained at the start of each delta
-    /// iteration; ready results are applied to the tracker and included in that block's message.
-    pending_snapshots: Vec<PendingSnapshot>,
+    /// Background snapshot tasks spawned for new components. Each task may be in-flight or
+    /// finished; completed ones are harvested at the start of each delta iteration and their
+    /// results included in that block's message.
+    snapshot_tasks: Vec<SnapshotTask>,
     /// Unfiltered deltas buffered while any snapshot task is in-flight, starting from the block
     /// at which the oldest task was spawned. Applied to each snapshot at drain time to reconstruct
     /// the component's current state.
@@ -238,7 +239,7 @@ struct SnapshotFetchResult {
     snapshot_block: u64,
 }
 
-struct PendingSnapshot {
+struct SnapshotTask {
     component_ids: Vec<String>,
     snapshot_block: u64,
     receiver: oneshot::Receiver<Result<SnapshotFetchResult, SynchronizerError>>,
@@ -437,7 +438,7 @@ where
             compression,
             partial_blocks: false,
             uses_dci: false,
-            pending_snapshots: Vec::new(),
+            snapshot_tasks: Vec::new(),
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
         }
@@ -697,19 +698,18 @@ where
                             debug!(block_number=?header.number, "Received delta message");
 
                             // Buffer unfiltered delta while any snapshot task is in-flight.
-                            if !self.pending_snapshots.is_empty() {
+                            if !self.snapshot_tasks.is_empty() {
                                 self.buffered_deltas.push(deltas.clone());
                             }
 
-                            // Drain any background snapshot tasks that have completed.
                             let background_snapshots = self.drain_completed_snapshots();
 
                             // Trim buffered_deltas: discard blocks no longer needed by any pending task.
-                            if self.pending_snapshots.is_empty() {
+                            if self.snapshot_tasks.is_empty() {
                                 self.buffered_deltas.clear();
                             } else {
                                 let oldest_pending_block = self
-                                    .pending_snapshots
+                                    .snapshot_tasks
                                     .iter()
                                     .map(|p| p.snapshot_block)
                                     .min()
@@ -952,7 +952,7 @@ where
     ) {
         let snapshot_block = snapshot_header.number;
 
-        if self.pending_snapshots.is_empty() {
+        if self.snapshot_tasks.is_empty() {
             self.buffered_deltas
                 .push(current_delta.clone());
         }
@@ -975,15 +975,15 @@ where
             self.snapshot_queue
                 .insert(id.clone(), SnapshotStatus::InFlight);
         }
-        self.pending_snapshots
-            .push(PendingSnapshot { component_ids, snapshot_block, receiver: rx });
+        self.snapshot_tasks
+            .push(SnapshotTask { component_ids, snapshot_block, receiver: rx });
     }
 
     /// Drains any background snapshot tasks that have completed. Returns a `Snapshot` containing
     /// all ready results, with buffered deltas applied to bring each snapshot up to date.
     fn drain_completed_snapshots(&mut self) -> Snapshot {
         let mut result = Snapshot::default();
-        let pending = std::mem::take(&mut self.pending_snapshots);
+        let pending = std::mem::take(&mut self.snapshot_tasks);
 
         for mut p in pending {
             match p.receiver.try_recv() {
@@ -1043,7 +1043,7 @@ where
                     }
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    self.pending_snapshots.push(p);
+                    self.snapshot_tasks.push(p);
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     warn!(
