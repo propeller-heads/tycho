@@ -525,26 +525,39 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
             match responses.get(response_id) {
                 Some(response) => {
-                    // Check for errors
-                    let response_value = match response {
-                        Err(error) => {
-                            results.insert(
-                                metadata.token,
-                                Err(SlotDetectorError::RequestError(format!(
-                                    "Slot test call failed: {error}",
-                                ))),
-                            );
-                            continue;
-                        }
-                        Ok(response_value) => response_value,
-                    };
-
                     let (storage_addr, slot) = &metadata
                         .all_slots
                         .first()
                         .expect("all_slots should not be empty")
                         .0
                         .clone();
+
+                    // On transport errors (e.g. Arbitrum disallows overriding
+                    // precompile addresses), drop this candidate and retry.
+                    let response_value = match response {
+                        Err(error) => {
+                            metadata
+                                .all_slots
+                                .retain(|s| s.0 != (storage_addr.clone(), slot.clone()));
+                            if !metadata.all_slots.is_empty() {
+                                warn!(
+                                    token = %metadata.token,
+                                    error = %error,
+                                    "Slot test call failed - trying next slot"
+                                );
+                                retry_data.push(metadata);
+                            } else {
+                                results.insert(
+                                    metadata.token,
+                                    Err(SlotDetectorError::RequestError(format!(
+                                        "Slot test call failed: {error}",
+                                    ))),
+                                );
+                            }
+                            continue;
+                        }
+                        Ok(response_value) => response_value,
+                    };
 
                     match self.extract_u256_from_call_response(response_value) {
                         Ok(returned_value) => {
@@ -635,8 +648,11 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::primitives::{Address as AlloyAddress, U256};
-    use serde_json::json;
+    use alloy::{
+        primitives::{Address as AlloyAddress, U256},
+        transports::TransportResult,
+    };
+    use serde_json::{json, Value};
     use tycho_common::{
         models::{Address, BlockHash},
         Bytes,
@@ -1017,6 +1033,72 @@ mod tests {
         assert_eq!(retry_data[0].all_slots[0].0 .1, slot_b);
         // No final result yet — token is still being retried
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_transport_error_schedules_retry_with_remaining() {
+        let detector = TestFixture::create_slot_detector_without_rpc();
+
+        let token = Address::from([0x11u8; 20]);
+        let precompile_addr = Address::from([0xAAu8; 20]);
+        let slot_a = Bytes::from(vec![0x01u8; 32]);
+        let slot_b = Bytes::from(vec![0x02u8; 32]);
+
+        let slots_to_test = vec![SlotMetadata {
+            token: token.clone(),
+            original_value: U256::ZERO,
+            test_value: U256::from(1_000_000_000_000_000_000u64),
+            all_slots: vec![
+                ((precompile_addr.clone(), slot_a.clone()), U256::ZERO),
+                ((token.clone(), slot_b.clone()), U256::ZERO),
+            ],
+        }];
+
+        let responses: Vec<TransportResult<Value>> = vec![Err(
+            alloy::transports::RpcError::LocalUsageError(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "overriding address not allowed",
+            ))),
+        )];
+
+        let mut results = HashMap::new();
+        let retry_data =
+            detector.process_slot_test_responses(responses, slots_to_test, &mut results);
+
+        assert_eq!(retry_data.len(), 1, "Should schedule retry with remaining slot");
+        assert_eq!(retry_data[0].all_slots.len(), 1);
+        assert_eq!(retry_data[0].all_slots[0].0 .1, slot_b);
+        assert!(results.is_empty(), "No final result yet — token is still being retried");
+    }
+
+    #[test]
+    fn test_transport_error_with_no_remaining_slots_is_terminal() {
+        let detector = TestFixture::create_slot_detector_without_rpc();
+
+        let token = Address::from([0x11u8; 20]);
+        let slot_a = Bytes::from(vec![0x01u8; 32]);
+
+        let slots_to_test = vec![SlotMetadata {
+            token: token.clone(),
+            original_value: U256::ZERO,
+            test_value: U256::from(1_000_000_000_000_000_000u64),
+            all_slots: vec![((token.clone(), slot_a.clone()), U256::ZERO)],
+        }];
+
+        let responses: Vec<TransportResult<Value>> = vec![Err(
+            alloy::transports::RpcError::LocalUsageError(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "overriding address not allowed",
+            ))),
+        )];
+
+        let mut results = HashMap::new();
+        let retry_data =
+            detector.process_slot_test_responses(responses, slots_to_test, &mut results);
+
+        assert!(retry_data.is_empty(), "No more slots to retry");
+        assert!(results.contains_key(&token));
+        assert!(matches!(results[&token], Err(SlotDetectorError::RequestError(_))));
     }
 
     #[test]
