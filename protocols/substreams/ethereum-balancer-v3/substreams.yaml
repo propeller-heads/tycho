@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_balancer_v3"
-  version: v0.4.0
+  version: v0.4.1
 
 protobuf:
   files:
