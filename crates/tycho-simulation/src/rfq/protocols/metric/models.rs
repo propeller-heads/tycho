@@ -36,29 +36,12 @@ impl MetricOracleUpdatePolicy {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricMetadata {
-    pub pair: String,
     #[serde(rename = "poolAddress", deserialize_with = "deserialize_address")]
     pub pool_address: Bytes,
-    #[serde(
-        rename = "priceProvider_address",
-        alias = "priceProviderAddress",
-        deserialize_with = "deserialize_address"
-    )]
-    pub price_provider_address: Bytes,
-    #[serde(
-        rename = "quoterAddress",
-        alias = "routerAddress",
-        deserialize_with = "deserialize_address"
-    )]
-    pub quoter_address: Bytes,
     #[serde(deserialize_with = "deserialize_address")]
     pub token0: Bytes,
     #[serde(deserialize_with = "deserialize_address")]
     pub token1: Bytes,
-    #[serde(rename = "cexStep")]
-    pub cex_step: Option<f64>,
-    #[serde(rename = "dexStep")]
-    pub dex_step: Option<f64>,
 }
 
 fn deserialize_address<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
@@ -72,7 +55,6 @@ where
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricBidAskResponse {
-    pub pair: String,
     #[serde(rename = "bidAdj")]
     pub bid_adj: String,
     #[serde(rename = "askAdj")]
@@ -85,12 +67,6 @@ pub struct MetricBidAskResponse {
     pub total_token1_available: String,
     #[serde(rename = "latestBlock")]
     pub latest_block: u64,
-    #[serde(rename = "blockTs")]
-    pub block_ts: u64,
-    #[serde(rename = "serverTs")]
-    pub server_ts: u64,
-    #[serde(rename = "quoteExpiration")]
-    pub quote_expiration: u64,
     #[serde(default)]
     pub depth: MetricDepth,
 }
@@ -110,16 +86,10 @@ pub struct MetricDepthBin {
     pub price: String,
     #[serde(rename = "cumulativeVolume")]
     pub cumulative_volume: String,
-    #[serde(rename = "priceImpactE6")]
-    pub price_impact_e6: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricSignedOracleUpdateResponse {
-    #[serde(rename = "blockTs")]
-    pub block_ts: u64,
-    #[serde(rename = "serverTs")]
-    pub server_ts: u64,
     #[serde(rename = "feedCreator", deserialize_with = "deserialize_address")]
     pub feed_creator: Bytes,
     #[serde(default)]
@@ -128,16 +98,10 @@ pub struct MetricSignedOracleUpdateResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricSignedOracleUpdateSlot {
-    #[serde(rename = "slotId")]
-    pub slot_id: u64,
     pub deadline: u64,
-    #[serde(rename = "slotPairs", default)]
-    pub slot_pairs: Vec<String>,
     #[serde(rename = "newSlotValue")]
     pub new_slot_value: String,
     pub signature: Bytes,
-    #[serde(default)]
-    pub prices: serde_json::Value,
 }
 
 impl MetricBidAskResponse {
@@ -168,8 +132,7 @@ impl MetricDepthBin {
     }
 }
 
-// Metric's APIs return Q64 values as decimal strings. We only convert them for indicative
-// routing; the binding quote path keeps the original Q64 strings for calldata encoding.
+// Metric's APIs return Q64 values as decimal strings. Convert only when pricing.
 pub fn q64_decimal_to_f64(value: &str) -> Result<f64, RFQError> {
     let raw = parse_biguint(value, "Q64 price")?;
     let raw = raw
@@ -196,16 +159,12 @@ mod tests {
     #[test]
     fn test_bid_ask_deserializes_depth_bins() {
         let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
-            "pair": "wethusdc",
             "bidAdj": "55340232221128654848000",
             "askAdj": "55524699661865750400000",
             "quoteAvailable": true,
             "totalToken0Available": "1000000000000000000",
             "totalToken1Available": "3000000000",
             "latestBlock": 0,
-            "blockTs": 0,
-            "serverTs": 1,
-            "quoteExpiration": 0,
             "depth": {
                 "asks": [{
                     "binIdx": 0,

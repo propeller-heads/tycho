@@ -58,6 +58,7 @@ contract MockMetricPool {
     address public immutable token1;
     MockMetricOracle public immutable oracle;
     bool public immutable requireOracleUpdate;
+    uint128 public lastPriceLimitX64;
 
     constructor(
         address token0_,
@@ -75,9 +76,10 @@ contract MockMetricPool {
         address receiver,
         bool zeroForOne,
         int128 amountSpecified,
-        uint128, /* priceLimitX64 */
+        uint128 priceLimitX64,
         bytes calldata data
     ) external {
+        lastPriceLimitX64 = priceLimitX64;
         if (requireOracleUpdate) {
             require(oracle.updated(), "oracle not updated");
         }
@@ -213,7 +215,6 @@ contract MetricExecutorTest is Test {
     MetricExecutorExposed executor;
 
     address receiver = makeAddr("receiver");
-    address metricRouter = makeAddr("metricRouter");
 
     function setUp() public {
         token0 = new MetricToken("Token 0", "TK0");
@@ -257,6 +258,25 @@ contract MetricExecutorTest is Test {
         assertEq(token0.balanceOf(address(pool)), amountIn);
         assertEq(token1.balanceOf(receiver), amountIn * 2);
         assertEq(token0.balanceOf(address(executor)), 0);
+        assertEq(pool.lastPriceLimitX64(), 0);
+    }
+
+    function testSwapOneForZeroUsesMaxPriceLimit() public {
+        MockMetricPool pool = _pool(false);
+        uint256 amountIn = 100 ether;
+        token1.mint(address(executor), amountIn);
+        token0.mint(address(pool), amountIn * 2);
+
+        executor.swap(
+            amountIn,
+            _encodeData(address(pool), false, ORACLE_UPDATE_NEVER, ""),
+            receiver
+        );
+
+        assertEq(token1.balanceOf(address(pool)), amountIn);
+        assertEq(token0.balanceOf(receiver), amountIn * 2);
+        assertEq(token1.balanceOf(address(executor)), 0);
+        assertEq(pool.lastPriceLimitX64(), type(uint128).max);
     }
 
     function testSwapWithOracleUpdate() public {
@@ -417,9 +437,7 @@ contract MetricExecutorTest is Test {
             address(token0),
             address(token1),
             pool,
-            metricRouter,
-            bytes1(uint8(zeroForOne ? 1 : 0)),
-            bytes32(uint256(0))
+            bytes1(uint8(zeroForOne ? 1 : 0))
         );
     }
 }

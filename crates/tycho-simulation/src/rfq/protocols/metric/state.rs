@@ -594,18 +594,11 @@ mod tests {
         let weth = weth();
         let usdc = usdc();
         let metadata = MetricMetadata {
-            pair: "ethusdc".to_string(),
             pool_address: Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap(),
-            price_provider_address: Bytes::from_str("0xbD321D18a7ce5fb91F8b16e026e3258f7b310598")
-                .unwrap(),
-            quoter_address: Bytes::from_str("0x58F9d1865d4Aeb59a9a7Dc68A3b4e0B42D9Ef5eD").unwrap(),
             token0: weth.address.clone(),
             token1: usdc.address.clone(),
-            cex_step: Some(0.0002),
-            dex_step: Some(0.0),
         };
         let bid_ask = MetricBidAskResponse {
-            pair: "ethusdc".to_string(),
             // 3000 * 2^64
             bid_adj: "55340232221128654848000".to_string(),
             // 3010 * 2^64
@@ -614,9 +607,6 @@ mod tests {
             total_token0_available: "10000000000000000000".to_string(),
             total_token1_available: "30000000000".to_string(),
             latest_block: 100,
-            block_ts: 1_700_000_000,
-            server_ts: 1_700_000_001,
-            quote_expiration: 1_700_000_005,
             depth: MetricDepth::default(),
         };
         let client = MetricClient::new(
@@ -680,7 +670,6 @@ mod tests {
             // 2900 * 2^64
             price: "53495557813757699686400".to_string(),
             cumulative_volume: "3000000000".to_string(),
-            price_impact_e6: "33333".to_string(),
         }];
 
         let result = state
@@ -703,7 +692,6 @@ mod tests {
             // 3100 * 2^64
             price: "57184906628499610009600".to_string(),
             cumulative_volume: "1000000000000000000".to_string(),
-            price_impact_e6: "33333".to_string(),
         }];
 
         let result = state
@@ -721,7 +709,6 @@ mod tests {
             // 2900 * 2^64
             price: "53495557813757699686400".to_string(),
             cumulative_volume: "3000000000".to_string(),
-            price_impact_e6: "33333".to_string(),
         }];
 
         let fill =
@@ -739,7 +726,6 @@ mod tests {
             // 3100 * 2^64
             price: "57184906628499610009600".to_string(),
             cumulative_volume: "1000000000000000000".to_string(),
-            price_impact_e6: "33333".to_string(),
         }];
 
         let fill =
@@ -757,7 +743,6 @@ mod tests {
             // 2900 * 2^64
             price: "53495557813757699686400".to_string(),
             cumulative_volume: "3000000000".to_string(),
-            price_impact_e6: "33333".to_string(),
         }];
 
         let fill =
@@ -852,10 +837,6 @@ mod tests {
         assert!(signed_quote.amount_out > BigUint::from(0u8));
         assert_eq!(signed_quote.base_token, state.base_token.address);
         assert_eq!(signed_quote.quote_token, state.quote_token.address);
-        assert_eq!(
-            signed_quote.quote_attributes["oracle_update_target"],
-            state.metadata.price_provider_address
-        );
         assert_eq!(
             &signed_quote.quote_attributes["oracle_update_0_calldata"][..4],
             &[0x78, 0xce, 0x3a, 0xe1]

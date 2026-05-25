@@ -19,14 +19,13 @@ interface IMetricPool {
 error MetricExecutor__InvalidDataLength();
 error MetricExecutor__InvalidOracleUpdateFlag();
 error MetricExecutor__AmountInTooLarge();
-error MetricExecutor__PriceLimitTooLarge();
 error MetricExecutor__InvalidCallback();
 error MetricExecutor__InvalidOracle();
 
 contract MetricExecutor is IExecutor, ICallback {
     using Address for address;
 
-    uint256 private constant _BASE_DATA_LENGTH = 114;
+    uint256 private constant _BASE_DATA_LENGTH = 62;
     uint256 private constant _ORACLE_UPDATE_HEADER_LENGTH = 4;
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
     // Keep this lined up with the MetricOracleUpdatePolicy byte from the Rust swap encoder.
@@ -71,7 +70,6 @@ contract MetricExecutor is IExecutor, ICallback {
         (
             address pool,
             bool zeroForOne,
-            uint128 priceLimitX64,
             OracleUpdateMode oracleUpdateMode,
             bytes calldata oracleCalldata
         ) = _decodeSwapData(data);
@@ -99,19 +97,20 @@ contract MetricExecutor is IExecutor, ICallback {
             // Retry mode tries the cheap path first. If the pool reverts, update the oracle and
             // try once more.
             _swapWithOracleRetry(
-                pool,
-                receiver,
-                zeroForOne,
-                amountSpecified,
-                priceLimitX64,
-                oracleCalldata
+                pool, receiver, zeroForOne, amountSpecified, oracleCalldata
             );
             return;
         }
 
         _setCurrentPool(pool);
         IMetricPool(pool)
-            .swap(receiver, zeroForOne, amountSpecified, priceLimitX64, "");
+            .swap(
+                receiver,
+                zeroForOne,
+                amountSpecified,
+                zeroForOne ? 0 : type(uint128).max,
+                ""
+            );
         _setCurrentPool(address(0));
     }
 
@@ -170,23 +169,15 @@ contract MetricExecutor is IExecutor, ICallback {
         returns (
             address pool,
             bool zeroForOne,
-            uint128 priceLimitX64,
             OracleUpdateMode oracleUpdateMode,
             bytes calldata oracleCalldata
         )
     {
         uint256 oracleCalldataLength = _validateDataLength(data);
         pool = address(bytes20(data[40:60]));
-        zeroForOne = uint8(data[80]) > 0;
+        zeroForOne = uint8(data[60]) > 0;
 
-        uint256 rawPriceLimit = uint256(bytes32(data[81:113]));
-        if (rawPriceLimit > type(uint128).max) {
-            revert MetricExecutor__PriceLimitTooLarge();
-        }
-        // forge-lint: disable-next-line(unsafe-typecast)
-        priceLimitX64 = uint128(rawPriceLimit);
-
-        oracleUpdateMode = OracleUpdateMode(uint8(data[113]));
+        oracleUpdateMode = OracleUpdateMode(uint8(data[61]));
         oracleCalldata = data[data.length:data.length];
         // For modes 1 and 2, the payload is just calldata. The oracle target comes from the
         // immutable, so user-supplied swap bytes cannot redirect this call.
@@ -209,7 +200,7 @@ contract MetricExecutor is IExecutor, ICallback {
             revert MetricExecutor__InvalidDataLength();
         }
 
-        uint8 oracleUpdateMode = uint8(data[113]);
+        uint8 oracleUpdateMode = uint8(data[61]);
         if (oracleUpdateMode > uint8(OracleUpdateMode.RetryOnRevert)) {
             revert MetricExecutor__InvalidOracleUpdateFlag();
         }
@@ -226,7 +217,7 @@ contract MetricExecutor is IExecutor, ICallback {
             revert MetricExecutor__InvalidDataLength();
         }
 
-        oracleCalldataLength = uint32(bytes4(data[114:118]));
+        oracleCalldataLength = uint32(bytes4(data[62:66]));
         if (data.length != minLength + oracleCalldataLength) {
             revert MetricExecutor__InvalidDataLength();
         }
@@ -237,24 +228,33 @@ contract MetricExecutor is IExecutor, ICallback {
         address receiver,
         bool zeroForOne,
         int128 amountSpecified,
-        uint128 priceLimitX64,
         bytes calldata oracleCalldata
     ) internal {
         _setCurrentPool(pool);
         try IMetricPool(pool)
-            .swap(receiver, zeroForOne, amountSpecified, priceLimitX64, "") {
+            .swap(
+                receiver,
+                zeroForOne,
+                amountSpecified,
+                zeroForOne ? 0 : type(uint128).max,
+                ""
+            ) {
             _setCurrentPool(address(0));
         } catch {
             // The first swap failed, so clear callback state before calling the oracle. Set it
             // again for the retry.
-            // TODO: When Metric gives us the stale-oracle revert selector, only retry for that
-            // selector and bubble up everything else unchanged.
             _setCurrentPool(address(0));
             // slither-disable-next-line unused-return
             oracle.functionCall(oracleCalldata);
             _setCurrentPool(pool);
             IMetricPool(pool)
-                .swap(receiver, zeroForOne, amountSpecified, priceLimitX64, "");
+                .swap(
+                    receiver,
+                    zeroForOne,
+                    amountSpecified,
+                    zeroForOne ? 0 : type(uint128).max,
+                    ""
+                );
             _setCurrentPool(address(0));
         }
     }

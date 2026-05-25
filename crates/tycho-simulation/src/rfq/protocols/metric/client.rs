@@ -17,7 +17,11 @@ use reqwest::Client;
 use tokio::time::{interval, timeout, Duration};
 use tracing::{error, info, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, token::Token, Chain},
+    models::{
+        protocol::{GetAmountOutParams, ProtocolComponent, ProtocolComponentState},
+        token::Token,
+        Chain,
+    },
     simulation::indicatively_priced::SignedQuote,
     Bytes,
 };
@@ -35,7 +39,6 @@ use crate::{
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::dto::{ProtocolComponent, ResponseProtocolState},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -165,25 +168,16 @@ impl MetricClient {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "metric_pool".to_string(),
-            chain: self.chain.into(),
+            chain: self.chain,
             tokens: vec![metadata.token0.clone(), metadata.token1.clone()],
-            contract_ids: vec![
-                metadata.pool_address.clone(),
-                metadata.price_provider_address.clone(),
-                metadata.quoter_address.clone(),
-            ],
+            contract_addresses: Vec::new(),
             static_attributes,
             ..Default::default()
         };
 
         let mut attributes = HashMap::new();
-        attributes.insert("pair".to_string(), metadata.pair.as_bytes().to_vec().into());
-        attributes.insert("pool_address".to_string(), metadata.pool_address.clone());
-        attributes
-            .insert("price_provider_address".to_string(), metadata.price_provider_address.clone());
-        attributes.insert("quoter_address".to_string(), metadata.quoter_address.clone());
 
-        let entries: [(&str, Vec<u8>); 9] = [
+        let entries: [(&str, Vec<u8>); 6] = [
             ("bid_adj", bid_ask.bid_adj.as_bytes().to_vec()),
             ("ask_adj", bid_ask.ask_adj.as_bytes().to_vec()),
             (
@@ -207,27 +201,6 @@ impl MetricClient {
                     .to_string()
                     .into_bytes(),
             ),
-            (
-                "block_ts",
-                bid_ask
-                    .block_ts
-                    .to_string()
-                    .into_bytes(),
-            ),
-            (
-                "server_ts",
-                bid_ask
-                    .server_ts
-                    .to_string()
-                    .into_bytes(),
-            ),
-            (
-                "quote_expiration",
-                bid_ask
-                    .quote_expiration
-                    .to_string()
-                    .into_bytes(),
-            ),
             ("depth", serde_json::to_vec(&bid_ask.depth).unwrap_or_default()),
         ];
 
@@ -235,33 +208,8 @@ impl MetricClient {
             attributes.insert(key.to_string(), bytes.into());
         }
 
-        if let Some(cex_step) = metadata.cex_step {
-            attributes.insert(
-                "cex_step".to_string(),
-                cex_step
-                    .to_string()
-                    .as_bytes()
-                    .to_vec()
-                    .into(),
-            );
-        }
-        if let Some(dex_step) = metadata.dex_step {
-            attributes.insert(
-                "dex_step".to_string(),
-                dex_step
-                    .to_string()
-                    .as_bytes()
-                    .to_vec()
-                    .into(),
-            );
-        }
-
         ComponentWithState {
-            state: ResponseProtocolState {
-                component_id: component_id.clone(),
-                attributes,
-                balances: HashMap::new(),
-            },
+            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],
@@ -441,8 +389,6 @@ impl MetricClient {
             })?;
 
         let mut quote_attributes = HashMap::new();
-        quote_attributes
-            .insert("oracle_update_target".to_string(), metadata.price_provider_address.clone());
         quote_attributes.insert(
             "oracle_update_0_calldata".to_string(),
             encode_oracle_update_calldata(&oracle_update.feed_creator, slot)?,
@@ -519,9 +465,7 @@ impl RFQClient for MetricClient {
                         continue;
                     }
 
-                    let component_key =
-                        format!("metric_{}_{}", client.chain.id(), pool.pool_address);
-                    let component_id = keccak256(component_key.as_bytes()).to_string();
+                    let component_id = pool.pool_address.to_string();
                     new_components.insert(
                         component_id.clone(),
                         client.create_component_with_state(component_id, pool, bid_ask, tvl),
@@ -756,15 +700,9 @@ mod tests {
 
     fn metadata() -> MetricMetadata {
         MetricMetadata {
-            pair: "ethusdc".to_string(),
             pool_address: Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap(),
-            price_provider_address: Bytes::from_str("0xbD321D18a7ce5fb91F8b16e026e3258f7b310598")
-                .unwrap(),
-            quoter_address: Bytes::from_str("0x58F9d1865d4Aeb59a9a7Dc68A3b4e0B42D9Ef5eD").unwrap(),
             token0: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
             token1: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            cex_step: Some(0.0002),
-            dex_step: Some(0.0),
         }
     }
 
@@ -776,31 +714,18 @@ mod tests {
         (BigUint::from(price) << 64usize).to_string()
     }
 
-    fn metadata_for_pair(pair: &str, token0: Bytes, token1: Bytes, seed: u8) -> MetricMetadata {
-        MetricMetadata {
-            pair: pair.to_string(),
-            pool_address: metric_address(seed),
-            price_provider_address: metric_address(seed + 1),
-            quoter_address: metric_address(seed + 2),
-            token0,
-            token1,
-            cex_step: Some(0.0),
-            dex_step: Some(0.0),
-        }
+    fn metadata_for_pool(token0: Bytes, token1: Bytes, seed: u8) -> MetricMetadata {
+        MetricMetadata { pool_address: metric_address(seed), token0, token1 }
     }
 
     fn bid_ask() -> MetricBidAskResponse {
         MetricBidAskResponse {
-            pair: "ethusdc".to_string(),
             bid_adj: "55340232221128654848000".to_string(),
             ask_adj: "55358678965202364400000".to_string(),
             quote_available: true,
             total_token0_available: "1000000000000000000".to_string(),
             total_token1_available: "3000000000".to_string(),
             latest_block: 100,
-            block_ts: 1_700_000_000,
-            server_ts: 1_700_000_001,
-            quote_expiration: 1_700_000_005,
             depth: MetricDepth::default(),
         }
     }
@@ -812,16 +737,12 @@ mod tests {
         total_token1_available: &str,
     ) -> MetricBidAskResponse {
         MetricBidAskResponse {
-            pair: "test".to_string(),
             bid_adj: q64_price(bid),
             ask_adj: q64_price(ask),
             quote_available: true,
             total_token0_available: total_token0_available.to_string(),
             total_token1_available: total_token1_available.to_string(),
             latest_block: 100,
-            block_ts: 1_700_000_000,
-            server_ts: 1_700_000_001,
-            quote_expiration: 1_700_000_005,
             depth: MetricDepth::default(),
         }
     }
@@ -873,14 +794,13 @@ mod tests {
         let weth = metric_address(20);
         let usdc = metric_address(30);
 
-        let target = metadata_for_pair("rethweth", reth, weth.clone(), 1);
+        let target = metadata_for_pool(reth, weth.clone(), 1);
         let target_bid_ask =
             bid_ask_with_prices(1, 1, "100000000000000000000", "2000000000000000000");
-        let low_liquidity_quote = metadata_for_pair("wethusdc_low", weth.clone(), usdc.clone(), 4);
+        let low_liquidity_quote = metadata_for_pool(weth.clone(), usdc.clone(), 4);
         let low_liquidity_bid_ask =
             bid_ask_with_prices(3000, 3000, "1000000000000000000", "1000000000");
-        let high_liquidity_quote =
-            metadata_for_pair("wethusdc_high", weth.clone(), usdc.clone(), 7);
+        let high_liquidity_quote = metadata_for_pool(weth.clone(), usdc.clone(), 7);
         // The higher-liquidity WETH/USDC pool has a different price. The expected TVL below proves
         // normalization chooses it by quote-side availability, not by first match.
         let high_liquidity_bid_ask =
@@ -906,23 +826,28 @@ mod tests {
 
     #[test]
     fn test_component_attributes_round_trip_values() {
+        let metadata = metadata();
         let component = client().create_component_with_state(
-            "metric_ethusdc".to_string(),
-            &metadata(),
+            metadata.pool_address.to_string(),
+            &metadata,
             &bid_ask(),
             3000.0,
         );
 
         assert_eq!(component.component.protocol_system, MetricClient::PROTOCOL_SYSTEM);
-        assert_eq!(component.component.tokens, vec![metadata().token0, metadata().token1]);
+        assert_eq!(
+            component.component.tokens,
+            vec![metadata.token0.clone(), metadata.token1.clone()]
+        );
         assert_eq!(
             component.component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
             MetricOracleUpdatePolicy::Always.as_attribute_value()
         );
-        assert_eq!(
-            component.state.attributes["pool_address"],
-            Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap()
-        );
+        assert_eq!(component.component.id, metadata.pool_address.to_string());
+        assert!(component
+            .component
+            .contract_addresses
+            .is_empty());
         assert_eq!(
             String::from_utf8(component.state.attributes["bid_adj"].to_vec()).unwrap(),
             "55340232221128654848000"
@@ -976,7 +901,7 @@ mod tests {
             }
         }
 
-        let Some((pool, bid_ask)) = selected else {
+        let Some((_pool, bid_ask)) = selected else {
             panic!(
                 "Metric live API returned no quoteAvailable bid_ask response with ask and bid depth across {} pools; last error: {:?}",
                 metadata.len(),
@@ -984,7 +909,6 @@ mod tests {
             );
         };
 
-        assert_eq!(bid_ask.pair, pool.pair);
         let bid_price = bid_ask.bid_price().unwrap();
         let ask_price = bid_ask.ask_price().unwrap();
         assert!(bid_price.is_finite() && bid_price > 0.0);
@@ -992,9 +916,6 @@ mod tests {
         assert!(bid_ask.total_token0_available().is_ok());
         assert!(bid_ask.total_token1_available().is_ok());
         assert!(bid_ask.latest_block > 0);
-        assert!(bid_ask.block_ts > 0);
-        assert!(bid_ask.server_ts > 0);
-        assert!(bid_ask.quote_expiration > 0);
 
         for bin in bid_ask
             .depth
@@ -1005,7 +926,6 @@ mod tests {
         {
             assert!(bin.price().unwrap().is_finite());
             assert!(bin.cumulative_volume().is_ok());
-            assert!(BigUint::from_str(&bin.price_impact_e6).is_ok());
         }
     }
 
@@ -1013,15 +933,12 @@ mod tests {
     fn test_encode_oracle_update_calldata() {
         let feed_creator = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
         let slot = MetricSignedOracleUpdateSlot {
-            slot_id: 0,
             deadline: 1_700_000_000,
-            slot_pairs: vec!["weth".to_string(), "usdc".to_string()],
             new_slot_value: "42".to_string(),
             signature: Bytes::from_str(
                 "0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111b",
             )
             .unwrap(),
-            prices: serde_json::json!([]),
         };
 
         let calldata = encode_oracle_update_calldata(&feed_creator, &slot).unwrap();

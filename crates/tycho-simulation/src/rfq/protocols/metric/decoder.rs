@@ -50,34 +50,35 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
                 ))
             })?
             .clone();
+        let pool_address = snapshot
+            .component
+            .id
+            .parse::<Bytes>()
+            .map_err(|_| {
+                InvalidSnapshotError::ValueError(format!(
+                    "Metric component id is not a pool address: {}",
+                    snapshot.component.id
+                ))
+            })?;
 
         // RFQ snapshots do not carry balances; all Metric pricing data is stored as attributes.
         let attrs = snapshot.state.attributes;
         let metadata = MetricMetadata {
-            pair: read_string_attr(&attrs, "pair")?,
-            pool_address: read_bytes_attr(&attrs, "pool_address")?,
-            price_provider_address: read_bytes_attr(&attrs, "price_provider_address")?,
-            quoter_address: read_bytes_attr(&attrs, "quoter_address")?,
+            pool_address,
             token0: token0_address.clone(),
             token1: token1_address.clone(),
-            cex_step: read_optional_f64_attr(&attrs, "cex_step")?,
-            dex_step: read_optional_f64_attr(&attrs, "dex_step")?,
         };
         let bid_ask = MetricBidAskResponse {
-            pair: metadata.pair.clone(),
             bid_adj: read_string_attr(&attrs, "bid_adj")?,
             ask_adj: read_string_attr(&attrs, "ask_adj")?,
             quote_available: true,
             total_token0_available: read_string_attr(&attrs, "total_token0_available")?,
             total_token1_available: read_string_attr(&attrs, "total_token1_available")?,
             latest_block: read_u64_attr(&attrs, "latest_block")?,
-            block_ts: read_u64_attr(&attrs, "block_ts")?,
-            server_ts: read_u64_attr(&attrs, "server_ts")?,
-            quote_expiration: read_u64_attr(&attrs, "quote_expiration")?,
             depth: read_optional_depth_attr(&attrs, "depth")?,
         };
 
-        let client = MetricClientBuilder::new(snapshot.component.chain.into())
+        let client = MetricClientBuilder::new(snapshot.component.chain)
             .tokens(HashSet::from([token0_address.clone(), token1_address.clone()]))
             .build()
             .map_err(|e| {
@@ -86,15 +87,6 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
 
         Ok(MetricState::new(token0, token1, metadata, bid_ask, client))
     }
-}
-
-fn read_bytes_attr(
-    attrs: &HashMap<String, Bytes>,
-    name: &str,
-) -> Result<Bytes, InvalidSnapshotError> {
-    attrs.get(name).cloned().ok_or_else(|| {
-        InvalidSnapshotError::MissingAttribute(format!("{name} attribute not found"))
-    })
 }
 
 fn read_string_attr(
@@ -114,19 +106,6 @@ fn read_u64_attr(attrs: &HashMap<String, Bytes>, name: &str) -> Result<u64, Inva
         .map_err(|_| InvalidSnapshotError::ValueError(format!("Invalid {name} integer")))
 }
 
-fn read_optional_f64_attr(
-    attrs: &HashMap<String, Bytes>,
-    name: &str,
-) -> Result<Option<f64>, InvalidSnapshotError> {
-    match attrs.get(name) {
-        Some(_) => read_string_attr(attrs, name)?
-            .parse()
-            .map(Some)
-            .map_err(|_| InvalidSnapshotError::ValueError(format!("Invalid {name} float"))),
-        None => Ok(None),
-    }
-}
-
 fn read_optional_depth_attr(
     attrs: &HashMap<String, Bytes>,
     name: &str,
@@ -142,9 +121,9 @@ fn read_optional_depth_attr(
 mod tests {
     use std::str::FromStr;
 
-    use tycho_common::{
-        dto::{Chain, ChangeType, ProtocolComponent, ResponseProtocolState},
-        models::Chain as ModelChain,
+    use tycho_common::models::{
+        protocol::{ProtocolComponent, ProtocolComponentState},
+        Chain as ModelChain, ChangeType,
     };
 
     use super::*;
@@ -181,19 +160,6 @@ mod tests {
         tokens.insert(usdc.address.clone(), usdc.clone());
 
         let mut attrs = HashMap::new();
-        attrs.insert("pair".to_string(), "ethusdc".as_bytes().to_vec().into());
-        attrs.insert(
-            "pool_address".to_string(),
-            Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap(),
-        );
-        attrs.insert(
-            "price_provider_address".to_string(),
-            Bytes::from_str("0xbD321D18a7ce5fb91F8b16e026e3258f7b310598").unwrap(),
-        );
-        attrs.insert(
-            "quoter_address".to_string(),
-            Bytes::from_str("0x58F9d1865d4Aeb59a9a7Dc68A3b4e0B42D9Ef5eD").unwrap(),
-        );
         attrs.insert(
             "bid_adj".to_string(),
             "55340232221128654848000"
@@ -218,24 +184,22 @@ mod tests {
         attrs
             .insert("total_token1_available".to_string(), "30000000000".as_bytes().to_vec().into());
         attrs.insert("latest_block".to_string(), "100".as_bytes().to_vec().into());
-        attrs.insert("block_ts".to_string(), "1700000000".as_bytes().to_vec().into());
-        attrs.insert("server_ts".to_string(), "1700000001".as_bytes().to_vec().into());
-        attrs.insert("quote_expiration".to_string(), "1700000005".as_bytes().to_vec().into());
         attrs.insert("depth".to_string(), r#"{"asks":[],"bids":[]}"#.as_bytes().to_vec().into());
 
+        let pool_address = Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap();
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 attributes: attrs,
-                component_id: "metric_ethusdc".to_string(),
+                component_id: pool_address.to_string(),
                 balances: HashMap::new(),
             },
             component: ProtocolComponent {
-                id: "metric_ethusdc".to_string(),
+                id: pool_address.to_string(),
                 protocol_system: "rfq:metric".to_string(),
                 protocol_type_name: "metric_pool".to_string(),
-                chain: Chain::Ethereum,
+                chain: ModelChain::Ethereum,
                 tokens: vec![weth.address.clone(), usdc.address.clone()],
-                contract_ids: Vec::new(),
+                contract_addresses: Vec::new(),
                 static_attributes: HashMap::new(),
                 change: ChangeType::Creation,
                 creation_tx: Bytes::default(),
@@ -263,7 +227,6 @@ mod tests {
 
         assert_eq!(state.base_token.symbol, "WETH");
         assert_eq!(state.quote_token.symbol, "USDC");
-        assert_eq!(state.metadata.pair, "ethusdc");
         assert_eq!(state.bid_ask.latest_block, 100);
     }
 
