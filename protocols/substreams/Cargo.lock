@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-balancer-v3"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
