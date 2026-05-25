@@ -1064,10 +1064,9 @@ mod tests {
         }];
 
         let responses: Vec<TransportResult<Value>> =
-            vec![Err(alloy::transports::RpcError::LocalUsageError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "transport error",
-            ))))];
+            vec![Err(alloy::transports::RpcError::LocalUsageError(Box::new(
+                std::io::Error::other("transport error"),
+            )))];
 
         let mut results = HashMap::new();
         let retry_data =
@@ -1094,10 +1093,9 @@ mod tests {
         }];
 
         let responses: Vec<TransportResult<Value>> =
-            vec![Err(alloy::transports::RpcError::LocalUsageError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "overriding address not allowed",
-            ))))];
+            vec![Err(alloy::transports::RpcError::LocalUsageError(Box::new(
+                std::io::Error::other("overriding address not allowed"),
+            )))];
 
         let mut results = HashMap::new();
         let retry_data =
