@@ -1,3 +1,13 @@
+## [0.301.1](https://github.com/propeller-heads/tycho-indexer/compare/0.301.0...0.301.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* **gas-estimations:** Add SWAP_BASE_GAS constant in slipstreams ([9ac79cc](https://github.com/propeller-heads/tycho-indexer/commit/9ac79ccf5727069028770d84ef7471565634789b))
+* **gas-estimations:** Tweak gas estimations for slipstreams ([12bd6b5](https://github.com/propeller-heads/tycho-indexer/commit/12bd6b534ae9e478319caa6fb7a88f6525b46883))
+* **gas-estimations:** Tweak gas estimations for slipstreams and univ3 ([#1036](https://github.com/propeller-heads/tycho-indexer/issues/1036)) ([59d959a](https://github.com/propeller-heads/tycho-indexer/commit/59d959a1f4eeb8fbeb67a8a6c53716a155ec9f37))
+* **gas-estimations:** Tweak gas estimations for uniswap v3 ([5c5c56e](https://github.com/propeller-heads/tycho-indexer/commit/5c5c56e757887de0a81e659c4bf47c7854bb1ca5))
+
 ## [0.301.0](https://github.com/propeller-heads/tycho-indexer/compare/0.300.5...0.301.0) (2026-05-25)
 
 

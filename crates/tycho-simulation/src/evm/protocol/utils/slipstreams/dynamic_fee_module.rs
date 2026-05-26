@@ -30,6 +30,10 @@ impl DynamicFeeConfig {
     pub fn update_base_fee(&mut self, base_fee: u32) {
         self.base_fee = base_fee;
     }
+
+    pub fn scaling_factor(&self) -> u64 {
+        self.scaling_factor
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

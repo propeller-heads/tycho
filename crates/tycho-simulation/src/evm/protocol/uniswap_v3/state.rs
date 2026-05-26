@@ -39,16 +39,16 @@ use crate::evm::protocol::{
     },
 };
 
-// Gas limit constants for capping get_limits calculations
-// These prevent simulations from exceeding Ethereum's block gas limit
-// The names of the constants reflect the exact method from the tenderly log.
-const SWAP_BASE_GAS: u64 = 130_000;
-// Bitmap word scan
+// Pre/post loop overhead: cold SLOADs (slot0, liquidity, feeGrowthGlobal) +
+// cold SSTOREs (slot0 write, liquidity write) at end of swap.
+const SWAP_BASE_GAS: u64 = 70_000;
+// Bitmap word scan (cold SLOAD of tickBitmap word)
 const GAS_PER_BITMAP_WORD: u64 = 2_100;
-// swap math step: getSqrtRatioAtTick + computeSwapStep + amount accounting
-const GAS_PER_SWAP_MATH_STEP: u64 = 4_000;
-// Initialized tick crossing
-const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 17_540;
+// swap math step: getSqrtRatioAtTick + computeSwapStep + amount accounting + getTickAtSqrtRatio
+const GAS_PER_SWAP_MATH_STEP: u64 = 5_400;
+// Initialized tick crossing: cross() updates feeGrowthOutside0/1 (2 SSTOREs).
+// Warm ≈ 10-17k, cold ≈ 40-52k. 24k biases toward cold for overestimation.
+const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 24_000;
 // Output transfer + balanceBefore + callback + balanceAfter.
 const V3_CALLBACK_SETTLEMENT_GAS: u64 = 70_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
@@ -134,7 +134,7 @@ impl UniswapV3State {
             tick: self.tick,
             liquidity: self.liquidity,
         };
-        let mut gas_used = U256::from(0);
+        let mut gas_used = U256::from(SWAP_BASE_GAS);
 
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
@@ -912,13 +912,20 @@ mod tests {
             .get_limits(t0.address.clone(), t1.address.clone())
             .unwrap();
 
-        assert_eq!(&res.0, &BigUint::from_u128(155144999154).unwrap());
+        assert_eq!(&res.0, &BigUint::from_u128(29160572556).unwrap());
 
         let out = usv3_state
             .get_amount_out(res.0, &t0, &t1)
             .expect("swap for limit in didn't work");
 
-        assert_eq!(&res.1, &out.amount);
+        // Allow 1-unit rounding difference: get_limits uses ceiling/floor delta math
+        // while get_amount_out uses the full swap path.
+        let diff = if res.1 > out.amount {
+            res.1.clone() - out.amount.clone()
+        } else {
+            out.amount.clone() - res.1.clone()
+        };
+        assert!(diff <= BigUint::from(1u64), "limit_out and amount_out differ by {diff}");
     }
 
     // Helper to create a basic test pool
