@@ -53,11 +53,13 @@ const TICK_CROSSING_GAS_COST: i32 = 70_000;
 // buffer (~77k–91k gas) instead of a simple slot read (~18k–27k gas). This extra cost is
 // added once per swap on top of the base.
 const TWAP_FEE_OVERHEAD: i32 = 65_000;
-
+// Pre/post loop overhead: fee(), slot0 reads, end-of-swap writes.
+const SWAP_BASE_GAS: i32 = 125_000;
 // Conservative max gas for a single swap. Used to cap get_limits iteration.
 const MAX_SWAP_GAS: u64 = 16_700_000;
 // Maximum initialized ticks that can be crossed within MAX_SWAP_GAS.
-const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - 125_000) / TICK_CROSSING_GAS_COST as u64;
+const MAX_TICKS_CROSSED: u64 =
+    (MAX_SWAP_GAS - SWAP_BASE_GAS as u64) / TICK_CROSSING_GAS_COST as u64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AerodromeSlipstreamsState {
@@ -173,7 +175,7 @@ impl AerodromeSlipstreamsState {
             liquidity: self.liquidity,
         };
         let twap_overhead = if self.dfc.scaling_factor() != 0 { TWAP_FEE_OVERHEAD } else { 0 };
-        let mut gas_used = U256::from((125_000 + twap_overhead) as u64);
+        let mut gas_used = U256::from((SWAP_BASE_GAS + twap_overhead) as u64);
         let mut n_loops = 0;
 
         let fee = self.get_fee()?;
