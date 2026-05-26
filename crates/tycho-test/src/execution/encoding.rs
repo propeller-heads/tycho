@@ -19,7 +19,7 @@ use tycho_common::{
 use tycho_execution::encoding::{
     evm::{
         encoder_builders::TychoRouterEncoderBuilder,
-        swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+        swap_encoder::swap_encoder_registry::SwapEncoderRegistry, ROUTER_ETH_ADDRESS,
     },
     models::{ClientFeeParams, EncodedSolution, Solution, Swap},
 };
@@ -130,8 +130,17 @@ fn encoded_transaction(
 ) -> miette::Result<Transaction> {
     let amount_in = biguint_to_u256(solution.amount_in());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
-    let token_in = Address::from_slice(solution.token_in());
-    let token_out = Address::from_slice(solution.token_out());
+    let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
+    let to_router_address = |raw: Address| {
+        if raw.as_slice() == native_address.as_ref() {
+            router_eth
+        } else {
+            raw
+        }
+    };
+
+    let token_in = to_router_address(Address::from_slice(solution.token_in()));
+    let token_out = to_router_address(Address::from_slice(solution.token_out()));
     let receiver = Address::from_slice(solution.receiver());
     let client_fee_params = ClientFeeParams::default().into_abi_params();
 
