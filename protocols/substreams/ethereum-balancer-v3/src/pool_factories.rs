@@ -138,8 +138,7 @@ pub fn address_map(
             let initial_min_price_bytes = price_params.0.to_signed_bytes_be();
             let initial_max_price_bytes = price_params.1.to_signed_bytes_be();
             let initial_target_price_bytes = price_params.2.to_signed_bytes_be();
-            let daily_price_shift_exponent_bytes =
-                daily_price_shift_exponent.to_signed_bytes_be();
+            let daily_price_shift_exponent_bytes = daily_price_shift_exponent.to_signed_bytes_be();
             let centeredness_margin_bytes = centeredness_margin.to_signed_bytes_be();
             let token_a_price_includes_rate_bytes = [price_params.3 as u8];
             let token_b_price_includes_rate_bytes = [price_params.4 as u8];
@@ -154,14 +153,8 @@ pub fn address_map(
                 ("initial_target_price", &initial_target_price_bytes),
                 ("daily_price_shift_exponent", &daily_price_shift_exponent_bytes),
                 ("centeredness_margin", &centeredness_margin_bytes),
-                (
-                    "token_a_price_includes_rate",
-                    &token_a_price_includes_rate_bytes,
-                ),
-                (
-                    "token_b_price_includes_rate",
-                    &token_b_price_includes_rate_bytes,
-                ),
+                ("token_a_price_includes_rate", &token_a_price_includes_rate_bytes),
+                ("token_b_price_includes_rate", &token_b_price_includes_rate_bytes),
             ];
 
             if !rate_providers.is_empty() {
