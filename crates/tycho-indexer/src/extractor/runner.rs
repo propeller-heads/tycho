@@ -400,7 +400,10 @@ impl ExtractorRunner {
         trace!(msg = %message, "Propagating message to subscribers.");
 
         if let Some(tx) = pending_deltas_tx {
-            if let Err(err) = tx.send(DeltaCommand::Block(message.clone())).await {
+            if let Err(err) = tx
+                .send(DeltaCommand::Block(message.clone()))
+                .await
+            {
                 error!(error = %err, "Failed to send to PendingDeltas channel");
             }
         }

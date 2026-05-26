@@ -257,7 +257,7 @@ impl WsActor {
                                 item.drop_state().into()
                             };
 
-                            yield ExtractorEvent::Message(subscription_id, result);
+                            yield ExtractorEvent::Message(subscription_id, Box::new(result));
                         }
                         // Channel closed: extractor restarted or stopped.
                         yield ExtractorEvent::ChannelClosed(subscription_id);
@@ -421,7 +421,7 @@ impl Actor for WsActor {
 }
 
 enum ExtractorEvent {
-    Message(Uuid, BlockAggregatedChanges),
+    Message(Uuid, Box<BlockAggregatedChanges>),
     ChannelClosed(Uuid),
 }
 
@@ -436,7 +436,8 @@ impl StreamHandler<ExtractorEvent> for WsActor {
         match msg {
             ExtractorEvent::Message(subscription_id, deltas) => {
                 trace!("Forwarding message to client");
-                let msg = WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id };
+                let msg =
+                    WebSocketMessage::BlockAggregatedChanges { deltas: *deltas, subscription_id };
                 let json_str = serde_json::to_string(&msg).unwrap();
 
                 // Check if compression is enabled for this subscription

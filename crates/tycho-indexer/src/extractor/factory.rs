@@ -17,8 +17,7 @@ use tycho_common::{
 use tycho_ethereum::{
     rpc::EthereumRpcClient,
     services::{
-        account_extractor::EVMAccountExtractor,
-        entrypoint_tracer::tracer::EVMEntrypointService,
+        account_extractor::EVMAccountExtractor, entrypoint_tracer::tracer::EVMEntrypointService,
         token_pre_processor::EthereumTokenPreProcessor,
     },
 };
@@ -346,7 +345,9 @@ impl ExtractorFactory {
         // We resume from (last_committed + 1) rather than using a cursor so that a restarted
         // extractor always replays at least from the last finalized block. The cursor is only
         // maintained inside SubstreamsStream for hot reconnections within a single run.
-        let last_block = extractor.get_last_processed_block().await;
+        let last_block = extractor
+            .get_last_processed_block()
+            .await;
         let start_block = compute_start_block(last_block.as_ref(), self.config.start_block)?;
         if let Some(block) = &last_block {
             info!(
@@ -436,9 +437,7 @@ async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), Ext
     if !Path::new(spkg_path).exists() {
         download_file_from_s3(
             s3_bucket.ok_or_else(|| {
-                ExtractionError::Setup(format!(
-                    "Missing spkg and s3 bucket config for {spkg_path}"
-                ))
+                ExtractionError::Setup(format!("Missing spkg and s3 bucket config for {spkg_path}"))
             })?,
             spkg_path,
             Path::new(spkg_path),
