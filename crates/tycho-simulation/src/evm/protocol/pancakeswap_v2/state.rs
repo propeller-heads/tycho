@@ -27,6 +27,7 @@ use crate::evm::protocol::{
     utils::add_fee_markup,
 };
 
+const SWAP_BASE_GAS: u64 = 90_000;
 const PANCAKESWAP_V2_FEE: u32 = 25; // 0.25% fee
 const FEE_PRECISION: U256 = U256::from_limbs([10000, 0, 0, 0]);
 const FEE_NUMERATOR: U256 = U256::from_limbs([9975, 0, 0, 0]);
@@ -83,7 +84,7 @@ impl ProtocolSim for PancakeswapV2State {
         };
         Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
-            BigUint::from(70_000u32),
+            BigUint::from(SWAP_BASE_GAS),
             Box::new(new_state),
         ))
     }
