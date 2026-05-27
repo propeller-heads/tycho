@@ -1,3 +1,14 @@
+## [0.302.3](https://github.com/propeller-heads/tycho-indexer/compare/0.302.2...0.302.3) (2026-05-27)
+
+
+### Bug Fixes
+
+* **tycho-ethereum:** address clippy lint on std::io::Error construction ([0e353dc](https://github.com/propeller-heads/tycho-indexer/commit/0e353dcaa703abe1b3182535ebb1259468a910c0))
+* **tycho-ethereum:** filter out non-token storage slots before testing candidates ([0fae1b7](https://github.com/propeller-heads/tycho-indexer/commit/0fae1b79c077bf46bc900a9fc776390bab269707))
+* **tycho-ethereum:** process all slot candidates, prioritise token address ([6435388](https://github.com/propeller-heads/tycho-indexer/commit/643538818ea0c4a39bf9929d3349066129c54598))
+* **tycho-ethereum:** retry next slot candidate on transport errors in slot detection ([cbf82d8](https://github.com/propeller-heads/tycho-indexer/commit/cbf82d8ca9cecdbdcdbe7f9bf53c86e587f3aebf))
+* **tycho-ethereum:** retry next slot candidate on transport errors in slot detection ([#1045](https://github.com/propeller-heads/tycho-indexer/issues/1045)) ([18a68b9](https://github.com/propeller-heads/tycho-indexer/commit/18a68b99398561b56b9ee7e857a82be816355249))
+
 ## [0.302.2](https://github.com/propeller-heads/tycho-indexer/compare/0.302.1...0.302.2) (2026-05-27)
 
 
