@@ -1,3 +1,40 @@
+## [0.302.2](https://github.com/propeller-heads/tycho-indexer/compare/0.302.1...0.302.2) (2026-05-27)
+
+
+### Bug Fixes
+
+* **tycho-execution:** add quickswap_v2 to swap encoder registry ([a67d15a](https://github.com/propeller-heads/tycho-indexer/commit/a67d15a504e30844eefae4c1043c4ad1e5cf6dad))
+* **tycho-execution:** add quickswap_v2 to swap encoder registry ([#1047](https://github.com/propeller-heads/tycho-indexer/issues/1047)) ([d69caf2](https://github.com/propeller-heads/tycho-indexer/commit/d69caf2eaa7a3ae0050a5c8892f4220bffb36f7d))
+
+## [0.302.1](https://github.com/propeller-heads/tycho-indexer/compare/0.302.0...0.302.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* **gas-estimations:** Add univ2 clones to PROTOCOLS_OPTIMIZABLE_TRANSFER_IN ([29852db](https://github.com/propeller-heads/tycho-indexer/commit/29852db2f79a34758468b579db65a6e228a7d145))
+* **gas-estimations:** Tweak gas estimations for uniswap v2 ([40e1742](https://github.com/propeller-heads/tycho-indexer/commit/40e174214661a5471b69a021ed42c530d9941035))
+* **gas-estimations:** Tweak gas estimations for uniswap v4 ([2a84ee1](https://github.com/propeller-heads/tycho-indexer/commit/2a84ee170ce3541e441b72da7de3b2294b7e36e3))
+* **gas-estimations:** Tweak gas estimations for univ4 and univ2 ([#1050](https://github.com/propeller-heads/tycho-indexer/issues/1050)) ([1c33714](https://github.com/propeller-heads/tycho-indexer/commit/1c3371437920ed597699590810d8fc9450bf68b1))
+* **tycho-test:** Use proper eth marker when encoding router call ([395e16e](https://github.com/propeller-heads/tycho-indexer/commit/395e16e824e7813dcb9d10d5f2b1361f07ec7d66))
+
+## [0.302.0](https://github.com/propeller-heads/tycho-indexer/compare/0.301.1...0.302.0) (2026-05-26)
+
+
+### Features
+
+* **encoding:** add client fee signature offset to EncodedSolution ([24e7a38](https://github.com/propeller-heads/tycho-indexer/commit/24e7a387cee281486518d49b6faa1fe4cbde7291))
+* **encoding:** add client fee signature offset to EncodedSolution ([#1046](https://github.com/propeller-heads/tycho-indexer/issues/1046)) ([89e2e47](https://github.com/propeller-heads/tycho-indexer/commit/89e2e470a01664a00fe41b0fba0f359b83c0e926))
+
+## [0.301.1](https://github.com/propeller-heads/tycho-indexer/compare/0.301.0...0.301.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* **gas-estimations:** Add SWAP_BASE_GAS constant in slipstreams ([9ac79cc](https://github.com/propeller-heads/tycho-indexer/commit/9ac79ccf5727069028770d84ef7471565634789b))
+* **gas-estimations:** Tweak gas estimations for slipstreams ([12bd6b5](https://github.com/propeller-heads/tycho-indexer/commit/12bd6b534ae9e478319caa6fb7a88f6525b46883))
+* **gas-estimations:** Tweak gas estimations for slipstreams and univ3 ([#1036](https://github.com/propeller-heads/tycho-indexer/issues/1036)) ([59d959a](https://github.com/propeller-heads/tycho-indexer/commit/59d959a1f4eeb8fbeb67a8a6c53716a155ec9f37))
+* **gas-estimations:** Tweak gas estimations for uniswap v3 ([5c5c56e](https://github.com/propeller-heads/tycho-indexer/commit/5c5c56e757887de0a81e659c4bf47c7854bb1ca5))
+
 ## [0.301.0](https://github.com/propeller-heads/tycho-indexer/compare/0.300.5...0.301.0) (2026-05-25)
 
 
