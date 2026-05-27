@@ -1,3 +1,11 @@
+## [0.302.2](https://github.com/propeller-heads/tycho-indexer/compare/0.302.1...0.302.2) (2026-05-27)
+
+
+### Bug Fixes
+
+* **tycho-execution:** add quickswap_v2 to swap encoder registry ([a67d15a](https://github.com/propeller-heads/tycho-indexer/commit/a67d15a504e30844eefae4c1043c4ad1e5cf6dad))
+* **tycho-execution:** add quickswap_v2 to swap encoder registry ([#1047](https://github.com/propeller-heads/tycho-indexer/issues/1047)) ([d69caf2](https://github.com/propeller-heads/tycho-indexer/commit/d69caf2eaa7a3ae0050a5c8892f4220bffb36f7d))
+
 ## [0.302.1](https://github.com/propeller-heads/tycho-indexer/compare/0.302.0...0.302.1) (2026-05-26)
 
 
