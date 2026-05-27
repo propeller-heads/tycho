@@ -33,6 +33,9 @@ use crate::{
 };
 
 const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
+const GAS_LIMIT: u64 = 100_000_000;
+// 1_000 native tokens (10^21 wei): covers 100M gas at up to ~10_000 gwei
+const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
@@ -210,10 +213,10 @@ pub(crate) async fn detect_token_slots(
     };
 
     let mut token_slots = HashMap::new();
-    // Add one entry for ETH
+    // Add one entry for the native token (represented as zero address)
     token_slots.insert(Bytes::zero(20), TokenSlots::default());
 
-    // Filter out ETH (zero address) as it doesn't need slot detection
+    // Filter out the native token (zero address) as it doesn't need slot detection
     let erc20_tokens: Vec<Bytes> = token_addresses
         .iter()
         .filter(|&addr| addr != &Bytes::zero(20))
@@ -296,11 +299,11 @@ pub(crate) fn setup_user_overwrites(
     let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
     let spender_address = Address::from_slice(&to_address[..20]);
 
-    // ETH
+    // Native token (zero address)
     if token_address == &Bytes::zero(20) {
-        let eth_balance = biguint_to_u256(amount) +
-            U256::from_str("100000000000000000000").expect("Couldn't convert eth amount to U256"); // given_amount + 10 ETH for gas
-        overwrites.insert(user_address, AccountOverride::default().with_balance(eth_balance));
+        // amount is sent as tx value, so the balance must cover both the swap value and gas
+        let native_balance = biguint_to_u256(amount) + GAS_RESERVE;
+        overwrites.insert(user_address, AccountOverride::default().with_balance(native_balance));
     } else {
         let token_balance = biguint_to_u256(amount);
         let token_allowance = biguint_to_u256(amount);
@@ -359,10 +362,7 @@ pub(crate) fn setup_user_overwrites(
                 )]),
             );
         }
-        // Add 10 ETH for gas for non-ETH token swaps
-        let eth_balance =
-            U256::from_str("10000000000000000000").expect("Couldn't convert eth amount to U256");
-        overwrites.insert(user_address, AccountOverride::default().with_balance(eth_balance));
+        overwrites.insert(user_address, AccountOverride::default().with_balance(GAS_RESERVE));
     }
 
     (overwrites, metadata)
@@ -379,7 +379,7 @@ pub(crate) fn swap_request(
         .input(transaction.data().clone().into())
         .value(U256::from_str(&transaction.value().to_string()).unwrap_or_default())
         .from(user_address)
-        .gas_limit(100_000_000)
+        .gas_limit(GAS_LIMIT)
         .max_fee_per_gas(
             max_fee_per_gas
                 .try_into()
