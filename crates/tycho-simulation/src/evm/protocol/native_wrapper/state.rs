@@ -4,13 +4,13 @@ use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
-    Bytes,
     dto::ProtocolStateDelta,
-    models::{Chain, token::Token},
+    models::{token::Token, Chain},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
     },
+    Bytes,
 };
 
 use crate::protocol::models::ProtocolComponent;
@@ -27,12 +27,12 @@ const UNWRAP_GAS: u64 = 14_000;
 /// This component is auto-injected by `ProtocolStreamBuilder` so every
 /// consumer automatically sees the bridge without manual wiring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WrapperState {
+pub struct NativeWrapperState {
     native_token: Token,
     wrapped_token: Token,
 }
 
-impl WrapperState {
+impl NativeWrapperState {
     pub fn new(chain: Chain) -> Self {
         Self { native_token: chain.native_token(), wrapped_token: chain.wrapped_native_token() }
     }
@@ -72,7 +72,7 @@ impl WrapperState {
 }
 
 #[typetag::serde]
-impl ProtocolSim for WrapperState {
+impl ProtocolSim for NativeWrapperState {
     fn fee(&self) -> f64 {
         0.0
     }
@@ -127,7 +127,7 @@ impl ProtocolSim for WrapperState {
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         other
             .as_any()
-            .downcast_ref::<WrapperState>()
+            .downcast_ref::<NativeWrapperState>()
             .is_some_and(|o| {
                 self.native_token == o.native_token && self.wrapped_token == o.wrapped_token
             })

@@ -130,7 +130,7 @@ use crate::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
         pending::PendingBlockProcessor,
         protocol::{
-            native_wrapper::state::{WrapperState, NATIVE_WRAPPER_ID},
+            native_wrapper::state::{NativeWrapperState, NATIVE_WRAPPER_ID},
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
     },
@@ -611,7 +611,7 @@ impl ProtocolStreamBuilder {
     }
 }
 
-/// Wraps a decoded protocol stream to inject a `WrapperState` component
+/// Wraps a decoded protocol stream to inject a `NativeWrapperState` component
 /// on the first successful update.
 ///
 /// Skips injection for chains where the native and wrapped-native tokens share
@@ -631,10 +631,10 @@ fn inject_native_wrapper(
             injected = true;
             update
                 .new_pairs
-                .insert(NATIVE_WRAPPER_ID.to_string(), WrapperState::component(chain));
+                .insert(NATIVE_WRAPPER_ID.to_string(), NativeWrapperState::component(chain));
             update
                 .states
-                .insert(NATIVE_WRAPPER_ID.to_string(), Box::new(WrapperState::new(chain)));
+                .insert(NATIVE_WRAPPER_ID.to_string(), Box::new(NativeWrapperState::new(chain)));
             debug!("Injected native_wrapper component for {chain}");
             update
         })
