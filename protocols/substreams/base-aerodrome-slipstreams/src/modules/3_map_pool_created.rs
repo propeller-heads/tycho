@@ -35,7 +35,7 @@ fn get_new_pools(
     tick_spacing_to_fee_store: StoreGetInt64,
 ) {
     // Extract new pools from PoolCreated events
-    let mut on_pool_created = |event: PoolCreated, _tx: &eth::TransactionTrace, _log: &eth::Log| {
+    let mut on_pool_created = |event: PoolCreated, _tx: &eth::TransactionTrace, log: &eth::Log| {
         let tycho_tx: Transaction = _tx.into();
         // Get default fee for tick spacing
         let default_fee = tick_spacing_to_fee_store
@@ -107,6 +107,11 @@ fn get_new_pools(
                     Attribute {
                         name: "pool_address".to_string(),
                         value: event.pool,
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "factory".to_string(),
+                        value: log.address.to_hex().into_bytes(),
                         change: ChangeType::Creation.into(),
                     },
                 ],
