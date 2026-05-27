@@ -24,6 +24,7 @@ members = [
     "ethereum-balancer-v3",
     "ethereum-fluid",
     "base-aerodrome-slipstreams",
+    "base-lunarbase",
     "ethereum-erc4626",
     "ethereum-rocketpool",
     "unichain-velodrome",

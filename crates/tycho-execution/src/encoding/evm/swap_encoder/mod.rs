@@ -11,6 +11,7 @@ mod fluid_v1;
 mod hashflow;
 mod liquidity_party;
 mod liquorice;
+mod lunarbase;
 mod maverick_v2;
 mod native_wrap;
 mod rocketpool;

@@ -23,6 +23,7 @@ const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.run
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
 
 /// Mapping from protocol component patterns to executor bytecode JSON strings
 static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -43,6 +44,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("ekubo_v3", EKUBO_V3_BYTECODE_JSON);
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
+    map.insert("lunarbase", LUNARBASE_BYTECODE_JSON);
     map
 });
 

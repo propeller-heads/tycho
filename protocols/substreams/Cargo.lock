@@ -288,6 +288,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "base-lunarbase"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "getrandom 0.2.17",
+ "hex",
+ "itertools 0.12.1",
+ "num-bigint",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-substreams 0.8.0",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

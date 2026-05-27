@@ -12,8 +12,9 @@ use crate::encoding::{
             ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
             etherfi::EtherfiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
             hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
-            liquorice::LiquoriceSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            native_wrap::WrapSwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
+            maverick_v2::MaverickV2SwapEncoder, native_wrap::WrapSwapEncoder,
+            rocketpool::RocketpoolSwapEncoder,
             slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
             uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
@@ -153,6 +154,9 @@ impl SwapEncoderRegistry {
             }
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "lunarbase" => {
+                Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "velodrome_slipstreams" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
