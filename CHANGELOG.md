@@ -1,3 +1,12 @@
+## [0.302.4](https://github.com/propeller-heads/tycho-indexer/compare/0.302.3...0.302.4) (2026-05-27)
+
+
+### Bug Fixes
+
+* add factory static attribute ([b909e79](https://github.com/propeller-heads/tycho-indexer/commit/b909e79f90f0603433a72f413d4aa645bdfe9e68))
+* add factory static attribute to Slipstreams ([#1051](https://github.com/propeller-heads/tycho-indexer/issues/1051)) ([18b9d87](https://github.com/propeller-heads/tycho-indexer/commit/18b9d87e4665e384eb0067461b1f7bd2778e59fd))
+* address slipstreams clippy warnings ([f8baa0c](https://github.com/propeller-heads/tycho-indexer/commit/f8baa0c8c3e8363a17d8709dd0fd9b493aae9ec3))
+
 ## [0.302.3](https://github.com/propeller-heads/tycho-indexer/compare/0.302.2...0.302.3) (2026-05-27)
 
 
