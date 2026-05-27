@@ -1,3 +1,11 @@
+## [0.302.5](https://github.com/propeller-heads/tycho-indexer/compare/0.302.4...0.302.5) (2026-05-27)
+
+
+### Bug Fixes
+
+* **tycho-test:** increase native gas reserve to cover high-gwei chains ([a351868](https://github.com/propeller-heads/tycho-indexer/commit/a351868758fb317b2a5e034212ed5032b853261d))
+* **tycho-test:** increase native gas reserve to cover high-gwei chains (Polygon) ([#1052](https://github.com/propeller-heads/tycho-indexer/issues/1052)) ([8c13ee1](https://github.com/propeller-heads/tycho-indexer/commit/8c13ee1cc49657d2de349bc5d230a5a034b6c34b))
+
 ## [0.302.4](https://github.com/propeller-heads/tycho-indexer/compare/0.302.3...0.302.4) (2026-05-27)
 
 
