@@ -39,7 +39,7 @@ pub enum Executor {
     Slipstreams,
     UniswapV2,
     UniswapV3,
-    Wrap,
+    NativeWrap,
     AerodromeV1,
     LiquidityParty,
 }
@@ -70,7 +70,7 @@ impl Executor {
         Executor::Slipstreams,
         Executor::UniswapV2,
         Executor::UniswapV3,
-        Executor::Wrap,
+        Executor::NativeWrap,
         Executor::AerodromeV1,
         Executor::LiquidityParty,
     ];
@@ -243,8 +243,8 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/WrapExecutor.sol#L77
-            Self::Wrap => {
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol#L77
+            Self::NativeWrap => {
                 let is_wrapping = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 1 },
                     [true, false],
@@ -497,8 +497,8 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/WrapExecutor.sol#L45
-            Self::Wrap => {
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol#L45
+            Self::NativeWrap => {
                 let is_wrapping = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 1 },
                     [true, false],
@@ -591,7 +591,7 @@ impl Executor {
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
-            Self::Wrap => unimplemented!(),
+            Self::NativeWrap => unimplemented!(),
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
         }
@@ -617,7 +617,7 @@ impl Executor {
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L58
             // not worth modeling as it has no reverts or side effects
             Self::UniswapV3 => Ok(()),
-            Self::Wrap => unimplemented!("Wrap doesn't use callbacks"),
+            Self::NativeWrap => unimplemented!("Wrap doesn't use callbacks"),
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
         }
@@ -660,8 +660,8 @@ impl Executor {
             )?,
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L26
             Self::UniswapV3 => Address::Router,
-            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/WrapExecutor.sol#L34
-            Self::Wrap => Address::Router,
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol#L34
+            Self::NativeWrap => Address::Router,
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L23
             Self::AerodromeV1 => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },

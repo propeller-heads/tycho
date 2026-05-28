@@ -16,7 +16,7 @@ use tycho_common::{
 use crate::protocol::models::ProtocolComponent;
 
 pub const NATIVE_WRAPPER_ID: &str = "native_wrapper";
-const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "wrap";
+const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrap";
 const NATIVE_WRAPPER_PROTOCOL_TYPE: &str = "NativeWrapper";
 const WRAP_GAS: u64 = 7_000;
 const UNWRAP_GAS: u64 = 14_000;
@@ -131,5 +131,97 @@ impl ProtocolSim for NativeWrapperState {
             .is_some_and(|o| {
                 self.native_token == o.native_token && self.wrapped_token == o.wrapped_token
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eth_state() -> NativeWrapperState {
+        NativeWrapperState::new(Chain::Ethereum)
+    }
+
+    fn native_token() -> Token {
+        Chain::Ethereum.native_token()
+    }
+
+    fn wrapped_token() -> Token {
+        Chain::Ethereum.wrapped_native_token()
+    }
+
+    #[test]
+    fn test_fee_is_zero() {
+        assert_eq!(eth_state().fee(), 0.0);
+    }
+
+    #[test]
+    fn test_spot_price_is_one() {
+        let state = eth_state();
+        let price = state
+            .spot_price(&native_token(), &wrapped_token())
+            .expect("valid pair");
+        assert_eq!(price, 1.0);
+
+        let price = state
+            .spot_price(&wrapped_token(), &native_token())
+            .expect("valid pair");
+        assert_eq!(price, 1.0);
+    }
+
+    #[test]
+    fn test_get_amount_out_wrapping() {
+        let state = eth_state();
+        let amount = BigUint::from(1_000_000u64);
+        let result = state
+            .get_amount_out(amount.clone(), &native_token(), &wrapped_token())
+            .expect("valid pair");
+        assert_eq!(result.amount, amount);
+        assert_eq!(result.gas, BigUint::from(WRAP_GAS));
+    }
+
+    #[test]
+    fn test_get_amount_out_unwrapping() {
+        let state = eth_state();
+        let amount = BigUint::from(1_000_000u64);
+        let result = state
+            .get_amount_out(amount.clone(), &wrapped_token(), &native_token())
+            .expect("valid pair");
+        assert_eq!(result.amount, amount);
+        assert_eq!(result.gas, BigUint::from(UNWRAP_GAS));
+    }
+
+    #[test]
+    fn test_get_amount_out_invalid_pair() {
+        let state = eth_state();
+        let bogus = Token { address: Bytes::from("0xdead"), ..native_token() };
+        let result = state.get_amount_out(BigUint::from(1u64), &bogus, &wrapped_token());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_limits() {
+        let state = eth_state();
+        let (sell_limit, buy_limit) = state
+            .get_limits(native_token().address, wrapped_token().address)
+            .expect("valid pair");
+        assert_eq!(sell_limit, BigUint::from(u128::MAX));
+        assert_eq!(buy_limit, BigUint::from(u128::MAX));
+    }
+
+    #[test]
+    fn test_spot_price_invalid_pair() {
+        let state = eth_state();
+        let bogus = Token { address: Bytes::from("0xdead"), ..native_token() };
+        let result = state.spot_price(&bogus, &wrapped_token());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_component_metadata() {
+        let component = NativeWrapperState::component(Chain::Ethereum);
+        assert_eq!(component.id, Bytes::from(NATIVE_WRAPPER_ID.as_bytes()));
+        assert_eq!(component.protocol_system, "native_wrap");
+        assert_eq!(component.protocol_type_name, "NativeWrapper");
     }
 }

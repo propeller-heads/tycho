@@ -5,18 +5,18 @@ import {CommonBase} from "../../lib/forge-std/src/Base.sol";
 import {Constants} from "../Constants.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
-    WrapExecutor,
-    WrapExecutor__InvalidDataLength,
+    NativeWrapExecutor,
+    NativeWrapExecutor__InvalidDataLength,
     IWrapped
-} from "../../src/executors/WrapExecutor.sol";
+} from "../../src/executors/NativeWrapExecutor.sol";
 import {StdAssertions} from "../../lib/forge-std/src/StdAssertions.sol";
 import {StdChains} from "../../lib/forge-std/src/StdChains.sol";
 import {StdCheats, StdCheatsSafe} from "../../lib/forge-std/src/StdCheats.sol";
 import {StdUtils} from "../../lib/forge-std/src/StdUtils.sol";
 import {TestUtils} from "../TestUtils.sol";
 
-contract WrapExecutorExposed is WrapExecutor {
-    constructor(address wethAddress) WrapExecutor(wethAddress) {}
+contract NativeWrapExecutorExposed is NativeWrapExecutor {
+    constructor(address wrappedAddress) NativeWrapExecutor(wrappedAddress) {}
 
     function decodeParams(bytes calldata data)
         external
@@ -27,12 +27,12 @@ contract WrapExecutorExposed is WrapExecutor {
     }
 }
 
-contract WrapExecutorTest is TestUtils, Constants {
-    WrapExecutorExposed wrapExecutor;
+contract NativeWrapExecutorTest is TestUtils, Constants {
+    NativeWrapExecutorExposed nativeWrapExecutor;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), 23899254);
-        wrapExecutor = new WrapExecutorExposed(WETH_ADDR);
+        nativeWrapExecutor = new NativeWrapExecutorExposed(WETH_ADDR);
     }
 
     function testDecodeParamsWrap() public view {
@@ -40,7 +40,7 @@ contract WrapExecutorTest is TestUtils, Constants {
             uint8(1) // isWrapping = true
         );
 
-        bool isWrapping = wrapExecutor.decodeParams(params);
+        bool isWrapping = nativeWrapExecutor.decodeParams(params);
 
         assertTrue(isWrapping);
     }
@@ -50,7 +50,7 @@ contract WrapExecutorTest is TestUtils, Constants {
             uint8(0) // isWrapping = false
         );
 
-        bool isWrapping = wrapExecutor.decodeParams(params);
+        bool isWrapping = nativeWrapExecutor.decodeParams(params);
 
         assertFalse(isWrapping);
     }
@@ -58,8 +58,8 @@ contract WrapExecutorTest is TestUtils, Constants {
     function testDecodeParamsInvalidDataLength() public {
         bytes memory invalidParams = abi.encodePacked(BOB);
 
-        vm.expectRevert(WrapExecutor__InvalidDataLength.selector);
-        wrapExecutor.decodeParams(invalidParams);
+        vm.expectRevert(NativeWrapExecutor__InvalidDataLength.selector);
+        nativeWrapExecutor.decodeParams(invalidParams);
     }
 
     function testGetTransferDataWrap() public {
@@ -73,7 +73,7 @@ contract WrapExecutorTest is TestUtils, Constants {
             address tokenIn,
             address tokenOut,
             bool outputToRouter
-        ) = wrapExecutor.getTransferData(params);
+        ) = nativeWrapExecutor.getTransferData(params);
 
         assertEq(
             uint8(transferType),
@@ -96,7 +96,7 @@ contract WrapExecutorTest is TestUtils, Constants {
             address tokenIn,
             address tokenOut,
             bool outputToRouter
-        ) = wrapExecutor.getTransferData(params);
+        ) = nativeWrapExecutor.getTransferData(params);
 
         assertEq(
             uint8(transferType),
@@ -117,10 +117,10 @@ contract WrapExecutorTest is TestUtils, Constants {
         );
 
         // Fund the executor with ETH
-        vm.deal(address(wrapExecutor), amountIn);
-        wrapExecutor.swap(amountIn, protocolData, BOB);
+        vm.deal(address(nativeWrapExecutor), amountIn);
+        nativeWrapExecutor.swap(amountIn, protocolData, BOB);
 
-        assertEq(WETH.balanceOf(address(wrapExecutor)), 1 ether);
+        assertEq(WETH.balanceOf(address(nativeWrapExecutor)), 1 ether);
     }
 
     function testSwapUnwrap() public {
@@ -131,12 +131,14 @@ contract WrapExecutorTest is TestUtils, Constants {
         );
 
         // Fund the executor with wETH
-        deal(WETH_ADDR, address(wrapExecutor), amountIn);
+        deal(WETH_ADDR, address(nativeWrapExecutor), amountIn);
 
-        uint256 ethBalanceBefore = address(wrapExecutor).balance;
-        wrapExecutor.swap(amountIn, protocolData, BOB);
+        uint256 ethBalanceBefore = address(nativeWrapExecutor).balance;
+        nativeWrapExecutor.swap(amountIn, protocolData, BOB);
 
-        assertEq(address(wrapExecutor).balance - ethBalanceBefore, 1 ether);
+        assertEq(
+            address(nativeWrapExecutor).balance - ethBalanceBefore, 1 ether
+        );
     }
 
     function testDecodeWrapping() public view {
@@ -144,7 +146,7 @@ contract WrapExecutorTest is TestUtils, Constants {
         bytes memory protocolData =
             loadCallDataFromFile("test_encode_wrap_wrapping");
 
-        bool isWrapping = wrapExecutor.decodeParams(protocolData);
+        bool isWrapping = nativeWrapExecutor.decodeParams(protocolData);
 
         assertTrue(isWrapping);
     }
@@ -154,7 +156,7 @@ contract WrapExecutorTest is TestUtils, Constants {
         bytes memory protocolData =
             loadCallDataFromFile("test_encode_wrap_unwrapping");
 
-        bool isWrapping = wrapExecutor.decodeParams(protocolData);
+        bool isWrapping = nativeWrapExecutor.decodeParams(protocolData);
 
         assertFalse(isWrapping);
     }

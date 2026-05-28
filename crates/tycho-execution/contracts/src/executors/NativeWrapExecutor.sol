@@ -15,10 +15,10 @@ interface IWrapped is IERC20 {
     function withdraw(uint256) external;
 }
 
-error WrapExecutor__InvalidDataLength();
-error WrapExecutor__ZeroAddress();
+error NativeWrapExecutor__InvalidDataLength();
+error NativeWrapExecutor__ZeroAddress();
 
-contract WrapExecutor is IExecutor {
+contract NativeWrapExecutor is IExecutor {
     using SafeERC20 for IWrapped;
     using SafeERC20 for IERC20;
 
@@ -26,7 +26,7 @@ contract WrapExecutor is IExecutor {
 
     constructor(address wrappedAddress) {
         if (wrappedAddress == address(0)) {
-            revert WrapExecutor__ZeroAddress();
+            revert NativeWrapExecutor__ZeroAddress();
         }
         wrapped = IWrapped(wrappedAddress);
     }
@@ -64,7 +64,7 @@ contract WrapExecutor is IExecutor {
         returns (bool isWrapping)
     {
         if (data.length != 1) {
-            revert WrapExecutor__InvalidDataLength();
+            revert NativeWrapExecutor__InvalidDataLength();
         }
 
         isWrapping = uint8(data[0]) == 1;
@@ -86,7 +86,7 @@ contract WrapExecutor is IExecutor {
         )
     {
         if (data.length != 1) {
-            revert WrapExecutor__InvalidDataLength();
+            revert NativeWrapExecutor__InvalidDataLength();
         }
 
         bool isWrapping = uint8(data[0]) == 1;

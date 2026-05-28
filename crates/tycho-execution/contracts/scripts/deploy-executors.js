@@ -70,7 +70,7 @@ const executors_to_deploy = {
         },
         // Args: Wrapped native token address
         {
-            exchange: "WrapExecutor", args: ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
+            exchange: "NativeWrapExecutor", args: ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
         },
         // Args: Liquorice settlement, Liquorice balance manager
         {
@@ -101,7 +101,7 @@ const executors_to_deploy = {
         {exchange: "SlipstreamsExecutor", args: []},
         // Args: Wrapped native token address
         {
-            exchange: "WrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
+            exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
         },
     ],
     "unichain": [
@@ -128,7 +128,7 @@ const executors_to_deploy = {
         {exchange: "SlipstreamsExecutor", args: []},
         // Args: Wrapped native token address
         {
-            exchange: "WrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
+            exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
         },
     ],
     "arbitrum": [
@@ -147,7 +147,7 @@ const executors_to_deploy = {
         },
         // Args: Wrapped native token address (WETH)
         {
-            exchange: "WrapExecutor", args: ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
+            exchange: "NativeWrapExecutor", args: ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
         },
     ],
     "polygon": [
@@ -166,7 +166,7 @@ const executors_to_deploy = {
         },
         // Args: Wrapped native token address (WPOL)
         {
-            exchange: "WrapExecutor", args: ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
+            exchange: "NativeWrapExecutor", args: ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
         },
     ],
     "bsc": [
@@ -186,7 +186,7 @@ const executors_to_deploy = {
         },
         // Args: Wrapped native token address (WBNB)
         {
-            exchange: "WrapExecutor", args: ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
+            exchange: "NativeWrapExecutor", args: ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
         },
     ],
 }
