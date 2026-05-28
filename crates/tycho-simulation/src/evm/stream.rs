@@ -640,3 +640,62 @@ fn inject_native_wrapper(
         })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use futures::{stream, StreamExt};
+    use tycho_common::models::Chain;
+
+    use super::*;
+    use crate::protocol::models::Update;
+
+    fn empty_update(block: u64) -> Update {
+        Update::new(block, HashMap::new(), HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_inject_native_wrapper_first_message_only() {
+        let updates = vec![Ok(empty_update(1)), Ok(empty_update(2)), Ok(empty_update(3))];
+        let input = stream::iter(updates);
+
+        let results: Vec<_> = inject_native_wrapper(input, Chain::Ethereum)
+            .collect()
+            .await;
+
+        assert_eq!(results.len(), 3);
+
+        let first = results[0]
+            .as_ref()
+            .expect("first update ok");
+        assert!(
+            first
+                .new_pairs
+                .contains_key(NATIVE_WRAPPER_ID),
+            "first message should have native_wrapper component"
+        );
+        assert!(
+            first
+                .states
+                .contains_key(NATIVE_WRAPPER_ID),
+            "first message should have native_wrapper state"
+        );
+
+        let second = results[1]
+            .as_ref()
+            .expect("second update ok");
+        assert!(
+            !second
+                .new_pairs
+                .contains_key(NATIVE_WRAPPER_ID),
+            "second message should NOT have native_wrapper component"
+        );
+        assert!(
+            !second
+                .states
+                .contains_key(NATIVE_WRAPPER_ID),
+            "second message should NOT have native_wrapper state"
+        );
+    }
+}
