@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 substreams = "0.5.22"
 substreams-ethereum = "0.9.13"
 substreams-helper = { path = "../crates/substreams-helper" }
-tycho-substreams = "0.8.0"
+tycho-substreams = { path = "../crates/tycho-substreams" }
 prost = "0.11"
 anyhow = "1.0.95"
 ethabi = "18.0.0"

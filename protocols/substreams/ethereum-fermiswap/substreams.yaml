@@ -29,19 +29,20 @@ networks:
     initialBlock:
       map_protocol_components: 24950669
       store_pairs: 24950669
-      store_pair_tokens: 24950669
       store_token_pairs: 24950669
+      map_token_balance_deltas: 24950669
+      store_token_balances: 24950669
       map_balance_deltas: 24950669
       store_balances: 24950669
       map_protocol_changes: 24950669
     params:
       map_protocol_components: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
-      map_balance_deltas: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
+      map_token_balance_deltas: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
       map_protocol_changes: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
 
 params:
   map_protocol_components: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
-  map_balance_deltas: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
+  map_token_balance_deltas: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
   map_protocol_changes: "engine_address=0ba5665583a4593a86cdc935ea2c8ff378c11317&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e"
 
 modules:
@@ -60,13 +61,6 @@ modules:
     inputs:
       - map: map_protocol_components
 
-  - name: store_pair_tokens
-    kind: store
-    updatePolicy: set_if_not_exists
-    valueType: int64
-    inputs:
-      - map: map_protocol_components
-
   - name: store_token_pairs
     kind: store
     updatePolicy: append
@@ -74,14 +68,31 @@ modules:
     inputs:
       - map: map_protocol_components
 
-  - name: map_balance_deltas
+  - name: map_token_balance_deltas
     kind: map
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
-      - store: store_pair_tokens
+      - store: store_token_pairs
         mode: deltas
-      - store: store_pair_tokens
+      - store: store_token_pairs
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_token_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_token_balance_deltas
+
+  - name: map_balance_deltas
+    kind: map
+    inputs:
+      - map: map_protocol_components
+      - map: map_token_balance_deltas
+      - store: store_token_balances
         mode: get
       - store: store_token_pairs
         mode: get
