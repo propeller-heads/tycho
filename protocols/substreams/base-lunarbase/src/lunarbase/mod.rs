@@ -1,13 +1,16 @@
-pub mod attributes;
-pub mod component;
-pub mod decoder;
-pub mod events;
-pub mod evm_log;
-pub mod indexed;
+pub(crate) mod attributes;
+pub(crate) mod component;
+pub(crate) mod decoder;
+pub(crate) mod events;
+pub(crate) mod evm_log;
+pub(crate) mod indexed;
 
-pub type Address = [u8; 20];
+pub(crate) type Address = [u8; 20];
 
-pub use component::{component_id, protocol_component, ProtocolComponent, PROTOCOL_TYPE_NAME};
-pub use events::EventApplyContext;
-pub use evm_log::EvmLog;
-pub use indexed::{BlockChanges, BlockChangesBuilder, IndexedTransaction, TransactionChanges};
+pub(crate) use component::{
+    component_id, protocol_component, ProtocolComponent, PROTOCOL_TYPE_NAME,
+};
+pub(crate) use events::EventApplyContext;
+pub(crate) use indexed::{
+    BlockChanges, BlockChangesBuilder, IndexedTransaction, TransactionChanges,
+};

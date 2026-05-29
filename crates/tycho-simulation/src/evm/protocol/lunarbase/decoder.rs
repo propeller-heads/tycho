@@ -1,24 +1,28 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+
+use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
+use tycho_common::{models::token::Token, simulation::errors::SimulationError, Bytes};
 
 use super::{
     attributes::{
-        attrs, insert_address, insert_bool, insert_u128, insert_u256, insert_u32, insert_u64,
-        require_address, require_bool, require_u128, require_u256, require_u32, require_u64,
-        AttributeError, AttributeMap,
+        attrs, insert_bool, insert_u128, insert_u256, insert_u32, insert_u64, require_bool,
+        require_u128, require_u256, require_u32, require_u64, AttributeError, AttributeMap,
     },
-    state::LunarBaseState,
+    state::{Address, LunarBaseState, LunarBaseTychoState},
+};
+use crate::protocol::{
+    errors::InvalidSnapshotError,
+    models::{DecoderContext, TryFromWithBlock},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateDelta {
     pub updated_attributes: AttributeMap,
-    pub deleted_attributes: HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateDecodeError {
     Attribute(AttributeError),
-    DeletedRequiredAttribute(String),
 }
 
 impl From<AttributeError> for StateDecodeError {
@@ -27,11 +31,23 @@ impl From<AttributeError> for StateDecodeError {
     }
 }
 
+impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseTychoState {
+    type Error = InvalidSnapshotError;
+
+    async fn try_from_with_header(
+        snapshot: ComponentWithState,
+        block: BlockHeader,
+        _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
+        _all_tokens: &HashMap<Bytes, Token>,
+        _decoder_context: &DecoderContext,
+    ) -> Result<Self, Self::Error> {
+        let state = decode_lunarbase_snapshot(&snapshot)?;
+        Ok(Self { state, head_block: block.number })
+    }
+}
+
 pub fn encode_state(state: &LunarBaseState) -> AttributeMap {
     let mut attrs = AttributeMap::new();
-    insert_address(&mut attrs, attrs::POOL, state.pool);
-    insert_address(&mut attrs, attrs::TOKEN_X, state.token_x);
-    insert_address(&mut attrs, attrs::TOKEN_Y, state.token_y);
     insert_u128(&mut attrs, attrs::ANCHOR_PRICE_X96, state.anchor_price_x96);
     insert_u32(&mut attrs, attrs::FEE_ASK_X24, state.fee_ask_x24);
     insert_u32(&mut attrs, attrs::FEE_BID_X24, state.fee_bid_x24);
@@ -46,11 +62,14 @@ pub fn encode_state(state: &LunarBaseState) -> AttributeMap {
     attrs
 }
 
-pub fn decode_state(attrs: &AttributeMap) -> Result<LunarBaseState, StateDecodeError> {
+pub fn decode_state(
+    static_attrs: StaticStateAttributes,
+    attrs: &AttributeMap,
+) -> Result<LunarBaseState, StateDecodeError> {
     Ok(LunarBaseState {
-        pool: require_address(attrs, attrs::POOL)?,
-        token_x: require_address(attrs, attrs::TOKEN_X)?,
-        token_y: require_address(attrs, attrs::TOKEN_Y)?,
+        pool: static_attrs.pool,
+        token_x: static_attrs.token_x,
+        token_y: static_attrs.token_y,
         anchor_price_x96: require_u128(attrs, attrs::ANCHOR_PRICE_X96)?,
         fee_ask_x24: require_u32(attrs, attrs::FEE_ASK_X24)?,
         fee_bid_x24: require_u32(attrs, attrs::FEE_BID_X24)?,
@@ -65,15 +84,86 @@ pub fn decode_state(attrs: &AttributeMap) -> Result<LunarBaseState, StateDecodeE
     })
 }
 
-pub fn apply_delta(state: &mut LunarBaseState, delta: &StateDelta) -> Result<(), StateDecodeError> {
-    if let Some(name) = delta.deleted_attributes.iter().next() {
-        return Err(StateDecodeError::DeletedRequiredAttribute(name.clone()));
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StaticStateAttributes {
+    pub pool: [u8; 20],
+    pub token_x: [u8; 20],
+    pub token_y: [u8; 20],
+}
 
+pub fn apply_delta(state: &mut LunarBaseState, delta: &StateDelta) -> Result<(), StateDecodeError> {
     let mut attrs = encode_state(state);
     attrs.extend(delta.updated_attributes.clone());
-    *state = decode_state(&attrs)?;
+    *state = decode_state(
+        StaticStateAttributes { pool: state.pool, token_x: state.token_x, token_y: state.token_y },
+        &attrs,
+    )?;
     Ok(())
+}
+
+pub fn decode_lunarbase_snapshot(
+    snapshot: &ComponentWithState,
+) -> Result<LunarBaseState, InvalidSnapshotError> {
+    let mut attributes = AttributeMap::new();
+    for (name, value) in snapshot.state.attributes.iter() {
+        attributes.insert(name.clone(), value.to_vec());
+    }
+
+    decode_state(
+        StaticStateAttributes {
+            pool: component_pool(snapshot)?,
+            token_x: component_token(snapshot, 0)?,
+            token_y: component_token(snapshot, 1)?,
+        },
+        &attributes,
+    )
+    .map_err(map_decode_error)
+}
+
+fn component_pool(snapshot: &ComponentWithState) -> Result<Address, InvalidSnapshotError> {
+    snapshot
+        .component
+        .contract_addresses
+        .first()
+        .ok_or_else(|| {
+            InvalidSnapshotError::ValueError("missing LunarBase pool contract".to_owned())
+        })
+        .and_then(|value| address_from_bytes(value.as_ref()).map_err(map_sim_error))
+}
+
+fn component_token(
+    snapshot: &ComponentWithState,
+    idx: usize,
+) -> Result<Address, InvalidSnapshotError> {
+    snapshot
+        .component
+        .tokens
+        .get(idx)
+        .map(|token| token.as_ref())
+        .ok_or_else(|| InvalidSnapshotError::ValueError(format!("missing token index {idx}")))
+        .and_then(|value| address_from_bytes(value).map_err(map_sim_error))
+}
+
+fn address_from_bytes(value: &[u8]) -> Result<Address, SimulationError> {
+    value.try_into().map_err(|_| {
+        SimulationError::InvalidInput(
+            format!("expected 20-byte address, got {}", value.len()),
+            None,
+        )
+    })
+}
+
+fn map_decode_error(err: StateDecodeError) -> InvalidSnapshotError {
+    match err {
+        StateDecodeError::Attribute(AttributeError::Missing(name)) => {
+            InvalidSnapshotError::MissingAttribute(name.to_string())
+        }
+        other => InvalidSnapshotError::ValueError(format!("{other:?}")),
+    }
+}
+
+fn map_sim_error(err: SimulationError) -> InvalidSnapshotError {
+    InvalidSnapshotError::ValueError(err.to_string())
 }
 
 #[cfg(test)]
@@ -108,7 +198,15 @@ mod tests {
     #[test]
     fn round_trips_full_state_attributes() {
         let state = state();
-        let decoded = decode_state(&encode_state(&state)).unwrap();
+        let decoded = decode_state(
+            StaticStateAttributes {
+                pool: state.pool,
+                token_x: state.token_x,
+                token_y: state.token_y,
+            },
+            &encode_state(&state),
+        )
+        .unwrap();
         assert_eq!(decoded, state);
     }
 
@@ -121,11 +219,7 @@ mod tests {
         insert_u32(&mut updated, attrs::FEE_BID_X24, 21);
         insert_u64(&mut updated, attrs::LATEST_UPDATE_BLOCK, 101);
 
-        apply_delta(
-            &mut state,
-            &StateDelta { updated_attributes: updated, deleted_attributes: HashSet::new() },
-        )
-        .unwrap();
+        apply_delta(&mut state, &StateDelta { updated_attributes: updated }).unwrap();
 
         assert_eq!(state.anchor_price_x96, 2u128 << 96);
         assert_eq!(state.fee_ask_x24, 20);

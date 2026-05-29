@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use ethabi::ethereum_types::U256;
 
 use crate::lunarbase::{
@@ -9,24 +7,6 @@ use crate::lunarbase::{
     decoder::StateDelta,
     Address,
 };
-
-pub mod topics {
-    pub const SWAP_EXECUTED: &str =
-        "0x1b43ddf90e971181a7faf41549e512675072e84befadbba7873086509dec1fdc";
-    pub const STATE_UPDATED: &str =
-        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61";
-    pub const BLOCK_DELAY_SET: &str =
-        "0x673f9280467ef1d677edd6a21630cf328068a1dc8da64205c1bc79855c6b2307";
-    pub const CONCENTRATION_K_SET: &str =
-        "0xcf34ec77e4a73dc1b2fdbb6eaec360819374b6412a8bf8096f91c4fdb76db3a8";
-    pub const WHITELIST_SET: &str =
-        "0x0aa5ec5ffdc7f6f9c4d0dded489d7450297155cb2f71cb771e02427f7dff4f51";
-    pub const BLACKLIST_FEE_MULTIPLIER_SET: &str =
-        "0xa15057886e6ebcdf47294bcb091d686031124d1041cafe00740e93667bacd186";
-    pub const SYNC: &str = "0x99e93fd94a51b80d7dd7ec3f69c4f09a43e7523f5a45ca09b88a178d9daaed1e";
-    pub const PAUSED: &str = "0x62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a258";
-    pub const UNPAUSED: &str = "0x5db9ee0a495bf2e6ff9c91a7834c1ba4fdd244a5e8aa4e537bd38aeae4b073aa";
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventApplyContext {
@@ -93,7 +73,7 @@ pub fn event_to_delta(
         }
     }
 
-    Ok(StateDelta { updated_attributes, deleted_attributes: HashSet::new() })
+    Ok(StateDelta { updated_attributes })
 }
 
 fn uint24_max() -> u32 {

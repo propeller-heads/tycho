@@ -13,6 +13,6 @@ pub fn store_protocol_components(
     }
 }
 
-fn component_key(component_id: &str) -> String {
+pub(crate) fn component_key(component_id: &str) -> String {
     format!("component:{component_id}")
 }

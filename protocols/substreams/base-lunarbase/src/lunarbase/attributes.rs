@@ -2,14 +2,9 @@ use std::collections::HashMap;
 
 use ethabi::ethereum_types::U256;
 
-use crate::lunarbase::Address;
-
 pub type AttributeMap = HashMap<String, Vec<u8>>;
 
 pub mod attrs {
-    pub const POOL: &str = "pool";
-    pub const TOKEN_X: &str = "token_x";
-    pub const TOKEN_Y: &str = "token_y";
     pub const ANCHOR_PRICE_X96: &str = "anchor_price_x96";
     pub const FEE_ASK_X24: &str = "fee_ask_x24";
     pub const FEE_BID_X24: &str = "fee_bid_x24";
@@ -21,10 +16,6 @@ pub mod attrs {
     pub const PAUSED: &str = "paused";
     pub const BLACKLIST_FEE_MULTIPLIER: &str = "blacklist_fee_multiplier";
     pub const EXECUTOR_WHITELISTED: &str = "executor_whitelisted";
-}
-
-pub fn insert_address(attrs: &mut AttributeMap, name: &'static str, value: Address) {
-    attrs.insert(name.to_owned(), value.to_vec());
 }
 
 pub fn insert_bool(attrs: &mut AttributeMap, name: &'static str, value: bool) {

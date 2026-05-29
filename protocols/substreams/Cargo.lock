@@ -297,6 +297,7 @@ dependencies = [
  "hex",
  "itertools 0.12.1",
  "num-bigint",
+ "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "tycho-substreams 0.8.0",

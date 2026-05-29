@@ -98,12 +98,5 @@ pub fn to_tycho_protocol_component(
     tycho::ProtocolComponent::new(&component.id)
         .with_tokens(&component.tokens)
         .with_contracts(&component.contract_addresses)
-        .with_attributes(
-            &component
-                .static_attributes
-                .into_iter()
-                .sorted_unstable_by(|(left, _), (right, _)| left.cmp(right))
-                .collect::<Vec<_>>(),
-        )
         .as_swap_type(lunarbase::PROTOCOL_TYPE_NAME, tycho::ImplementationType::Custom)
 }

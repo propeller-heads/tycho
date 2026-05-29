@@ -1,10 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
+use substreams_ethereum::pb::eth;
+
 use crate::lunarbase::{
+    attributes::{
+        attrs, insert_bool, insert_u128, insert_u256, insert_u32, insert_u64, AttributeMap,
+    },
     component::ProtocolComponent,
     decoder::StateDelta,
     events::{event_to_delta, EventApplyContext, EventApplyError, LunarBaseEvent},
-    evm_log::{decode_lunarbase_state_log, EvmLog, LogDecodeError},
+    evm_log::{decode_lunarbase_state_log, LogDecodeError},
     Address,
 };
 
@@ -66,12 +71,14 @@ impl BlockChangesBuilder {
     }
 
     pub fn register_component(&mut self, tx: IndexedTransaction, component: ProtocolComponent) {
+        let component_id = component.id.clone();
         self.known_components
-            .insert(component.id.clone());
+            .insert(component_id.clone());
         let tx_changes = self.transaction_mut(tx);
         tx_changes
             .new_protocol_components
             .push(component);
+        merge_state_delta(tx_changes, &component_id, initial_state_delta());
     }
 
     pub fn apply_event(
@@ -91,7 +98,7 @@ impl BlockChangesBuilder {
         }
 
         let delta = event_to_delta(event, context)?;
-        if delta.updated_attributes.is_empty() && delta.deleted_attributes.is_empty() {
+        if delta.updated_attributes.is_empty() {
             return Ok(());
         }
         let tx_changes = self.transaction_mut(tx);
@@ -113,7 +120,7 @@ impl BlockChangesBuilder {
     pub fn apply_log(
         &mut self,
         tx: IndexedTransaction,
-        log: &EvmLog,
+        log: &eth::v2::Log,
         context: EventApplyContext,
         token_x: Address,
         token_y: Address,
@@ -121,7 +128,10 @@ impl BlockChangesBuilder {
         let Some(event) = decode_lunarbase_state_log(log)? else {
             return Ok(());
         };
-        let component_id = crate::lunarbase::component::component_id(log.address);
+        let Some(address) = fixed_20(&log.address) else {
+            return Ok(());
+        };
+        let component_id = crate::lunarbase::component::component_id(address);
         self.apply_event(tx, &component_id, &event, context, token_x, token_y)
     }
 
@@ -151,23 +161,35 @@ impl BlockChangesBuilder {
     }
 }
 
+fn fixed_20(value: &[u8]) -> Option<[u8; 20]> {
+    value.try_into().ok()
+}
+
 fn merge_state_delta(tx: &mut TransactionChanges, component_id: &str, delta: StateDelta) {
     let entry = tx
         .state_updates
         .entry(component_id.to_owned())
         .or_default();
 
-    for deleted in delta.deleted_attributes {
-        entry
-            .updated_attributes
-            .remove(&deleted);
-        entry.deleted_attributes.insert(deleted);
-    }
-
     for (name, value) in delta.updated_attributes {
-        entry.deleted_attributes.remove(&name);
         entry
             .updated_attributes
             .insert(name, value);
     }
+}
+
+fn initial_state_delta() -> StateDelta {
+    let mut updated_attributes = AttributeMap::new();
+    insert_u128(&mut updated_attributes, attrs::ANCHOR_PRICE_X96, 0);
+    insert_u32(&mut updated_attributes, attrs::FEE_ASK_X24, 0);
+    insert_u32(&mut updated_attributes, attrs::FEE_BID_X24, 0);
+    insert_u64(&mut updated_attributes, attrs::LATEST_UPDATE_BLOCK, 0);
+    insert_u128(&mut updated_attributes, attrs::RESERVE_X, 0);
+    insert_u128(&mut updated_attributes, attrs::RESERVE_Y, 0);
+    insert_u32(&mut updated_attributes, attrs::CONCENTRATION_K, 0);
+    insert_u64(&mut updated_attributes, attrs::BLOCK_DELAY, 2);
+    insert_bool(&mut updated_attributes, attrs::PAUSED, true);
+    insert_u256(&mut updated_attributes, attrs::BLACKLIST_FEE_MULTIPLIER, 1.into());
+    insert_bool(&mut updated_attributes, attrs::EXECUTOR_WHITELISTED, false);
+    StateDelta { updated_attributes }
 }

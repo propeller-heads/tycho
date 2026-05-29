@@ -1,8 +1,4 @@
-use super::{
-    attributes::{attrs, insert_address, AttributeMap},
-    state::Address,
-    PROTOCOL_SYSTEM,
-};
+use super::{state::Address, PROTOCOL_SYSTEM};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolComponent {
@@ -10,7 +6,6 @@ pub struct ProtocolComponent {
     pub protocol_system: &'static str,
     pub tokens: [Address; 2],
     pub contract_addresses: Vec<Address>,
-    pub static_attributes: AttributeMap,
 }
 
 pub fn component_id(pool: Address) -> String {
@@ -18,17 +13,11 @@ pub fn component_id(pool: Address) -> String {
 }
 
 pub fn protocol_component(pool: Address, token_x: Address, token_y: Address) -> ProtocolComponent {
-    let mut static_attributes = AttributeMap::new();
-    insert_address(&mut static_attributes, attrs::POOL, pool);
-    insert_address(&mut static_attributes, attrs::TOKEN_X, token_x);
-    insert_address(&mut static_attributes, attrs::TOKEN_Y, token_y);
-
     ProtocolComponent {
         id: component_id(pool),
         protocol_system: PROTOCOL_SYSTEM,
         tokens: [token_x, token_y],
         contract_addresses: vec![pool],
-        static_attributes,
     }
 }
 

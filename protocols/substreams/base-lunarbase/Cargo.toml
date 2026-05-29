@@ -19,3 +19,8 @@ tycho-substreams = { path = "../crates/tycho-substreams" }
 
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
+
+[build-dependencies]
+anyhow = "1.0.95"
+serde_json = "1.0.138"
+substreams-ethereum = "0.9.9"

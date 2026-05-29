@@ -2,14 +2,9 @@ use std::collections::HashMap;
 
 use lunarbase_pmm_math::U256;
 
-use super::state::Address;
-
 pub type AttributeMap = HashMap<String, Vec<u8>>;
 
 pub mod attrs {
-    pub const POOL: &str = "pool";
-    pub const TOKEN_X: &str = "token_x";
-    pub const TOKEN_Y: &str = "token_y";
     pub const ANCHOR_PRICE_X96: &str = "anchor_price_x96";
     pub const FEE_ASK_X24: &str = "fee_ask_x24";
     pub const FEE_BID_X24: &str = "fee_bid_x24";
@@ -28,10 +23,6 @@ pub enum AttributeError {
     Missing(&'static str),
     InvalidLength { name: &'static str, expected: usize, actual: usize },
     IntegerOverflow(&'static str),
-}
-
-pub fn insert_address(attrs: &mut AttributeMap, name: &'static str, value: Address) {
-    attrs.insert(name.to_owned(), value.to_vec());
 }
 
 pub fn insert_bool(attrs: &mut AttributeMap, name: &'static str, value: bool) {
@@ -62,19 +53,6 @@ pub fn insert_u256(attrs: &mut AttributeMap, name: &'static str, value: U256) {
             out[31 - idx] = *byte;
         });
     attrs.insert(name.to_owned(), out);
-}
-
-pub fn require_address(
-    attrs: &AttributeMap,
-    name: &'static str,
-) -> Result<Address, AttributeError> {
-    let value = require(attrs, name)?;
-    if value.len() != 20 {
-        return Err(AttributeError::InvalidLength { name, expected: 20, actual: value.len() });
-    }
-    let mut out = [0u8; 20];
-    out.copy_from_slice(value);
-    Ok(out)
 }
 
 pub fn require_bool(attrs: &AttributeMap, name: &'static str) -> Result<bool, AttributeError> {
