@@ -2,11 +2,7 @@ use tycho_client::feed::BlockHeader;
 
 use crate::evm::decoder::TychoStreamDecoder;
 
-mod attributes;
-#[cfg(test)]
-mod component;
 mod decoder;
-mod quote;
 pub mod state;
 
 pub use state::LunarBaseTychoState;
@@ -32,7 +28,6 @@ mod tests {
     };
 
     use super::{
-        component::protocol_component,
         decoder::{decode_lunarbase_snapshot, encode_state},
         register_lunarbase_decoder,
         state::{Address, LunarBaseState, LunarBaseTychoState},
@@ -89,10 +84,10 @@ mod tests {
     }
 
     fn snapshot(state: LunarBaseState) -> ComponentWithState {
-        let component = protocol_component(state.pool, state.token_x, state.token_y);
+        let component_id = component_id(state.pool);
         ComponentWithState {
             state: ResponseProtocolState {
-                component_id: component.id.clone(),
+                component_id: component_id.clone(),
                 attributes: encode_state(&state)
                     .into_iter()
                     .map(|(name, value)| (name, Bytes::from(value)))
@@ -101,7 +96,7 @@ mod tests {
             }
             .into(),
             component: ProtocolComponent {
-                id: component.id.clone(),
+                id: component_id,
                 protocol_system: PROTOCOL_SYSTEM.to_owned(),
                 protocol_type_name: "lunarbase".to_owned(),
                 chain: Chain::Base.into(),
@@ -109,11 +104,7 @@ mod tests {
                     Bytes::from(state.token_x.to_vec()),
                     Bytes::from(state.token_y.to_vec()),
                 ],
-                contract_ids: component
-                    .contract_addresses
-                    .into_iter()
-                    .map(Bytes::from)
-                    .collect(),
+                contract_ids: vec![Bytes::from(state.pool.to_vec())],
                 static_attributes: HashMap::new(),
                 creation_tx: Bytes::zero(32),
                 ..Default::default()
@@ -124,10 +115,37 @@ mod tests {
         }
     }
 
+    fn component_id(pool: Address) -> String {
+        address_to_hex(pool)
+    }
+
+    fn address_to_hex(address: Address) -> String {
+        let mut out = String::with_capacity(42);
+        out.push_str("0x");
+        for byte in address {
+            out.push(nibble_to_hex(byte >> 4));
+            out.push(nibble_to_hex(byte & 0x0f));
+        }
+        out
+    }
+
+    fn nibble_to_hex(value: u8) -> char {
+        match value {
+            0..=9 => (b'0' + value) as char,
+            10..=15 => (b'a' + value - 10) as char,
+            _ => unreachable!("nibble is always <= 15"),
+        }
+    }
+
     #[test]
     fn registers_decoder_with_tycho_stream_decoder() {
         let mut decoder = TychoStreamDecoder::<BlockHeader>::new();
         register_lunarbase_decoder(&mut decoder);
+    }
+
+    #[test]
+    fn builds_stable_component_id() {
+        assert_eq!(component_id([0xab; 20]), "0xabababababababababababababababababababab");
     }
 
     #[test]
