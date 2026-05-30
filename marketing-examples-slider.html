@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Marketing Examples — Slider</title>
+<style>
+  :root {
+    --bar: 52px;
+    --accent: #ff5a3c;
+    --bg: #0e0e10;
+    --fg: #f4f4f5;
+    --muted: #a1a1aa;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+
+  /* Top bar */
+  #bar {
+    height: var(--bar); flex: 0 0 var(--bar);
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 12px; background: #161618; border-bottom: 1px solid #262629;
+    z-index: 30;
+  }
+  #bar .brand { font-weight: 700; letter-spacing: .2px; white-space: nowrap; }
+  #bar .brand span { color: var(--accent); }
+  #bar .chip {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--accent); background: rgba(255,90,60,.12);
+    padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+  }
+  #bar .title {
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 14px; color: var(--fg);
+  }
+  #bar .count { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  #jump {
+    background: #1f1f23; color: var(--fg); border: 1px solid #303036; border-radius: 8px;
+    padding: 7px 8px; font-size: 13px; max-width: 38vw;
+  }
+  #bar a.open { color: var(--muted); text-decoration: none; font-size: 13px; white-space: nowrap; }
+  #bar a.open:hover { color: var(--fg); }
+
+  /* Stage */
+  #stage { position: relative; flex: 1 1 auto; overflow: hidden; }
+  #track {
+    position: absolute; inset: 0; display: flex;
+    transition: transform .42s cubic-bezier(.22,.61,.36,1);
+    will-change: transform;
+  }
+  .slide { position: relative; flex: 0 0 100%; height: 100%; background: #fff; }
+  .slide iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+  .slide .ph {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #888; background: #fff; font-size: 14px;
+  }
+
+  /* Edge nav arrows */
+  .nav {
+    position: absolute; top: 0; bottom: 0; width: 64px; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: 0; cursor: pointer; color: #fff;
+    transition: background .15s;
+  }
+  .nav:hover { background: rgba(0,0,0,.04); }
+  .nav.prev { left: 0; }
+  .nav.next { right: 0; }
+  .nav .ic {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(20,20,22,.82); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+  }
+  .nav:disabled { opacity: .25; cursor: default; }
+  @media (max-width: 640px) { .nav { width: 48px; } .nav .ic { width: 34px; height: 34px; } }
+
+  /* Progress */
+  #progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0,0,0,.08); z-index: 25; }
+  #progress > div { height: 100%; background: var(--accent); width: 0; transition: width .42s ease; }
+
+  /* hint toast */
+  #hint {
+    position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+    background: rgba(20,20,22,.9); color: #fff; padding: 8px 14px; border-radius: 999px;
+    font-size: 13px; z-index: 26; transition: opacity .5s; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <div class="brand">Marketing<span>Examples</span></div>
+    <div class="chip" id="chip">—</div>
+    <div class="title" id="title">Loading…</div>
+    <select id="jump" title="Jump to example"></select>
+    <span class="count" id="count">—</span>
+    <a class="open" id="openLink" target="_blank" rel="noopener">open ↗</a>
+  </div>
+  <div id="stage">
+    <div id="track"></div>
+    <button class="nav prev" id="prev" aria-label="Previous"><span class="ic">‹</span></button>
+    <button class="nav next" id="next" aria-label="Next"><span class="ic">›</span></button>
+    <div id="progress"><div id="progressBar"></div></div>
+    <div id="hint">← → arrow keys to slide</div>
+  </div>
+</div>
+
+<script>
+// Every example from marketingexamples.com, in homepage order.
+// category is derived from the path prefix.
+const PATHS = [
+  "/social/zero-click","/creative/ketones","/sales/lera","/content/pizza-influencer",
+  "/copywriting/promise","/landing-page/trial","/ads/ugly","/ads/tabs","/brand/tropicana",
+  "/landing-page/rows","/ads/adobe","/copywriting/bou","/brand/loom","/copywriting/naming",
+  "/sales/jason-cohen","/brand/reforge","/copywriting/rhetorical-devices","/landing-page/cta",
+  "/retention/raffle","/landing-page/press-b","/creative/wooly-hats","/landing-page/blinkist",
+  "/copywriting/adjectives","/landing-page/upsell","/content/subject-lines","/copywriting/feastables",
+  "/sales/lizzy","/referral/the-swirl","/content/viral","/copywriting/sky-bet","/social/calvin-klein",
+  "/ads/caliber","/seo/chamaripa","/landing-page/cta-warmth","/landing-page/guide","/content/search",
+  "/sales/dream-100","/social/innocent","/sales/step-by-step","/creative/barbie",
+  "/landing-page/price-comparison","/landing-page/wine-list","/sales/ppp","/social/ama",
+  "/social/founder-brand","/landing-page/meta-images","/creative/typo-domains","/ads/do-great-work",
+  "/content/sweet-spot","/creative/cognitive-biases","/social/two-tweets","/content/vogue",
+  "/sales/sticker-mule","/retention/open-rate","/content/clips","/copywriting/math","/content/doac",
+  "/landing-page/labels","/sales/abandoned-cart","/creative/zendesk","/brand/ag1","/ads/leo",
+  "/creative/angostura","/social/zero-likes","/creative/peak-design","/brand/klopp","/social/arcteryx",
+  "/social/billboards","/brand/chewy","/landing-page/pricing","/social/fast","/content/giphy",
+  "/social/easy-to-sum-up","/seo/table-of-contents","/social/product-hunt","/seo/cronitor",
+  "/content/kapwing-youtube","/content/sharing","/social/lil-nas-x","/copywriting/conversational",
+  "/landing-page/titles","/brand/personal","/brand/asos","/referral/gillette","/social/twitter-inspiration",
+  "/copywriting/tips","/copywriting/psychology-of-persuasion","/seo/grubhub-link-building","/ads/signal",
+  "/brand/real","/social/molly-mae","/seo/digital-pr","/ads/neiman","/brand/ladbaby",
+  "/landing-page/email-subscribers","/ads/experiments","/brand/tesla","/content/taylordle",
+  "/landing-page/rewrites","/sales/convert-kit"
+];
+
+const TITLES = {
+  "/social/zero-click":"Same interview. 700x reach.",
+  "/creative/ketones":"Posting seltzer. Making money.",
+  "/sales/lera":"The saleswoman closing 33% of cold pitches",
+  "/content/pizza-influencer":"A full-time \"pizza influencer\"",
+  "/copywriting/promise":"One of these videos has 18M views",
+  "/landing-page/trial":"Should you offer a free trial?",
+  "/ads/ugly":"\"Make Ugly Ads\"",
+  "/ads/tabs":"The chocolate that goes viral every day",
+  "/brand/tropicana":"This rebrand cost Tropicana $55M",
+  "/landing-page/rows":"Rows' homepage test that doubled conversions",
+  "/ads/adobe":"Adobe's Perfect TikTok",
+  "/copywriting/bou":"Bou's Near-Perfect Google ad",
+  "/brand/loom":"How Loom Created a Category",
+  "/copywriting/naming":"Four (not boring) ways to name a new product line",
+  "/sales/jason-cohen":"The cold email that started a $100M / yr company",
+  "/brand/reforge":"Reforge and the Strategic Use of Language",
+  "/copywriting/rhetorical-devices":"One line. Eight Rhetorical Devices.",
+  "/landing-page/cta":"Four ways to write a CTA",
+  "/retention/raffle":"I love this DTC retention strategy",
+  "/landing-page/press-b":"\"Press B anytime to Buy\"",
+  "/creative/wooly-hats":"Innocent's Wooly Hats",
+  "/landing-page/blinkist":"I love Blinkist's free trial paywall",
+  "/copywriting/adjectives":"\"How can I do the ad without any adjectives?\"",
+  "/landing-page/upsell":"I love True Classic's upsell",
+  "/content/subject-lines":"Growth Design's 60% open rate",
+  "/copywriting/feastables":"Two million clicks from one email",
+  "/sales/lizzy":"Lizzy's email worked on me",
+  "/referral/the-swirl":"How the 🌀 took over LinkedIn",
+  "/content/viral":"How to approach viral content marketing",
+  "/copywriting/sky-bet":"Sky Bet's Perfect Offer",
+  "/social/calvin-klein":"70% of Calvin Klein's tweets are questions",
+  "/ads/caliber":"The most upvoted Reddit ad ever",
+  "/seo/chamaripa":"How Chamaripa turned celeb heights into shoe sales",
+  "/landing-page/cta-warmth":"Three ways to add warmth to your CTA",
+  "/landing-page/guide":"My step-by-step guide to landing pages that convert",
+  "/content/search":"Veed, Miro and Canva's strategy in one line",
+  "/sales/dream-100":"\"The Dream 100\"",
+  "/social/innocent":"Innocent know how to write copy",
+  "/sales/step-by-step":"One thousand replies to cold emails",
+  "/creative/barbie":"Barbie Newsjacking",
+  "/landing-page/price-comparison":"How Basecamp makes $99/month feel cheap",
+  "/landing-page/wine-list":"Wine List's Counterintuitive Pricing",
+  "/sales/ppp":"My favourite sales email pattern",
+  "/social/ama":"4 years. 4 AMA's. 1M views.",
+  "/social/founder-brand":"Seven ways to build your \"founder brand\"",
+  "/landing-page/meta-images":"My favourite \"Meta Images\"",
+  "/creative/typo-domains":"10% of ARR from typo domains",
+  "/ads/do-great-work":"My new favourite agency ad",
+  "/content/sweet-spot":"The content marketing sweet spot",
+  "/creative/cognitive-biases":"Nine marketing examples that tap into cognitive biases",
+  "/social/two-tweets":"The tale of two Twitter strategies",
+  "/content/vogue":"How Vogue tapped 5M views from a 3 year old interview",
+  "/sales/sticker-mule":"Sticker Mule's plain text emails",
+  "/retention/open-rate":"A crash course in improving your open rate",
+  "/content/clips":"How to grow a YouTube channel in 2022",
+  "/copywriting/math":"Copywriting is more like math than you suspect",
+  "/content/doac":"Inside Steven Bartlett's ad library",
+  "/landing-page/labels":"Don't write \"labels\"...",
+  "/sales/abandoned-cart":"I love this abandoned cart hook",
+  "/creative/zendesk":"My favourite indie rock band",
+  "/brand/ag1":"AG1's welcome offer is idiot-proof",
+  "/ads/leo":"An influencer ad that doesn't SUCK",
+  "/creative/angostura":"Why is the Angostura bitters label too big?",
+  "/social/zero-likes":"A crafty social media giveaway",
+  "/creative/peak-design":"A brilliant response to Amazon cloning your product",
+  "/brand/klopp":"How Jürgen Klopp makes fans smile",
+  "/social/arcteryx":"Arc'teryx's TikTok Fame",
+  "/social/billboards":"I love Billboards designed for social",
+  "/brand/chewy":"How Chewy delights customers",
+  "/landing-page/pricing":"Refactoring UI: A lesson in high prices",
+  "/social/fast":"How brands make friends on Twitter",
+  "/content/giphy":"Using GIPHY for free brand awareness",
+  "/social/easy-to-sum-up":"If you want to grow on social make yourself easy to sum up",
+  "/seo/table-of-contents":"A Table of Contents can work wonders for SEO",
+  "/social/product-hunt":"How I got 2,000 new subscribers from Product Hunt",
+  "/seo/cronitor":"Cronitor's Little Side-Project",
+  "/content/kapwing-youtube":"Kapwing's YouTube strategy",
+  "/content/sharing":"How I promote my content",
+  "/social/lil-nas-x":"The marketing genius of Lil Nas X",
+  "/copywriting/conversational":"My guide to conversational copywriting",
+  "/landing-page/titles":"How to write a landing page title",
+  "/brand/personal":"People Warm to People, Not Brands",
+  "/brand/asos":"One Tweet. Eighty media placements.",
+  "/referral/gillette":"A simple idea that's makes Gillette $60M/yr",
+  "/social/twitter-inspiration":"My Twitter Inspiration Handbook",
+  "/copywriting/tips":"17 tips for great copywriting",
+  "/copywriting/psychology-of-persuasion":"27 words that sum up the psychology of copywriting",
+  "/seo/grubhub-link-building":"Grubhub's link building strategy",
+  "/ads/signal":"Signal's Instagram Ads",
+  "/brand/real":"Real Marketing",
+  "/social/molly-mae":"£8k Instagram Giveaway → 1M followers",
+  "/seo/digital-pr":"A crash course in getting press and building links",
+  "/ads/neiman":"Neiman's magazine ads",
+  "/brand/ladbaby":"How LadBaby started a movement",
+  "/landing-page/email-subscribers":"How to build a website which converts email subscribers",
+  "/ads/experiments":"A story about my dad and PPC ads",
+  "/brand/tesla":"The genius of Tesla's marketing strategy",
+  "/content/taylordle":"Taylordle",
+  "/landing-page/rewrites":"Rewriting landing pages with a pro copywriter",
+  "/sales/convert-kit":"How Convert Kit grew from $1.5k to $100k MRR"
+};
+
+const CAT_LABEL = {
+  "social":"Social","creative":"Creative","sales":"Sales","content":"Content",
+  "copywriting":"Copywriting","landing-page":"Landing Page","ads":"Ads","brand":"Brand",
+  "retention":"Retention","referral":"Referral","seo":"SEO"
+};
+
+const ORIGIN = "https://marketingexamples.com";
+const examples = PATHS.map(p => ({
+  path: p,
+  url: ORIGIN + p,
+  title: TITLES[p] || p,
+  cat: CAT_LABEL[p.split("/")[1]] || p.split("/")[1]
+}));
+
+const N = examples.length;
+const WINDOW = 1; // how many iframes to keep mounted on each side of current
+
+const track = document.getElementById("track");
+const slides = [];
+
+// Build empty slides
+examples.forEach((ex, i) => {
+  const s = document.createElement("div");
+  s.className = "slide";
+  s.dataset.loaded = "0";
+  const ph = document.createElement("div");
+  ph.className = "ph";
+  ph.textContent = "Loading " + ex.title + " …";
+  s.appendChild(ph);
+  track.appendChild(s);
+  slides.push(s);
+});
+
+function mount(i) {
+  const s = slides[i];
+  if (s.dataset.loaded === "1") return;
+  const f = document.createElement("iframe");
+  f.loading = "lazy";
+  f.title = examples[i].title;
+  f.referrerPolicy = "no-referrer-when-downgrade";
+  f.src = examples[i].url;
+  s.appendChild(f);
+  s.dataset.loaded = "1";
+}
+function unmount(i) {
+  const s = slides[i];
+  if (s.dataset.loaded !== "1") return;
+  const f = s.querySelector("iframe");
+  if (f) f.remove();
+  s.dataset.loaded = "0";
+}
+
+// ----- state / navigation -----
+const els = {
+  chip: document.getElementById("chip"),
+  title: document.getElementById("title"),
+  count: document.getElementById("count"),
+  prev: document.getElementById("prev"),
+  next: document.getElementById("next"),
+  jump: document.getElementById("jump"),
+  open: document.getElementById("openLink"),
+  progress: document.getElementById("progressBar"),
+  hint: document.getElementById("hint")
+};
+
+// Populate jump dropdown
+examples.forEach((ex, i) => {
+  const o = document.createElement("option");
+  o.value = i;
+  o.textContent = (i + 1) + ". [" + ex.cat + "] " + ex.title;
+  els.jump.appendChild(o);
+});
+
+let current = readStart();
+
+function readStart() {
+  const h = parseInt((location.hash || "").replace("#", ""), 10);
+  if (!isNaN(h) && h >= 1 && h <= N) return h - 1;
+  const saved = parseInt(localStorage.getItem("me_slider_idx") || "", 10);
+  if (!isNaN(saved) && saved >= 0 && saved < N) return saved;
+  return 0;
+}
+
+function render(animate = true) {
+  if (!animate) track.style.transition = "none";
+  track.style.transform = "translateX(" + (-current * 100) + "%)";
+  if (!animate) { void track.offsetWidth; track.style.transition = ""; }
+
+  // window-mount iframes
+  for (let i = 0; i < N; i++) {
+    if (Math.abs(i - current) <= WINDOW) mount(i);
+    else unmount(i);
+  }
+
+  const ex = examples[current];
+  els.chip.textContent = ex.cat;
+  els.title.textContent = ex.title;
+  els.count.textContent = (current + 1) + " / " + N;
+  els.jump.value = current;
+  els.open.href = ex.url;
+  els.prev.disabled = current === 0;
+  els.next.disabled = current === N - 1;
+  els.progress.style.width = ((current + 1) / N * 100) + "%";
+
+  location.hash = (current + 1);
+  localStorage.setItem("me_slider_idx", current);
+  document.title = (current + 1) + "/" + N + " · " + ex.title + " — Marketing Examples";
+}
+
+function go(i) {
+  i = Math.max(0, Math.min(N - 1, i));
+  if (i === current) return;
+  current = i;
+  render(true);
+}
+const nextSlide = () => go(current + 1);
+const prevSlide = () => go(current - 1);
+
+els.next.addEventListener("click", nextSlide);
+els.prev.addEventListener("click", prevSlide);
+els.jump.addEventListener("change", e => go(parseInt(e.target.value, 10)));
+
+// Keyboard
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); nextSlide(); }
+  else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); prevSlide(); }
+  else if (e.key === "Home") { e.preventDefault(); go(0); }
+  else if (e.key === "End") { e.preventDefault(); go(N - 1); }
+});
+
+// Touch swipe on the non-iframe zones (edge arrows already handle taps).
+// Cross-origin iframes capture their own pointer events, so we listen on the bar + edges.
+let tx = 0, ty = 0, tracking = false;
+function onStart(x, y) { tx = x; ty = y; tracking = true; }
+function onEnd(x, y) {
+  if (!tracking) return;
+  tracking = false;
+  const dx = x - tx, dy = y - ty;
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+    if (dx < 0) nextSlide(); else prevSlide();
+  }
+}
+const bar = document.getElementById("bar");
+[bar].forEach(z => {
+  z.addEventListener("touchstart", e => onStart(e.touches[0].clientX, e.touches[0].clientY), {passive:true});
+  z.addEventListener("touchend", e => onEnd(e.changedTouches[0].clientX, e.changedTouches[0].clientY), {passive:true});
+});
+
+window.addEventListener("hashchange", () => {
+  const h = parseInt((location.hash || "").replace("#", ""), 10);
+  if (!isNaN(h) && h - 1 !== current && h >= 1 && h <= N) go(h - 1);
+});
+
+// First paint (no animation)
+render(false);
+
+// Hide hint after a moment
+setTimeout(() => { els.hint.style.opacity = "0"; }, 3500);
+</script>
+</body>
+</html>
