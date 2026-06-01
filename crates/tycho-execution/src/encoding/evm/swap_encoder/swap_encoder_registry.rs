@@ -13,9 +13,9 @@ use crate::encoding::{
             etherfi::EtherfiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
             hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            rocketpool::RocketpoolSwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder, weth::WethSwapEncoder,
+            native_wrap::WrapSwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -157,7 +157,9 @@ impl SwapEncoderRegistry {
             "velodrome_slipstreams" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "weth" => Ok(Box::new(WethSwapEncoder::new(executor_address, self.chain, config)?)),
+            "native_wrap" => {
+                Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "etherfi" => {
                 Ok(Box::new(EtherfiSwapEncoder::new(executor_address, self.chain, config)?))
             }

@@ -13,7 +13,7 @@
 //! pattern matching over enum variants was chosen.
 //! If performance mattered less, trait objects would likely be chosen.
 //!
-//! <https://github.com/propeller-heads/tycho-execution/tree/main/foundry/src/executors>
+//! <https://github.com/propeller-heads/tycho-indexer/tree/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors>
 use serde::Serialize;
 
 use crate::{
@@ -39,7 +39,7 @@ pub enum Executor {
     Slipstreams,
     UniswapV2,
     UniswapV3,
-    Weth,
+    NativeWrap,
     AerodromeV1,
     LiquidityParty,
 }
@@ -70,12 +70,12 @@ impl Executor {
         Executor::Slipstreams,
         Executor::UniswapV2,
         Executor::UniswapV3,
-        Executor::Weth,
+        Executor::NativeWrap,
         Executor::AerodromeV1,
         Executor::LiquidityParty,
     ];
 
-    /// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/interfaces/IExecutor.sol#L41>
+    /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
     pub fn get_transfer_data(
         &self,
         params: &Params,
@@ -83,7 +83,7 @@ impl Executor {
         swap_index: u8,
     ) -> Result<TransferData, Error> {
         match self {
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/CurveExecutor.sol#L139
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/CurveExecutor.sol#L143
             Self::Curve => {
                 let token_in = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -114,7 +114,7 @@ impl Executor {
                     output_to_router: true,
                 })
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/ERC4626Executor.sol#L67
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/ERC4626Executor.sol#L67
             Self::ERC4626 => {
                 let token_in = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -147,7 +147,7 @@ impl Executor {
                     output_to_router: false,
                 })
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/FluidV1Executor.sol#L132
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L134
             Self::FluidV1 => {
                 let is_native_sell = params.request(
                     ParamKey::ProtocolData { swap_index, start: 61, end: 62 },
@@ -175,7 +175,7 @@ impl Executor {
                     output_to_router: false,
                 })
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/MaverickV2Executor.sol#L64
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/MaverickV2Executor.sol#L64
             Self::MaverickV2 => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: params.request(
@@ -195,7 +195,7 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/SlipstreamsExecutor.sol#L96
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L83
             Self::Slipstreams => Ok(TransferData {
                 transfer_type: TransferType::None,
                 receiver: Address::Zero,
@@ -209,7 +209,7 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV2Executor.sol#L102
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV2Executor.sol#L102
             Self::UniswapV2 => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: params.request(
@@ -229,7 +229,7 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV3Executor.sol#L107
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L81
             Self::UniswapV3 => Ok(TransferData {
                 transfer_type: TransferType::None,
                 receiver: Address::Zero,
@@ -243,8 +243,8 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/WethExecutor.sol#L76
-            Self::Weth => {
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol#L77
+            Self::NativeWrap => {
                 let is_wrapping = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 1 },
                     [true, false],
@@ -261,7 +261,7 @@ impl Executor {
                     output_to_router: true,
                 })
             }
-            // https://github.com/propeller-heads/tycho-indexer/blob/0d9b01ddbe72c5518fdc79a423ffd19dc7226709/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L80
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L80
             Self::AerodromeV1 => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: params.request(
@@ -281,7 +281,7 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
-            // https://github.com/propeller-heads/tycho-indexer/blob/0d9b01ddbe72c5518fdc79a423ffd19dc7226709/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol#L34
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol#L34
             Self::LiquidityParty => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: params.request(
@@ -304,7 +304,7 @@ impl Executor {
         }
     }
 
-    /// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/interfaces/IExecutor.sol#L23>
+    /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L23>
     #[allow(clippy::too_many_arguments)]
     pub fn swap(
         &self,
@@ -317,7 +317,7 @@ impl Executor {
         swap_index: u8,
     ) -> Result<(), Error> {
         match self {
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/CurveExecutor.sol#L70
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/CurveExecutor.sol#L71
             Self::Curve => {
                 let pool = params.request(
                     ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
@@ -369,7 +369,7 @@ impl Executor {
                 }
                 Ok(())
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/ERC4626Executor.sol#L32
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/ERC4626Executor.sol#L32
             Self::ERC4626 => {
                 let target = params.request(
                     ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
@@ -388,7 +388,7 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/FluidV1Executor.sol#L60
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L61
             Self::FluidV1 => {
                 let dex = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -416,7 +416,7 @@ impl Executor {
                 }
                 Ok(())
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/CurveExecutor.sol#L70
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/MaverickV2Executor.sol#L28
             Self::MaverickV2 => {
                 let pool = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -435,7 +435,7 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/SlipstreamsExecutor.sol#L37
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L37
             Self::Slipstreams => {
                 let pool = params.request(
                     ParamKey::ProtocolData { swap_index, start: 43, end: 63 },
@@ -455,7 +455,7 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV2Executor.sol#L39
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV2Executor.sol#L39
             Self::UniswapV2 => {
                 let pool = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -474,7 +474,7 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV3Executor.sol#L37
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L37
             Self::UniswapV3 => {
                 let target = params.request(
                     ParamKey::ProtocolData { swap_index, start: 43, end: 63 },
@@ -497,8 +497,8 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/WethExecutor.sol#L44
-            Self::Weth => {
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol#L45
+            Self::NativeWrap => {
                 let is_wrapping = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 1 },
                     [true, false],
@@ -522,7 +522,7 @@ impl Executor {
                 }
                 Ok(())
             }
-            // https://github.com/propeller-heads/tycho-indexer/blob/0d9b01ddbe72c5518fdc79a423ffd19dc7226709/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L32
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L32
             Self::AerodromeV1 => {
                 let pool = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -541,7 +541,7 @@ impl Executor {
                     })
                 }
             }
-            // https://github.com/propeller-heads/tycho-indexer/blob/0d9b01ddbe72c5518fdc79a423ffd19dc7226709/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol#L11
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol#L11
             Self::LiquidityParty => {
                 let pool = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -572,26 +572,26 @@ impl Executor {
         match self {
             Self::Curve => unimplemented!(),
             Self::ERC4626 => unimplemented!(),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/FluidV1Executor.sol#L155
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L159
             Self::FluidV1 => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: Address::Named("fluid-v1-liquidity"),
             }),
             Self::MaverickV2 => unimplemented!(),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/SlipstreamsExecutor.sol#L120
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L107
             Self::Slipstreams => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
             Self::UniswapV2 => unimplemented!(),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV3Executor.sol#L131
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L105
             Self::UniswapV3 => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
-            Self::Weth => unimplemented!(),
+            Self::NativeWrap => unimplemented!(),
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
         }
@@ -601,7 +601,7 @@ impl Executor {
         match self {
             Self::Curve => unimplemented!("Curve doesn't use callbacks"),
             Self::ERC4626 => unimplemented!("ERC4626 doesn't use callbacks"),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/FluidV1Executor.sol#L115
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L117
             Self::FluidV1 => {
                 let dex: Address = state.tload("fluid_v1_current_dex")?;
                 if state.msg_sender() != dex {
@@ -610,20 +610,20 @@ impl Executor {
                 Ok(())
             }
             Self::MaverickV2 => unimplemented!("MaverickV2 doesn't use callbacks"),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/SlipstreamsExecutor.sol#L60
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L60
             // not worth modeling as it has no reverts or side effects
             Self::Slipstreams => Ok(()),
             Self::UniswapV2 => unimplemented!("UniswapV2 doesn't use callbacks"),
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV3Executor.sol#L60
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L58
             // not worth modeling as it has no reverts or side effects
             Self::UniswapV3 => Ok(()),
-            Self::Weth => unimplemented!("Weth doesn't use callbacks"),
+            Self::NativeWrap => unimplemented!("Wrap doesn't use callbacks"),
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
         }
     }
 
-    /// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/interfaces/IExecutor.sol#L63>
+    /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L63>
     ///
     /// Most executors return `msg.sender` which translates to the router
     /// because the function is called via staticcall.
@@ -634,13 +634,13 @@ impl Executor {
         swap_index: u8,
     ) -> Result<Address, Error> {
         Ok(match self {
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/CurveExecutor.sol#L59
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/CurveExecutor.sol#L60
             Self::Curve => Address::Router,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/ERC4626Executor.sol#L21
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/ERC4626Executor.sol#L21
             Self::ERC4626 => Address::Router,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/FluidV1Executor.sol#L49
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L50
             Self::FluidV1 => Address::Router,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/MaverickV2Executor.sol#L18
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/MaverickV2Executor.sol#L18
             Self::MaverickV2 => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
                 // trying more variants might find some very obscure bugs
@@ -648,9 +648,9 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/SlipstreamsExecutor.sol#L26
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L26
             Self::Slipstreams => Address::Router,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV2Executor.sol#L29
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV2Executor.sol#L29
             Self::UniswapV2 => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
                 // trying more variants might find some very obscure bugs
@@ -658,11 +658,11 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/UniswapV3Executor.sol#L26
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L26
             Self::UniswapV3 => Address::Router,
-            // https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/executors/WethExecutor.sol#L33
-            Self::Weth => Address::Router,
-            // https://github.com/propeller-heads/tycho-indexer/blob/0d9b01ddbe72c5518fdc79a423ffd19dc7226709/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L23
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol#L34
+            Self::NativeWrap => Address::Router,
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol#L23
             Self::AerodromeV1 => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
                 // trying more variants might find some very obscure bugs
@@ -670,7 +670,7 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
-            // https://github.com/propeller-heads/tycho-indexer/blob/0d9b01ddbe72c5518fdc79a423ffd19dc7226709/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol#L54
+            // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol#L54
             Self::LiquidityParty => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
                 // trying more variants might find some very obscure bugs

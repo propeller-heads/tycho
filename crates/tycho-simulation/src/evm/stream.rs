@@ -82,7 +82,7 @@
 //!     .await
 //!     .expect("Failed loading tokens");
 //!
-//!     let mut protocol_stream =
+//!     let protocol_stream =
 //!         ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum)
 //!             .auth_key(Some("sampletoken".to_string()))
 //!             .skip_state_decode_failures(true)
@@ -95,6 +95,7 @@
 //!             .build()
 //!             .await
 //!             .expect("Failed building protocol stream");
+//!     tokio::pin!(protocol_stream);
 //!
 //!     // Loop through block updates
 //!     while let Some(msg) = protocol_stream.next().await {
@@ -108,7 +109,7 @@ use std::{
     time,
 };
 
-use futures::{Stream, StreamExt};
+use futures::{future::Either, stream, Stream, StreamExt};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, warn};
 use tycho_client::{
@@ -129,7 +130,10 @@ use crate::{
     evm::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
         pending::PendingBlockProcessor,
-        protocol::uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
+        protocol::{
+            native_wrapper::state::{NativeWrapperState, NATIVE_WRAPPER_ID},
+            uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
+        },
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -234,7 +238,10 @@ impl ProtocolStreamBuilder {
         }
 
         if EXCHANGES_REQUIRING_FILTER.contains(&name) && filter_fn.is_none() {
-            warn!("Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs", name);
+            warn!(
+                "Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs",
+                name
+            );
         }
 
         self
@@ -286,7 +293,10 @@ impl ProtocolStreamBuilder {
         }
 
         if EXCHANGES_REQUIRING_FILTER.contains(&name) && filter_fn.is_none() {
-            warn!("Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs", name);
+            warn!(
+                "Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs",
+                name
+            );
         }
 
         self
@@ -542,6 +552,7 @@ impl ProtocolStreamBuilder {
                     }
                 }),
         );
+        let stream = inject_native_wrapper(stream, self.chain);
         Ok((stream, pending))
     }
 
@@ -557,6 +568,7 @@ impl ProtocolStreamBuilder {
         })?;
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
+        let chain = self.chain;
 
         let stream = Box::pin(
             ReceiverStream::new(rx)
@@ -582,9 +594,9 @@ impl ProtocolStreamBuilder {
                     }
                 })
                 .then({
-                    let decoder = decoder.clone(); // Clone the decoder for the closure
+                    let decoder = decoder.clone();
                     move |msg| {
-                        let decoder = decoder.clone(); // Clone again for the async block
+                        let decoder = decoder.clone();
                         async move {
                             let msg = msg.expect("Save since stream ends if we receive an error");
                             decoder.decode(&msg).await.map_err(|e| {
@@ -595,6 +607,105 @@ impl ProtocolStreamBuilder {
                     }
                 }),
         );
+        let stream = inject_native_wrapper(stream, chain);
         Ok(stream)
+    }
+}
+
+/// Wraps a decoded protocol stream to inject a `NativeWrapperState` component
+/// on the first successful update.
+///
+/// Skips injection for chains where the native and wrapped-native tokens share
+/// the same address (e.g. Starknet).
+fn inject_native_wrapper(
+    inner: impl Stream<Item = Result<Update, StreamDecodeError>> + Unpin + Send + 'static,
+    chain: Chain,
+) -> impl Stream<Item = Result<Update, StreamDecodeError>> + Send {
+    let has_distinct_wrapper = chain.native_token().address != chain.wrapped_native_token().address;
+
+    if !has_distinct_wrapper {
+        return Either::Left(inner);
+    }
+
+    Either::Right(
+        stream::once(async move {
+            let mut inner = inner;
+            let first = inner.next().await;
+            let modified = first.into_iter().map(move |result| {
+                result.map(|mut update| {
+                    update.new_pairs.insert(
+                        NATIVE_WRAPPER_ID.to_string(),
+                        NativeWrapperState::component(chain),
+                    );
+                    update.states.insert(
+                        NATIVE_WRAPPER_ID.to_string(),
+                        Box::new(NativeWrapperState::new(chain)),
+                    );
+                    debug!("Injected native_wrapper component for {chain}");
+                    update
+                })
+            });
+            stream::iter(modified).chain(inner)
+        })
+        .flatten(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use futures::{stream, StreamExt};
+    use tycho_common::models::Chain;
+
+    use super::*;
+    use crate::protocol::models::Update;
+
+    fn empty_update(block: u64) -> Update {
+        Update::new(block, HashMap::new(), HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_inject_native_wrapper_first_message_only() {
+        let updates = vec![Ok(empty_update(1)), Ok(empty_update(2)), Ok(empty_update(3))];
+        let input = stream::iter(updates);
+
+        let results: Vec<_> = inject_native_wrapper(input, Chain::Ethereum)
+            .collect()
+            .await;
+
+        assert_eq!(results.len(), 3);
+
+        let first = results[0]
+            .as_ref()
+            .expect("first update ok");
+        assert!(
+            first
+                .new_pairs
+                .contains_key(NATIVE_WRAPPER_ID),
+            "first message should have native_wrapper component"
+        );
+        assert!(
+            first
+                .states
+                .contains_key(NATIVE_WRAPPER_ID),
+            "first message should have native_wrapper state"
+        );
+
+        let second = results[1]
+            .as_ref()
+            .expect("second update ok");
+        assert!(
+            !second
+                .new_pairs
+                .contains_key(NATIVE_WRAPPER_ID),
+            "second message should NOT have native_wrapper component"
+        );
+        assert!(
+            !second
+                .states
+                .contains_key(NATIVE_WRAPPER_ID),
+            "second message should NOT have native_wrapper state"
+        );
     }
 }

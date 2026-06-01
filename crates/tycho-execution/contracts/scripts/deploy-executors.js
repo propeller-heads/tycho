@@ -68,9 +68,9 @@ const executors_to_deploy = {
         {
             exchange: "EkuboV3Executor", args: []
         },
-        // Args: WETH address
+        // Args: Wrapped native token address
         {
-            exchange: "WethExecutor", args: ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
+            exchange: "NativeWrapExecutor", args: ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
         },
         // Args: Liquorice settlement, Liquorice balance manager
         {
@@ -99,9 +99,9 @@ const executors_to_deploy = {
         },
         // Aerodrome Slipstreams - Args: (none)
         {exchange: "SlipstreamsExecutor", args: []},
-        // Args: WETH address
+        // Args: Wrapped native token address
         {
-            exchange: "WethExecutor", args: ["0x4200000000000000000000000000000000000006"]
+            exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
         },
     ],
     "unichain": [
@@ -126,9 +126,9 @@ const executors_to_deploy = {
         },
         // Aerodrome Slipstreams - Args: (none)
         {exchange: "SlipstreamsExecutor", args: []},
-        // Args: WETH address
+        // Args: Wrapped native token address
         {
-            exchange: "WethExecutor", args: ["0x4200000000000000000000000000000000000006"]
+            exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
         },
     ],
     "arbitrum": [
@@ -145,6 +145,10 @@ const executors_to_deploy = {
                 "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
             ]
         },
+        // Args: Wrapped native token address (WETH)
+        {
+            exchange: "NativeWrapExecutor", args: ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
+        },
     ],
     "polygon": [
         // USV2 & QUICKSWAP V2 - Args: Fee BPS
@@ -159,6 +163,10 @@ const executors_to_deploy = {
                 // polygon
                 "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
             ]
+        },
+        // Args: Wrapped native token address (WPOL)
+        {
+            exchange: "NativeWrapExecutor", args: ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
         },
     ],
     "bsc": [
@@ -175,6 +183,10 @@ const executors_to_deploy = {
                 // This is the Angstrom address for ethereum. There isn't one for BSC
                 "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
             ]
+        },
+        // Args: Wrapped native token address (WBNB)
+        {
+            exchange: "NativeWrapExecutor", args: ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
         },
     ],
 }

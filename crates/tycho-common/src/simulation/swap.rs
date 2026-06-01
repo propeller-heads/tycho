@@ -117,7 +117,7 @@ impl<'a> QuoteParams<'a> {
             return Err(SimulationError::InvalidInput(
                 "Quote tokens have to differ!".to_string(),
                 None,
-            ))
+            ));
         }
         Ok(Self {
             context: Context::default(),
@@ -143,7 +143,7 @@ impl<'a> QuoteParams<'a> {
             return Err(SimulationError::InvalidInput(
                 "Quote tokens have to differ!".to_string(),
                 None,
-            ))
+            ));
         }
 
         Ok(Self {
@@ -347,7 +347,7 @@ impl Range {
             return Err(SimulationError::InvalidInput(
                 "Invalid range! Argument lower > upper".to_string(),
                 None,
-            ))
+            ));
         }
         Ok(Self { lower, upper })
     }

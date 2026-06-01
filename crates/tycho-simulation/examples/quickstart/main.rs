@@ -251,7 +251,7 @@ async fn main() {
         load_blocklist(cli.blocklist_file.as_deref()).expect("Failed to load blocklist");
     protocol_stream = protocol_stream.blocklist_components(blocklist);
 
-    let mut protocol_stream = protocol_stream
+    let protocol_stream = protocol_stream
         .auth_key(Some(tycho_api_key.clone()))
         .skip_state_decode_failures(true)
         .set_tokens(all_tokens.clone())
@@ -259,6 +259,7 @@ async fn main() {
         .build()
         .await
         .expect("Failed building protocol stream");
+    tokio::pin!(protocol_stream);
 
     // Initialize the encoder
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
