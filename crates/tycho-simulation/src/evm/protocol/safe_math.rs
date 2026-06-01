@@ -548,4 +548,23 @@ mod safe_math_tests {
         assert!(sqrt_large * sqrt_large <= large);
         assert!((sqrt_large + U512::from(1u32)) * (sqrt_large + U512::from(1u32)) > large);
     }
+
+    // RED: these tests expose the f64 base-case bug in compute_karatsuba_sqrt.
+    // u64::MAX as f64 rounds up to 2^64; sqrt → 2^32; 2^32 * 2^32 overflows u64 → panic.
+    #[test]
+    #[should_panic]
+    fn test_sqrt_u256_panics_on_u64_max() {
+        let _ = sqrt_u256(U256::from(u64::MAX));
+    }
+
+    // 67108865^2 - 1: f64 rounds sqrt up by 1; result² > x violates the floor invariant.
+    #[test]
+    fn test_sqrt_u256_wrong_floor_near_perfect_square() {
+        let x = U256::from(67108865u64 * 67108865u64 - 1);
+        let result = sqrt_u256(x).unwrap();
+        assert!(
+            result * result <= x,
+            "floor invariant violated: sqrt({x}) returned {result}, but {result}² > x"
+        );
+    }
 }
