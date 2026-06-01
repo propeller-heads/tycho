@@ -18,8 +18,8 @@ contract FermiSwapAdapterTest is AdapterTest {
     address constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
 
     uint256 constant WETH_BALANCE = 10 ether;
-    uint256 constant SELL_WETH_AMOUNT = 1 ether;
-    uint256 constant BUY_USDC_AMOUNT = 1_000e6;
+    uint256 constant SELL_WETH_AMOUNT = 0.1 ether;
+    uint256 constant BUY_USDC_AMOUNT = 1_00e6;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"));
