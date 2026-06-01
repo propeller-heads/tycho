@@ -6,17 +6,12 @@ import "openzeppelin-contracts/contracts/interfaces/IERC20.sol";
 import "src/fermiswap/FermiSwapAdapter.sol";
 import "src/interfaces/ISwapAdapterTypes.sol";
 
-interface IFermiEngineFairPrice {
-    function getFairPriceE8(address baseAsset, address quoteAsset)
-        external
-        view
-        returns (uint256 priceE8, uint64 updatedAtBlock);
-}
-
 contract FermiSwapAdapterTest is AdapterTest {
     FermiSwapAdapter adapter;
 
     address constant FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
+    address constant PRIO_UPDATE_REGISTRY =
+        0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F;
     address constant TRADER_VAULT = 0x585d44727129B9C69791B10238Ca605932938B4F;
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
@@ -28,16 +23,15 @@ contract FermiSwapAdapterTest is AdapterTest {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"));
-
-        (, uint64 updatedAtBlock) = IFermiEngineFairPrice(
-                address(IFermiSwapper(FERMI_SWAPPER).fermi())
-            ).getFairPriceE8(WETH, USDC);
-        vm.roll(uint256(updatedAtBlock));
+        address fermiEngine = address(IFermiSwapper(FERMI_SWAPPER).fermi());
+        _refreshFermiPair(fermiEngine, WETH, USDC);
 
         adapter = new FermiSwapAdapter(FERMI_SWAPPER);
 
         vm.label(address(adapter), "FermiSwapAdapter");
         vm.label(FERMI_SWAPPER, "FermiSwapper");
+        vm.label(fermiEngine, "FermiEngine");
+        vm.label(PRIO_UPDATE_REGISTRY, "PrioUpdateRegistry");
         vm.label(TRADER_VAULT, "TraderVault");
         vm.label(WETH, "WETH");
         vm.label(USDC, "USDC");
@@ -51,15 +45,17 @@ contract FermiSwapAdapterTest is AdapterTest {
     function testGetPoolIds() public view {
         bytes32[] memory poolIds = adapter.getPoolIds(0, 10);
 
-        assertEq(poolIds.length, 2);
+        assertEq(poolIds.length, 3);
         assertEq(poolIds[0], _poolId(WETH, USDC));
         assertEq(poolIds[1], _poolId(WETH, USDT));
+        assertEq(poolIds[2], _poolId(USDC, USDT));
 
         bytes32[] memory offsetPoolIds = adapter.getPoolIds(1, 10);
-        assertEq(offsetPoolIds.length, 1);
+        assertEq(offsetPoolIds.length, 2);
         assertEq(offsetPoolIds[0], _poolId(WETH, USDT));
+        assertEq(offsetPoolIds[1], _poolId(USDC, USDT));
 
-        bytes32[] memory emptyPoolIds = adapter.getPoolIds(2, 10);
+        bytes32[] memory emptyPoolIds = adapter.getPoolIds(3, 10);
         assertEq(emptyPoolIds.length, 0);
     }
 
@@ -175,5 +171,41 @@ contract FermiSwapAdapterTest is AdapterTest {
         returns (bytes32)
     {
         return keccak256(abi.encodePacked(baseAsset, quoteAsset));
+    }
+
+    function _refreshFermiPair(
+        address fermiEngine,
+        address baseAsset,
+        address quoteAsset
+    ) internal {
+        bytes32 laneSlot = keccak256(
+            abi.encode(
+                fermiEngine, uint256(_fermiPairKey(baseAsset, quoteAsset))
+            )
+        );
+        uint256 storedLane = uint256(vm.load(PRIO_UPDATE_REGISTRY, laneSlot));
+        uint256 storedSlotCount = (storedLane >> 216) & 0xff;
+
+        assertGt(storedSlotCount, 0);
+        vm.store(
+            PRIO_UPDATE_REGISTRY,
+            laneSlot,
+            bytes32(
+                (uint256(uint32(block.timestamp)) << 224)
+                    | _lanePayload(storedLane)
+            )
+        );
+    }
+
+    function _fermiPairKey(address baseAsset, address quoteAsset)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(baseAsset, quoteAsset));
+    }
+
+    function _lanePayload(uint256 storedLane) internal pure returns (uint256) {
+        return storedLane & (type(uint256).max >> 32);
     }
 }
