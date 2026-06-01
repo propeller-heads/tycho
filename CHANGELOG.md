@@ -1,3 +1,16 @@
+## [0.303.0](https://github.com/propeller-heads/tycho-indexer/compare/0.302.5...0.303.0) (2026-06-01)
+
+
+### Features
+
+* add WrapperState for native token wrapping in Fynd ([3a60104](https://github.com/propeller-heads/tycho-indexer/commit/3a601043af25964a8b09ba6e4cae6fddcf50f050))
+* Inject NativeWrapperState into ProtocolStream ([#1048](https://github.com/propeller-heads/tycho-indexer/issues/1048)) ([9c89048](https://github.com/propeller-heads/tycho-indexer/commit/9c8904816277dad6e14903518d946090023fc948))
+
+
+### Bug Fixes
+
+* different gas for unwrap + add gas to execution... ([9e24824](https://github.com/propeller-heads/tycho-indexer/commit/9e24824641b90b4504827d0805094d0f033a00ba))
+
 ## [0.302.5](https://github.com/propeller-heads/tycho-indexer/compare/0.302.4...0.302.5) (2026-05-27)
 
 
