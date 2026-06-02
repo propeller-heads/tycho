@@ -361,6 +361,8 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 }
                 uint256 id = _toId(inputToken);
                 _burn(user, id, inputAmount);
+                _setDelta(inputToken, 0);
+                _setNonZeroDeltaCount(0);
             }
         } else {
             // When vault usage is NOT allowed, all deltas must be zero

@@ -26,6 +26,48 @@ import "./TychoRouterTestSetup.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
 
 /**
+ * @title VaultSwapBatcher
+ * @notice Helper that batches two vault swaps in one transaction,
+ *         exercising same-tx transient storage reuse.
+ */
+contract VaultSwapBatcher {
+    TychoRouter public router;
+
+    constructor(address router_) {
+        router = TychoRouter(payable(router_));
+    }
+
+    function depositAndBatchSwaps(
+        address tokenIn,
+        uint256 depositAmount,
+        uint256 amountIn1,
+        uint256 amountIn2,
+        address tokenOut,
+        bytes calldata swap1,
+        bytes calldata swap2
+    ) external {
+        IERC20(tokenIn).approve(address(router), depositAmount);
+        router.deposit(tokenIn, depositAmount);
+
+        ClientFeeParams memory noFee = ClientFeeParams({
+            clientFeeBps: 0,
+            clientFeeReceiver: address(0),
+            maxClientContribution: 0,
+            deadline: 0,
+            clientSignature: new bytes(0)
+        });
+
+        router.singleSwapUsingVault(
+            amountIn1, tokenIn, tokenOut, 1, address(this), noFee, swap1
+        );
+
+        router.singleSwapUsingVault(
+            amountIn2, tokenIn, tokenOut, 1, address(this), noFee, swap2
+        );
+    }
+}
+
+/**
  * @title TychoRouterUsingVaultTest
  * @notice Test cases for different swap scenarios relating to the Vault
  */
@@ -727,6 +769,43 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         uint256 routerBalanceAfter =
             IERC20(USDC_ADDR).balanceOf(tychoRouterAddr);
         assertEq(routerBalanceAfter - routerBalanceBefore, expectedAmountOut);
+    }
+
+    function testSameTransactionBatchedVaultSwaps() public {
+        // Two vault swaps in one transaction must both succeed.
+        // Before the fix, _finalizeBalances left stale transient
+        // deltas after the first vault swap, causing the second
+        // to revert with Vault__UnexpectedNonZeroCount.
+        VaultSwapBatcher batcher = new VaultSwapBatcher(tychoRouterAddr);
+
+        uint256 amountPerSwap = 1 ether;
+        uint256 totalDeposit = amountPerSwap * 2;
+        deal(WETH_ADDR, address(batcher), totalDeposit);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+
+        batcher.depositAndBatchSwaps(
+            WETH_ADDR,
+            totalDeposit,
+            amountPerSwap,
+            amountPerSwap,
+            DAI_ADDR,
+            swap,
+            swap
+        );
+
+        // Vault fully drained
+        assertEq(
+            tychoRouter.balanceOf(
+                address(batcher), uint256(uint160(WETH_ADDR))
+            ),
+            0
+        );
+        // Batcher received DAI from both swaps
+        assertGt(IERC20(DAI_ADDR).balanceOf(address(batcher)), 0);
     }
 
     function testRebalanceVault() public {
