@@ -1,3 +1,11 @@
+## [0.303.1](https://github.com/propeller-heads/tycho/compare/0.303.0...0.303.1) (2026-06-02)
+
+
+### Bug Fixes
+
+* retain token balance contract changes ([b67b1bb](https://github.com/propeller-heads/tycho/commit/b67b1bb57b8e30965b9799e3d32794936dfd9139))
+* retain token balance contract changes ([#1056](https://github.com/propeller-heads/tycho/issues/1056)) ([53746bc](https://github.com/propeller-heads/tycho/commit/53746bc6c0818a09307e0cbb7288283c637a870a))
+
 ## [0.303.0](https://github.com/propeller-heads/tycho-indexer/compare/0.302.5...0.303.0) (2026-06-01)
 
 
