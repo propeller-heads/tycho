@@ -1,0 +1,522 @@
+[
+  {
+    "type": "function",
+    "name": "LABEL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "ROUTES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "routes_",
+        "type": "bytes4[]",
+        "internalType": "bytes4[]"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "VERSION",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "createBToken",
+    "inputs": [
+      {
+        "name": "_name",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "_symbol",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "_totalSupply",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_salt",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "bToken_",
+        "type": "address",
+        "internalType": "contract BToken"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "createPool",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct BFactory.CreateParams",
+        "components": [
+          {
+            "name": "bToken",
+            "type": "address",
+            "internalType": "contract BToken"
+          },
+          {
+            "name": "initialPoolBTokens",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reserve",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "initialPoolReserves",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "initialActivePrice",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "initialBLV",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "creator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeRecipient",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "creatorFeePct",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "swapFeePct",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "createHook",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "claimMerkleRoot",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "initialCollateral",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "initialDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "precomputeBTokenAddress",
+    "inputs": [
+      {
+        "name": "_name",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "_symbol",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "_totalSupply",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_salt",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_deployer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "computedAddress_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "supportsInterface",
+    "inputs": [
+      {
+        "name": "_interfaceId",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "event",
+    "name": "BTokenCreated",
+    "inputs": [
+      {
+        "name": "bTokenAddress",
+        "type": "address",
+        "indexed": false,
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "symbol",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "decimals",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "totalSupply",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "creator",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Initialized",
+    "inputs": [
+      {
+        "name": "bToken",
+        "type": "address",
+        "indexed": false,
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "activePrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "blvPrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "swapFeePct",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PoolCreated",
+    "inputs": [
+      {
+        "name": "bTokenAddress",
+        "type": "address",
+        "indexed": false,
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "reserveAddress",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "creator",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "feeRecipient",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "creatorFeePct",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "initialActivePrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "initialBlvPrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalReserves",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalBTokens",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalCollateral",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalDebt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Component_NotPermitted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_Paused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_Reentrant",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_ReserveAccountingMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsolventInitialCreditPosition",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidActivePrice",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidBLVPrice",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidConvexityExp",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidConvexityExp",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidCreator",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidCreatorFee",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidFeeRecipient",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidInitialCollateralOrDebt",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidName",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidPoolSupply",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSalt",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSwapFeePct",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSymbol",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvariantDecreased",
+    "inputs": [
+      {
+        "name": "prevInvariant",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "newInvariant",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NativeLib_AmountMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NativeLib_NotWrapped",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotApprovedReserve",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotDeployer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PoolAlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TotalSupplyTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TotalSupplyTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnauthorizedCreditPositionCreation",
+    "inputs": []
+  }
+]
