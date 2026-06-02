@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import "forge-std/Test.sol";
-import "src/baseline-mercury/BaselineSwapAdapter.sol";
+import "src/baseline/BaselineSwapAdapter.sol";
 import "src/interfaces/ISwapAdapterTypes.sol";
 
 contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
@@ -14,7 +14,7 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
         address(0x3000000000000000000000000000000000000003);
 
     BaselineSwapAdapter internal adapter;
-    MockBaselineMercuryRelay internal relay;
+    MockBaselineRelay internal relay;
 
     bytes32 internal constant POOL_ID = bytes32(bytes20(BTOKEN));
 
@@ -23,7 +23,7 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
         vm.etch(RESERVE, address(new MockERC20()).code);
         vm.etch(OTHER, address(new MockERC20()).code);
 
-        relay = new MockBaselineMercuryRelay();
+        relay = new MockBaselineRelay();
         relay.setPool(BTOKEN, RESERVE);
         relay.setQuotes(BTOKEN, 42 ether, 2 ether, 5 ether, 3 ether);
 
@@ -142,7 +142,7 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
     }
 }
 
-contract MockBaselineMercuryRelay {
+contract MockBaselineRelay {
     mapping(address => address) public reserveForBToken;
     mapping(address => uint256) public buyQuoteForBToken;
     mapping(address => uint256) public sellQuoteForBToken;
