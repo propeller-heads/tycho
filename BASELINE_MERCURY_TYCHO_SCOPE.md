@@ -6,12 +6,19 @@ Status: working scope document. Keep at repository root while implementing; remo
 
 Integrate the Baseline DEX / Mercury AMM with Tycho so Tycho users can discover, simulate, and eventually execute Baseline swaps.
 
+Production coverage needs Ethereum mainnet and Base today, with additional EVM chains expected later. Keep chain-specific configuration data-driven and avoid naming packages or protocol ids as Base-only unless they are explicitly test fixtures.
+
 The first target is not the full production integration. The first target is proving a Tycho VM quote simulation for one real Base pool:
 
 - Relay / proxy: `0xc81Fd894C0acE037d133aF4886550aC8133568E8`
 - bToken / component id candidate: `0xFf8104251E7761163faC3211eF5583FB3F8583d6` (`REPPO`)
 - reserve token: `0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b` (`VIRTUAL`)
-- protocol system candidate: `vm:baseline_mercury`
+- protocol system candidate: `vm:baseline`
+
+Current Baseline deployment metadata from `packages/contracts/addressBook.ts`:
+
+- Ethereum mainnet: relay/proxy `0xc81Fd894C0acE037d133aF4886550aC8133568E8`, deployment block `24920863`
+- Base: relay/proxy `0xc81Fd894C0acE037d133aF4886550aC8133568E8`, deployment block `45070267`
 
 ## Local References
 
@@ -165,7 +172,7 @@ Goal: get a Tycho VM simulation quote working for the REPPO/VIRTUAL fixture.
 
 Deliverables:
 
-- `BaselineSwapAdapter.sol` under `protocols/adapter-integration/evm/src/baseline-mercury/`
+- `BaselineSwapAdapter.sol` under `protocols/adapter-integration/evm/src/baseline/`
 - `manifest.yaml` for the adapter
 - Pinned REPPO quote fixture:
   - exact Base block number
@@ -175,7 +182,7 @@ Deliverables:
   - expected `quoteBuyExactIn` and `quoteSellExactIn` outputs at that block
 - Foundry tests for the adapter against a Base fork or pinned prestate fixture
 - Runtime bytecode generated into `crates/tycho-simulation/src/evm/protocol/vm/assets/`
-- `baseline_mercury` registered in `crates/tycho-simulation/src/evm/protocol/vm/constants.rs`
+- `baseline` registered in `crates/tycho-simulation/src/evm/protocol/vm/constants.rs`
 - A minimal simulation test proving:
   - reserve -> bToken calls `quoteBuyExactIn`
   - bToken -> reserve calls `quoteSellExactIn`
@@ -214,7 +221,17 @@ Recommended starting point:
 
 Likely package name:
 
-- `protocols/substreams/base-baseline-mercury`
+- `protocols/substreams/ethereum-baseline`
+
+Chain configs should cover at least:
+
+- Ethereum mainnet from block `24920863`
+- Base from block `45070267`
+
+Use chain-specific YAML files if this matches the Tycho Substreams pattern, for example:
+
+- `ethereum-baseline.yaml`
+- `base-baseline.yaml`
 
 Events to track:
 
@@ -225,15 +242,15 @@ Events to track:
 
 Deployment boundaries still need to be pinned:
 
-- Base factory address
-- relay/proxy deployment block or first relevant indexing block
-- whether there are multiple Mercury relays/factories on Base
+- Ethereum and Base factory/relay event address handling. The current Baseline address book lists the same deterministic relay/proxy on both chains.
+- Whether future chains use the same deterministic relay/proxy address and route layout.
+- Whether there are multiple Mercury relays/factories on any supported chain.
 - production start block for the Substreams package
 
 Component creation:
 
 - Component id: bToken address string
-- Protocol system: `vm:baseline_mercury`
+- Protocol system: `vm:baseline`
 - Tokens: `[bToken, reserveAddress]`
 - Contract addresses should include at least:
   - relay/proxy
@@ -262,9 +279,9 @@ Goal: allow Tycho execution to call Mercury swaps onchain.
 
 Files likely involved:
 
-- `crates/tycho-execution/contracts/src/executors/BaselineMercuryExecutor.sol`
-- `crates/tycho-execution/contracts/test/protocols/BaselineMercury.t.sol`
-- `crates/tycho-execution/src/encoding/evm/swap_encoder/baseline_mercury.rs`
+- `crates/tycho-execution/contracts/src/executors/BaselineExecutor.sol`
+- `crates/tycho-execution/contracts/test/protocols/Baseline.t.sol`
+- `crates/tycho-execution/src/encoding/evm/swap_encoder/baseline.rs`
 - `crates/tycho-execution/src/encoding/evm/swap_encoder/mod.rs`
 - `crates/tycho-execution/src/encoding/evm/swap_encoder/swap_encoder_registry.rs`
 - `crates/tycho-execution/config/executor_addresses.json`

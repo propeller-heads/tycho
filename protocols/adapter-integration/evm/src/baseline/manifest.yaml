@@ -16,6 +16,11 @@ contract: BaselineSwapAdapter.sol
 # Deployment instances used to generate chain specific bytecode.
 instances:
   - chain:
+      name: mainnet
+      id: 1
+    arguments:
+      - "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+  - chain:
       name: base
       id: 8453
     arguments:

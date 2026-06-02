@@ -42,21 +42,26 @@ contract BaselineSwapAdapter is ISwapAdapter {
         // NOTE: OrderSide determines if amount is input or output
         if (bTokenBuy) {
             if (side == OrderSide.Sell) {
-                (trade.calculatedAmount, trade.gasUsed) = _buyExactIn(bToken, sellToken, specifiedAmount);
+                (trade.calculatedAmount, trade.gasUsed) =
+                    _buyExactIn(bToken, sellToken, specifiedAmount);
             } else {
-                (trade.calculatedAmount, trade.gasUsed) = _buyExactOut(bToken, sellToken, specifiedAmount);
+                (trade.calculatedAmount, trade.gasUsed) =
+                    _buyExactOut(bToken, sellToken, specifiedAmount);
             }
         } else if (bTokenSell) {
             if (side == OrderSide.Sell) {
-                (trade.calculatedAmount, trade.gasUsed) = _sellExactIn(bToken, buyToken, specifiedAmount);
+                (trade.calculatedAmount, trade.gasUsed) =
+                    _sellExactIn(bToken, buyToken, specifiedAmount);
             } else {
-                (trade.calculatedAmount, trade.gasUsed) = _sellExactOut(bToken, buyToken, specifiedAmount);
+                (trade.calculatedAmount, trade.gasUsed) =
+                    _sellExactOut(bToken, buyToken, specifiedAmount);
             }
         } else {
             revert InvalidOrder("Token pair does not match bToken pool");
         }
 
-        // TODO price not implemented yet, will be price(specifiedAmount) when done
+        // TODO price not implemented yet, will be price(specifiedAmount) when
+        // done
         trade.price = Fraction(0, 0);
     }
 
@@ -114,7 +119,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         _approveRelay(reserve, amountIn);
         uint256 gasBefore = gasleft();
         (amountOut,) =
-            IBaselineMercuryRelay(relay).buyTokensExactIn(bToken, amountIn, 0);
+            IBaselineRelay(relay).buyTokensExactIn(bToken, amountIn, 0);
         gasUsed = gasBefore - gasleft();
         _safeCall(
             bToken, abi.encodeCall(IERC20.transfer, (msg.sender, amountOut))
@@ -134,7 +139,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         _approveRelay(bToken, amountIn);
         uint256 gasBefore = gasleft();
         (amountOut,) =
-            IBaselineMercuryRelay(relay).sellTokensExactIn(bToken, amountIn, 0);
+            IBaselineRelay(relay).sellTokensExactIn(bToken, amountIn, 0);
         gasUsed = gasBefore - gasleft();
         _safeCall(
             reserve, abi.encodeCall(IERC20.transfer, (msg.sender, amountOut))
@@ -145,8 +150,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         internal
         returns (uint256 amountIn, uint256 gasUsed)
     {
-        (amountIn,,) =
-            IBaselineMercuryRelay(relay).quoteBuyExactOut(bToken, amountOut);
+        (amountIn,,) = IBaselineRelay(relay).quoteBuyExactOut(bToken, amountOut);
         _safeCall(
             reserve,
             abi.encodeCall(
@@ -155,7 +159,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         );
         _approveRelay(reserve, amountIn);
         uint256 gasBefore = gasleft();
-        (amountIn,) = IBaselineMercuryRelay(relay)
+        (amountIn,) = IBaselineRelay(relay)
             .buyTokensExactOut(bToken, amountOut, amountIn);
         gasUsed = gasBefore - gasleft();
         _safeCall(
@@ -168,7 +172,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         returns (uint256 amountIn, uint256 gasUsed)
     {
         (amountIn,,) =
-            IBaselineMercuryRelay(relay).quoteSellExactOut(bToken, amountOut);
+            IBaselineRelay(relay).quoteSellExactOut(bToken, amountOut);
         _safeCall(
             bToken,
             abi.encodeCall(
@@ -177,7 +181,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         );
         _approveRelay(bToken, amountIn);
         uint256 gasBefore = gasleft();
-        (amountIn,) = IBaselineMercuryRelay(relay)
+        (amountIn,) = IBaselineRelay(relay)
             .sellTokensExactOut(bToken, amountOut, amountIn);
         gasUsed = gasBefore - gasleft();
         _safeCall(
@@ -206,7 +210,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
     }
 }
 
-interface IBaselineMercuryRelay {
+interface IBaselineRelay {
     function buyTokensExactIn(
         address bToken,
         uint256 amountIn,
