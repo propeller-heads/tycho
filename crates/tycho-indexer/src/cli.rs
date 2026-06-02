@@ -231,6 +231,12 @@ pub struct RunSpkgArgs {
     #[clap(long)]
     pub dci_plugin: Option<String>,
 
+    /// Retention horizon date
+    ///
+    /// Any data before this date is not kept in storage.
+    #[clap(long, env, default_value = "2024-01-01T00:00:00")]
+    pub retention_horizon: String,
+
     /// Settlement contract address used for token transfer simulation.
     /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
     #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
@@ -342,6 +348,7 @@ mod cli_tests {
                 initialized_accounts: vec![],
                 initialization_block: 0,
                 dci_plugin: None,
+                retention_horizon: "2024-01-01T00:00:00".to_string(),
                 settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
                     .parse()
                     .unwrap(),

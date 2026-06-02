@@ -21,7 +21,7 @@ use std::{
 
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
-use chrono::{NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use clap::Parser;
 use futures03::future::select_all;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -337,11 +337,16 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
         ),
     )]));
 
+    let retention_horizon: NaiveDateTime = run_args
+        .retention_horizon
+        .parse()
+        .expect("Failed to parse retention horizon");
+
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,
         &run_args.substreams_args,
         &[Chain::from_str(&run_args.chain).unwrap()],
-        Utc::now().naive_utc(),
+        retention_horizon,
         config,
         None,
         run_args.settlement_contract,

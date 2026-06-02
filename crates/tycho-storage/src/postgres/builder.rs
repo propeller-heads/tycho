@@ -35,8 +35,16 @@ impl GatewayBuilder {
         self
     }
 
+    fn migration_horizon(&self) -> Option<NaiveDateTime> {
+        if self.retention_horizon == NaiveDateTime::default() {
+            None
+        } else {
+            Some(self.retention_horizon)
+        }
+    }
+
     pub async fn build(self) -> Result<(CachedGateway, JoinHandle<()>), StorageError> {
-        let pool = postgres::connect(&self.database_url).await?;
+        let pool = postgres::connect(&self.database_url, self.migration_horizon()).await?;
         postgres::ensure_chains(&self.chains, pool.clone()).await;
         postgres::ensure_protocol_systems(&self.protocol_systems, pool.clone()).await;
 
@@ -61,7 +69,7 @@ impl GatewayBuilder {
     }
 
     pub async fn build_gw(self) -> Result<CachedGateway, StorageError> {
-        let pool = postgres::connect(&self.database_url).await?;
+        let pool = postgres::connect(&self.database_url, self.migration_horizon()).await?;
 
         let inner_gw = PostgresGateway::new(pool.clone(), self.retention_horizon).await?;
         let (tx, _) = mpsc::channel(10);
@@ -71,7 +79,7 @@ impl GatewayBuilder {
     }
 
     pub async fn build_direct_gw(self) -> Result<DirectGateway, StorageError> {
-        let pool = postgres::connect(&self.database_url).await?;
+        let pool = postgres::connect(&self.database_url, self.migration_horizon()).await?;
         postgres::ensure_chains(&self.chains, pool.clone()).await;
         postgres::ensure_protocol_systems(&self.protocol_systems, pool.clone()).await;
 
