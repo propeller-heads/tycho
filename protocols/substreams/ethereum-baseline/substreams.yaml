@@ -21,7 +21,7 @@ networks:
   mainnet:
     initialBlock:
       map_protocol_components: 24920863
-      store_protocol_tokens: 24920863
+      store_pool_reserves: 24920863
       map_relative_component_balance: 24920863
       store_component_balances: 24920863
       map_protocol_changes: 24920863
@@ -32,7 +32,7 @@ networks:
   base:
     initialBlock:
       map_protocol_components: 45070267
-      store_protocol_tokens: 45070267
+      store_pool_reserves: 45070267
       map_relative_component_balance: 45070267
       store_component_balances: 45070267
       map_protocol_changes: 45070267
@@ -55,7 +55,7 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
 
-  - name: store_protocol_tokens
+  - name: store_pool_reserves
     kind: store
     updatePolicy: set
     valueType: string
@@ -67,7 +67,7 @@ modules:
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
-      - store: store_protocol_tokens
+      - store: store_pool_reserves
     output:
       type: proto:tycho.evm.v1.BlockBalanceDeltas
 

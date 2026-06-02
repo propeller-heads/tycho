@@ -19,12 +19,18 @@
 //! provided code with care and ensure you fully understand each step before proceeding
 //! with your implementation
 use crate::{
-    abi::b_factory::events::PoolCreated, pool_factories, pool_factories::DeploymentConfig,
+    abi::{b_factory::events::PoolCreated, b_swap::events::Swap},
+    pool_factories,
+    pool_factories::DeploymentConfig,
 };
 use anyhow::Result;
 use itertools::Itertools;
 use std::collections::HashMap;
-use substreams::{pb::substreams::StoreDeltas, prelude::*};
+use substreams::{
+    pb::substreams::StoreDeltas,
+    prelude::*,
+    store::{StoreGet, StoreGetString, StoreSetString},
+};
 use substreams_ethereum::pb::eth;
 use substreams_ethereum::Event;
 use tycho_substreams::{
@@ -64,23 +70,18 @@ fn map_protocol_components(
 }
 
 #[substreams::handlers::store]
-fn store_protocol_tokens(
+fn store_pool_reserves(
     map_protocol_components: BlockTransactionProtocolComponents,
-    store: StoreSetInt64,
+    store: StoreSetString,
 ) {
     map_protocol_components
         .tx_components
         .into_iter()
-        .for_each(|tx_pc| {
-            tx_pc
-                .components
-                .into_iter()
-                .for_each(|pc| {
-                    pc.tokens.iter().for_each(|token| {
-                        let token_addr_hex = hex::encode(token);
-                        store.set(0, &token_addr_hex, &1);
-                    })
-                })
+        .flat_map(|tx_pc| tx_pc.components)
+        .for_each(|component| {
+            if let Some(reserve) = component.tokens.get(1) {
+                store.set(0, format!("reserve:{}", component.id), &hex::encode(reserve));
+            }
         });
 }
 
@@ -98,7 +99,7 @@ fn store_protocol_tokens(
 fn map_relative_component_balance(
     params: String,
     block: eth::v2::Block,
-    _store: StoreGetInt64,
+    reserve_store: StoreGetString,
 ) -> Result<BlockBalanceDeltas> {
     let config: DeploymentConfig = serde_qs::from_str(params.as_str())?;
     let res = block
@@ -136,8 +137,40 @@ fn map_relative_component_balance(
                         ];
                     }
 
-                    // TODO: add BSwap::Swap balance deltas once the bToken -> reserve mapping
-                    // is carried through the balance pipeline.
+                    if let Some(event) = Swap::match_and_decode(log) {
+                        let component_id = format!("0x{}", hex::encode(&event.b_token));
+                        let Some(reserve) =
+                            reserve_store.get_last(format!("reserve:{component_id}"))
+                        else {
+                            return vec![];
+                        };
+                        let Ok(reserve) = hex::decode(reserve) else {
+                            return vec![];
+                        };
+
+                        let b_token_delta = event.b_token_delta.neg();
+                        let reserve_delta =
+                            event.reserve_delta.neg() - event.total_fee + event.liquidity_fee;
+                        let component_id = component_id.into_bytes();
+
+                        return vec![
+                            BalanceDelta {
+                                ord: log.ordinal,
+                                tx: Some(tx.into()),
+                                token: event.b_token,
+                                delta: b_token_delta.to_signed_bytes_be(),
+                                component_id: component_id.clone(),
+                            },
+                            BalanceDelta {
+                                ord: log.ordinal,
+                                tx: Some(tx.into()),
+                                token: reserve,
+                                delta: reserve_delta.to_signed_bytes_be(),
+                                component_id,
+                            },
+                        ];
+                    }
+
                     vec![]
                 })
         })
