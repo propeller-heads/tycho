@@ -9,18 +9,18 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-/// Encodes a ETH <-> WETH swap
+/// Encodes a native token wrap/unwrap swap.
 ///
 /// # Fields
 /// * `executor_address` - The address of the executor contract that will perform the swap.
 /// * `native_token_address` - The address of the native token.
 #[derive(Clone)]
-pub struct WethSwapEncoder {
+pub struct WrapSwapEncoder {
     executor_address: Bytes,
     native_token_address: Bytes,
 }
 
-impl SwapEncoder for WethSwapEncoder {
+impl SwapEncoder for WrapSwapEncoder {
     fn new(
         executor_address: Bytes,
         chain: Chain,
@@ -56,10 +56,12 @@ mod tests {
     use super::*;
     use crate::encoding::{evm::utils::write_calldata_to_file, models::default_token};
     #[test]
-    fn test_encode_weth_wrapping() {
-        // ETH -> (weth) -> wETH
-        let pool =
-            ProtocolComponent { protocol_system: String::from("weth"), ..Default::default() };
+    fn test_encode_wrap_wrapping() {
+        // ETH -> (wrap) -> WETH
+        let pool = ProtocolComponent {
+            protocol_system: String::from("native_wrap"),
+            ..Default::default()
+        };
         let token_in = Bytes::from("0x0000000000000000000000000000000000000000");
         let token_out = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
         let swap = Swap::new(
@@ -73,7 +75,7 @@ mod tests {
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
         };
-        let encoder = WethSwapEncoder::new(
+        let encoder = WrapSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
             None,
@@ -87,12 +89,12 @@ mod tests {
 
         assert_eq!(hex_swap, String::from("01").to_lowercase());
 
-        write_calldata_to_file("test_encode_weth_wrapping", hex_swap.as_str());
+        write_calldata_to_file("test_encode_wrap_wrapping", hex_swap.as_str());
     }
 
     #[test]
-    fn test_encode_weth_unwrapping() {
-        // wETH -> (weth) -> ETH
+    fn test_encode_wrap_unwrapping() {
+        // WETH -> (unwrap) -> ETH
         let pool = ProtocolComponent {
             id: String::from(""),
             protocol_system: String::from(""),
@@ -111,7 +113,7 @@ mod tests {
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
         };
-        let encoder = WethSwapEncoder::new(
+        let encoder = WrapSwapEncoder::new(
             Bytes::from("0x13aa49bAc059d709dd0a18D6bb63290076a702D7"),
             Chain::Ethereum,
             None,
@@ -125,6 +127,6 @@ mod tests {
 
         assert_eq!(hex_swap, String::from("00").to_lowercase());
 
-        write_calldata_to_file("test_encode_weth_unwrapping", hex_swap.as_str());
+        write_calldata_to_file("test_encode_wrap_unwrapping", hex_swap.as_str());
     }
 }

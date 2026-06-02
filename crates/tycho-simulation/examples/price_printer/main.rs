@@ -135,7 +135,7 @@ async fn main() {
             .tvl_threshold
             .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
         let tvl_filter = ComponentFilter::with_tvl_range(tvl_threshold, tvl_threshold);
-        let mut protocol_stream =
+        let protocol_stream =
             register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter)
                 .auth_key(Some(tycho_api_key.clone()))
                 .skip_state_decode_failures(true)
@@ -144,6 +144,7 @@ async fn main() {
                 .build()
                 .await
                 .expect("Failed building protocol stream");
+        tokio::pin!(protocol_stream);
 
         // Loop through block updates
         while let Some(msg) = protocol_stream.next().await {

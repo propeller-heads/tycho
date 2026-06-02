@@ -2515,7 +2515,8 @@ mod tests {
         assert!(parse_retry_value("invalid").is_none());
         assert!(parse_retry_value("").is_none());
         assert!(parse_retry_value("not_a_number").is_none());
-        assert!(parse_retry_value("Mon, 32 Jan 2030 25:00:00 +0000").is_none()); // Invalid date
+        assert!(parse_retry_value("Mon, 32 Jan 2030 25:00:00 +0000").is_none());
+        // Invalid date
     }
 
     #[tokio::test]

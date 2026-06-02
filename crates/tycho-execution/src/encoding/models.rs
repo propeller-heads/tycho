@@ -399,6 +399,27 @@ impl EncodedSolution {
     pub fn estimated_gas(&self) -> &BigUint {
         &self.estimated_gas
     }
+
+    /// Byte offset within TychoRouter calldata where the client fee signature starts.
+    pub fn client_fee_signature_offset(&self) -> usize {
+        let name = self
+            .function_signature
+            .split('(')
+            .next()
+            .unwrap_or("");
+        let head_params = match name {
+            "singleSwap" |
+            "singleSwapUsingVault" |
+            "sequentialSwap" |
+            "sequentialSwapUsingVault" => 7,
+            "splitSwap" | "splitSwapUsingVault" => 8,
+            "singleSwapPermit2" | "sequentialSwapPermit2" => 14,
+            "splitSwapPermit2" => 15,
+            _ => 0,
+        };
+        // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple
+        4 + head_params * 32 + 192
+    }
 }
 
 /// Represents a single permit for permit2.

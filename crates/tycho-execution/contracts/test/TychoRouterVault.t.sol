@@ -23,7 +23,7 @@ import {
     IUniswapV2Pair
 } from "@uniswap-v2/contracts/interfaces/IUniswapV2Pair.sol";
 import "./TychoRouterTestSetup.sol";
-import {WethExecutor} from "../src/executors/WethExecutor.sol";
+import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
 
 /**
  * @title TychoRouterUsingVaultTest
@@ -434,10 +434,10 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         // Hop 1: WETH → ETH (unwrap), Hop 2: ETH → WETH (wrap)
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(
-            address(wethExecutor), abi.encodePacked(uint8(0))
+            address(nativeWrapExecutor), abi.encodePacked(uint8(0))
         );
         swaps[1] = encodeSequentialSwap(
-            address(wethExecutor), abi.encodePacked(uint8(1))
+            address(nativeWrapExecutor), abi.encodePacked(uint8(1))
         );
 
         // Client contributes up to amountIn to cover the break-even shortfall.

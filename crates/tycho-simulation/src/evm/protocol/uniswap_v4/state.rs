@@ -51,14 +51,16 @@ use crate::{
     impl_non_serializable_protocol,
 };
 
-// Gas limit constants for capping get_limits calculations
-// These prevent simulations from exceeding Ethereum's block gas limit
-// The names of the constants reflect the exact method from the tenderly log.
-const SWAP_BASE_GAS: u64 = 130_000;
+// Fixed overhead per swap: covers router overhead, executor preamble (decode, sync,
+// unlock/callback pattern), and token transfer-in.
+const SWAP_BASE_GAS: u64 = 185_000;
+// Per loop: PoolManager.swap bitmap lookup + sqrt math + computeSwapStep.
+// V4's singleton PoolManager hits warmer storage than V3 standalone pools: ~3,500/loop.
+const GAS_PER_BITMAP_LOOKUP: u64 = 3_500;
+// Initialized tick crossing: _updateTick() updates feeGrowthOutside0/1 (2 SSTOREs).
+// Warm ≈ 10–17k, cold ≈ 40–52k. 17,540 reflects warm scenario.
 const GAS_PER_TICK: u64 = 17_540;
-const GAS_PER_BITMAP_LOOKUP: u64 = 4_000;
-// Cost of taking the output amount from the Uniswap V4 PoolManager, corresponds to
-// PoolManager.take()
+// Settlement overhead within swapExactInputSingle: _settle() + _getFullCredit() + misc.
 const V4_CALLBACK_SETTLEMENT_GAS: u64 = 30_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
@@ -213,7 +215,7 @@ impl UniswapV4State {
             tick: self.tick,
             liquidity: self.liquidity,
         };
-        let mut gas_used = U256::from(0);
+        let mut gas_used = U256::from(SWAP_BASE_GAS);
 
         while state.amount_remaining != I256::ZERO && state.sqrt_price != price_limit {
             let (mut next_tick, initialized) = match self

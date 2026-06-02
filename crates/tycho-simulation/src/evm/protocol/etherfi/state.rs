@@ -100,7 +100,7 @@ impl EtherfiState {
     fn shares_for_amount(&self, amount: U256) -> Result<U256, SimulationError> {
         let total_pooled_ether = self.total_value_in_lp + self.total_value_out_of_lp;
         if total_pooled_ether == U256::ZERO {
-            return Ok(U256::ZERO)
+            return Ok(U256::ZERO);
         }
         // Pro-rata shares for a given pooled ETH amount.
         Ok(amount * self.total_shares / total_pooled_ether)
@@ -108,7 +108,7 @@ impl EtherfiState {
 
     fn amount_for_share(&self, share: U256) -> Result<U256, SimulationError> {
         if self.total_shares == U256::ZERO {
-            return Ok(U256::ZERO)
+            return Ok(U256::ZERO);
         }
         // Pro-rata ETH amount for a given share count.
         let total_pooled_ether = self.total_value_in_lp + self.total_value_out_of_lp;
@@ -118,7 +118,7 @@ impl EtherfiState {
     fn shares_for_withdrawal_amount(&self, amount: U256) -> Result<U256, SimulationError> {
         let total_pooled_ether = self.total_value_in_lp + self.total_value_out_of_lp;
         if total_pooled_ether == U256::ZERO {
-            return Ok(U256::ZERO)
+            return Ok(U256::ZERO);
         }
         let numerator = amount * self.total_shares;
         Ok(numerator + total_pooled_ether - U256::ONE / total_pooled_ether)
@@ -232,7 +232,7 @@ impl ProtocolSim for EtherfiState {
                 u256_to_biguint(amount_out),
                 BigUint::from(46_886u32), // LiquidityPool.deposit function gas used
                 Box::new(new_state),
-            ))
+            ));
         }
 
         if token_in.address.as_ref() == EETH_ADDRESS && token_out.address.as_ref() == ETH_ADDRESS {
@@ -247,7 +247,7 @@ impl ProtocolSim for EtherfiState {
                 U256::from(BASIS_POINT_SCALE),
             )?;
             if liquid_eth_amount < low_watermark || liquid_eth_amount - low_watermark < amount_in {
-                return Err(SimulationError::FatalError("Exceeded total redeemable amount".into()))
+                return Err(SimulationError::FatalError("Exceeded total redeemable amount".into()));
             } else {
                 // Enforce the rate-limit bucket before applying exit fees and balances.
                 let bucket_unit = convert_to_bucket_unit(amount_in, true)?;
@@ -255,7 +255,7 @@ impl ProtocolSim for EtherfiState {
                     .limit
                     .refill(self.block_timestamp);
                 if limit.remaining < bucket_unit {
-                    return Err(SimulationError::FatalError("Exceeded rate limit".into()))
+                    return Err(SimulationError::FatalError("Exceeded rate limit".into()));
                 }
                 limit.remaining -= bucket_unit;
                 limit.last_refill = self.block_timestamp;
@@ -279,7 +279,7 @@ impl ProtocolSim for EtherfiState {
                 BigUint::from(151_676u32), /* EtherFiRedemptionManager._redeemEEth function gas
                                             * used */
                 Box::new(new_state),
-            ))
+            ));
         }
 
         if token_in.address.as_ref() == EETH_ADDRESS && token_out.address.as_ref() == WEETH_ADDRESS
@@ -290,7 +290,7 @@ impl ProtocolSim for EtherfiState {
                 amount_out,
                 BigUint::from(70_489u32), // weeth.wrap function gas used
                 Box::new(new_state),
-            ))
+            ));
         }
 
         if token_in.address.as_ref() == WEETH_ADDRESS && token_out.address.as_ref() == EETH_ADDRESS
@@ -301,7 +301,7 @@ impl ProtocolSim for EtherfiState {
                 amount_out,
                 BigUint::from(60_182u32), // weeth.unwrap function gas used
                 Box::new(new_state),
-            ))
+            ));
         }
 
         Err(SimulationError::FatalError("unsupported swap".to_string()))

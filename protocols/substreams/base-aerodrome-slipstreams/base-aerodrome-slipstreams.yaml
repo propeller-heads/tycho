@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "base_aerodrome_slipstreams"
-  version: v0.1.0
+  version: v0.1.1
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/base-aerodrome-slipstreams"
 
 protobuf:

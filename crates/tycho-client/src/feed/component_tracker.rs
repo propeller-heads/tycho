@@ -232,7 +232,7 @@ where
     }
 
     /// Update the tracked contracts list with contracts associated with the given components
-    fn update_contracts(&mut self, components: Vec<ComponentId>) {
+    pub(crate) fn update_contracts(&mut self, components: Vec<ComponentId>) {
         // Only process components that are actually being tracked.
         let mut tracked_component_ids = HashSet::new();
 

@@ -62,7 +62,7 @@ impl TychoRouterEncoder {
 
     fn encode_solution(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         self.validate_solution(solution)?;
-        let solution = self.add_weth_swaps(solution, &self.chain);
+        let solution = self.add_native_wrap_swaps(solution, &self.chain);
 
         let groups = group_swaps(solution.swaps());
 
@@ -84,10 +84,11 @@ impl TychoRouterEncoder {
         Ok(encoded_solution)
     }
 
-    /// Returns a new solution with added wrapping/unwrapping swaps if the original solution
-    /// contains a swap that goes from ETH to WETH or vice versa but doesn't include the
-    /// corresponding wrapping or unwrapping swap.
-    fn add_weth_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
+    /// Returns a new solution with added wrapping/unwrapping swaps if the
+    /// original solution contains a swap between a chain's native token and
+    /// its wrapped counterpart but doesn't include the corresponding
+    /// wrapping or unwrapping swap.
+    fn add_native_wrap_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
         let swaps = solution.swaps();
         let mut new_swaps: Vec<Swap> = Vec::with_capacity(swaps.len());
 
@@ -123,26 +124,16 @@ impl TychoRouterEncoder {
         solution.clone().with_swaps(new_swaps)
     }
 
-    // This method checks if an ETH <-> WETH swap is needed between two tokens and
-    // returns the corresponding swap if needed
     fn _wrapping_bridge(&self, token_a: &Bytes, token_b: &Bytes, chain: &Chain) -> Option<Swap> {
-        let eth = chain.native_token();
-        let weth = chain.wrapped_native_token();
+        let native = chain.native_token();
+        let wrapped_native = chain.wrapped_native_token();
+        let wrap_component =
+            ProtocolComponent { protocol_system: "native_wrap".to_string(), ..Default::default() };
 
-        if token_a == &weth.address && token_b == &eth.address {
-            Some(Swap::new(
-                ProtocolComponent { protocol_system: "weth".to_string(), ..Default::default() },
-                weth,
-                eth,
-                BigUint::ZERO,
-            ))
-        } else if token_a == &eth.address && token_b == &weth.address {
-            Some(Swap::new(
-                ProtocolComponent { protocol_system: "weth".to_string(), ..Default::default() },
-                eth,
-                weth,
-                BigUint::ZERO,
-            ))
+        if token_a == &wrapped_native.address && token_b == &native.address {
+            Some(Swap::new(wrap_component, wrapped_native, native, BigUint::from(14_000u64)))
+        } else if token_a == &native.address && token_b == &wrapped_native.address {
+            Some(Swap::new(wrap_component, native, wrapped_native, BigUint::from(7_000u64)))
         } else {
             None
         }
@@ -468,7 +459,7 @@ mod tests {
                 vec![swap_dai_usdc, swap_usdc_eth_univ4(), swap_weth_dai],
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps().len(), 4);
             assert_eq!(solution.swaps()[2].token_in().address, eth());
             assert_eq!(solution.swaps()[2].token_out().address, weth());
@@ -476,7 +467,7 @@ mod tests {
                 solution.swaps()[2]
                     .component()
                     .protocol_system,
-                "weth"
+                "native_wrap"
             );
         }
 
@@ -508,7 +499,7 @@ mod tests {
                 vec![swap_weth_dai],
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps().len(), 2);
             assert_eq!(solution.swaps()[0].token_in().address, eth());
             assert_eq!(solution.swaps()[0].token_out().address, weth());
@@ -516,7 +507,7 @@ mod tests {
                 solution.swaps()[0]
                     .component()
                     .protocol_system,
-                "weth"
+                "native_wrap"
             );
         }
 
@@ -536,19 +527,22 @@ mod tests {
                 vec![swap_usdc_eth_univ4()],
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             let last_swap = solution.swaps().last().unwrap();
             assert_eq!(solution.swaps().len(), 2);
             assert_eq!(last_swap.token_in().address, eth());
             assert_eq!(last_swap.token_out().address, weth());
-            assert_eq!(last_swap.component().protocol_system, "weth");
+            assert_eq!(last_swap.component().protocol_system, "native_wrap");
         }
 
         #[test]
         fn test_sanity_check_no_missing_wrapped_eth_swap() {
             // USDC -> ETH -> WETH (no swap needed to be added)
             let eth_weth_swap = Swap::new(
-                ProtocolComponent { protocol_system: "weth".to_string(), ..Default::default() },
+                ProtocolComponent {
+                    protocol_system: "native_wrap".to_string(),
+                    ..Default::default()
+                },
                 default_token(eth()),
                 default_token(weth()),
                 BigUint::ZERO,
@@ -567,7 +561,7 @@ mod tests {
                 input_swaps.clone(),
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps().len(), 2);
             assert_eq!(solution.swaps(), input_swaps.as_slice());
         }

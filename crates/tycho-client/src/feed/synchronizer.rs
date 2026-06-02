@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -11,7 +14,7 @@ use tokio::{
     task::JoinHandle,
     time::{sleep, timeout},
 };
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 use tycho_common::{
     models::{
         blockchain::{
@@ -19,7 +22,7 @@ use tycho_common::{
         },
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
-        ExtractorIdentity,
+        Chain, ExtractorIdentity,
     },
     Bytes,
 };
@@ -70,6 +73,31 @@ pub enum SynchronizerError {
 
 pub type SyncResult<T> = Result<T, SynchronizerError>;
 
+impl SynchronizerError {
+    /// Returns true if the error is transient and the failing operation can be retried.
+    ///
+    /// Transient: network/HTTP failures, rate limiting, server unavailability. These are
+    /// infrastructure problems that may resolve without any change to the request.
+    ///
+    /// Permanent: malformed data, fatal server errors, invalid requests. Retrying would produce
+    /// the same failure.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            SynchronizerError::RPCError(e) => matches!(
+                e,
+                RPCError::HttpClient(_, _) |
+                    RPCError::RateLimited(_) |
+                    RPCError::ServerUnreachable(_) |
+                    RPCError::StaleBlock(_)
+            ),
+            SynchronizerError::Timeout(_) |
+            SynchronizerError::ConnectionError(_) |
+            SynchronizerError::ConnectionClosed => true,
+            _ => false,
+        }
+    }
+}
+
 impl<T> From<SendError<T>> for SynchronizerError {
     fn from(err: SendError<T>) -> Self {
         SynchronizerError::ChannelError(format!("Failed to send message: {err}"))
@@ -100,9 +128,18 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     compression: bool,
     partial_blocks: bool,
     uses_dci: bool,
-    /// Brand-new components (in new_protocol_components) whose snapshot we deferred until the
-    /// first message of the next block. Only used when partial_blocks is true.
-    deferred_snapshot_components: Vec<String>,
+    /// Background snapshot tasks spawned for new components. Each task may be in-flight or
+    /// finished; completed ones are harvested at the start of each delta iteration and their
+    /// results included in that block's message.
+    snapshot_tasks: Vec<SnapshotTask>,
+    /// Unfiltered deltas buffered while any snapshot task is in-flight, starting from the block
+    /// at which the oldest task was spawned. Applied to each snapshot at drain time to reconstruct
+    /// the component's current state.
+    buffered_deltas: Vec<BlockAggregatedChanges>,
+    /// State machine tracking components awaiting their initial snapshot. A component lives here
+    /// from the moment it's queued until its snapshot is successfully applied (at which point it
+    /// moves into `component_tracker.components`).
+    snapshot_queue: HashMap<String, SnapshotStatus>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -181,6 +218,33 @@ where
     }
 }
 
+/// Tracks the lifecycle of a component's initial snapshot request.
+#[derive(Debug, Clone, PartialEq)]
+enum SnapshotStatus {
+    /// Waiting for the next block boundary before fetching. Only used with partial blocks.
+    Deferred,
+    /// A background snapshot task has been spawned and is in-flight.
+    InFlight,
+    /// The last fetch attempt failed transiently; will be re-queued on the next delta.
+    RetryNext,
+    /// The fetch failed permanently; component is excluded until the synchronizer restarts.
+    Blacklisted,
+}
+
+struct SnapshotFetchResult {
+    components: HashMap<String, ProtocolComponent>,
+    contract_ids: HashSet<Bytes>,
+    dci_update: DCIUpdate,
+    snapshot: Snapshot,
+    snapshot_block: u64,
+}
+
+struct SnapshotTask {
+    component_ids: Vec<String>,
+    snapshot_block: u64,
+    receiver: oneshot::Receiver<Result<SnapshotFetchResult, SynchronizerError>>,
+}
+
 /// Handle for controlling a running synchronizer task.
 ///
 /// This handle provides methods to gracefully shut down the synchronizer
@@ -221,6 +285,115 @@ pub trait StateSynchronizer: Send + Sync + 'static {
     async fn start(
         mut self,
     ) -> (SynchronizerTaskHandle, Receiver<SyncResult<StateSyncMessage<BlockHeader>>>);
+}
+
+struct FetchSnapshotParams {
+    chain: Chain,
+    protocol_system: String,
+    block_number: u64,
+    uses_dci: bool,
+    retrieve_balances: bool,
+    include_tvl: bool,
+}
+
+/// Fetches a snapshot for given components. If DCI is enabled, also traces entry
+/// points and extends `contract_ids` with any contracts they access.
+///
+/// Returns the snapshot, the DCI update, and the complete set of contract IDs (original +
+/// DCI-discovered).
+async fn fetch_snapshot<R: RPCClient>(
+    rpc_client: &R,
+    components: HashMap<String, ProtocolComponent>,
+    mut contract_ids: HashSet<Bytes>,
+    params: &FetchSnapshotParams,
+) -> Result<(Snapshot, DCIUpdate, HashSet<Bytes>), SynchronizerError> {
+    if components.is_empty() {
+        return Ok((Snapshot::default(), DCIUpdate::default(), contract_ids));
+    }
+
+    let component_ids: Vec<String> = components.keys().cloned().collect();
+
+    let (dci_update, entrypoints_result) = if params.uses_dci {
+        let result = rpc_client
+            .get_traced_entry_points_paginated(TracedEntryPointsPaginatedParams::new(
+                params.chain,
+                &params.protocol_system,
+                component_ids.clone(),
+                RPC_CLIENT_CONCURRENCY,
+            ))
+            .await?;
+        let dci_contracts: HashSet<Bytes> = result
+            .values()
+            .flat_map(|traces| {
+                traces
+                    .iter()
+                    .flat_map(|(_, tr)| tr.accessed_slots.keys().cloned())
+            })
+            .collect();
+        contract_ids.extend(dci_contracts);
+        let eps = result.clone();
+        let dci: DCIUpdate = result.into();
+        (dci, eps)
+    } else {
+        (DCIUpdate::default(), HashMap::new())
+    };
+
+    let contract_ids_vec: Vec<Bytes> = contract_ids.iter().cloned().collect();
+    let request = SnapshotParameters::new(
+        params.chain,
+        &params.protocol_system,
+        &components,
+        &contract_ids_vec,
+        params.block_number,
+    )
+    .entrypoints(&entrypoints_result)
+    .include_balances(params.retrieve_balances)
+    .include_tvl(params.include_tvl);
+
+    let snapshot = rpc_client
+        .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
+        .await?;
+
+    Ok((snapshot, dci_update, contract_ids))
+}
+
+/// Fetches a snapshot for new components not yet in the tracker. Calls `get_protocol_components`
+/// to resolve the components, then delegates to `fetch_snapshot`.
+async fn fetch_snapshot_background<R: RPCClient>(
+    rpc_client: R,
+    component_ids: Vec<String>,
+    params: FetchSnapshotParams,
+) -> Result<SnapshotFetchResult, SynchronizerError> {
+    if component_ids.is_empty() {
+        return Ok(SnapshotFetchResult {
+            components: HashMap::new(),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot::default(),
+            snapshot_block: params.block_number,
+        });
+    }
+
+    let request = crate::rpc::ProtocolComponentsParams::new(params.chain, &params.protocol_system)
+        .with_component_ids(component_ids);
+    let components: HashMap<String, ProtocolComponent> = rpc_client
+        .get_protocol_components(request)
+        .await?
+        .into_data()
+        .into_iter()
+        .map(|pc| (pc.id.clone(), pc))
+        .collect();
+
+    let contract_ids: HashSet<Bytes> = components
+        .values()
+        .flat_map(|c| c.contract_addresses.iter().cloned())
+        .collect();
+
+    let snapshot_block = params.block_number;
+    let (snapshot, dci_update, contract_ids) =
+        fetch_snapshot(&rpc_client, components.clone(), contract_ids, &params).await?;
+
+    Ok(SnapshotFetchResult { components, contract_ids, dci_update, snapshot, snapshot_block })
 }
 
 impl<R, D> ProtocolStateSynchronizer<R, D>
@@ -265,7 +438,9 @@ where
             compression,
             partial_blocks: false,
             uses_dci: false,
-            deferred_snapshot_components: Vec::new(),
+            snapshot_tasks: Vec::new(),
+            buffered_deltas: Vec::new(),
+            snapshot_queue: HashMap::new(),
         }
     }
 
@@ -280,123 +455,6 @@ where
     pub fn with_partial_blocks(mut self, partial_blocks: bool) -> Self {
         self.partial_blocks = partial_blocks;
         self
-    }
-
-    /// When using partial blocks, brand-new components are deferred until the first message of the
-    /// next block. This returns snapshots for those deferred components if we just advanced to a
-    /// new block; otherwise returns an empty snapshot. For full blocks this always returns empty.
-    async fn take_flushed_deferred_snapshots(
-        &mut self,
-        header: &BlockHeader,
-    ) -> SyncResult<Snapshot> {
-        if !self.partial_blocks {
-            return Ok(Snapshot::default());
-        }
-        let prev = match self
-            .last_synced_block
-            .as_ref()
-            .filter(|p| header.number > p.number)
-        {
-            Some(p) => p,
-            None => return Ok(Snapshot::default()),
-        };
-        let deferred = std::mem::take(&mut self.deferred_snapshot_components);
-        if deferred.is_empty() {
-            return Ok(Snapshot::default());
-        }
-        let snapshot_header =
-            BlockHeader { number: prev.number, hash: prev.hash.clone(), ..Default::default() };
-        let msg = self
-            .get_snapshots(snapshot_header, Some(&deferred))
-            .await?;
-        Ok(msg.snapshots)
-    }
-
-    /// Retrieves state snapshots of the requested components
-    async fn get_snapshots<'a, I: IntoIterator<Item = &'a String>>(
-        &mut self,
-        header: BlockHeader,
-        ids: Option<I>,
-    ) -> SyncResult<StateSyncMessage<BlockHeader>> {
-        if !self.include_snapshots {
-            return Ok(StateSyncMessage { header, ..Default::default() });
-        }
-
-        // Use given ids or use all if not passed
-        let component_ids: Vec<_> = match ids {
-            Some(ids) => ids.into_iter().cloned().collect(),
-            None => self
-                .component_tracker
-                .get_tracked_component_ids(),
-        };
-
-        if component_ids.is_empty() {
-            return Ok(StateSyncMessage { header, ..Default::default() });
-        }
-
-        let entrypoints_result: HashMap<
-            String,
-            Vec<(
-                tycho_common::models::blockchain::EntryPointWithTracingParams,
-                tycho_common::models::blockchain::TracingResult,
-            )>,
-        > = if self.uses_dci {
-            let result = self
-                .rpc_client
-                .get_traced_entry_points_paginated(TracedEntryPointsPaginatedParams::new(
-                    self.extractor_id.chain,
-                    self.extractor_id.name.as_str(),
-                    component_ids.clone(),
-                    RPC_CLIENT_CONCURRENCY,
-                ))
-                .await?;
-            self.component_tracker
-                .process_entrypoints(&DCIUpdate::from(result.clone()));
-            result
-        } else {
-            HashMap::new()
-        };
-
-        // Get contract IDs from component tracker
-        let contract_ids: Vec<Bytes> = self
-            .component_tracker
-            .get_contracts_by_component(&component_ids)
-            .into_iter()
-            .collect();
-
-        // Filter components to only include the requested ones
-        let filtered_components: HashMap<_, _> = self
-            .component_tracker
-            .components
-            .iter()
-            .filter(|(id, _)| component_ids.contains(id))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let request = SnapshotParameters::new(
-            self.extractor_id.chain,
-            &self.extractor_id.name,
-            &filtered_components,
-            &contract_ids,
-            header.number,
-        )
-        .entrypoints(&entrypoints_result)
-        .include_balances(self.retrieve_balances)
-        .include_tvl(self.include_tvl);
-        let snapshot_response = self
-            .rpc_client
-            .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
-            .await?;
-
-        trace!(states=?&snapshot_response.states, "Retrieved ProtocolStates");
-        trace!(contract_states=?&snapshot_response.vm_storage, "Retrieved ContractState");
-
-        Ok(StateSyncMessage {
-            header,
-            snapshots: snapshot_response,
-            deltas: None,
-            removed_components: HashMap::new(),
-        })
     }
 
     /// Main method that does all the work.
@@ -545,39 +603,86 @@ where
                     } else {
                         BlockHeader { revert: false, ..header.clone() }
                     };
-                    match self
-                        .get_snapshots::<Vec<&String>>(snapshot_header, None)
-                        .await
+                    let component_ids =
+                        self.component_tracker.get_tracked_component_ids();
+                    let init_snapshot = if !self.include_snapshots ||
+                        component_ids.is_empty()
                     {
-                        Ok(snapshot) => {
-                            let n_components = self.component_tracker.components.len();
-                            let n_snapshots = snapshot.snapshots.states.len();
-                            info!(n_components, n_snapshots, "Initial snapshot retrieved, starting delta message feed");
-                            break 'init (snapshot.merge(deltas_msg), header);
-                        }
-                        Err(SynchronizerError::RPCError(crate::rpc::RPCError::StaleBlock(
-                            reason,
-                        ))) => {
-                            stale_retries += 1;
-                            if stale_retries > MAX_STALE_RETRIES {
-                                return Err(SynchronizerError::RPCError(
-                                    crate::rpc::RPCError::StaleBlock(reason),
-                                ));
+                        Snapshot::default()
+                    } else {
+                        // Fetch initial snapshots
+                        let components: HashMap<_, _> = self
+                            .component_tracker
+                            .components
+                            .iter()
+                            .filter(|(id, _)| component_ids.contains(id))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let contract_ids: HashSet<Bytes> = self
+                            .component_tracker
+                            .get_contracts_by_component(&component_ids)
+                            .into_iter()
+                            .collect();
+                        let fetch_params = FetchSnapshotParams {
+                            chain: self.extractor_id.chain,
+                            protocol_system: self.extractor_id.name.clone(),
+                            block_number: snapshot_header.number,
+                            uses_dci: self.uses_dci,
+                            retrieve_balances: self.retrieve_balances,
+                            include_tvl: self.include_tvl,
+                        };
+                        match fetch_snapshot(
+                            &self.rpc_client,
+                            components,
+                            contract_ids,
+                            &fetch_params,
+                        )
+                        .await
+                        {
+                            Ok((snap, dci_update, _)) => {
+                                self.component_tracker
+                                    .process_entrypoints(&dci_update);
+                                snap
                             }
-                            // The server's persisted state for this block is outside the plan
-                            // retention window. Discard this delta and wait for a fresher block
-                            // from the same subscription rather than restarting from scratch.
-                            warn!(
-                                block = header.number,
-                                stale_retries,
-                                %reason,
-                                "Snapshot block is outside server retention window; \
-                                 waiting for a more recent block"
-                            );
-                            continue 'init;
+                            Err(SynchronizerError::RPCError(
+                                crate::rpc::RPCError::StaleBlock(reason),
+                            )) => {
+                                stale_retries += 1;
+                                if stale_retries > MAX_STALE_RETRIES {
+                                    return Err(SynchronizerError::RPCError(
+                                        crate::rpc::RPCError::StaleBlock(reason),
+                                    ));
+                                }
+                                // The server's persisted state for this block is outside
+                                // the plan retention window. Discard this delta and wait
+                                // for a fresher block from the same subscription rather
+                                // than restarting from scratch.
+                                warn!(
+                                    block = header.number,
+                                    stale_retries,
+                                    %reason,
+                                    "Snapshot block is outside server retention \
+                                     window; waiting for a more recent block"
+                                );
+                                continue 'init;
+                            }
+                            Err(e) => return Err(e),
                         }
-                        Err(e) => return Err(e),
-                    }
+                    };
+                    let n_components = self.component_tracker.components.len();
+                    let n_snapshots = init_snapshot.states.len();
+                    info!(
+                        n_components,
+                        n_snapshots,
+                        "Initial snapshot retrieved, starting delta message feed"
+                    );
+                    let snapshot_msg = StateSyncMessage {
+                        header: snapshot_header,
+                        snapshots: init_snapshot,
+                        deltas: None,
+                        removed_components: HashMap::new(),
+                    };
+                    break 'init (snapshot_msg.merge(deltas_msg), header);
                 } else {
                     break 'init (deltas_msg, header);
                 }
@@ -592,63 +697,129 @@ where
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
-                            let flushed_snapshots =
-                                self.take_flushed_deferred_snapshots(&header).await?;
+                            // Buffer unfiltered delta while any snapshot task is in-flight.
+                            if !self.snapshot_tasks.is_empty() {
+                                self.buffered_deltas.push(deltas.clone());
+                            }
+
+                            let background_snapshots = self.drain_completed_snapshots();
+
+                            // Trim buffered_deltas: discard blocks no longer needed by any pending task.
+                            if self.snapshot_tasks.is_empty() {
+                                self.buffered_deltas.clear();
+                            } else {
+                                let oldest_pending_block = self
+                                    .snapshot_tasks
+                                    .iter()
+                                    .map(|p| p.snapshot_block)
+                                    .min()
+                                    .unwrap_or(u64::MAX);
+                                self.buffered_deltas
+                                    .retain(|d| d.block.number > oldest_pending_block);
+                            }
 
                             let (snapshots, removed_components) = {
-                                // 1. Remove components based on latest changes
-                                // 2. Add components based on latest changes, query those for snapshots
-                                let (to_add, to_remove) = self.component_tracker.filter_updated_components(&deltas);
+                                let (to_add, to_remove) =
+                                    self.component_tracker.filter_updated_components(&deltas);
 
-                                // Only components we don't track yet need a snapshot.
-                                let requiring_snapshot: Vec<String> = to_add
+                                // Harvest transient retries now so they feed into truly_new.
+                                // TVL changes are not re-emitted, so without explicit re-queuing
+                                // a transiently failed component would never be retried.
+                                // Remove from the map first so the truly_new filter below treats
+                                // them the same as brand-new components.
+                                let retry_ids: Vec<String> = self
+                                    .snapshot_queue
                                     .iter()
-                                    .filter(|id| {
-                                        !self.component_tracker
-                                            .components
-                                            .contains_key(id.as_str())
-                                    })
-                                    .map(|id| id.to_string())
+                                    .filter(|(_, s)| matches!(s, SnapshotStatus::RetryNext))
+                                    .map(|(id, _)| id.clone())
                                     .collect();
-                                debug!(components=?requiring_snapshot, "SnapshotRequest");
-                                let requiring_snapshot_refs: Vec<&String> = requiring_snapshot.iter().collect();
-                                self.component_tracker
-                                    .start_tracking(&requiring_snapshot_refs)
-                                    .await?;
+                                for id in &retry_ids {
+                                    self.snapshot_queue.remove(id);
+                                }
 
-                                // When partial_blocks: defer brand-new to next block's first message; only preexisting get snapshot now.
-                                let request_now: Vec<String> = if self.partial_blocks {
-                                    let (preexisting, brand_new) = requiring_snapshot
-                                        .into_iter()
-                                        .partition(|id| {
-                                            !deltas.new_protocol_components.contains_key(id.as_str())
-                                        });
-                                    self.deferred_snapshot_components.extend(brand_new);
-                                    preexisting
-                                } else {
-                                    requiring_snapshot
+                                // Components not yet tracked and not in the staged state machine
+                                // (not in-flight, not deferred, not blacklisted). Merges
+                                // delta-triggered new components with transient retries; `seen`
+                                // deduplicates the two sources.
+                                let truly_new: Vec<String> = {
+                                    let mut seen = HashSet::new();
+                                    to_add
+                                        .iter()
+                                        .chain(retry_ids.iter())
+                                        .filter(|id| {
+                                            !self.component_tracker
+                                                .components
+                                                .contains_key(id.as_str())
+                                                && !self
+                                                    .snapshot_queue
+                                                    .contains_key(id.as_str())
+                                                && seen.insert(id.as_str())
+                                        })
+                                        .cloned()
+                                        .collect()
                                 };
 
-                                let mut snapshots = if request_now.is_empty() {
-                                    Snapshot::default()
-                                } else {
-                                    let snapshot_header = if self.partial_blocks && header.number > 0
-                                    {
-                                        // get snapshot at the previous block (current block is only partial and not available for querying)
-                                        BlockHeader {
+                                if self.partial_blocks {
+                                    let is_new_block = self
+                                        .last_synced_block
+                                        .as_ref()
+                                        .map(|b| header.number > b.number)
+                                        .unwrap_or(true);
+
+                                    let has_deferred = self
+                                        .snapshot_queue
+                                        .values()
+                                        .any(|s| matches!(s, SnapshotStatus::Deferred));
+                                    if is_new_block && has_deferred && header.number > 0 {
+                                        // Block number incremented: the previous block is
+                                        // complete. Fire deferred components at that block's
+                                        // height.
+                                        let to_fire: Vec<String> = self
+                                            .snapshot_queue
+                                            .iter()
+                                            .filter(|(_, s)| matches!(s, SnapshotStatus::Deferred))
+                                            .map(|(id, _)| id.clone())
+                                            .collect();
+                                        for id in &to_fire {
+                                            self.snapshot_queue.remove(id);
+                                        }
+                                        let snapshot_header = BlockHeader {
                                             number: header.number - 1,
                                             hash: header.parent_hash.clone(),
                                             ..Default::default()
-                                        }
-                                    } else {
-                                        BlockHeader { revert: false, ..header.clone() }
-                                    };
-                                    self.get_snapshots(snapshot_header, Some(&request_now))
-                                        .await?
-                                        .snapshots
-                                };
+                                        };
+                                        debug!(
+                                            components = ?to_fire,
+                                            extractor = %self.extractor_id.name,
+                                            snapshot_block = header.number - 1,
+                                            "snapshot_deferred_to_background"
+                                        );
+                                        self.spawn_snapshot_task(
+                                            to_fire,
+                                            snapshot_header,
+                                            &deltas,
+                                        );
+                                    }
 
-                                snapshots.extend(flushed_snapshots);
+                                    // Accumulate truly_new into the deferred set for the current
+                                    // block; they will be fired when the next block arrives.
+                                    for id in truly_new {
+                                        self.snapshot_queue
+                                            .insert(id, SnapshotStatus::Deferred);
+                                    }
+                                } else if !truly_new.is_empty() {
+                                    debug!(
+                                        components = ?truly_new,
+                                        extractor = %self.extractor_id.name,
+                                        block_number = ?header.number,
+                                        "snapshot_deferred_to_background"
+                                    );
+                                    let snapshot_header =
+                                        BlockHeader { revert: false, ..header.clone() };
+                                    self.spawn_snapshot_task(truly_new, snapshot_header, &deltas);
+                                }
+
+                                let snapshots = background_snapshots;
 
                                 let removed_components = if !to_remove.is_empty() {
                                     self.component_tracker.stop_tracking(&to_remove)
@@ -659,14 +830,13 @@ where
                                 (snapshots, removed_components)
                             };
 
-                            // 3. Update entrypoints on the tracker (affects which contracts are tracked)
+                            // Update entrypoints on the tracker (affects which contracts are tracked for DCI).
                             self.component_tracker.process_entrypoints(&deltas.dci_update);
 
-                            // 4. Filter deltas by currently tracked components / contracts
+                            // Filter deltas by currently tracked components / contracts.
                             self.filter_deltas(&mut deltas);
                             let n_changes = deltas.n_changes();
 
-                            // 5. Send the message
                             let next = StateSyncMessage {
                                 header: header.clone(),
                                 snapshots,
@@ -711,6 +881,184 @@ where
                 Err((e, Some(end_rx)))
             }
         }
+    }
+
+    /// Applies `self.buffered_deltas` to `snapshot`, updating attributes, balances, and contract
+    /// storage for deltas strictly after `snapshot_block`.
+    fn apply_deltas_to_snapshot(
+        &self,
+        snapshot: &mut Snapshot,
+        snapshot_block: u64,
+        contract_ids: &HashSet<Bytes>,
+    ) {
+        for delta in &self.buffered_deltas {
+            if delta.block.number <= snapshot_block {
+                continue;
+            }
+            for (component_id, state_delta) in &delta.state_deltas {
+                if let Some(cws) = snapshot.states.get_mut(component_id) {
+                    cws.state.attributes.extend(
+                        state_delta
+                            .updated_attributes
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone())),
+                    );
+                    for key in &state_delta.deleted_attributes {
+                        cws.state.attributes.remove(key);
+                    }
+                }
+            }
+            for (component_id, token_balances) in &delta.component_balances {
+                if let Some(cws) = snapshot.states.get_mut(component_id) {
+                    for (token, bal) in token_balances {
+                        cws.state
+                            .balances
+                            .insert(token.clone(), bal.balance.clone());
+                    }
+                }
+            }
+            for (address, account_delta) in &delta.account_deltas {
+                if contract_ids.contains(address) {
+                    if let Some(account) = snapshot.vm_storage.get_mut(address) {
+                        account.slots.extend(
+                            account_delta
+                                .slots
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    v.as_ref()
+                                        .map(|v| (k.clone(), v.clone()))
+                                }),
+                        );
+                        if let Some(balance) = &account_delta.balance {
+                            account.native_balance = balance.clone();
+                        }
+                        if let Some(code) = account_delta.code() {
+                            account.code = code.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawns a background snapshot task for `component_ids` at `snapshot_header`. If no other
+    /// task is already in-flight, starts buffering deltas from `current_delta` so the snapshot
+    /// can be brought up to date when the task drains.
+    fn spawn_snapshot_task(
+        &mut self,
+        component_ids: Vec<String>,
+        snapshot_header: BlockHeader,
+        current_delta: &BlockAggregatedChanges,
+    ) {
+        let snapshot_block = snapshot_header.number;
+
+        if self.snapshot_tasks.is_empty() {
+            self.buffered_deltas
+                .push(current_delta.clone());
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let rpc = self.rpc_client.clone();
+        let bg_params = FetchSnapshotParams {
+            chain: self.extractor_id.chain,
+            protocol_system: self.extractor_id.name.clone(),
+            block_number: snapshot_block,
+            uses_dci: self.uses_dci,
+            retrieve_balances: self.retrieve_balances,
+            include_tvl: self.include_tvl,
+        };
+        let ids = component_ids.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(fetch_snapshot_background(rpc, ids, bg_params).await);
+        });
+        for id in &component_ids {
+            self.snapshot_queue
+                .insert(id.clone(), SnapshotStatus::InFlight);
+        }
+        self.snapshot_tasks
+            .push(SnapshotTask { component_ids, snapshot_block, receiver: rx });
+    }
+
+    /// Drains any background snapshot tasks that have completed. Returns a `Snapshot` containing
+    /// all ready results, with buffered deltas applied to bring each snapshot up to date.
+    fn drain_completed_snapshots(&mut self) -> Snapshot {
+        let mut result = Snapshot::default();
+        let pending = std::mem::take(&mut self.snapshot_tasks);
+
+        for mut p in pending {
+            match p.receiver.try_recv() {
+                Ok(Ok(fetch_result)) => {
+                    debug!(
+                        components = ?p.component_ids,
+                        extractor = %self.extractor_id.name,
+                        "snapshot_background_ready"
+                    );
+                    for id in &p.component_ids {
+                        self.snapshot_queue.remove(id);
+                    }
+                    let new_component_ids: Vec<String> = fetch_result
+                        .components
+                        .keys()
+                        .cloned()
+                        .collect();
+                    self.component_tracker
+                        .components
+                        .extend(fetch_result.components);
+                    self.component_tracker
+                        .process_entrypoints(&fetch_result.dci_update);
+                    self.component_tracker
+                        .update_contracts(new_component_ids);
+                    let mut snapshot = fetch_result.snapshot;
+                    self.apply_deltas_to_snapshot(
+                        &mut snapshot,
+                        fetch_result.snapshot_block,
+                        &fetch_result.contract_ids,
+                    );
+                    result.extend(snapshot);
+                }
+                Ok(Err(e)) => {
+                    if e.is_transient() {
+                        warn!(
+                            components = ?p.component_ids,
+                            extractor = %self.extractor_id.name,
+                            err = %e,
+                            "Background snapshot fetch failed transiently; will retry next block"
+                        );
+                        for id in &p.component_ids {
+                            self.snapshot_queue
+                                .insert(id.clone(), SnapshotStatus::RetryNext);
+                        }
+                    } else {
+                        warn!(
+                            components = ?p.component_ids,
+                            extractor = %self.extractor_id.name,
+                            err = %e,
+                            "Background snapshot fetch failed permanently; \
+                             components blacklisted until restart"
+                        );
+                        for id in &p.component_ids {
+                            self.snapshot_queue
+                                .insert(id.clone(), SnapshotStatus::Blacklisted);
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    self.snapshot_tasks.push(p);
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    warn!(
+                        components = ?p.component_ids,
+                        extractor = %self.extractor_id.name,
+                        "Background snapshot task dropped before sending result"
+                    );
+                    for id in &p.component_ids {
+                        self.snapshot_queue.remove(id);
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
@@ -1076,9 +1424,6 @@ mod test {
                 })
             });
 
-        rpc.expect_get_traced_entry_points()
-            .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
-
         let mut state_sync = with_mocked_clients(true, false, Some(rpc), None);
         state_sync
             .component_tracker
@@ -1108,10 +1453,37 @@ mod test {
             removed_components: Default::default(),
         };
 
-        let snap = state_sync
-            .get_snapshots(header, Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
+        let snap = StateSyncMessage {
+            header: header.clone(),
+            snapshots: snapshot,
+            deltas: None,
+            removed_components: Default::default(),
+        };
 
         assert_eq!(snap, exp);
     }
@@ -1144,9 +1516,6 @@ mod test {
                 })
             });
 
-        rpc.expect_get_traced_entry_points()
-            .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
-
         let mut state_sync = with_mocked_clients(true, true, Some(rpc), None);
         state_sync
             .component_tracker
@@ -1176,10 +1545,37 @@ mod test {
             removed_components: Default::default(),
         };
 
-        let snap = state_sync
-            .get_snapshots(header, Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: true,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
+        let snap = StateSyncMessage {
+            header: header.clone(),
+            snapshots: snapshot,
+            deltas: None,
+            removed_components: Default::default(),
+        };
 
         assert_eq!(snap, exp);
     }
@@ -1289,9 +1685,6 @@ mod test {
                 })
             });
 
-        rpc.expect_get_traced_entry_points()
-            .returning(move |_| Ok(Page::new(traced_entry_point_response(), 1, 0, 100)));
-
         let mut state_sync = with_mocked_clients(false, false, Some(rpc), None);
         let component = ProtocolComponent {
             id: "Component1".to_string(),
@@ -1332,10 +1725,37 @@ mod test {
             removed_components: Default::default(),
         };
 
-        let snap = state_sync
-            .get_snapshots(header, Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: false,
+            retrieve_balances: false,
+            include_tvl: false,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
+        let snap = StateSyncMessage {
+            header: header.clone(),
+            snapshots: snapshot,
+            deltas: None,
+            removed_components: Default::default(),
+        };
 
         assert_eq!(snap, exp);
     }
@@ -1377,9 +1797,6 @@ mod test {
                 })
             });
 
-        rpc.expect_get_traced_entry_points()
-            .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
-
         let mut state_sync = with_mocked_clients(false, true, Some(rpc), None);
         state_sync
             .component_tracker
@@ -1413,10 +1830,37 @@ mod test {
             removed_components: Default::default(),
         };
 
-        let snap = state_sync
-            .get_snapshots(header, Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: false,
+            retrieve_balances: false,
+            include_tvl: true,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
+        let snap = StateSyncMessage {
+            header: header.clone(),
+            snapshots: snapshot,
+            deltas: None,
+            removed_components: Default::default(),
+        };
 
         assert_eq!(snap, exp);
     }
@@ -1471,9 +1915,6 @@ mod test {
                 })
             });
 
-        rpc.expect_get_traced_entry_points()
-            .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
-
         let mut state_sync = with_mocked_clients(true, false, Some(rpc), None);
 
         // Track all three components
@@ -1492,29 +1933,47 @@ mod test {
 
         // Request snapshot for ONLY Component2
         let components_arg = ["Component2".to_string()];
-
-        let snap = state_sync
-            .get_snapshots(header.clone(), Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
 
         // Verify we only got Component2 back
-        assert_eq!(snap.snapshots.states.len(), 1);
-        assert!(snap
-            .snapshots
+        assert_eq!(snapshot.states.len(), 1);
+        assert!(snapshot
             .states
             .contains_key("Component2"));
-        assert!(!snap
-            .snapshots
+        assert!(!snapshot
             .states
             .contains_key("Component1"));
-        assert!(!snap
-            .snapshots
+        assert!(!snapshot
             .states
             .contains_key("Component3"));
     }
 
     fn mock_clients_for_state_sync(
+        bg_done: Option<Arc<tokio::sync::Notify>>,
     ) -> (MockRPCClient, MockDeltasClient, Sender<BlockAggregatedChanges>) {
         let mut rpc_client = make_mock_client();
         // Mocks for the start_tracking call, these need to come first because they are more
@@ -1550,8 +2009,8 @@ mod test {
                         .contains_key("Component3")
                 },
             )
-            .returning(|_request, _chunk_size, _concurrency| {
-                Ok(Snapshot {
+            .returning(move |_request, _chunk_size, _concurrency| {
+                let snap = Ok(Snapshot {
                     states: [(
                         "Component3".to_string(),
                         ComponentWithState {
@@ -1571,7 +2030,11 @@ mod test {
                     .into_iter()
                     .collect(),
                     vm_storage: HashMap::new(),
-                })
+                });
+                if let Some(n) = &bg_done {
+                    n.notify_one();
+                }
+                snap
             });
 
         // mock calls for the initial state snapshots
@@ -1662,13 +2125,15 @@ mod test {
 
     /// Test strategy
     ///
-    /// - initial snapshot retrieval returns two component1 and component2 as snapshots
-    /// - send 2 dummy messages, containing only blocks
-    /// - third message contains a new component with some significant tvl, one initial component
-    ///   slips below tvl threshold, another one is above tvl but does not get re-requested.
+    /// - initial snapshot retrieval returns component1 and component2 as snapshots
+    /// - block 1: DCI update for Component1; no new components
+    /// - block 2: Component3 TVL crosses threshold → background snapshot task spawned; snapshot
+    ///   appears in block 3 after the background task drains
+    /// - block 3: empty block; drain produces Component3 snapshot
     #[test_log::test(tokio::test)]
     async fn test_state_sync() {
-        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync();
+        let bg_done = Arc::new(tokio::sync::Notify::new());
+        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync(Some(bg_done.clone()));
         let deltas = [
             BlockAggregatedChanges {
                 extractor: "uniswap-v2".to_string(),
@@ -1738,6 +2203,21 @@ mod test {
                 .collect(),
                 ..Default::default()
             },
+            // Block 3: empty block; the background task for Component3 should have completed,
+            // so drain_completed_snapshots returns the Component3 snapshot.
+            BlockAggregatedChanges {
+                extractor: "uniswap-v2".to_string(),
+                chain: Chain::Ethereum,
+                block: Block {
+                    number: 3,
+                    hash: Bytes::from("0x03"),
+                    parent_hash: Bytes::from("0x02"),
+                    chain: Chain::Ethereum,
+                    ts: Default::default(),
+                },
+                revert: false,
+                ..Default::default()
+            },
         ];
         let mut state_sync = with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client));
         state_sync
@@ -1751,16 +2231,25 @@ mod test {
         tx.send(deltas[0].clone())
             .await
             .expect("deltas channel msg 0 closed!");
-        let first_msg = timeout(Duration::from_millis(100), rx.recv())
+        let first_msg = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("waiting for first state msg timed out!")
             .expect("state sync block sender closed!");
         tx.send(deltas[1].clone())
             .await
             .expect("deltas channel msg 1 closed!");
-        let second_msg = timeout(Duration::from_millis(100), rx.recv())
+        let second_msg = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("waiting for second state msg timed out!")
+            .expect("state sync block sender closed!");
+        // Wait for the background snapshot task to complete before sending block 3.
+        bg_done.notified().await;
+        tx.send(deltas[2].clone())
+            .await
+            .expect("deltas channel msg 2 closed!");
+        let third_msg = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("waiting for third state msg timed out!")
             .expect("state sync block sender closed!");
         let _ = close_tx.send(());
         jh.await
@@ -1818,6 +2307,8 @@ mod test {
             removed_components: Default::default(),
         };
 
+        // Block 2: Component3 snapshot task is spawned in the background. Component3 is not
+        // yet tracked, so it is filtered from component_tvl. Snapshot is empty.
         let exp2 = StateSyncMessage {
             header: BlockHeader {
                 number: 2,
@@ -1826,32 +2317,7 @@ mod test {
                 revert: false,
                 ..Default::default()
             },
-            snapshots: Snapshot {
-                states: [
-                    // This is the new component we queried once it passed the tvl threshold.
-                    (
-                        "Component3".to_string(),
-                        ComponentWithState {
-                            state: ProtocolComponentState::new(
-                                "Component3",
-                                Default::default(),
-                                Default::default(),
-                            ),
-                            component: ProtocolComponent {
-                                id: "Component3".to_string(),
-                                ..Default::default()
-                            },
-                            component_tvl: Some(1000.0),
-                            entrypoints: vec![],
-                        },
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-                vm_storage: HashMap::new(),
-            },
-            // Our deltas are empty and since merge methods are
-            // tested in tycho-common we don't have much to do here.
+            snapshots: Snapshot::default(),
             deltas: Some(BlockAggregatedChanges {
                 extractor: "uniswap-v2".to_string(),
                 chain: Chain::Ethereum,
@@ -1864,9 +2330,8 @@ mod test {
                 },
                 revert: false,
                 component_tvl: [
-                    // "Component2" should not show here.
+                    // Component2 removed (tvl=0), Component3 not yet tracked → filtered out.
                     ("Component1".to_string(), 100.0),
-                    ("Component3".to_string(), 1000.0),
                 ]
                 .into_iter()
                 .collect(),
@@ -1880,15 +2345,50 @@ mod test {
             .into_iter()
             .collect(),
         };
+
+        // Block 3: background task has completed; Component3 snapshot is drained and included.
+        let exp3 = StateSyncMessage {
+            header: BlockHeader {
+                number: 3,
+                hash: Bytes::from("0x03"),
+                parent_hash: Bytes::from("0x02"),
+                revert: false,
+                ..Default::default()
+            },
+            snapshots: Snapshot {
+                states: [(
+                    "Component3".to_string(),
+                    ComponentWithState {
+                        state: ProtocolComponentState::new(
+                            "Component3",
+                            Default::default(),
+                            Default::default(),
+                        ),
+                        component: ProtocolComponent {
+                            id: "Component3".to_string(),
+                            ..Default::default()
+                        },
+                        component_tvl: Some(1000.0),
+                        entrypoints: vec![],
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                vm_storage: HashMap::new(),
+            },
+            deltas: Some(deltas[2].clone()),
+            removed_components: Default::default(),
+        };
         assert_eq!(first_msg.unwrap(), exp1);
         assert_eq!(second_msg.unwrap(), exp2);
+        assert_eq!(third_msg.unwrap(), exp3);
     }
 
     #[test_log::test(tokio::test)]
     async fn test_state_sync_with_tvl_range() {
-        // Define the range for testing
         let remove_tvl_threshold = 5.0;
         let add_tvl_threshold = 7.0;
+        let bg_done = Arc::new(tokio::sync::Notify::new());
 
         let mut rpc_client = make_mock_client();
         let mut deltas_client = MockDeltasClient::new();
@@ -1909,6 +2409,7 @@ mod test {
                 ))
             });
         // Mock get_snapshots for Component3
+        let bg_done_clone = bg_done.clone();
         rpc_client
             .expect_get_snapshots()
             .withf(
@@ -1920,8 +2421,8 @@ mod test {
                         .contains_key("Component3")
                 },
             )
-            .returning(|_request, _chunk_size, _concurrency| {
-                Ok(Snapshot {
+            .returning(move |_request, _chunk_size, _concurrency| {
+                let snap = Ok(Snapshot {
                     states: [(
                         "Component3".to_string(),
                         ComponentWithState {
@@ -1941,7 +2442,9 @@ mod test {
                     .into_iter()
                     .collect(),
                     vm_storage: HashMap::new(),
-                })
+                });
+                bg_done_clone.notify_one();
+                snap
             });
 
         // Mock for the initial snapshot retrieval
@@ -2072,6 +2575,20 @@ mod test {
                 .collect(),
                 ..Default::default()
             },
+            // Block 3: empty; background task for Component3 should have completed.
+            BlockAggregatedChanges {
+                extractor: "uniswap-v2".to_string(),
+                chain: Chain::Ethereum,
+                block: Block {
+                    number: 3,
+                    hash: Bytes::from("0x03"),
+                    parent_hash: Bytes::from("0x02"),
+                    chain: Chain::Ethereum,
+                    ts: Default::default(),
+                },
+                revert: false,
+                ..Default::default()
+            },
         ];
 
         let (handle, mut rx) = state_sync.start().await;
@@ -2083,18 +2600,31 @@ mod test {
             .expect("deltas channel msg 0 closed!");
 
         // Expecting to receive the initial state message
-        let _ = timeout(Duration::from_millis(100), rx.recv())
+        let _ = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("waiting for first state msg timed out!")
             .expect("state sync block sender closed!");
 
-        // Send the third message, which should trigger TVL-based changes
+        // Send the second message, which should trigger TVL-based changes.
+        // Component3 snapshot is deferred to background; not in this block's message.
         tx.send(deltas[1].clone())
             .await
             .expect("deltas channel msg 1 closed!");
-        let second_msg = timeout(Duration::from_millis(100), rx.recv())
+        let second_msg = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("waiting for second state msg timed out!")
+            .expect("state sync block sender closed!")
+            .expect("no error");
+
+        // Wait for the background snapshot task to complete before sending block 3.
+        bg_done.notified().await;
+
+        tx.send(deltas[2].clone())
+            .await
+            .expect("deltas channel msg 2 closed!");
+        let third_msg = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("waiting for third state msg timed out!")
             .expect("state sync block sender closed!")
             .expect("no error");
 
@@ -2102,11 +2632,50 @@ mod test {
         jh.await
             .expect("state sync task panicked!");
 
+        // Block 2: Component3 task spawned; snapshot is empty, Component3 filtered from deltas.
         let expected_second_msg = StateSyncMessage {
             header: BlockHeader {
                 number: 2,
                 hash: Bytes::from("0x02"),
                 parent_hash: Bytes::from("0x01"),
+                revert: false,
+                ..Default::default()
+            },
+            snapshots: Snapshot::default(),
+            deltas: Some(BlockAggregatedChanges {
+                extractor: "uniswap-v2".to_string(),
+                chain: Chain::Ethereum,
+                block: Block {
+                    number: 2,
+                    hash: Bytes::from("0x02"),
+                    parent_hash: Bytes::from("0x01"),
+                    chain: Chain::Ethereum,
+                    ts: Default::default(),
+                },
+                revert: false,
+                component_tvl: [
+                    ("Component1".to_string(), 6.0), /* Within range, should not trigger changes
+                                                      * Component3 not yet tracked → filtered
+                                                      * out */
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }),
+            removed_components: [(
+                "Component2".to_string(),
+                ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        // Block 3: background task drained; Component3 snapshot present.
+        let expected_third_msg = StateSyncMessage {
+            header: BlockHeader {
+                number: 3,
+                hash: Bytes::from("0x03"),
+                parent_hash: Bytes::from("0x02"),
                 revert: false,
                 ..Default::default()
             },
@@ -2124,41 +2693,19 @@ mod test {
                             ..Default::default()
                         },
                         component_tvl: Some(10.0),
-                        entrypoints: vec![], // TODO: add entrypoints?
+                        entrypoints: vec![],
                     },
                 )]
                 .into_iter()
                 .collect(),
                 vm_storage: HashMap::new(),
             },
-            deltas: Some(BlockAggregatedChanges {
-                extractor: "uniswap-v2".to_string(),
-                chain: Chain::Ethereum,
-                block: Block {
-                    number: 2,
-                    hash: Bytes::from("0x02"),
-                    parent_hash: Bytes::from("0x01"),
-                    chain: Chain::Ethereum,
-                    ts: Default::default(),
-                },
-                revert: false,
-                component_tvl: [
-                    ("Component1".to_string(), 6.0), // Within range, should not trigger changes
-                    ("Component3".to_string(), 10.0), // Above upper threshold, should be added
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            }),
-            removed_components: [(
-                "Component2".to_string(),
-                ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
-            )]
-            .into_iter()
-            .collect(),
+            deltas: Some(deltas[2].clone()),
+            removed_components: Default::default(),
         };
 
         assert_eq!(second_msg, expected_second_msg);
+        assert_eq!(third_msg, expected_third_msg);
     }
 
     #[test_log::test(tokio::test)]
@@ -3021,7 +3568,7 @@ mod test {
     /// Test that full block as first message in partial mode is accepted
     #[test_log::test(tokio::test)]
     async fn test_partial_mode_accepts_full_block_as_first_message() {
-        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync();
+        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync(None);
         let mut state_sync = with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client))
             .with_partial_blocks(true);
         state_sync
@@ -3054,7 +3601,7 @@ mod test {
     /// Test that block number increase is detected as new block
     #[test_log::test(tokio::test)]
     async fn test_partial_mode_detects_block_number_increase() {
-        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync();
+        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync(None);
         let mut state_sync = with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client))
             .with_partial_blocks(true);
         state_sync
@@ -3102,7 +3649,7 @@ mod test {
     /// Test that partial mode skips new blocks that are already synced
     #[test_log::test(tokio::test)]
     async fn test_partial_mode_skips_already_synced_blocks() {
-        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync();
+        let (rpc_client, deltas_client, tx) = mock_clients_for_state_sync(None);
         let mut state_sync = with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client))
             .with_partial_blocks(true);
         state_sync
@@ -3202,13 +3749,33 @@ mod test {
             .insert("Component1".to_string(), component);
 
         let components_arg = ["Component1".to_string()];
-        let snap = state_sync
-            .get_snapshots(header, Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
 
-        assert!(snap
-            .snapshots
+        assert!(snapshot
             .states
             .contains_key("Component1"));
     }
@@ -3254,31 +3821,56 @@ mod test {
             .insert("Component1".to_string(), component);
 
         let components_arg = ["Component1".to_string()];
-        let snap = state_sync
-            .get_snapshots(header, Some(&components_arg))
-            .await
-            .expect("Retrieving snapshot failed");
+        let req_ids: Vec<String> = components_arg.to_vec();
+        let components: HashMap<_, _> = state_sync
+            .component_tracker
+            .components
+            .iter()
+            .filter(|(id, _)| req_ids.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contract_ids: HashSet<Bytes> = state_sync
+            .component_tracker
+            .get_contracts_by_component(&req_ids)
+            .into_iter()
+            .collect();
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: header.number,
+            uses_dci: true,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+        let (snapshot, _, _) =
+            fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
+                .await
+                .expect("Retrieving snapshot failed");
 
-        assert!(snap
-            .snapshots
+        assert!(snapshot
             .states
             .contains_key("Component1"));
     }
 
-    /// Test that in partial_blocks mode:
-    /// - Preexisting components (in to_add but not in new_protocol_components) get their snapshot
-    ///   requested immediately at the previous block and included in the same message.
-    /// - Brand-new components (in new_protocol_components) have their snapshot deferred to the
-    ///   first message of the next block, then requested at the completed previous block.
+    /// Test that in partial-blocks mode, new components are deferred until the block number
+    /// increments (confirming the previous block is complete), then fired as a background task at
+    /// the previous block's height. The snapshots appear in the first message of the block AFTER
+    /// the one where the task was fired.
+    ///
+    /// Timeline:
+    /// - Block 1 (full): initial sync
+    /// - Block 2 partial: BrandNew + Preexisting added to deferred set (no task yet)
+    /// - Block 3 partial: block number increments → task fired at snapshot_block=2; msg3 empty
+    /// - Block 4 partial: task has completed → drain returns both snapshots in msg4
     #[test_log::test(tokio::test)]
     async fn test_partial_mode_defers_brand_new_component_snapshot_to_next_block() {
         use std::time::Duration;
 
         use tokio::{sync::mpsc::channel, time::timeout};
 
+        let bg_done = Arc::new(tokio::sync::Notify::new());
         let mut rpc_client = make_mock_client();
-        // get_protocol_components for BrandNew + Preexisting when start_tracking is called (block
-        // 2)
+        // get_protocol_components for BrandNew + Preexisting (background task fires at block 3)
         rpc_client
             .expect_get_protocol_components()
             .withf(|params: &crate::rpc::ProtocolComponentsParams| {
@@ -3297,7 +3889,7 @@ mod test {
                     100,
                 ))
             });
-        // get_protocol_components for initial sync (via get_protocol_components_paginated)
+        // get_protocol_components for initial sync
         rpc_client
             .expect_get_protocol_components()
             .returning(|_| {
@@ -3311,9 +3903,8 @@ mod test {
                     100,
                 ))
             });
-        // get_snapshots: more specific expectations first so init (block 0, all components)
-        // does not match the block 1/2 ones.
-        // get_snapshots for deferred flush: block 2, BrandNew (when processing block 3)
+        // Background task fires when block 3 arrives: snapshot at block 2 (3 - 1).
+        let bg_done_clone = bg_done.clone();
         rpc_client
             .expect_get_snapshots()
             .withf(
@@ -3321,71 +3912,58 @@ mod test {
                  _chunk_size: &Option<usize>,
                  _concurrency: &usize| {
                     request.block_number == 2 &&
-                        request
+                        (request
                             .components
-                            .contains_key("BrandNew")
+                            .contains_key("BrandNew") ||
+                            request
+                                .components
+                                .contains_key("Preexisting"))
                 },
             )
-            .returning(|_request, _chunk_size, _concurrency| {
-                Ok(Snapshot {
-                    states: [(
-                        "BrandNew".to_string(),
-                        ComponentWithState {
-                            state: ProtocolComponentState::new(
-                                "BrandNew",
-                                Default::default(),
-                                Default::default(),
-                            ),
-                            component: ProtocolComponent {
-                                id: "BrandNew".to_string(),
-                                ..Default::default()
+            .returning(move |_request, _chunk_size, _concurrency| {
+                let snap = Ok(Snapshot {
+                    states: [
+                        (
+                            "BrandNew".to_string(),
+                            ComponentWithState {
+                                state: ProtocolComponentState::new(
+                                    "BrandNew",
+                                    Default::default(),
+                                    Default::default(),
+                                ),
+                                component: ProtocolComponent {
+                                    id: "BrandNew".to_string(),
+                                    ..Default::default()
+                                },
+                                component_tvl: Some(100.0),
+                                entrypoints: vec![],
                             },
-                            component_tvl: Some(100.0),
-                            entrypoints: vec![],
-                        },
-                    )]
+                        ),
+                        (
+                            "Preexisting".to_string(),
+                            ComponentWithState {
+                                state: ProtocolComponentState::new(
+                                    "Preexisting",
+                                    Default::default(),
+                                    Default::default(),
+                                ),
+                                component: ProtocolComponent {
+                                    id: "Preexisting".to_string(),
+                                    ..Default::default()
+                                },
+                                component_tvl: Some(75.0),
+                                entrypoints: vec![],
+                            },
+                        ),
+                    ]
                     .into_iter()
                     .collect(),
                     vm_storage: HashMap::new(),
-                })
+                });
+                bg_done_clone.notify_one();
+                snap
             });
-        // get_snapshots for preexisting: block 1, Preexisting (when processing block 2)
-        rpc_client
-            .expect_get_snapshots()
-            .withf(
-                |request: &SnapshotParameters,
-                 _chunk_size: &Option<usize>,
-                 _concurrency: &usize| {
-                    request.block_number == 1 &&
-                        request
-                            .components
-                            .contains_key("Preexisting")
-                },
-            )
-            .returning(|_request, _chunk_size, _concurrency| {
-                Ok(Snapshot {
-                    states: [(
-                        "Preexisting".to_string(),
-                        ComponentWithState {
-                            state: ProtocolComponentState::new(
-                                "Preexisting",
-                                Default::default(),
-                                Default::default(),
-                            ),
-                            component: ProtocolComponent {
-                                id: "Preexisting".to_string(),
-                                ..Default::default()
-                            },
-                            component_tvl: Some(75.0),
-                            entrypoints: vec![],
-                        },
-                    )]
-                    .into_iter()
-                    .collect(),
-                    vm_storage: HashMap::new(),
-                })
-            });
-        // get_snapshots for initial sync (block 0, all components)
+        // get_snapshots for initial sync (block 0, Component1+Component2)
         rpc_client
             .expect_get_snapshots()
             .returning(|_request, _chunk_size, _concurrency| {
@@ -3434,7 +4012,7 @@ mod test {
             .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
 
         let mut deltas_client = MockDeltasClient::new();
-        let (tx, rx) = channel(1);
+        let (tx, rx) = channel(4);
         deltas_client
             .expect_subscribe()
             .return_once(move |_, _| Ok((Uuid::default(), rx)));
@@ -3462,17 +4040,15 @@ mod test {
             .expect("Channel open")
             .expect("No error");
 
-        // Block 2 partial (index 2): BrandNew (in new_protocol_components → deferred) and
-        // Preexisting (not in new_protocol_components → snapshot requested immediately at block 1).
+        // Block 2 partial: BrandNew and Preexisting both appear. Neither task is fired yet —
+        // both are added to deferred_snapshot_components.
         let mut block2 = make_block_changes(2, Some(2));
         block2.new_protocol_components = HashMap::from([(
             "BrandNew".to_string(),
             ProtocolComponent { id: "BrandNew".to_string(), ..Default::default() },
         )]);
-        block2.component_tvl = HashMap::from([
-            ("BrandNew".to_string(), 100.0),
-            ("Preexisting".to_string(), 75.0), // > add_tvl (50), not in new_protocol_components
-        ]);
+        block2.component_tvl =
+            HashMap::from([("BrandNew".to_string(), 100.0), ("Preexisting".to_string(), 75.0)]);
         tx.send(block2).await.unwrap();
         let msg2 = timeout(Duration::from_millis(200), block_rx.recv())
             .await
@@ -3481,20 +4057,26 @@ mod test {
             .expect("No error");
 
         assert!(
-            msg2.snapshots.states.contains_key("Preexisting"),
-            "Preexisting component snapshot should be requested immediately in same block; got keys: {:?}",
-            msg2.snapshots.states.keys().collect::<Vec<_>>()
+            !msg2
+                .snapshots
+                .states
+                .contains_key("Preexisting"),
+            "Preexisting should still be deferred in block 2, not yet snapshotted; got: {:?}",
+            msg2.snapshots
+                .states
+                .keys()
+                .collect::<Vec<_>>()
         );
         assert!(
             !msg2
                 .snapshots
                 .states
                 .contains_key("BrandNew"),
-            "Brand-new component snapshot should be deferred, not in block 2 message"
+            "BrandNew should still be deferred in block 2, not yet snapshotted"
         );
 
-        // Block 3 partial (index 1): first partial of next block triggers flush of deferred
-        // snapshot at block 2
+        // Block 3 partial: block number increments → deferred components fire as background task
+        // at snapshot_block=2. msg3 has no snapshots (task just spawned).
         tx.send(make_block_changes(3, Some(1)))
             .await
             .unwrap();
@@ -3505,14 +4087,221 @@ mod test {
             .expect("No error");
 
         assert_eq!(msg3.header.number, 3);
-        assert_eq!(msg3.header.partial_block_index, Some(1), "First partial of block 3");
+        assert_eq!(msg3.header.partial_block_index, Some(1));
         assert!(
-            msg3.snapshots.states.contains_key("BrandNew"),
-            "Deferred brand-new component snapshot should be included in next block message; got keys: {:?}",
-            msg3.snapshots.states.keys().collect::<Vec<_>>()
+            !msg3
+                .snapshots
+                .states
+                .contains_key("BrandNew"),
+            "BrandNew task just fired; snapshot not yet available in msg3"
+        );
+        assert!(
+            !msg3
+                .snapshots
+                .states
+                .contains_key("Preexisting"),
+            "Preexisting task just fired; snapshot not yet available in msg3"
+        );
+
+        // Wait for the background snapshot task to complete before the next block arrives.
+        bg_done.notified().await;
+
+        // Block 4 partial: drain finds the completed task → both snapshots present in msg4.
+        tx.send(make_block_changes(4, Some(0)))
+            .await
+            .unwrap();
+        let msg4 = timeout(Duration::from_millis(200), block_rx.recv())
+            .await
+            .expect("Should receive block 4")
+            .expect("Channel open")
+            .expect("No error");
+
+        assert_eq!(msg4.header.number, 4);
+        assert_eq!(msg4.header.partial_block_index, Some(0));
+        assert!(
+            msg4.snapshots
+                .states
+                .contains_key("BrandNew"),
+            "BrandNew snapshot should be in msg4 after background task drains; got keys: {:?}",
+            msg4.snapshots
+                .states
+                .keys()
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            msg4.snapshots
+                .states
+                .contains_key("Preexisting"),
+            "Preexisting snapshot should be in msg4 after background task drains; got keys: {:?}",
+            msg4.snapshots
+                .states
+                .keys()
+                .collect::<Vec<_>>()
         );
 
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
+    }
+
+    /// Directly exercises all four mutation paths of `apply_deltas_to_snapshot`:
+    /// attribute update, attribute deletion, balance merge, and VM slot/balance/code overwrite.
+    /// Also verifies that deltas at or before `snapshot_block` are skipped.
+    #[test]
+    fn test_apply_deltas_to_snapshot() {
+        use tycho_common::models::{
+            contract::{Account, AccountDelta},
+            protocol::{ComponentBalance, ProtocolComponentStateDelta},
+            ChangeType,
+        };
+
+        let contract_addr = Bytes::from("0xc0ffee");
+        let token_addr = Bytes::from("0xdeadbeef");
+
+        // Build the snapshot at block 5: one component with attributes and balances,
+        // one VM contract with slots and native balance.
+        let mut snapshot = Snapshot {
+            states: [(
+                "comp1".to_string(),
+                ComponentWithState {
+                    state: ProtocolComponentState::new(
+                        "comp1",
+                        [
+                            ("keep".to_string(), Bytes::from("0x01")),
+                            ("delete_me".to_string(), Bytes::from("0x02")),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        [(token_addr.clone(), Bytes::from("0x64"))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    component: ProtocolComponent::default(),
+                    component_tvl: None,
+                    entrypoints: vec![],
+                },
+            )]
+            .into_iter()
+            .collect(),
+            vm_storage: [(
+                contract_addr.clone(),
+                Account {
+                    chain: Chain::Ethereum,
+                    address: contract_addr.clone(),
+                    title: String::new(),
+                    slots: [(Bytes::from("0x01"), Bytes::from("0xaa"))]
+                        .into_iter()
+                        .collect(),
+                    native_balance: Bytes::from("0x10"),
+                    token_balances: HashMap::new(),
+                    code: Bytes::from("0x0a0b"),
+                    code_hash: Default::default(),
+                    balance_modify_tx: Default::default(),
+                    code_modify_tx: Default::default(),
+                    creation_tx: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        // Two buffered deltas: block 5 (at snapshot_block, must be skipped) and block 6
+        // (after snapshot_block, must be applied).
+        let skipped_delta = BlockAggregatedChanges {
+            block: Block { number: 5, ..Default::default() },
+            state_deltas: [(
+                "comp1".to_string(),
+                ProtocolComponentStateDelta::new(
+                    "comp1",
+                    [("keep".to_string(), Bytes::from("0xff"))]
+                        .into_iter()
+                        .collect(),
+                    HashSet::new(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let applied_delta = BlockAggregatedChanges {
+            block: Block { number: 6, ..Default::default() },
+            state_deltas: [(
+                "comp1".to_string(),
+                ProtocolComponentStateDelta::new(
+                    "comp1",
+                    [("keep".to_string(), Bytes::from("0x99"))]
+                        .into_iter()
+                        .collect(),
+                    ["delete_me".to_string()]
+                        .into_iter()
+                        .collect(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+            component_balances: [(
+                "comp1".to_string(),
+                [(
+                    token_addr.clone(),
+                    ComponentBalance::new(
+                        token_addr.clone(),
+                        Bytes::from("0xc8"),
+                        200.0,
+                        Default::default(),
+                        "comp1",
+                    ),
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            account_deltas: [(
+                contract_addr.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    contract_addr.clone(),
+                    [
+                        (Bytes::from("0x01"), Some(Bytes::from("0xbb"))),
+                        (Bytes::from("0x02"), Some(Bytes::from("0xcc"))),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    Some(Bytes::from("0x20")),
+                    Some(Bytes::from("0x0c0d")),
+                    ChangeType::Update,
+                ),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let mut sync = with_mocked_clients(true, false, None, None);
+        sync.buffered_deltas = vec![skipped_delta, applied_delta];
+
+        let contract_ids: HashSet<Bytes> = [contract_addr.clone()]
+            .into_iter()
+            .collect();
+        sync.apply_deltas_to_snapshot(&mut snapshot, 5, &contract_ids);
+
+        let comp = &snapshot.states["comp1"].state;
+
+        // Attribute update applied
+        assert_eq!(comp.attributes["keep"], Bytes::from("0x99"));
+        // Attribute deletion applied
+        assert!(!comp
+            .attributes
+            .contains_key("delete_me"));
+        // Balance merge applied
+        assert_eq!(comp.balances[&token_addr], Bytes::from("0xc8"));
+
+        let account = &snapshot.vm_storage[&contract_addr];
+        // Existing slot overwritten, new slot added
+        assert_eq!(account.slots[&Bytes::from("0x01")], Bytes::from("0xbb"));
+        assert_eq!(account.slots[&Bytes::from("0x02")], Bytes::from("0xcc"));
+        // Native balance updated
+        assert_eq!(account.native_balance, Bytes::from("0x20"));
+        // Code updated
+        assert_eq!(account.code, Bytes::from("0x0c0d"));
     }
 }

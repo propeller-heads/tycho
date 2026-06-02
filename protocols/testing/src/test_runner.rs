@@ -323,11 +323,12 @@ impl TestRunner {
             .set_tokens(all_tokens)
             .await;
 
-        let mut stream = stream_builder
+        let stream = stream_builder
             .build()
             .await
             .into_diagnostic()
             .wrap_err("Failed to build protocol stream")?;
+        tokio::pin!(stream);
 
         info!("Live testing started. Processing stream updates...");
 

@@ -1838,12 +1838,12 @@ fn test_single_swap_with_univ4_angstrom() {
 
 #[test]
 fn test_single_encoding_strategy_weth_wrap() {
-    let weth_executor =
-        ProtocolComponent { protocol_system: String::from("weth"), ..Default::default() };
+    let wrap_executor =
+        ProtocolComponent { protocol_system: String::from("native_wrap"), ..Default::default() };
     let token_in = eth();
     let token_out = weth();
     let swap = Swap::new(
-        weth_executor,
+        wrap_executor,
         default_token(token_in.clone()),
         default_token(token_out.clone()),
         BigUint::ZERO,
@@ -1879,17 +1879,17 @@ fn test_single_encoding_strategy_weth_wrap() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file("test_single_encoding_strategy_weth_wrapping", hex_calldata.as_str());
+    write_calldata_to_file("test_single_encoding_strategy_wrap_wrapping", hex_calldata.as_str());
 }
 
 #[test]
 fn test_single_encoding_strategy_weth_unwrap() {
-    let weth_executor =
-        ProtocolComponent { protocol_system: String::from("weth"), ..Default::default() };
+    let wrap_executor =
+        ProtocolComponent { protocol_system: String::from("native_wrap"), ..Default::default() };
     let token_in = weth();
     let token_out = eth();
     let swap = Swap::new(
-        weth_executor,
+        wrap_executor,
         default_token(token_in.clone()),
         default_token(token_out.clone()),
         BigUint::ZERO,
@@ -1925,11 +1925,11 @@ fn test_single_encoding_strategy_weth_unwrap() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file("test_single_encoding_strategy_weth_unwrapping", hex_calldata.as_str());
+    write_calldata_to_file("test_single_encoding_strategy_wrap_unwrapping", hex_calldata.as_str());
 }
 
 #[test]
-fn test_sequential_encoding_strategy_weth_wrap_added() {
+fn test_sequential_encoding_strategy_wrap_added() {
     // The solution is initially a single swap. The wrapping step is inserted automatically.
     // Final execution flow:
     // ETH → (wrap to WETH) → WETH → (Uniswap V2 swap) → DAI
@@ -1974,10 +1974,7 @@ fn test_sequential_encoding_strategy_weth_wrap_added() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file(
-        "test_sequential_encoding_strategy_weth_wrap_added",
-        hex_calldata.as_str(),
-    );
+    write_calldata_to_file("test_sequential_encoding_strategy_wrap_added", hex_calldata.as_str());
 }
 
 #[test]

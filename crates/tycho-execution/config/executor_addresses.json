@@ -17,7 +17,7 @@
     "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
     "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
     "ekubo_v3": "0xc77A1a9B8ebecc6bFB386720E0A37Bc900860f5b",
-    "weth": "0x67DD87c719D0EA8499346693978CBEE1a743eEC9",
+    "native_wrap": "0x67DD87c719D0EA8499346693978CBEE1a743eEC9",
     "rfq:liquorice": "0x3Bd39a3606b9DC0afD07Ea1c865C4583d94cBa60",
     "vm:liquidityparty": "0x1F8b52899DCf1Be69eaFc754cA3E099Ff15F03aE"
   },
@@ -28,7 +28,7 @@
     "uniswap_v4": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
     "rfq:bebop": "0xcDf4E28676b9f2e8C6a722Eb163e0c2f9c0716B7",
     "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
-    "weth": "0x8aE978713c6952041d058D8a3fe3a2568f1e1aE1"
+    "native_wrap": "0x8aE978713c6952041d058D8a3fe3a2568f1e1aE1"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -36,25 +36,28 @@
     "uniswap_v4": "0x3AE67e7DCFa6c5aB36DA9dE3B67B7496956E0874",
     "velodrome_slipstreams": "0xd9Ee40C6895De968b41b96253970B48Fe852e5eF",
     "vm:curve": "0x685733eDB7654e540aB537eabC28b554646b69d0",
-    "weth": "0x50905E0f94350f9e533Cd275667AFC728265960D"
+    "native_wrap": "0x50905E0f94350f9e533Cd275667AFC728265960D"
   },
   "arbitrum": {
     "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
-    "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f"
+    "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
+    "native_wrap": "0x0000000000000000000000000000000000000000"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
     "pancakeswap_v2": "0x0ECbE4a09eff3F4d054723720f60b55EE52bD99E",
     "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
-    "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed"
+    "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
+    "native_wrap": "0x0000000000000000000000000000000000000000"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
     "quickswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
     "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
-    "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA"
+    "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
+    "native_wrap": "0x0000000000000000000000000000000000000000"
   }
 }

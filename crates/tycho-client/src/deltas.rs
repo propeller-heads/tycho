@@ -727,7 +727,7 @@ impl WsDeltasClient {
             .subscriptions
             .get(&subscription_id)
         {
-            return
+            return;
         }
 
         let (tx, rx) = oneshot::channel();

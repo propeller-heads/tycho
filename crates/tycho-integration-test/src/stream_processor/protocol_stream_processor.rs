@@ -73,9 +73,10 @@ impl ProtocolStreamProcessor {
         tx: Sender<miette::Result<StreamUpdate>>,
     ) -> miette::Result<JoinHandle<()>> {
         info!("Starting protocol stream processor for chain {:?}", self.chain);
-        let mut stream = self.build_stream(all_tokens).await?;
+        let stream = self.build_stream(all_tokens).await?;
         let handle = tokio::spawn(async move {
             info!("Protocol stream processor started");
+            tokio::pin!(stream);
             let mut is_first_update = true;
             while let Some(res) = stream.next().await {
                 let update = match res {

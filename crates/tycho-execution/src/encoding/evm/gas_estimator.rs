@@ -29,7 +29,8 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
 /// Protocols where the router-to-pool input transfer is skipped (funds are sent directly without
 /// an intermediate router hop). The input transfer cost is therefore not double-counted — it is
 /// only charged once, on the first hop or when the optimized path applies.
-pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &["erc4626", "maverick_v2", "uniswap_v2"];
+pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
+    &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
 
 /// ProtocolWillDebit: the router must `approve(protocol)` before swapping.
 /// The protocol's `transferFrom` is inside `swap()` and already in the gas computation of
@@ -39,7 +40,8 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] =
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
-pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] = &["vm:curve", "rocketpool", "fluid_v1", "weth"];
+pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrap"];
 
 pub const ROUTER_FEES_ACTIVE: bool = true;
 
