@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use ethabi::ethereum_types::U256;
 use substreams_ethereum::pb::eth;
 
 use crate::lunarbase::{
@@ -64,12 +65,28 @@ pub struct BlockChangesBuilder {
     transactions: Vec<TransactionChanges>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootstrapState {
+    pub blacklist_fee_multiplier: U256,
+}
+
+impl Default for BootstrapState {
+    fn default() -> Self {
+        Self { blacklist_fee_multiplier: 1.into() }
+    }
+}
+
 impl BlockChangesBuilder {
     pub fn new(known_components: impl IntoIterator<Item = String>) -> Self {
         Self { known_components: known_components.into_iter().collect(), transactions: Vec::new() }
     }
 
-    pub fn register_component(&mut self, tx: IndexedTransaction, component: ProtocolComponent) {
+    pub fn register_component(
+        &mut self,
+        tx: IndexedTransaction,
+        component: ProtocolComponent,
+        bootstrap_state: BootstrapState,
+    ) {
         let component_id = component.id.clone();
         self.known_components
             .insert(component_id.clone());
@@ -77,7 +94,7 @@ impl BlockChangesBuilder {
         tx_changes
             .new_protocol_components
             .push(component);
-        merge_state_delta(tx_changes, &component_id, initial_state_delta());
+        merge_state_delta(tx_changes, &component_id, initial_state_delta(bootstrap_state));
     }
 
     pub fn apply_event(
@@ -177,7 +194,7 @@ fn merge_state_delta(tx: &mut TransactionChanges, component_id: &str, delta: Sta
     }
 }
 
-fn initial_state_delta() -> StateDelta {
+fn initial_state_delta(bootstrap_state: BootstrapState) -> StateDelta {
     let mut updated_attributes = AttributeMap::new();
     insert_u128(&mut updated_attributes, attrs::ANCHOR_PRICE_X96, 0);
     insert_u32(&mut updated_attributes, attrs::FEE_ASK_X24, 0);
@@ -187,8 +204,12 @@ fn initial_state_delta() -> StateDelta {
     insert_u128(&mut updated_attributes, attrs::RESERVE_Y, 0);
     insert_u32(&mut updated_attributes, attrs::CONCENTRATION_K, 0);
     insert_u64(&mut updated_attributes, attrs::BLOCK_DELAY, 2);
-    insert_bool(&mut updated_attributes, attrs::PAUSED, true);
-    insert_u256(&mut updated_attributes, attrs::BLACKLIST_FEE_MULTIPLIER, 1.into());
+    insert_bool(&mut updated_attributes, attrs::PAUSED, false);
+    insert_u256(
+        &mut updated_attributes,
+        attrs::BLACKLIST_FEE_MULTIPLIER,
+        bootstrap_state.blacklist_fee_multiplier,
+    );
     insert_bool(&mut updated_attributes, attrs::EXECUTOR_WHITELISTED, false);
     StateDelta { updated_attributes }
 }

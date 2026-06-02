@@ -5,7 +5,7 @@ use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::bytes_to_address,
+    evm::utils::{bytes_to_address, convert_to_router_token},
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -31,8 +31,8 @@ impl SwapEncoder for LunarBaseSwapEncoder {
     ) -> Result<Vec<u8>, EncodingError> {
         let pool = Address::from_str(&swap.component().id)
             .map_err(|_| EncodingError::FatalError("Invalid LunarBase component id".to_owned()))?;
-        let token_in = bytes_to_address(&swap.token_in().address)?;
-        let token_out = bytes_to_address(&swap.token_out().address)?;
+        let token_in = convert_to_router_token(bytes_to_address(&swap.token_in().address)?);
+        let token_out = convert_to_router_token(bytes_to_address(&swap.token_out().address)?);
 
         Ok((pool, token_in, token_out).abi_encode_packed())
     }
@@ -85,7 +85,7 @@ mod tests {
             ),
             concat!(
                 "0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
-                "0000000000000000000000000000000000000000",
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                 "833589fcd6edb6e08f4c7c32d4f71b54bda02913",
             )
         );

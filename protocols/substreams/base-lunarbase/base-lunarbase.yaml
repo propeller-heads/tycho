@@ -20,7 +20,7 @@ binaries:
 modules:
   - name: map_protocol_components
     kind: map
-    initialBlock: 45125288
+    initialBlock: 46240924
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -29,7 +29,7 @@ modules:
 
   - name: store_protocol_components
     kind: store
-    initialBlock: 45125288
+    initialBlock: 46240924
     updatePolicy: set_if_not_exists
     valueType: proto:tycho.evm.v1.ProtocolComponent
     inputs:
@@ -37,7 +37,7 @@ modules:
 
   - name: map_protocol_changes
     kind: map
-    initialBlock: 45125288
+    initialBlock: 46240924
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -47,7 +47,7 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_protocol_components: "pool=0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&bootstrap_block=45125288"
-  map_protocol_changes: "pool=0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&bootstrap_block=45125288"
+  map_protocol_components: "pool=0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&bootstrap_block=46240924&blacklist_fee_multiplier=100"
+  map_protocol_changes: "pool=0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&bootstrap_block=46240924&blacklist_fee_multiplier=100"
 
 network: base

@@ -104,7 +104,7 @@ mod tests {
                     Bytes::from(state.token_x.to_vec()),
                     Bytes::from(state.token_y.to_vec()),
                 ],
-                contract_ids: vec![Bytes::from(state.pool.to_vec())],
+                contract_ids: Vec::new(),
                 static_attributes: HashMap::new(),
                 creation_tx: Bytes::zero(32),
                 ..Default::default()

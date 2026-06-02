@@ -97,6 +97,5 @@ pub fn to_tycho_protocol_component(
 ) -> tycho::ProtocolComponent {
     tycho::ProtocolComponent::new(&component.id)
         .with_tokens(&component.tokens)
-        .with_contracts(&component.contract_addresses)
         .as_swap_type(lunarbase::PROTOCOL_TYPE_NAME, tycho::ImplementationType::Custom)
 }

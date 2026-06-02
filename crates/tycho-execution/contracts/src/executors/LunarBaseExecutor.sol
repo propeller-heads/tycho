@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {TransferManager} from "../TransferManager.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 interface ILunarBasePool {
     struct ExactInputParams {
@@ -30,17 +31,18 @@ error LunarBaseExecutor__InvalidDataLength();
 error LunarBaseExecutor__MsgValueMismatch();
 
 contract LunarBaseExecutor is IExecutor {
-    address internal constant NATIVE_TOKEN =
+    address internal constant LUNARBASE_NATIVE_TOKEN =
         0x0000000000000000000000000000000000000000;
     uint256 internal constant DATA_LENGTH = 60;
 
-    function fundsExpectedAddress(bytes calldata data)
+    function fundsExpectedAddress(
+        bytes calldata /* data */
+    )
         external
         view
         returns (address receiver)
     {
-        (, address tokenIn,,) = _decodeData(data);
-        return tokenIn == NATIVE_TOKEN ? address(this) : msg.sender;
+        return msg.sender;
     }
 
     // slither-disable-next-line locked-ether
@@ -50,13 +52,13 @@ contract LunarBaseExecutor is IExecutor {
     {
         (address pool, address tokenIn, address tokenOut,) = _decodeData(data);
 
-        if (tokenIn == NATIVE_TOKEN) {
+        if (tokenIn == ETH_ADDRESS) {
             if (msg.value != amountIn) {
                 revert LunarBaseExecutor__MsgValueMismatch();
             }
             // slither-disable-next-line arbitrary-send-eth,unused-return
             ILunarBasePool(pool).swapExactInNative{value: amountIn}(
-                tokenOut, receiver, 0, block.timestamp
+                _toLunarBaseToken(tokenOut), receiver, 0, block.timestamp
             );
             return;
         }
@@ -65,8 +67,8 @@ contract LunarBaseExecutor is IExecutor {
         ILunarBasePool(pool)
             .swapExactIn(
                 ILunarBasePool.ExactInputParams({
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
+                    tokenIn: _toLunarBaseToken(tokenIn),
+                    tokenOut: _toLunarBaseToken(tokenOut),
                     recipient: receiver,
                     amountIn: amountIn,
                     amountOutMinimum: 0,
@@ -89,7 +91,7 @@ contract LunarBaseExecutor is IExecutor {
         address pool;
         (pool, tokenIn, tokenOut,) = _decodeData(data);
 
-        if (tokenIn == NATIVE_TOKEN) {
+        if (tokenIn == ETH_ADDRESS) {
             transferType = TransferManager.TransferType.TransferNativeInExecutor;
             receiver = address(0);
         } else {
@@ -97,6 +99,10 @@ contract LunarBaseExecutor is IExecutor {
             receiver = pool;
         }
         outputToRouter = false;
+    }
+
+    function _toLunarBaseToken(address token) internal pure returns (address) {
+        return token == ETH_ADDRESS ? LUNARBASE_NATIVE_TOKEN : token;
     }
 
     function _decodeData(bytes calldata data)

@@ -10,5 +10,5 @@ pub(crate) use component::{
 };
 pub(crate) use events::EventApplyContext;
 pub(crate) use indexed::{
-    BlockChanges, BlockChangesBuilder, IndexedTransaction, TransactionChanges,
+    BlockChanges, BlockChangesBuilder, BootstrapState, IndexedTransaction, TransactionChanges,
 };

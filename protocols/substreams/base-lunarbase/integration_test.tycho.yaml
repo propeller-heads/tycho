@@ -3,36 +3,17 @@ protocol_system: "lunarbase"
 protocol_type_names:
   - "lunarbase_pool"
 module_name: "map_protocol_changes"
-skip_balance_check: false
-initialized_accounts:
-  - "0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99"
+# LunarBase component balances are tradable reserves emitted by Sync.
+# The pool contract can also hold pending deposits and fee buckets, so raw
+# on-chain token balances intentionally do not always equal reserves.
+skip_balance_check: true
 tests:
-  - name: test_live_pool_bootstrap
-    start_block: 45125288
-    stop_block: 45125289
+  - name: test_latest_implementation_live_state
+    start_block: 46240924
+    stop_block: 46242605
     expected_components:
       - id: "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"
         tokens:
           - "0x0000000000000000000000000000000000000000"
           - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        static_attributes:
-          pool: "0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99"
-          token_x: "0x0000000000000000000000000000000000000000"
-          token_y: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        creation_tx: "0x8373b92bd5c25e5afa96f261362ea1dfec44581d602414aea6ab3592cca3a6b8"
-        skip_simulation: true
-
-  - name: test_flashblock_cadence_state_updates
-    start_block: 46464985
-    stop_block: 46464987
-    expected_components:
-      - id: "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"
-        tokens:
-          - "0x0000000000000000000000000000000000000000"
-          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        static_attributes:
-          pool: "0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99"
-          token_x: "0x0000000000000000000000000000000000000000"
-          token_y: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        creation_tx: "0x8373b92bd5c25e5afa96f261362ea1dfec44581d602414aea6ab3592cca3a6b8"
-        skip_simulation: true
+        creation_tx: "0x9cde54a572dba097f5660b51436e0fa96c6e8bf80e5a5865cc9af56edfdb51ef"

@@ -43,6 +43,7 @@ pub fn map_protocol_changes(
             builder.register_component(
                 tx,
                 lunarbase::protocol_component(pool.pool, pool.token_x, pool.token_y),
+                pool.bootstrap_state,
             );
         }
     }

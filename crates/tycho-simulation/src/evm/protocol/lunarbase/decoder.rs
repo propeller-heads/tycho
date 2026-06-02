@@ -231,14 +231,7 @@ pub fn decode_lunarbase_snapshot(
 }
 
 fn component_pool(snapshot: &ComponentWithState) -> Result<Address, InvalidSnapshotError> {
-    snapshot
-        .component
-        .contract_addresses
-        .first()
-        .ok_or_else(|| {
-            InvalidSnapshotError::ValueError("missing LunarBase pool contract".to_owned())
-        })
-        .and_then(|value| address_from_bytes(value.as_ref()).map_err(map_sim_error))
+    address_from_component_id(&snapshot.component.id).map_err(map_sim_error)
 }
 
 fn component_token(
@@ -261,6 +254,30 @@ fn address_from_bytes(value: &[u8]) -> Result<Address, SimulationError> {
             None,
         )
     })
+}
+
+fn address_from_component_id(value: &str) -> Result<Address, SimulationError> {
+    let value = value
+        .strip_prefix("0x")
+        .unwrap_or(value);
+    if value.len() != 40 {
+        return Err(SimulationError::InvalidInput(
+            format!("expected 20-byte hex address component id, got {value}"),
+            None,
+        ));
+    }
+
+    let mut out = [0u8; 20];
+    for (idx, byte) in out.iter_mut().enumerate() {
+        let start = idx * 2;
+        *byte = u8::from_str_radix(&value[start..start + 2], 16).map_err(|err| {
+            SimulationError::InvalidInput(
+                format!("invalid LunarBase component id hex: {err}"),
+                None,
+            )
+        })?;
+    }
+    Ok(out)
 }
 
 fn map_decode_error(err: StateDecodeError) -> InvalidSnapshotError {

@@ -6,7 +6,6 @@ pub const PROTOCOL_TYPE_NAME: &str = "lunarbase_pool";
 pub struct ProtocolComponent {
     pub id: String,
     pub tokens: [Address; 2],
-    pub contract_addresses: Vec<Address>,
 }
 
 pub fn component_id(pool: Address) -> String {
@@ -14,11 +13,7 @@ pub fn component_id(pool: Address) -> String {
 }
 
 pub fn protocol_component(pool: Address, token_x: Address, token_y: Address) -> ProtocolComponent {
-    ProtocolComponent {
-        id: component_id(pool),
-        tokens: [token_x, token_y],
-        contract_addresses: vec![pool],
-    }
+    ProtocolComponent { id: component_id(pool), tokens: [token_x, token_y] }
 }
 
 fn address_to_hex(address: Address) -> String {
