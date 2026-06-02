@@ -167,13 +167,6 @@ impl ProtocolSim for MetricState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        if !self.bid_ask.quote_available {
-            return Err(SimulationError::RecoverableError(format!(
-                "Metric quote unavailable for pool {} at block {}",
-                self.metadata.pool_address, self.bid_ask.latest_block
-            )));
-        }
-
         let direction = self.direction(&token_in.address, &token_out.address)?;
         let amount_in_human = amount_in.to_f64().ok_or_else(|| {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())

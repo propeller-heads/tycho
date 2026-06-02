@@ -88,6 +88,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
+    /// Run PAMM RFQ protocols.
+    #[arg(long, default_value_t = false)]
+    run_pamm_protocols: bool,
+
     /// Port for the Prometheus metrics server
     #[arg(long, default_value_t = 9898)]
     metrics_port: u16,
@@ -314,18 +318,19 @@ async fn run(cli: Cli) -> miette::Result<()> {
         }
     }
     if !cli.disable_rfq {
-        if let Ok(rfq_stream_processor) = RFQStreamProcessor::new(
+        let rfq_stream_processor = RFQStreamProcessor::new(
             chain,
             tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
-        ) {
-            rfq_handle = Some(
-                rfq_stream_processor
-                    .run_stream(&all_tokens, rfq_tx)
-                    .await?,
-            );
-        }
+            cli.run_pamm_protocols,
+        )
+        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        rfq_handle = Some(
+            rfq_stream_processor
+                .run_stream(&all_tokens, rfq_tx)
+                .await?,
+        );
     }
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));

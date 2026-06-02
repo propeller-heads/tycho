@@ -42,6 +42,7 @@ use tycho_simulation::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
             liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
+            metric::{client_builder::MetricClientBuilder, state::MetricState},
         },
         stream::RFQStreamBuilder,
     },
@@ -70,6 +71,9 @@ struct Cli {
     tvl_threshold: f64,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
+    /// Run PAMM RFQ protocols.
+    #[arg(long, default_value_t = false)]
+    run_pamm_protocols: bool,
 }
 
 impl Cli {
@@ -130,7 +134,11 @@ async fn main() {
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
         (liquorice_user.is_none() || liquorice_key.is_none())
     {
-        panic!("No RFQ credentials found. Please set BEBOP_USER and BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables.");
+        if cli.run_pamm_protocols {
+            println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
+        } else {
+            panic!("No RFQ credentials found. Please set BEBOP_USER and BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
+        }
     }
 
     println!("Loading tokens from Tycho... {url}", url = tycho_url.as_str());
@@ -224,6 +232,21 @@ async fn main() {
             .expect("Failed to create Liquorice RFQ client");
         rfq_stream_builder =
             rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+    }
+    if cli.run_pamm_protocols {
+        println!("Setting up Metric RFQ client...\n");
+        match MetricClientBuilder::new(chain)
+            .tokens(rfq_tokens.clone())
+            .token_metadata(all_tokens.clone())
+            .tvl_threshold(cli.tvl_threshold)
+            .build()
+        {
+            Ok(metric_client) => {
+                rfq_stream_builder =
+                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
+            }
+            Err(e) => eprintln!("Skipping Metric RFQ client: {e}"),
+        }
     }
 
     // Start the RFQ stream in a background task
