@@ -1,0 +1,61 @@
+# Name of the substreams config file in your substreams module. Usually "./substreams.yaml"
+substreams_yaml_path: ./substreams.yaml
+# Name of the adapter contract, usually: ProtocolSwapAdapter"
+adapter_contract: "SwapAdapter"
+# Constructor signature of the Adapter contract"
+adapter_build_signature: "constructor(address)"
+# A comma separated list of args to be passed to the contructor of the Adapter contract"
+adapter_build_args: "0x0000000000000000000000000000000000000000"
+# Whether the testing script should skip checking balances of the protocol components.
+# If set to `true` please always add a reason why it's skipped.
+skip_balance_check: false
+# A list of accounts that need to be indexed to run the tests properly.
+# Usually used when there is a global component required by all pools and created before the tested range of blocks. For example a factory or a vault.
+# Please note that this component needs to be indexed by your substreams module, this feature is only for testing purpose.
+# Also please always add a reason why this account is needed for your tests.
+# This will be applied to each test.
+initialized_accounts:
+  - "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84" # Needed for ....
+# A list of protocol types names created by your Substreams module.
+protocol_type_names:
+  - "type_name_1"
+  - "type_name_2"
+# The name of the protocol system
+protocol_system: "protocol_name"
+# A list of tests.
+tests:
+  # Name of the test
+  - name: test_pool_creation
+    # Indexed block range
+    start_block: 123
+    stop_block: 456
+    # Same as global `initialized_accounts` but only scoped to this test.
+    initialized_accounts:
+      - "0x0c0e5f2fF0ff18a3be9b835635039256dC4B4963" # Needed for ....
+    # A list of expected component indexed in the block range. Each component must match perfectly the `ProtocolComponent` indexed by your subtreams module.
+    expected_components:
+      - id: "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7"
+        tokens:
+          - "0xdac17f958d2ee523a2206206994597c13d831ec7"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          - "0x6b175474e89094c44da98b954eedeac495271d0f"
+        static_attributes: { }
+        creation_tx: "0x20793bbf260912aae189d5d261ff003c9b9166da8191d8f9d63ff1c7722f3ac6"
+        # Whether the script should skip trying to simulate a swap on this component.
+        # If set to `true` please always add a reason why it's skipped.
+        skip_simulation: false
+        # Whether the script should skip trying to simulate execution of a swap on this component.
+        # If set to `true` please always add a reason why it's skipped.
+        skip_execution: false
+  - name: test_something_else
+    start_block: 123
+    stop_block: 456
+    expected_components:
+      - id: "0xdc24316b9ae028f1497c275eb9192a3ea0f67022"
+        tokens:
+          - "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+          - "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+        static_attributes: { }
+        creation_tx: "0xfac67ecbd423a5b915deff06045ec9343568edaec34ae95c43d35f2c018afdaa"
+        skip_simulation: true # If true, always add a reason
+        skip_execution: true # If true, always add a reason

@@ -1,0 +1,1 @@
+Please put any abi JSONs into this folder the buildscript will compile these to rust code.
