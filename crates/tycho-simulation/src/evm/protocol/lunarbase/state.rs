@@ -35,7 +35,7 @@ pub struct LunarBaseState {
     pub block_delay: u64,
     pub paused: bool,
     pub blacklist_fee_multiplier: U256,
-    pub executor_whitelisted: bool,
+    pub swap_caller_whitelisted: bool,
 }
 
 impl LunarBaseState {
@@ -57,7 +57,7 @@ impl LunarBaseState {
     }
 
     pub fn fee_multiplier(&self) -> U256 {
-        if self.executor_whitelisted || self.blacklist_fee_multiplier.is_zero() {
+        if self.swap_caller_whitelisted || self.blacklist_fee_multiplier.is_zero() {
             U256::from(1u64)
         } else {
             self.blacklist_fee_multiplier
@@ -427,8 +427,20 @@ mod tests {
             block_delay: 2,
             paused: false,
             blacklist_fee_multiplier: U256::from(1u64),
-            executor_whitelisted: true,
+            swap_caller_whitelisted: true,
         }
+    }
+
+    #[test]
+    fn uses_base_fee_for_whitelisted_swap_caller() {
+        let mut state = state();
+        state.blacklist_fee_multiplier = U256::from(100u64);
+        state.swap_caller_whitelisted = true;
+
+        assert_eq!(state.fee_multiplier(), U256::from(1u64));
+
+        state.swap_caller_whitelisted = false;
+        assert_eq!(state.fee_multiplier(), U256::from(100u64));
     }
 
     #[test]

@@ -23,7 +23,7 @@ mod attrs {
     pub const BLOCK_DELAY: &str = "block_delay";
     pub const PAUSED: &str = "paused";
     pub const BLACKLIST_FEE_MULTIPLIER: &str = "blacklist_fee_multiplier";
-    pub const EXECUTOR_WHITELISTED: &str = "executor_whitelisted";
+    pub const SWAP_CALLER_WHITELISTED: &str = "swap_caller_whitelisted";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +65,21 @@ fn insert_u256(attrs: &mut AttributeMap, name: &'static str, value: U256) {
 
 fn require_bool(attrs: &AttributeMap, name: &'static str) -> Result<bool, AttributeError> {
     let value = require(attrs, name)?;
+    decode_bool(name, value)
+}
+
+fn optional_bool(
+    attrs: &AttributeMap,
+    name: &'static str,
+    default: bool,
+) -> Result<bool, AttributeError> {
+    attrs
+        .get(name)
+        .map(|value| decode_bool(name, value))
+        .unwrap_or(Ok(default))
+}
+
+fn decode_bool(name: &'static str, value: &[u8]) -> Result<bool, AttributeError> {
     if value.len() != 1 {
         return Err(AttributeError::InvalidLength { name, expected: 1, actual: value.len() });
     }
@@ -83,8 +98,18 @@ fn require_u128(attrs: &AttributeMap, name: &'static str) -> Result<u128, Attrib
     decode_u128(name, require(attrs, name)?)
 }
 
-fn require_u256(attrs: &AttributeMap, name: &'static str) -> Result<U256, AttributeError> {
-    let value = require(attrs, name)?;
+fn optional_u256(
+    attrs: &AttributeMap,
+    name: &'static str,
+    default: U256,
+) -> Result<U256, AttributeError> {
+    attrs
+        .get(name)
+        .map(|value| decode_u256(name, value))
+        .unwrap_or(Ok(default))
+}
+
+fn decode_u256(name: &'static str, value: &[u8]) -> Result<U256, AttributeError> {
     if value.len() > 32 {
         return Err(AttributeError::InvalidLength { name, expected: 32, actual: value.len() });
     }
@@ -168,7 +193,7 @@ pub fn encode_state(state: &LunarBaseState) -> AttributeMap {
     insert_u64(&mut attrs, attrs::BLOCK_DELAY, state.block_delay);
     insert_bool(&mut attrs, attrs::PAUSED, state.paused);
     insert_u256(&mut attrs, attrs::BLACKLIST_FEE_MULTIPLIER, state.blacklist_fee_multiplier);
-    insert_bool(&mut attrs, attrs::EXECUTOR_WHITELISTED, state.executor_whitelisted);
+    insert_bool(&mut attrs, attrs::SWAP_CALLER_WHITELISTED, state.swap_caller_whitelisted);
     attrs
 }
 
@@ -189,8 +214,12 @@ pub fn decode_state(
         concentration_k: require_u32(attrs, attrs::CONCENTRATION_K)?,
         block_delay: require_u64(attrs, attrs::BLOCK_DELAY)?,
         paused: require_bool(attrs, attrs::PAUSED)?,
-        blacklist_fee_multiplier: require_u256(attrs, attrs::BLACKLIST_FEE_MULTIPLIER)?,
-        executor_whitelisted: require_bool(attrs, attrs::EXECUTOR_WHITELISTED)?,
+        blacklist_fee_multiplier: optional_u256(
+            attrs,
+            attrs::BLACKLIST_FEE_MULTIPLIER,
+            U256::from(1u64),
+        )?,
+        swap_caller_whitelisted: optional_bool(attrs, attrs::SWAP_CALLER_WHITELISTED, true)?,
     })
 }
 
@@ -318,7 +347,7 @@ mod tests {
             block_delay: 2,
             paused: false,
             blacklist_fee_multiplier: U256::from(1u64),
-            executor_whitelisted: true,
+            swap_caller_whitelisted: true,
         }
     }
 
@@ -335,6 +364,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn defaults_fee_whitelist_attributes_for_legacy_snapshots() {
+        let state = state();
+        let mut attrs = encode_state(&state);
+        attrs.remove(attrs::BLACKLIST_FEE_MULTIPLIER);
+        attrs.remove(attrs::SWAP_CALLER_WHITELISTED);
+
+        let decoded = decode_state(
+            StaticStateAttributes {
+                pool: state.pool,
+                token_x: state.token_x,
+                token_y: state.token_y,
+            },
+            &attrs,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.blacklist_fee_multiplier, U256::from(1u64));
+        assert!(decoded.swap_caller_whitelisted);
     }
 
     #[test]

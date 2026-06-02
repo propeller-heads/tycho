@@ -210,6 +210,6 @@ fn initial_state_delta(bootstrap_state: BootstrapState) -> StateDelta {
         attrs::BLACKLIST_FEE_MULTIPLIER,
         bootstrap_state.blacklist_fee_multiplier,
     );
-    insert_bool(&mut updated_attributes, attrs::EXECUTOR_WHITELISTED, false);
+    insert_bool(&mut updated_attributes, attrs::SWAP_CALLER_WHITELISTED, true);
     StateDelta { updated_attributes }
 }

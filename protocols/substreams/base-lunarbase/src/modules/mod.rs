@@ -30,7 +30,7 @@ mod config {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Config {
         pub pools: Vec<PoolConfig>,
-        pub tycho_executor: lunarbase::Address,
+        pub tycho_router: lunarbase::Address,
     }
 
     impl Default for Config {
@@ -43,7 +43,7 @@ mod config {
                     bootstrap_block: None,
                     bootstrap_state: lunarbase::BootstrapState::default(),
                 }],
-                tycho_executor: [0u8; 20],
+                tycho_router: [0u8; 20],
             }
         }
     }
@@ -64,7 +64,7 @@ mod config {
                     "pool" => single_pool.pool = parse_address(value)?,
                     "token_x" => single_pool.token_x = parse_address(value)?,
                     "token_y" => single_pool.token_y = parse_address(value)?,
-                    "tycho_executor" => config.tycho_executor = parse_address(value)?,
+                    "tycho_router" => config.tycho_router = parse_address(value)?,
                     "bootstrap_block" => single_pool.bootstrap_block = Some(value.parse()?),
                     "blacklist_fee_multiplier" => {
                         single_pool
@@ -165,8 +165,7 @@ mod tests {
             "pool=0x0000000000000000000000000000000000000001&\
              token_x=0x0000000000000000000000000000000000000002&\
              token_y=0x0000000000000000000000000000000000000003&\
-             bootstrap_block=10&\
-             blacklist_fee_multiplier=100",
+             bootstrap_block=10",
         )
         .expect("valid config");
 
@@ -179,7 +178,7 @@ mod tests {
             config.pools[0]
                 .bootstrap_state
                 .blacklist_fee_multiplier,
-            100.into()
+            1.into()
         );
     }
 
@@ -189,7 +188,7 @@ mod tests {
             "pools=\
              0x0000000000000000000000000000000000000001:\
              0x0000000000000000000000000000000000000002:\
-             0x0000000000000000000000000000000000000003:10:100,\
+             0x0000000000000000000000000000000000000003:10,\
              0x0000000000000000000000000000000000000004:\
              0x0000000000000000000000000000000000000005:\
              0x0000000000000000000000000000000000000006:20",
@@ -203,7 +202,7 @@ mod tests {
             config.pools[0]
                 .bootstrap_state
                 .blacklist_fee_multiplier,
-            100.into()
+            1.into()
         );
         assert_eq!(config.pools[1].pool, address(4));
         assert_eq!(config.pools[1].token_x, address(5));

@@ -14,7 +14,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventApplyContext {
     pub block_number: u64,
-    pub tycho_executor: Address,
+    pub tycho_router: Address,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -151,8 +151,8 @@ pub fn event_to_delta(
             insert_u32(&mut updated_attributes, attrs::CONCENTRATION_K, *concentration_k);
         }
         LunarBaseEvent::WhitelistSet { account, whitelisted } => {
-            if *account == context.tycho_executor {
-                insert_bool(&mut updated_attributes, attrs::EXECUTOR_WHITELISTED, *whitelisted);
+            if *account == context.tycho_router {
+                insert_bool(&mut updated_attributes, attrs::SWAP_CALLER_WHITELISTED, *whitelisted);
             }
         }
         LunarBaseEvent::BlacklistFeeMultiplierSet { multiplier } => {

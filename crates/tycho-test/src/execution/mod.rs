@@ -15,7 +15,7 @@ use tycho_simulation::evm::protocol::u256_num::u256_to_biguint;
 
 use crate::{
     execution::{
-        encoding::{detect_token_slots, setup_router_overwrites},
+        encoding::{detect_token_slots, setup_lunarbase_overwrites, setup_router_overwrites},
         execution_simulator::ExecutionSimulator,
         models::{
             RouterOverwritesData, SimulationInput, SimulationResult, TychoExecutionInput,
@@ -136,6 +136,15 @@ pub async fn simulate_swap_transaction(
                         state_overwrites.extend(angstrom_overwrites);
                     }
                 }
+            }
+            if info.protocol_system == "lunarbase" {
+                let pool_address = Address::from_str(&info.component_id)
+                    .map_err(|e| (miette!("Invalid LunarBase component id: {e}"), None, None))?;
+                let swap_caller = bytes_to_address(&to_address)
+                    .map_err(|e| (miette!("Invalid Tycho router address: {e}"), None, None))?;
+                let lunarbase_overwrites = setup_lunarbase_overwrites(pool_address, swap_caller)
+                    .map_err(|e| (e, None, None))?;
+                state_overwrites.extend(lunarbase_overwrites);
             }
         }
 

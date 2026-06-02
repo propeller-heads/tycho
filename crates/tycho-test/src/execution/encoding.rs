@@ -480,6 +480,32 @@ pub fn setup_angstrom_overwrites(
     overwrites
 }
 
+/// Sets the Tycho swap caller as whitelisted in a LunarBase pool.
+///
+/// LunarBase charges the base fee for whitelisted swappers and applies
+/// `blacklistFeeMultiplier` otherwise. Since Tycho executors are invoked through
+/// the router, the pool sees the router as `msg.sender`; the test overwrite must
+/// mirror that production integration path.
+pub fn setup_lunarbase_overwrites(
+    pool_address: Address,
+    swap_caller: Address,
+) -> miette::Result<AddressHashMap<AccountOverride>> {
+    let mut overwrites = AddressHashMap::default();
+    let pool_access_slot = B256::from_slice(
+        &hex::decode("9832e62c6c6e13b4465b385de9f563995a2974f4f839176dcccf0b12e5c11200")
+            .expect("valid LunarBase PoolAccessStorage slot"),
+    );
+    let whitelist_slot = keccak256((swap_caller, pool_access_slot).abi_encode());
+
+    overwrites.insert(
+        pool_address,
+        AccountOverride::default()
+            .with_state_diff(vec![(whitelist_slot, FixedBytes::<32>::from(U256::ONE))]),
+    );
+
+    Ok(overwrites)
+}
+
 /// Sets up state overwrites for the Tycho router and its associated executor.
 ///
 /// This function prepares the router for execution simulation by applying bytecode overwrites

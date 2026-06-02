@@ -62,7 +62,7 @@ pub fn map_protocol_changes(
                 log,
                 lunarbase::EventApplyContext {
                     block_number: block.number,
-                    tycho_executor: config.tycho_executor,
+                    tycho_router: config.tycho_router,
                 },
                 pool.token_x,
                 pool.token_y,
