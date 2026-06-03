@@ -587,8 +587,21 @@ Current execution testing checkpoint:
   `0x4e59b44847b379578588920cA78FbF26c0B4956C` and salt
   `BaselineExecutor-ethereum`, the computed executor address is
   `0xB3F3943F595074c2F271a8C680F4C18E116C9EEF`.
+  A Baseline-only Hardhat/CREATE2 fork rehearsal at block `24930105` deployed
+  this bytecode successfully at that address (`tx`
+  `0x0e48eef825470b7f5945ac1400dd65b38ee4acdb46e5ea76f5affc50c4bec95b`,
+  gas `360254`), `relay()` returned
+  `0xc81Fd894C0acE037d133aF4886550aC8133568E8`, and `getTransferData()` resolved
+  both buy and sell calldata against live fork state.
+  The Hardhat/CREATE2 deployed runtime is not byte-identical to
+  `BaselineExecutor.runtime.json`: the protocol-testing fixture is the
+  Foundry-exported execution simulation bytecode, while the production deploy
+  path uses Hardhat compiler artifacts. Use the fixture as behavioral
+  protocol-testing evidence, not as production bytecode parity evidence.
   This address is not yet in production `executor_addresses.json`; add it only
-  after real deployment and TychoRouter whitelisting.
+  after real deployment and TychoRouter whitelisting. Until then,
+  `SwapEncoderRegistry::new_with_defaults` will not register Baseline from
+  production executor config.
   For the real deploy, run the script with only the Baseline entry enabled, or
   first add an explicit skip-if-code-exists path; the unmodified Ethereum list
   will attempt already deployed executors before reaching Baseline.
