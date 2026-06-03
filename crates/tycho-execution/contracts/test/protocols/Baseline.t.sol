@@ -9,22 +9,15 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 contract BaselineExecutorExposed is BaselineExecutor {
     constructor(address relay_) BaselineExecutor(relay_) {}
 
-    function decodeData(bytes calldata data)
-        external
-        pure
-        returns (address bToken, address tokenIn, address tokenOut)
-    {
+    function decodeData(bytes calldata data) external pure returns (address bToken, address tokenIn, address tokenOut) {
         return _decodeData(data);
     }
 }
 
 contract BaselineExecutorTest is TestUtils, Constants {
-    address internal constant BTOKEN =
-        address(0x1000000000000000000000000000000000000001);
-    address internal constant RESERVE =
-        address(0x2000000000000000000000000000000000000002);
-    address internal constant OTHER =
-        address(0x3000000000000000000000000000000000000003);
+    address internal constant BTOKEN = address(0x1000000000000000000000000000000000000001);
+    address internal constant RESERVE = address(0x2000000000000000000000000000000000000002);
+    address internal constant OTHER = address(0x3000000000000000000000000000000000000003);
 
     BaselineExecutorExposed executor;
     MockBaselineRelay relay;
@@ -35,6 +28,7 @@ contract BaselineExecutorTest is TestUtils, Constants {
         vm.etch(OTHER, address(new MockERC20()).code);
 
         relay = new MockBaselineRelay();
+        relay.setReserve(BTOKEN, RESERVE);
         relay.setQuotes(BTOKEN, 42 ether, 2 ether);
         executor = new BaselineExecutorExposed(address(relay));
     }
@@ -42,8 +36,7 @@ contract BaselineExecutorTest is TestUtils, Constants {
     function testDecodeData() public view {
         bytes memory data = abi.encodePacked(BTOKEN, RESERVE, BTOKEN);
 
-        (address bToken, address tokenIn, address tokenOut) =
-            executor.decodeData(data);
+        (address bToken, address tokenIn, address tokenOut) = executor.decodeData(data);
 
         assertEq(bToken, BTOKEN);
         assertEq(tokenIn, RESERVE);
@@ -83,14 +76,18 @@ contract BaselineExecutorTest is TestUtils, Constants {
             bool outputToRouter
         ) = executor.getTransferData(data);
 
-        assertEq(
-            uint8(transferType),
-            uint8(TransferManager.TransferType.ProtocolWillDebit)
-        );
+        assertEq(uint8(transferType), uint8(TransferManager.TransferType.ProtocolWillDebit));
         assertEq(receiver, address(relay));
         assertEq(tokenIn, RESERVE);
         assertEq(tokenOut, BTOKEN);
         assertEq(outputToRouter, true);
+    }
+
+    function testGetTransferDataInvalidReserveReverts() public {
+        bytes memory data = abi.encodePacked(BTOKEN, OTHER, BTOKEN);
+
+        vm.expectRevert(BaselineExecutor__InvalidTokenPair.selector);
+        executor.getTransferData(data);
     }
 
     function testBuyExactIn() public {
@@ -128,6 +125,28 @@ contract BaselineExecutorTest is TestUtils, Constants {
         executor.swap(1 ether, data, BOB);
     }
 
+    function testInvalidBuyReserveReverts() public {
+        bytes memory data = abi.encodePacked(BTOKEN, OTHER, BTOKEN);
+
+        vm.expectRevert(BaselineExecutor__InvalidTokenPair.selector);
+        executor.swap(1 ether, data, BOB);
+    }
+
+    function testUnknownBTokenReserveReverts() public {
+        address unknownBToken = address(0x4000000000000000000000000000000000000004);
+        bytes memory data = abi.encodePacked(unknownBToken, address(0), unknownBToken);
+
+        vm.expectRevert(BaselineExecutor__InvalidTokenPair.selector);
+        executor.swap(1 ether, data, BOB);
+    }
+
+    function testInvalidSellReserveReverts() public {
+        bytes memory data = abi.encodePacked(BTOKEN, BTOKEN, OTHER);
+
+        vm.expectRevert(BaselineExecutor__InvalidTokenPair.selector);
+        executor.swap(1 ether, data, BOB);
+    }
+
     function testSameBTokenPairReverts() public {
         bytes memory data = abi.encodePacked(BTOKEN, BTOKEN, BTOKEN);
 
@@ -137,8 +156,7 @@ contract BaselineExecutorTest is TestUtils, Constants {
 }
 
 contract TychoRouterForBaselineTest is TychoRouterTestSetup {
-    address internal constant BTOKEN =
-        0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63;
+    address internal constant BTOKEN = 0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63;
     uint256 internal constant BASELINE_BLOCK = 24_930_105;
     uint256 internal constant BUY_EXACT_IN_AMOUNT = 1e15;
     uint256 internal constant SELL_EXACT_IN_AMOUNT = 1e18;
@@ -156,8 +174,7 @@ contract TychoRouterForBaselineTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         IERC20(WETH_ADDR).approve(tychoRouterAddr, type(uint256).max);
 
-        bytes memory callData =
-            loadCallDataFromFile("test_single_encoding_strategy_baseline_buy");
+        bytes memory callData = loadCallDataFromFile("test_single_encoding_strategy_baseline_buy");
         (bool success,) = tychoRouterAddr.call(callData);
 
         uint256 balanceAfter = IERC20(BTOKEN).balanceOf(ALICE);
@@ -175,8 +192,7 @@ contract TychoRouterForBaselineTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         IERC20(BTOKEN).approve(tychoRouterAddr, type(uint256).max);
 
-        bytes memory callData =
-            loadCallDataFromFile("test_single_encoding_strategy_baseline_sell");
+        bytes memory callData = loadCallDataFromFile("test_single_encoding_strategy_baseline_sell");
         (bool success,) = tychoRouterAddr.call(callData);
 
         uint256 balanceAfter = IERC20(WETH_ADDR).balanceOf(ALICE);
@@ -190,11 +206,18 @@ contract TychoRouterForBaselineTest is TychoRouterTestSetup {
 
 contract MockBaselineRelay {
     mapping(address => uint256) public buyQuoteForBToken;
+    mapping(address => address) public reserveForBToken;
     mapping(address => uint256) public sellQuoteForBToken;
 
-    function setQuotes(address bToken, uint256 buyQuote, uint256 sellQuote)
-        external
-    {
+    function reserve(address bToken) external view returns (address) {
+        return reserveForBToken[bToken];
+    }
+
+    function setReserve(address bToken, address reserve_) external {
+        reserveForBToken[bToken] = reserve_;
+    }
+
+    function setQuotes(address bToken, uint256 buyQuote, uint256 sellQuote) external {
         buyQuoteForBToken[bToken] = buyQuote;
         sellQuoteForBToken[bToken] = sellQuote;
     }
@@ -203,8 +226,7 @@ contract MockBaselineRelay {
         external
         returns (uint256 amountOut, uint256 feesReceived)
     {
-        MockERC20(address(0x2000000000000000000000000000000000000002))
-            .transferFrom(msg.sender, address(this), amountIn);
+        MockERC20(address(0x2000000000000000000000000000000000000002)).transferFrom(msg.sender, address(this), amountIn);
 
         amountOut = buyQuoteForBToken[bToken];
         MockERC20(bToken).mint(msg.sender, amountOut);
@@ -218,8 +240,7 @@ contract MockBaselineRelay {
         MockERC20(bToken).transferFrom(msg.sender, address(this), amountIn);
 
         amountOut = sellQuoteForBToken[bToken];
-        MockERC20(address(0x2000000000000000000000000000000000000002))
-            .mint(msg.sender, amountOut);
+        MockERC20(address(0x2000000000000000000000000000000000000002)).mint(msg.sender, amountOut);
         feesReceived = 0;
     }
 }
@@ -243,10 +264,7 @@ contract MockERC20 {
         return true;
     }
 
-    function transferFrom(address from, address to, uint256 amount)
-        external
-        returns (bool)
-    {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         uint256 currentAllowance = allowance[from][msg.sender];
         if (currentAllowance != type(uint256).max) {
             allowance[from][msg.sender] = currentAllowance - amount;

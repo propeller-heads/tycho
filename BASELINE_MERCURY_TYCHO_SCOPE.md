@@ -215,10 +215,9 @@ Fixture:
 
 Clone mapping:
 
-- `base-baseline -> ethereum-baseline`
-- Added in:
-  - `protocols/testing/src/test_runner.rs`
-  - `protocols/testing/run.Dockerfile`
+- No generic `protocols/testing` clone mapping is currently required. Base is
+  kept as an indexing-only fixture until a Base RPC with `debug_storageRangeAt`
+  support is available for VM hydration/range testing.
 
 Base REPPO bToken:
 
@@ -423,7 +422,6 @@ Done:
 
 - Mainnet fixture passes range test.
 - Base fixture preserved as indexing-only.
-- `base-baseline -> ethereum-baseline` clone mapping is wired in local and Docker protocol testing.
 - Base RPC helper script added.
 
 Remaining indexing questions:
@@ -540,34 +538,24 @@ Passed 1/1
 
 Note: `cargo fmt --check` scoped to `crates/tycho-simulation` currently fails on many pre-existing unrelated formatting diffs; do not run a global formatter unless intentionally cleaning the repo.
 
-Next simulation follow-up:
+Simulation follow-up:
 
-- Add a stronger assertion or separate fork/adapter check that compares Tycho VM
-  amount out to live Baseline `quote*` results at the same block. The current
-  Ethereum fixture stop block is `24930105`.
+- Quote-equivalence is now covered by the Baseline adapter fork test at block
+  `24930105`, comparing adapter outputs against live relay `quoteBuyExactIn` and
+  `quoteSellExactIn` results.
 - Confirm `ComponentUpgraded` route storage changes cause DCI to refresh BSwap,
   BLens, and BStaking implementation accounts after future upgrades.
 
-Next agent task:
+Current execution testing checkpoint:
 
-- Build the quote-equivalence check before starting execution work.
-- Target Ethereum mainnet first, not Base, because the Ethereum fixture currently
-  completes full range indexing plus VM simulation while Base is still blocked by
-  `debug_storageRangeAt` RPC support.
-- Pool/component id is the bToken
-  `0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63`.
-- Reserve is WETH `0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2`.
-- Relay/proxy is `0xc81Fd894C0acE037d133aF4886550aC8133568E8`; all Baseline
-  contract calls go through this relay.
-- Compare reserve -> bToken VM output against:
-  `quoteBuyExactIn(address,uint256)(uint256,uint256,uint256)`.
-- Compare bToken -> reserve VM output against:
-  `quoteSellExactIn(address,uint256)(uint256,uint256,uint256)`.
-- Use block `24930105` for live quote calls so the comparison is against the same
-  fixture state used by the passing range test.
-- Prefer a repo-native `protocol-testing` or `tycho-simulation` assertion over an
-  external script. If that harness cannot expose the simulated amount directly,
-  add the smallest focused test helper and document why.
+- Rust `SwapEncoder` unit coverage exists for reserve -> bToken and bToken ->
+  reserve calldata.
+- Rust protocol integration tests generate full Tycho calldata fixtures for both
+  directions.
+- Solidity executor unit tests cover decode behavior, transfer metadata,
+  canonical reserve validation, and buy/sell dispatch.
+- Solidity TychoRouter fork tests execute both directions at block `24930105`
+  against the Mercury relay.
 - Do not add a static BStaking implementation address. BStaking is a routed
   component behind the relay like BSwap and BLens. The current DCI path discovers
   it through relay `getCurrentRate(address)` and then swap simulation can call
@@ -591,8 +579,11 @@ Likely files:
 Initial execution scope:
 
 - ERC20-only.
-- reserve -> bToken calls `buyTokensExactIn(bToken, amountIn, minOut)`.
-- bToken -> reserve calls `sellTokensExactIn(bToken, amountIn, minOut)`.
+- reserve -> bToken calls `buyTokensExactIn(bToken, amountIn, 0)`.
+- bToken -> reserve calls `sellTokensExactIn(bToken, amountIn, 0)`.
+- The executor validates the encoded reserve against relay `reserve(bToken)`;
+  router-level `minAmountOut` is responsible for aggregate slippage because the
+  Baseline encoder does not carry per-hop min-out values.
 - Native reserve path is out of scope initially.
 
 Before coding executor:
@@ -653,15 +644,14 @@ Execution:
 - Which non-swap Baseline events mutate `State.Pool`, `State.Maker`, or `State.BlockPricing` for a bToken?
 - Should route implementation code be emitted as a normal contract or as stateless VM metadata?
 - Does Tycho need a `balance_owner` attribute for relay-held liquidity?
-- Which exact VM simulation test harness should be used for the mainnet fixture?
-- Which Tycho transfer type best matches Mercury execution when the relay pulls tokens via `transferFrom`?
 - Can Base testing use a better RPC later, or do we need a Base-specific test-only path that avoids `debug_storageRangeAt`?
 
 ## Go / No-Go Criteria
 
 Continue VM integration when:
 
-- Mainnet quote VM simulation matches live `quoteBuyExactIn` and `quoteSellExactIn`.
+- Mainnet quote VM simulation and adapter fork tests continue to match live
+  `quoteBuyExactIn` and `quoteSellExactIn`.
 - Indexed relay storage remains compact and bToken-derivable.
 - Component update marking can cover quote-relevant state changes.
 - Implementation code can be made available to Tycho VM cleanly.
