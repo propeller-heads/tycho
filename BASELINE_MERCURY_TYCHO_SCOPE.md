@@ -4,7 +4,7 @@ Status: working handoff document. Keep at repository root while implementing; re
 
 ## Current State
 
-We are integrating the Baseline DEX / Mercury AMM with Tycho so Tycho users can discover, simulate, and eventually execute Baseline swaps.
+We are integrating the Baseline DEX / Mercury AMM with Tycho so Tycho users can discover, simulate, and execute Baseline swaps.
 
 Current branch:
 
@@ -17,16 +17,27 @@ Recent checkpoint commits:
 - `7fefdf6fc feat: mark baseline controller state updates`
 - `fd9927cc2 Add Baseline VM adapter and substream scaffold`
 - `489ee4215 Discover Baseline staking route via DCI`
+- `9b57d5992 Add Baseline execution support`
+- `3f2e3ec74 Update Baseline scope handoff`
+- `483673881 Validate Baseline execution reserve pairs`
 
-Current committed checkpoint:
+Current checkpoint:
 
 - Baseline VM adapter runtime is generated and registered in `tycho-simulation`.
 - Ethereum mainnet range fixture has `skip_simulation: false` and passes with
   actual VM simulation in both directions.
+- Ethereum mainnet range fixture has `skip_execution: false` and passes Tycho
+  execution in both directions.
 - Substreams emits DCI entrypoints for Baseline quote traces so Tycho dynamically discovers relay delegate implementation bytecode instead of relying on hardcoded implementation addresses.
 - DCI also includes a harmless BStaking view route,
   `getCurrentRate(address)`, so Tycho discovers the BStaking implementation
   needed by swap-time `sync(address)`.
+- Baseline ERC20 execution support is implemented and validated:
+  - Rust encoder registered under protocol key `baseline`.
+  - Solidity executor routes through the singleton relay.
+  - Executor validates token pairs against relay `reserve(bToken)`.
+  - Protocol-testing has Baseline executor runtime bytecode and uses current
+    TychoRouter/FeeCalculator runtime fixtures for execution simulation.
 
 Only known unrelated local file:
 
@@ -203,6 +214,7 @@ cargo run -- range --package ethereum-baseline --chain ethereum --match-test tes
 Observed result:
 
 ```text
+Batch execution complete: 6 successes, 0 failures
 ✅ test_mainnet_pool_creation passed
 Passed 1/1
 ```
@@ -215,9 +227,10 @@ Fixture:
 
 Clone mapping:
 
-- No generic `protocols/testing` clone mapping is currently required. Base is
-  kept as an indexing-only fixture until a Base RPC with `debug_storageRangeAt`
-  support is available for VM hydration/range testing.
+- `protocols/testing/src/test_runner.rs` currently maps `base-baseline` to the
+  `ethereum-baseline` package so the Base fixture can reuse the same package.
+- Base is kept as an indexing-only fixture until a Base RPC with
+  `debug_storageRangeAt` support is available for VM hydration/range testing.
 
 Base REPPO bToken:
 
@@ -556,6 +569,10 @@ Current execution testing checkpoint:
   canonical reserve validation, and buy/sell dispatch.
 - Solidity TychoRouter fork tests execute both directions at block `24930105`
   against the Mercury relay.
+- Protocol-testing execution is enabled for Ethereum mainnet and passes six
+  generated executions at block `24930105`:
+  - three bToken -> WETH sell simulations
+  - three WETH -> bToken buy simulations
 - Do not add a static BStaking implementation address. BStaking is a routed
   component behind the relay like BSwap and BLens. The current DCI path discovers
   it through relay `getCurrentRate(address)` and then swap simulation can call
@@ -576,7 +593,7 @@ Likely files:
 - `crates/tycho-execution/config/test_executor_addresses.json`
 - Possibly `crates/tycho-execution/config/protocol_specific_addresses.json`
 
-Initial execution scope:
+Implemented execution scope:
 
 - ERC20-only.
 - reserve -> bToken calls `buyTokensExactIn(bToken, amountIn, 0)`.
@@ -585,16 +602,20 @@ Initial execution scope:
   router-level `minAmountOut` is responsible for aggregate slippage because the
   Baseline encoder does not carry per-hop min-out values.
 - Native reserve path is out of scope initially.
+- `test_executor_addresses.json` includes the Baseline test executor address used
+  for generated calldata fixtures. `executor_addresses.json` should be updated
+  only after a real Baseline executor is deployed and whitelisted on the
+  production TychoRouter.
 
-Before coding executor:
+Confirmed executor fund flow:
 
-- Confirm Mercury's spender/funds location under Tycho execution:
-  - whether the relay pulls from `msg.sender`, executor, dispatcher/router, or another address
-  - which address must hold input tokens
-  - which address must approve the relay
-  - which Tycho `TransferType`, `getTransferData`, and `fundsExpectedAddress` behavior matches that flow
-
-Execution is broader than quote simulation and may require additional token/bToken/reserve storage.
+- The router delegatecalls the Baseline executor, so the Baseline relay sees the
+  TychoRouter as `msg.sender`.
+- `getTransferData` uses `TransferType.ProtocolWillDebit`, receiver relay, and
+  `outputToRouter = true`.
+- `fundsExpectedAddress` returns `msg.sender`, matching the router-held input
+  funds flow.
+- The executor does not perform ERC20 transfers or approvals itself.
 
 ## Test Plan
 
@@ -618,6 +639,8 @@ Execution:
 - Rust encoder test verifies encoded bToken, direction, token in/out, limits.
 - Solidity executor test verifies correct Mercury method is called for each direction.
 - Fork test verifies encoded calldata executes against Ethereum mainnet first.
+- Protocol-testing range execution verifies generated Tycho execution calldata
+  against the Ethereum mainnet fixture.
 - Add Base fork execution once a compatible Base RPC is available or another test harness avoids `debug_storageRangeAt`.
 
 ## Risks

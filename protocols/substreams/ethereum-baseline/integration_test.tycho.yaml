@@ -25,4 +25,4 @@ tests:
           manual_updates: "0x01"
         creation_tx: "0xe21a7f343e28c0dba205757179c92b7e99d38dc4874e4b59c7f4af5792b53a29"
         skip_simulation: false
-        skip_execution: true # Execution tests will be enabled after VM simulation is validated.
+        skip_execution: false
