@@ -38,8 +38,43 @@ use substreams::{
 use substreams_ethereum::pb::eth;
 use substreams_ethereum::Event;
 use tycho_substreams::{
-    balances::aggregate_balances_changes, contract::extract_contract_changes_builder, prelude::*,
+    balances::aggregate_balances_changes,
+    block_storage::get_block_storage_changes,
+    contract::extract_contract_changes_builder,
+    entrypoint::create_entrypoint,
+    prelude::{entry_point_params::TraceData, *},
 };
+
+const DCI_QUOTE_ENTRYPOINTS: [(&str, [u8; 4]); 4] = [
+    ("quoteBuyExactIn(address,uint256)", [0x28, 0x7c, 0x89, 0xa7]),
+    ("quoteBuyExactOut(address,uint256)", [0xf3, 0xa8, 0xd7, 0xf2]),
+    ("quoteSellExactIn(address,uint256)", [0x0a, 0x64, 0x92, 0x74]),
+    ("quoteSellExactOut(address,uint256)", [0xfe, 0x28, 0x97, 0x7c]),
+];
+const DCI_LENS_ENTRYPOINTS: [(&str, [u8; 4]); 3] = [
+    ("reserve(address)", [0xe7, 0x51, 0x79, 0xa4]),
+    ("totalBTokens(address)", [0x94, 0x69, 0x51, 0x2b]),
+    ("totalReserves(address)", [0x6d, 0x08, 0x00, 0xbc]),
+];
+const DCI_SAMPLE_AMOUNT_IN: u128 = 1_000_000_000_000_000;
+
+fn dci_quote_calldata(selector: [u8; 4], b_token: &[u8]) -> Vec<u8> {
+    let mut calldata = Vec::with_capacity(68);
+    calldata.extend_from_slice(&selector);
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(b_token);
+    calldata.extend_from_slice(&[0u8; 16]);
+    calldata.extend_from_slice(&DCI_SAMPLE_AMOUNT_IN.to_be_bytes());
+    calldata
+}
+
+fn dci_btoken_calldata(selector: [u8; 4], b_token: &[u8]) -> Vec<u8> {
+    let mut calldata = Vec::with_capacity(36);
+    calldata.extend_from_slice(&selector);
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(b_token);
+    calldata
+}
 
 fn maybe_quote_state_update_component_id(log: &eth::v2::Log) -> Option<String> {
     CreatorFeePctSet::match_and_decode(log)
@@ -241,14 +276,47 @@ fn map_protocol_changes(
                 .iter()
                 .for_each(|component| {
                     builder.add_protocol_component(component);
-                    // TODO: In case you require to add any dynamic attributes to the
-                    //  component you can do so here:
-                    /*
-                        builder.add_entity_change(&EntityChanges {
-                            component_id: component.id.clone(),
-                            attributes: default_attributes.clone(),
+                    builder.add_entity_change(&EntityChanges {
+                        component_id: component.id.clone(),
+                        attributes: vec![Attribute {
+                            name: "balance_owner".to_string(),
+                            value: config.relay_address.clone(),
+                            change: ChangeType::Creation.into(),
+                        }],
+                    });
+                    let Some(b_token) = component.tokens.first() else {
+                        return;
+                    };
+                    DCI_QUOTE_ENTRYPOINTS
+                        .iter()
+                        .for_each(|(signature, selector)| {
+                            let (entrypoint, entrypoint_params) = create_entrypoint(
+                                config.relay_address.clone(),
+                                signature.to_string(),
+                                component.id.clone(),
+                                TraceData::Rpc(RpcTraceData {
+                                    caller: None,
+                                    calldata: dci_quote_calldata(*selector, b_token),
+                                }),
+                            );
+                            builder.add_entrypoint(&entrypoint);
+                            builder.add_entrypoint_params(&entrypoint_params);
                         });
-                    */
+                    DCI_LENS_ENTRYPOINTS
+                        .iter()
+                        .for_each(|(signature, selector)| {
+                            let (entrypoint, entrypoint_params) = create_entrypoint(
+                                config.relay_address.clone(),
+                                signature.to_string(),
+                                component.id.clone(),
+                                TraceData::Rpc(RpcTraceData {
+                                    caller: None,
+                                    calldata: dci_btoken_calldata(*selector, b_token),
+                                }),
+                            );
+                            builder.add_entrypoint(&entrypoint);
+                            builder.add_entrypoint_params(&entrypoint_params);
+                        });
                 });
         });
 
@@ -314,6 +382,8 @@ fn map_protocol_changes(
         &mut transaction_changes,
     );
 
+    let block_storage_changes = get_block_storage_changes(&block);
+
     // Process all `transaction_changes` for final output in the `BlockChanges`,
     //  sorted by transaction index (the key).
     Ok(BlockChanges {
@@ -323,5 +393,6 @@ fn map_protocol_changes(
             .sorted_unstable_by_key(|(index, _)| *index)
             .filter_map(|(_, builder)| builder.build())
             .collect::<Vec<_>>(),
+        storage_changes: block_storage_changes,
     })
 }
