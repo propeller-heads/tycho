@@ -582,9 +582,16 @@ Current execution testing checkpoint:
   `getTransferData()` resolved both Rust-generated buy/sell executor calldata
   against live fork state, and deployed runtime bytecode matched
   `protocols/testing/fixtures/BaselineExecutor.runtime.json`.
-  This was a manual `forge create` smoke, not the Hardhat CREATE2
-  `scripts/deploy-executors.js` path; before real deployment, add Baseline to
-  that script and verify the computed CREATE2 address.
+- The Hardhat CREATE2 deployment script includes `BaselineExecutor` for
+  Ethereum mainnet with the relay constructor arg above. With factory
+  `0x4e59b44847b379578588920cA78FbF26c0B4956C` and salt
+  `BaselineExecutor-ethereum`, the computed executor address is
+  `0xB3F3943F595074c2F271a8C680F4C18E116C9EEF`.
+  This address is not yet in production `executor_addresses.json`; add it only
+  after real deployment and TychoRouter whitelisting.
+  For the real deploy, run the script with only the Baseline entry enabled, or
+  first add an explicit skip-if-code-exists path; the unmodified Ethereum list
+  will attempt already deployed executors before reaching Baseline.
 - Do not add a static BStaking implementation address. BStaking is a routed
   component behind the relay like BSwap and BLens. The current DCI path discovers
   it through relay `getCurrentRate(address)` and then swap simulation can call

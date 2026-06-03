@@ -79,6 +79,11 @@ const executors_to_deploy = {
                 "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
             ]
         },
+        // Args: Baseline relay/proxy
+        {
+            exchange: "BaselineExecutor",
+            args: ["0xc81Fd894C0acE037d133aF4886550aC8133568E8"]
+        },
     ],
     "base": [
         // USV2 - Args: Fee BPS
