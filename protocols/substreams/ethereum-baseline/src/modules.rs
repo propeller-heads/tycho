@@ -103,7 +103,6 @@ fn map_protocol_components(
                 let components = tx
                     .logs_with_calls()
                     .filter_map(|(log, call)| {
-                        // TODO: ensure this method is implemented correctly
                         pool_factories::maybe_create_component(call.call, log, tx, &config)
                     })
                     .collect::<Vec<_>>();
@@ -351,8 +350,8 @@ fn map_protocol_changes(
                     token_bc_map.values().for_each(|bc| {
                         // track component balance
                         builder.add_balance_change(bc);
-                        // Mark this component as updates since we are using manual update tracking
-                        // TODO: ensure this covers all cases a component should be marked as
+                        // Mark balance-changing components because Baseline uses manual update
+                        // tracking instead of component-address balance checks.
                         let component_id =
                             String::from_utf8(bc.component_id.clone()).expect("bad component id");
                         builder.mark_component_as_updated(&component_id);
@@ -367,33 +366,28 @@ fn map_protocol_changes(
     // Some controller operations update quote-relevant pool fields without
     // producing swap balance deltas. Mark those components updated so Tycho
     // refreshes simulation state when the relay storage changes.
-    block
-        .transactions()
-        .for_each(|tx| {
-            tx.logs_with_calls()
-                .filter_map(|(log, _call)| {
-                    if log.address != config.relay_address {
-                        return None;
-                    }
-                    maybe_quote_state_update_component_id(log)
-                })
-                .for_each(|component_id| {
-                    let tx: Transaction = tx.into();
-                    let builder = transaction_changes
-                        .entry(tx.index)
-                        .or_insert_with(|| TransactionChangesBuilder::new(&tx));
-                    builder.mark_component_as_updated(&component_id);
-                });
-        });
+    block.transactions().for_each(|tx| {
+        tx.logs_with_calls()
+            .filter_map(|(log, _call)| {
+                if log.address != config.relay_address {
+                    return None;
+                }
+                maybe_quote_state_update_component_id(log)
+            })
+            .for_each(|component_id| {
+                let tx: Transaction = tx.into();
+                let builder = transaction_changes
+                    .entry(tx.index)
+                    .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+                builder.mark_component_as_updated(&component_id);
+            });
+    });
 
     // Extract and insert any storage changes that happened for any of the components.
     extract_contract_changes_builder(
         &block,
         |addr| {
-            // we assume that the store holds contract addresses as keys and if it
-            // contains a value, that contract is of relevance.
-            // TODO: if you have any additional static contracts that need to be indexed,
-            //  please add them here.
+            // Baseline quote state lives behind the singleton relay/proxy.
             addr == config.relay_address
         },
         &mut transaction_changes,
