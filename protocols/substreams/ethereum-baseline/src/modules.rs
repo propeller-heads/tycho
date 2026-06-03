@@ -56,6 +56,8 @@ const DCI_LENS_ENTRYPOINTS: [(&str, [u8; 4]); 3] = [
     ("totalBTokens(address)", [0x94, 0x69, 0x51, 0x2b]),
     ("totalReserves(address)", [0x6d, 0x08, 0x00, 0xbc]),
 ];
+const DCI_STAKING_ENTRYPOINTS: [(&str, [u8; 4]); 1] =
+    [("getCurrentRate(address)", [0xdc, 0xe7, 0x7d, 0x84])];
 const DCI_SAMPLE_AMOUNT_IN: u128 = 1_000_000_000_000_000;
 
 fn dci_quote_calldata(selector: [u8; 4], b_token: &[u8]) -> Vec<u8> {
@@ -303,6 +305,21 @@ fn map_protocol_changes(
                             builder.add_entrypoint_params(&entrypoint_params);
                         });
                     DCI_LENS_ENTRYPOINTS
+                        .iter()
+                        .for_each(|(signature, selector)| {
+                            let (entrypoint, entrypoint_params) = create_entrypoint(
+                                config.relay_address.clone(),
+                                signature.to_string(),
+                                component.id.clone(),
+                                TraceData::Rpc(RpcTraceData {
+                                    caller: None,
+                                    calldata: dci_btoken_calldata(*selector, b_token),
+                                }),
+                            );
+                            builder.add_entrypoint(&entrypoint);
+                            builder.add_entrypoint_params(&entrypoint_params);
+                        });
+                    DCI_STAKING_ENTRYPOINTS
                         .iter()
                         .for_each(|(signature, selector)| {
                             let (entrypoint, entrypoint_params) = create_entrypoint(

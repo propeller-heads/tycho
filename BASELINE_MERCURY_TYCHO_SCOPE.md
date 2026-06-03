@@ -428,9 +428,8 @@ Remaining indexing questions:
 
 ### Milestone B: VM Simulation
 
-Status: uncommitted local work; Ethereum mainnet range indexing passes, but VM
-snapshot decoding is still blocked by missing routed BStaking state during swap
-simulation.
+Status: uncommitted local work after `fd9927cc2`; Ethereum mainnet range
+indexing and VM simulation now pass for both directions.
 
 Changed files in current uncommitted checkpoint:
 
@@ -439,8 +438,10 @@ Changed files in current uncommitted checkpoint:
 - `crates/tycho-simulation/src/evm/protocol/vm/constants.rs`
 - `crates/tycho-simulation/src/evm/protocol/vm/assets/BaselineSwapAdapter.evm.runtime`
 - `protocols/substreams/ethereum-baseline/src/modules.rs`
+- `protocols/substreams/ethereum-baseline/src/pool_factories.rs`
 - `protocols/substreams/ethereum-baseline/Cargo.toml`
 - `protocols/substreams/Cargo.lock`
+- `protocols/substreams/ethereum-baseline/substreams.yaml`
 - `protocols/substreams/ethereum-baseline/integration_test.tycho.yaml`
 - `protocols/runtest.sh`
 
@@ -479,30 +480,35 @@ DCI behavior:
     - `reserve(address)`
     - `totalBTokens(address)`
     - `totalReserves(address)`
+    - `getCurrentRate(address)`
     - `quoteBuyExactIn(address,uint256)`
     - `quoteBuyExactOut(address,uint256)`
     - `quoteSellExactIn(address,uint256)`
     - `quoteSellExactOut(address,uint256)`
   - calldata: selector, the pool bToken, and sample amount `1e15`
 - DCI traces through the relay and discovers the current BSwap and BLens
-  implementation code dynamically.
+  implementation code dynamically. `getCurrentRate(address)` is included as a
+  harmless BStaking view route so DCI also discovers the current BStaking
+  implementation needed by swap-time `sync(address)`.
+- BSwap swap simulation calls relay `sync(address)` (`0xa5841194`), which routes
+  to BStaking. The callable BStaking address is still the relay; the
+  implementation account is discovered through DCI, like BSwap and BLens.
 - `map_protocol_changes` also includes `get_block_storage_changes(&block)` so DCI can track storage changes and retrigger traces when relevant route/storage slots change.
 - To support this, `ethereum-baseline` now depends on `tycho-substreams = "0.8.0"` instead of the older git revision.
 - Execution entrypoints are intentionally not used as DCI trace params because sample swap execution calls need token funding/approval state and revert without it. The quote paths cover the BSwap delegate target and quote storage surface without requiring funded sample calls.
-- Current VM blocker: during adapter swap simulation, BSwap calls relay
+- Earlier VM blocker: during adapter swap simulation, BSwap calls relay
   `sync(address)` (`0xa5841194`), which routes to BStaking at
-  `0x1117C9C13D152e2C84504533066676163B3B7470`. That account is not included in
-  Tycho VM snapshots, so debug simulation currently reports
-  `MissingAccount(0x1117...)` and decodes zero snapshots. Adding `sync(address)`
-  as a DCI entrypoint did not help because the direct trace reverts and did not
-  add BStaking to the contract set.
+  `0x1117C9C13D152e2C84504533066676163B3B7470`. Adding `sync(address)` as a DCI
+  entrypoint did not help because the direct trace reverts and did not add
+  BStaking to the contract set. The working fix is to add non-mutating
+  `getCurrentRate(address)` as a BStaking DCI entrypoint.
 
 Validation already run:
 
 - `forge test --match-contract BaselineSwapAdapter --root protocols/adapter-integration/evm -vv` passes.
 - `cargo build -p tycho-simulation` from repo root passes.
 - `cargo build --release --target wasm32-unknown-unknown` from `protocols/substreams/ethereum-baseline` passes.
-- Mainnet range indexing test exits successfully:
+- Mainnet range indexing + VM simulation test exits successfully:
 
 ```bash
 cd /Users/indigo/projects/baseline/tycho-indexer/protocols
@@ -518,12 +524,21 @@ Observed DCI confirmation in the passing test:
 NewContract block_number=24929812 contract_address=Bytes(0xafaa95adb26fcd9094b46055a485f1fd6127c058)
 ```
 
+Successful VM simulation run also logs:
+
+```text
+Spot price "B/WETH": 0.001377338867291873
+Simulated amount out for trading 0.1%, 1.0%, and 10.0% of max in both B -> WETH and WETH -> B directions
+Passed 1/1
+```
+
 Note: `cargo fmt --check` scoped to `crates/tycho-simulation` currently fails on many pre-existing unrelated formatting diffs; do not run a global formatter unless intentionally cleaning the repo.
 
 Next simulation follow-up:
 
 - Add a stronger assertion or separate fork/adapter check that compares Tycho VM amount out to live Baseline `quote*` results at block `24929814`.
-- Decide whether to keep broad limits or derive safer pool-specific limits.
+- Confirm `ComponentUpgraded` route storage changes cause DCI to refresh BSwap,
+  BLens, and BStaking implementation accounts after future upgrades.
 
 ### Milestone C: Execution
 
