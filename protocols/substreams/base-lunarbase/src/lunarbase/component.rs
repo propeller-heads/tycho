@@ -14,6 +14,7 @@ pub fn protocol_component(
 ) -> tycho::ProtocolComponent {
     tycho::ProtocolComponent::new(&component_id(pool))
         .with_tokens(&[token_x, token_y])
+        .with_contracts(&[pool])
         .as_swap_type(PROTOCOL_TYPE_NAME, tycho::ImplementationType::Custom)
 }
 
