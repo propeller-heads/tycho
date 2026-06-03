@@ -1,3 +1,11 @@
+## [0.304.1](https://github.com/propeller-heads/tycho/compare/0.304.0...0.304.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* add block-not-found retry in integration-test ([ef01f0d](https://github.com/propeller-heads/tycho/commit/ef01f0db5720237709afec24eb4d4bbbca5da20e))
+* add block-not-found retry in integration-test ([#1063](https://github.com/propeller-heads/tycho/issues/1063)) ([f610783](https://github.com/propeller-heads/tycho/commit/f61078388353e3535c666cdcf3d5a8e34390a29a))
+
 ## [0.304.0](https://github.com/propeller-heads/tycho/compare/0.303.2...0.304.0) (2026-06-03)
 
 
