@@ -563,6 +563,9 @@ Current execution testing checkpoint:
 
 - Rust `SwapEncoder` unit coverage exists for reserve -> bToken and bToken ->
   reserve calldata.
+- Rust encoder tests also write raw Baseline executor calldata fixtures for both
+  directions, and Solidity executor tests load those bytes with
+  `loadCallDataFromFile()`.
 - Rust protocol integration tests generate full Tycho calldata fixtures for both
   directions.
 - Solidity executor unit tests cover decode behavior, transfer metadata,
@@ -623,7 +626,11 @@ Substreams/indexing:
 
 - Mainnet `test_mainnet_pool_creation` passes.
 - Base `test_reppo_pool_creation` remains indexing-only until Base RPC hydration works.
-- Add tests or fixture checks for quote-relevant non-swap state changes once identified.
+- Quote-relevant non-swap state changes have been audited against Mercury source:
+  controller `DeployerSet`, `CreatorFeePctSet`, and `LiquidityFeePctSet` are
+  component-marked; swap-driven pool/maker/block-pricing changes are covered by
+  `Swap`/balance updates. Fee claim, staking yield, creator/recipient, reserve
+  approval, and pause fields are not quote inputs for `quoteSwap`.
 
 Simulation:
 
@@ -637,6 +644,8 @@ Simulation:
 Execution:
 
 - Rust encoder test verifies encoded bToken, direction, token in/out, limits.
+- Direct Rust `SwapEncoder` -> Solidity `BaselineExecutor` tests load the
+  encoder-produced bytes and assert transfer metadata plus buy/sell execution.
 - Solidity executor test verifies correct Mercury method is called for each direction.
 - Fork test verifies encoded calldata executes against Ethereum mainnet first.
 - Protocol-testing range execution verifies generated Tycho execution calldata
@@ -648,7 +657,9 @@ Execution:
 - Base full VM/range testing is blocked on `debug_storageRangeAt` support.
 - Route/component upgrades can change implementation addresses and code.
 - `BlockPricing` state depends on block number and in-block flow accumulators; quote tests must use block-compatible fixtures.
-- Quote-relevant state may change without swap balance deltas; component update marking must be audited.
+- Protocol-testing currently logs execution failures via an internal
+  `failure_count` but returns success from the execution verification helper; do
+  not rely only on process exit until that global runner behavior is fixed.
 - Execution surface is larger than quote surface.
 - ERC20 balances and allowances may require token-specific slot detection for execution tests.
 - Baseline’s singleton relay architecture requires custom storage tracking; factory template assumptions are not enough.
@@ -664,7 +675,6 @@ Execution:
 
 ## Open Questions
 
-- Which non-swap Baseline events mutate `State.Pool`, `State.Maker`, or `State.BlockPricing` for a bToken?
 - Should route implementation code be emitted as a normal contract or as stateless VM metadata?
 - Does Tycho need a `balance_owner` attribute for relay-held liquidity?
 - Can Base testing use a better RPC later, or do we need a Base-specific test-only path that avoids `debug_storageRangeAt`?

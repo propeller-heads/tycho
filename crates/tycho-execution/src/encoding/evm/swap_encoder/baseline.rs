@@ -59,7 +59,10 @@ mod tests {
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::models::{default_token, Swap};
+    use crate::encoding::{
+        evm::utils::write_calldata_to_file,
+        models::{default_token, Swap},
+    };
 
     const BTOKEN: &str = "0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63";
     const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
@@ -117,6 +120,7 @@ mod tests {
             ))
             .to_lowercase()
         );
+        write_calldata_to_file("test_encode_baseline_executor_buy", &hex_swap);
     }
 
     #[test]
@@ -147,5 +151,6 @@ mod tests {
             ))
             .to_lowercase()
         );
+        write_calldata_to_file("test_encode_baseline_executor_sell", &hex_swap);
     }
 }
