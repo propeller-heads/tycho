@@ -34,6 +34,7 @@ WORKDIR /build/tycho-protocol-sdk/protocols/substreams
 RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            base-baseline) echo "ethereum-baseline" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -72,6 +73,7 @@ COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams 
 RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            base-baseline) echo "ethereum-baseline" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \

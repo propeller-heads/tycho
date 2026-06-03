@@ -7,22 +7,25 @@ adapter_contract: "BaselineSwapAdapter"
 adapter_build_signature: "constructor(address)"
 adapter_build_args: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
 skip_balance_check: true # Baseline is singleton-style; component liquidity is indexed from relay events, not component-address balances.
-initialized_accounts:
-  - "0xc81Fd894C0acE037d133aF4886550aC8133568E8" # Relay/proxy used by Baseline swaps.
+# TODO VERY IMPORTANT
+# Keep empty while this fixture is indexing-only. The current Base RPC returns
+# null for historical debug_storageRangeAt on the relay, so account hydration will
+# be re-enabled once VM simulation is tested with a compatible archive/debug RPC.
+initialized_accounts: []
 
 tests:
-  - name: test_mainnet_pool_creation
-    start_block: 24929812
-    stop_block: 24929814
+  - name: test_reppo_pool_creation
+    start_block: 46596026
+    stop_block: 46596028
     expected_components:
-      - id: "0x9fdbde76236998dc2836fe67a9954ede456a1d63"
+      - id: "0xff8104251e7761163fac3211ef5583fb3f8583d6"
         tokens:
-          - "0x9fdbde76236998dc2836fe67a9954ede456a1d63"
-          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          - "0xff8104251e7761163fac3211ef5583fb3f8583d6"
+          - "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b"
         static_attributes:
           relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
-          reserve: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          reserve: "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b"
           manual_updates: "0x01"
-        creation_tx: "0xe21a7f343e28c0dba205757179c92b7e99d38dc4874e4b59c7f4af5792b53a29"
+        creation_tx: "0x7c2b4d0dc9bce17b44e60618e6423cb2c081cf60b6f8e4cf93e23aa61f15e0e2"
         skip_simulation: true # VM storage-surface tracing is still pending for Baseline quote simulation.
         skip_execution: true # Execution tests will be enabled after VM simulation is validated.
