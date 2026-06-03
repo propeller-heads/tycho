@@ -19,7 +19,11 @@
 //! provided code with care and ensure you fully understand each step before proceeding
 //! with your implementation
 use crate::{
-    abi::{b_factory::events::PoolCreated, b_swap::events::Swap},
+    abi::{
+        b_controller::events::{CreatorFeePctSet, DeployerSet, LiquidityFeePctSet},
+        b_factory::events::PoolCreated,
+        b_swap::events::Swap,
+    },
     pool_factories,
     pool_factories::DeploymentConfig,
 };
@@ -36,6 +40,14 @@ use substreams_ethereum::Event;
 use tycho_substreams::{
     balances::aggregate_balances_changes, contract::extract_contract_changes_builder, prelude::*,
 };
+
+fn maybe_quote_state_update_component_id(log: &eth::v2::Log) -> Option<String> {
+    CreatorFeePctSet::match_and_decode(log)
+        .map(|event| event.b_token)
+        .or_else(|| LiquidityFeePctSet::match_and_decode(log).map(|event| event.b_token))
+        .or_else(|| DeployerSet::match_and_decode(log).map(|event| event.b_token))
+        .map(|b_token| format!("0x{}", hex::encode(b_token)))
+}
 
 /// Find and create all relevant protocol components
 ///
@@ -265,6 +277,28 @@ fn map_protocol_changes(
                     })
                 });
             builder.add_contract_changes(&contract_changes);
+        });
+
+    // Some controller operations update quote-relevant pool fields without
+    // producing swap balance deltas. Mark those components updated so Tycho
+    // refreshes simulation state when the relay storage changes.
+    block
+        .transactions()
+        .for_each(|tx| {
+            tx.logs_with_calls()
+                .filter_map(|(log, _call)| {
+                    if log.address != config.relay_address {
+                        return None;
+                    }
+                    maybe_quote_state_update_component_id(log)
+                })
+                .for_each(|component_id| {
+                    let tx: Transaction = tx.into();
+                    let builder = transaction_changes
+                        .entry(tx.index)
+                        .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+                    builder.mark_component_as_updated(&component_id);
+                });
         });
 
     // Extract and insert any storage changes that happened for any of the components.
