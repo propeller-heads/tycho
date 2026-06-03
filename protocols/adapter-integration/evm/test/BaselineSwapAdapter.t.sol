@@ -26,6 +26,7 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
         relay = new MockBaselineRelay();
         relay.setPool(BTOKEN, RESERVE);
         relay.setQuotes(BTOKEN, 42 ether, 2 ether, 5 ether, 3 ether);
+        relay.setTotals(BTOKEN, 100 ether, 200 ether);
 
         adapter = new BaselineSwapAdapter(address(relay));
     }
@@ -39,7 +40,7 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
 
         assertEq(trade.calculatedAmount, 42 ether);
         assertEq(trade.price.numerator, 0);
-        assertEq(trade.price.denominator, 0);
+        assertEq(trade.price.denominator, 1);
         assertEq(MockERC20(RESERVE).balanceOf(address(this)), 0);
         assertEq(MockERC20(RESERVE).balanceOf(address(relay)), 100 ether);
         assertEq(MockERC20(BTOKEN).balanceOf(address(this)), 42 ether);
@@ -67,7 +68,7 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
         assertEq(trade.calculatedAmount, 0);
         assertEq(trade.gasUsed, 0);
         assertEq(trade.price.numerator, 0);
-        assertEq(trade.price.denominator, 0);
+        assertEq(trade.price.denominator, 1);
     }
 
     function testSwapBuysBTokenWithReserveExactOut() public {
@@ -111,21 +112,35 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
         adapter.swap(POOL_ID, OTHER, BTOKEN, OrderSide.Sell, 1 ether);
     }
 
-    function testGetCapabilities() public view {
+    function testGetCapabilities() public {
         Capability[] memory capabilities =
             adapter.getCapabilities(POOL_ID, RESERVE, BTOKEN);
 
         assertEq(capabilities.length, 2);
         assertEq(uint256(capabilities[0]), uint256(Capability.SellOrder));
         assertEq(uint256(capabilities[1]), uint256(Capability.BuyOrder));
+
+        vm.expectRevert();
+        adapter.getCapabilities(POOL_ID, OTHER, BTOKEN);
     }
 
-    function testGetLimits() public view {
+    function testGetLimits() public {
         uint256[] memory limits = adapter.getLimits(POOL_ID, RESERVE, BTOKEN);
 
         assertEq(limits.length, 2);
-        assertEq(limits[0], type(uint256).max);
-        assertEq(limits[1], type(uint256).max);
+        assertEq(limits[0], 10 ether);
+        assertEq(limits[1], 20 ether);
+
+        vm.expectRevert();
+        adapter.getLimits(POOL_ID, OTHER, BTOKEN);
+    }
+
+    function testGetLimitsForSellDirection() public view {
+        uint256[] memory limits = adapter.getLimits(POOL_ID, BTOKEN, RESERVE);
+
+        assertEq(limits.length, 2);
+        assertEq(limits[0], 20 ether);
+        assertEq(limits[1], 10 ether);
     }
 
     function testUnimplementedHelpersRevert() public {
@@ -142,15 +157,93 @@ contract BaselineSwapAdapterTest is Test, ISwapAdapterTypes {
     }
 }
 
+contract BaselineSwapAdapterMainnetForkTest is Test, ISwapAdapterTypes {
+    address internal constant RELAY =
+        address(0xc81Fd894C0acE037d133aF4886550aC8133568E8);
+    address internal constant MAINNET_BTOKEN =
+        address(0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63);
+    address internal constant WETH =
+        address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+
+    uint256 internal constant FORK_BLOCK = 24_930_104;
+    uint256 internal constant AMOUNT = 1e15;
+
+    BaselineSwapAdapter internal adapter;
+    bytes32 internal constant POOL_ID = bytes32(bytes20(MAINNET_BTOKEN));
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("mainnet"), FORK_BLOCK);
+        adapter = new BaselineSwapAdapter(RELAY);
+    }
+
+    function testBuyExactInMatchesMainnetQuote() public {
+        (uint256 expectedAmountOut,,) =
+            IBaselineRelayQuotes(RELAY).quoteBuyExactIn(MAINNET_BTOKEN, AMOUNT);
+
+        deal(WETH, address(this), AMOUNT);
+        IERC20(WETH).approve(address(adapter), AMOUNT);
+
+        Trade memory trade =
+            adapter.swap(POOL_ID, WETH, MAINNET_BTOKEN, OrderSide.Sell, AMOUNT);
+
+        assertEq(trade.calculatedAmount, expectedAmountOut);
+        assertGt(trade.gasUsed, 0);
+    }
+
+    function testSellExactInMatchesMainnetQuote() public {
+        (uint256 expectedAmountOut,,) =
+            IBaselineRelayQuotes(RELAY).quoteSellExactIn(MAINNET_BTOKEN, AMOUNT);
+
+        deal(MAINNET_BTOKEN, address(this), AMOUNT);
+        IERC20(MAINNET_BTOKEN).approve(address(adapter), AMOUNT);
+
+        Trade memory trade =
+            adapter.swap(POOL_ID, MAINNET_BTOKEN, WETH, OrderSide.Sell, AMOUNT);
+
+        assertEq(trade.calculatedAmount, expectedAmountOut);
+        assertGt(trade.gasUsed, 0);
+    }
+
+    function testBuyExactOutMatchesMainnetQuote() public {
+        (uint256 expectedAmountIn,,) =
+            IBaselineRelayQuotes(RELAY).quoteBuyExactOut(MAINNET_BTOKEN, AMOUNT);
+
+        deal(WETH, address(this), expectedAmountIn);
+        IERC20(WETH).approve(address(adapter), expectedAmountIn);
+
+        Trade memory trade =
+            adapter.swap(POOL_ID, WETH, MAINNET_BTOKEN, OrderSide.Buy, AMOUNT);
+
+        assertEq(trade.calculatedAmount, expectedAmountIn);
+        assertGt(trade.gasUsed, 0);
+    }
+
+    function testSellExactOutMatchesMainnetQuote() public {
+        (uint256 expectedAmountIn,,) =
+            IBaselineRelayQuotes(RELAY).quoteSellExactOut(MAINNET_BTOKEN, AMOUNT);
+
+        deal(MAINNET_BTOKEN, address(this), expectedAmountIn);
+        IERC20(MAINNET_BTOKEN).approve(address(adapter), expectedAmountIn);
+
+        Trade memory trade =
+            adapter.swap(POOL_ID, MAINNET_BTOKEN, WETH, OrderSide.Buy, AMOUNT);
+
+        assertEq(trade.calculatedAmount, expectedAmountIn);
+        assertGt(trade.gasUsed, 0);
+    }
+}
+
 contract MockBaselineRelay {
     mapping(address => address) public reserveForBToken;
     mapping(address => uint256) public buyQuoteForBToken;
     mapping(address => uint256) public sellQuoteForBToken;
     mapping(address => uint256) public buyExactOutQuoteForBToken;
     mapping(address => uint256) public sellExactOutQuoteForBToken;
+    mapping(address => uint256) public totalReservesForBToken;
+    mapping(address => uint256) public totalBTokensForBToken;
 
-    function setPool(address bToken, address reserve) external {
-        reserveForBToken[bToken] = reserve;
+    function setPool(address bToken, address reserveToken) external {
+        reserveForBToken[bToken] = reserveToken;
     }
 
     function setQuotes(
@@ -166,12 +259,21 @@ contract MockBaselineRelay {
         sellExactOutQuoteForBToken[bToken] = sellExactOutQuote;
     }
 
+    function setTotals(
+        address bToken,
+        uint256 reserveTotal,
+        uint256 bTokenTotal
+    ) external {
+        totalReservesForBToken[bToken] = reserveTotal;
+        totalBTokensForBToken[bToken] = bTokenTotal;
+    }
+
     function buyTokensExactIn(address bToken, uint256 amountIn, uint256)
         external
         returns (uint256 amountOut, uint256 feesReceived)
     {
-        address reserve = reserveForBToken[bToken];
-        MockERC20(reserve).transferFrom(msg.sender, address(this), amountIn);
+        address reserveToken = reserveForBToken[bToken];
+        MockERC20(reserveToken).transferFrom(msg.sender, address(this), amountIn);
 
         amountOut = buyQuoteForBToken[bToken];
         MockERC20(bToken).mint(msg.sender, amountOut);
@@ -182,9 +284,9 @@ contract MockBaselineRelay {
         external
         returns (uint256 amountIn, uint256 feesReceived)
     {
-        address reserve = reserveForBToken[bToken];
+        address reserveToken = reserveForBToken[bToken];
         amountIn = buyExactOutQuoteForBToken[bToken];
-        MockERC20(reserve).transferFrom(msg.sender, address(this), amountIn);
+        MockERC20(reserveToken).transferFrom(msg.sender, address(this), amountIn);
 
         MockERC20(bToken).mint(msg.sender, amountOut);
         feesReceived = 0;
@@ -210,15 +312,27 @@ contract MockBaselineRelay {
         slippage = 0;
     }
 
+    function reserve(address bToken) external view returns (address) {
+        return reserveForBToken[bToken];
+    }
+
+    function totalReserves(address bToken) external view returns (uint256) {
+        return totalReservesForBToken[bToken];
+    }
+
+    function totalBTokens(address bToken) external view returns (uint256) {
+        return totalBTokensForBToken[bToken];
+    }
+
     function sellTokensExactIn(address bToken, uint256 amountIn, uint256)
         external
         returns (uint256 amountOut, uint256 feesReceived)
     {
-        address reserve = reserveForBToken[bToken];
+        address reserveToken = reserveForBToken[bToken];
         MockERC20(bToken).transferFrom(msg.sender, address(this), amountIn);
 
         amountOut = sellQuoteForBToken[bToken];
-        MockERC20(reserve).mint(msg.sender, amountOut);
+        MockERC20(reserveToken).mint(msg.sender, amountOut);
         feesReceived = 0;
     }
 
@@ -226,11 +340,11 @@ contract MockBaselineRelay {
         external
         returns (uint256 amountIn, uint256 feesReceived)
     {
-        address reserve = reserveForBToken[bToken];
+        address reserveToken = reserveForBToken[bToken];
         amountIn = sellExactOutQuoteForBToken[bToken];
         MockERC20(bToken).transferFrom(msg.sender, address(this), amountIn);
 
-        MockERC20(reserve).mint(msg.sender, amountOut);
+        MockERC20(reserveToken).mint(msg.sender, amountOut);
         feesReceived = 0;
     }
 }
@@ -263,4 +377,26 @@ contract MockERC20 {
         balanceOf[to] += amount;
         return true;
     }
+}
+
+interface IBaselineRelayQuotes {
+    function quoteBuyExactIn(address bToken, uint256 amountIn)
+        external
+        view
+        returns (uint256 amountOut, uint256 feesReceived, uint256 slippage);
+
+    function quoteBuyExactOut(address bToken, uint256 amountOut)
+        external
+        view
+        returns (uint256 amountIn, uint256 feesReceived, uint256 slippage);
+
+    function quoteSellExactIn(address bToken, uint256 amountIn)
+        external
+        view
+        returns (uint256 amountOut, uint256 feesReceived, uint256 slippage);
+
+    function quoteSellExactOut(address bToken, uint256 amountOut)
+        external
+        view
+        returns (uint256 amountIn, uint256 feesReceived, uint256 slippage);
 }

@@ -10,18 +10,17 @@ Current branch:
 
 - `feat/baseline-adapter`
 
-Recent checkpoint commit:
+Recent checkpoint commits:
 
 - `e3d7f058b test: add baseline substreams fixtures`
+- `86a4603ad docs: update baseline tycho scope`
+- `7fefdf6fc feat: mark baseline controller state updates`
 
-That commit added/updated:
+Uncommitted checkpoint after those commits:
 
-- `protocols/substreams/ethereum-baseline/integration_test.tycho.yaml`
-- `protocols/substreams/ethereum-baseline/integration_test_base_baseline.tycho.yaml`
-- `protocols/substreams/ethereum-baseline/src/modules.rs`
-- `protocols/testing/src/test_runner.rs`
-- `protocols/testing/run.Dockerfile`
-- `check-base-storage-range.sh`
+- Baseline VM adapter runtime is generated and registered in `tycho-simulation`.
+- Ethereum mainnet range fixture has `skip_simulation: false` and passes.
+- Substreams emits DCI entrypoints for Baseline quote traces so Tycho dynamically discovers relay delegate implementation bytecode instead of relying on hardcoded implementation addresses.
 
 Only known unrelated local file:
 
@@ -274,9 +273,12 @@ Relay:
 
 - `0xc81Fd894C0acE037d133aF4886550aC8133568E8`
 
-Delegate implementation seen in quote traces:
+Delegate implementations observed:
 
-- `0xafaa95adb26fcd9094b46055a485f1fd6127c058`
+- Ethereum mainnet route slot at block `24929814`: `0xafaa95adb26fcd9094b46055a485f1fd6127c058`
+- Base route slot at latest during local check: `0x040c1abc3b2e89916e6bc30a043818a4ee58cad0`
+
+These are no longer configured as hardcoded `stateless_contract_addr` params. `map_protocol_changes` now emits DCI entrypoints using sample calldata for all four quote functions. In the mainnet range test, DCI discovered `0xafaa95adb26fcd9094b46055a485f1fd6127c058` as a `NewContract`.
 
 Quote sanity checks:
 
@@ -400,10 +402,10 @@ Main risk:
 
 - The Substream currently extracts all relay storage writes, but component updates are primarily marked from balance deltas. If `Pool`, `Maker`, or `BlockPricing` changes without a `BSwap:Swap` balance delta, Tycho may store fresh relay storage but not know which component should be refreshed.
 
-Next implementation task:
+Current mitigation:
 
-- Identify all Mercury events/state-changing paths that mutate quote-relevant `Pool`, `Maker`, or `BlockPricing` state.
-- Ensure those changes mark the affected bToken component updated.
+- Controller events `CreatorFeePctSet`, `LiquidityFeePctSet`, and `DeployerSet` now mark the affected bToken component updated.
+- Still identify any remaining Mercury state-changing paths that mutate quote-relevant `Pool`, `Maker`, or `BlockPricing` state without a swap balance delta.
 
 ## Current Milestones
 
@@ -424,39 +426,104 @@ Remaining indexing questions:
 - Whether Tycho needs a `balance_owner` attribute for the relay-held liquidity model, or whether current component balance output is enough for simulation/routing.
 - Whether the implementation/delegate target should be emitted as a normal contract or as stateless VM metadata.
 
-### Milestone B: VM Quote Simulation
+### Milestone B: VM Simulation
 
-Goal: get Tycho VM simulation quote working for the Ethereum mainnet bToken fixture.
+Status: uncommitted local work; Ethereum mainnet range indexing passes, but VM
+snapshot decoding is still blocked by missing routed BStaking state during swap
+simulation.
 
-Likely files:
+Changed files in current uncommitted checkpoint:
 
 - `protocols/adapter-integration/evm/src/baseline/BaselineSwapAdapter.sol`
-- `protocols/adapter-integration/evm/manifest.yaml`
+- `protocols/adapter-integration/evm/test/BaselineSwapAdapter.t.sol`
 - `crates/tycho-simulation/src/evm/protocol/vm/constants.rs`
-- `crates/tycho-simulation/src/evm/protocol/vm/assets/`
-- VM simulation tests in the existing Tycho simulation test structure.
+- `crates/tycho-simulation/src/evm/protocol/vm/assets/BaselineSwapAdapter.evm.runtime`
+- `protocols/substreams/ethereum-baseline/src/modules.rs`
+- `protocols/substreams/ethereum-baseline/Cargo.toml`
+- `protocols/substreams/Cargo.lock`
+- `protocols/substreams/ethereum-baseline/integration_test.tycho.yaml`
+- `protocols/runtest.sh`
 
 Adapter behavior:
 
 - Interpret component/pool id as the bToken address.
 - reserve -> bToken:
-  - exact-in quote uses `quoteBuyExactIn(bToken, amountIn)`.
+  - exact-in simulation calls `buyTokensExactIn(bToken, amountIn, 0)`.
+  - exact-out simulation prequotes with `quoteBuyExactOut`, then calls `buyTokensExactOut`.
 - bToken -> reserve:
-  - exact-in quote uses `quoteSellExactIn(bToken, amountIn)`.
-- Exact-out functions are traced and available:
-  - reserve -> bToken exact-out uses `quoteBuyExactOut`.
-  - bToken -> reserve exact-out uses `quoteSellExactOut`.
+  - exact-in simulation calls `sellTokensExactIn(bToken, amountIn, 0)`.
+  - exact-out simulation prequotes with `quoteSellExactOut`, then calls `sellTokensExactOut`.
+- `price()` remains intentionally unimplemented because Tycho treats `PriceFunction` as optional.
+- `getCapabilities()` advertises sell and buy order support, not `PriceFunction`.
+- `swap()` returns `Fraction(0, 1)` as the documented unavailable-price marker.
+- `gasUsed` is measured around the relay swap call only; outer adapter token transfer and approval setup are excluded.
+- `swap()`, `getLimits()`, and `getCapabilities()` validate the canonical pair by
+  resolving `reserve(bToken)` through the relay. Valid directions are only
+  reserve -> bToken and bToken -> reserve.
 
 Expected adapter metadata:
 
-- `getTokens` should return `[bToken, reserve]`.
-- `capabilities` should match whichever sides are implemented.
-- `getLimits` can stay conservative if existing VM adapters use broad limits.
+- `getTokens()` and `getPoolIds()` remain unimplemented; the integration test provides token/pool fixtures through indexed Substreams data.
+- `getLimits()` returns conservative probe limits based on relay lens totals:
+  `totalReserves(bToken) / 10` for the reserve token and
+  `totalBTokens(bToken) / 10` for the bToken. The `/10` cap is a simulation
+  probe bound, not a protocol max trade size.
 
-Milestone B test goal:
+DCI behavior:
 
-- Unskip simulation for the Ethereum mainnet fixture.
-- Compare VM simulation output to live `quote*` at block `24929814`.
+- Baseline depends on relay route/delegatecall implementation code.
+- The relay emits `ComponentUpgraded(bytes32 label, address oldImpl, address newImpl, uint256 version)` when a component implementation changes.
+- Instead of fanning out `stateless_contract_addr_0` updates to every pool, Substreams emits DCI quote entrypoints per pool:
+  - target: Baseline relay/proxy
+  - signatures:
+    - `reserve(address)`
+    - `totalBTokens(address)`
+    - `totalReserves(address)`
+    - `quoteBuyExactIn(address,uint256)`
+    - `quoteBuyExactOut(address,uint256)`
+    - `quoteSellExactIn(address,uint256)`
+    - `quoteSellExactOut(address,uint256)`
+  - calldata: selector, the pool bToken, and sample amount `1e15`
+- DCI traces through the relay and discovers the current BSwap and BLens
+  implementation code dynamically.
+- `map_protocol_changes` also includes `get_block_storage_changes(&block)` so DCI can track storage changes and retrigger traces when relevant route/storage slots change.
+- To support this, `ethereum-baseline` now depends on `tycho-substreams = "0.8.0"` instead of the older git revision.
+- Execution entrypoints are intentionally not used as DCI trace params because sample swap execution calls need token funding/approval state and revert without it. The quote paths cover the BSwap delegate target and quote storage surface without requiring funded sample calls.
+- Current VM blocker: during adapter swap simulation, BSwap calls relay
+  `sync(address)` (`0xa5841194`), which routes to BStaking at
+  `0x1117C9C13D152e2C84504533066676163B3B7470`. That account is not included in
+  Tycho VM snapshots, so debug simulation currently reports
+  `MissingAccount(0x1117...)` and decodes zero snapshots. Adding `sync(address)`
+  as a DCI entrypoint did not help because the direct trace reverts and did not
+  add BStaking to the contract set.
+
+Validation already run:
+
+- `forge test --match-contract BaselineSwapAdapter --root protocols/adapter-integration/evm -vv` passes.
+- `cargo build -p tycho-simulation` from repo root passes.
+- `cargo build --release --target wasm32-unknown-unknown` from `protocols/substreams/ethereum-baseline` passes.
+- Mainnet range indexing test exits successfully:
+
+```bash
+cd /Users/indigo/projects/baseline/tycho-indexer/protocols
+set -a; source ../.substreams.env; set +a
+PATH="/Users/indigo/projects/baseline/tycho-indexer/target/debug:$PATH" \
+RPC_URL="https://wispy-hidden-knowledge.quiknode.pro/744cca7e0d6ab60a5bff9c19aee2599dbff70471" \
+cargo run --bin protocol-testing -- range --package ethereum-baseline --chain ethereum --match-test test_mainnet_pool_creation
+```
+
+Observed DCI confirmation in the passing test:
+
+```text
+NewContract block_number=24929812 contract_address=Bytes(0xafaa95adb26fcd9094b46055a485f1fd6127c058)
+```
+
+Note: `cargo fmt --check` scoped to `crates/tycho-simulation` currently fails on many pre-existing unrelated formatting diffs; do not run a global formatter unless intentionally cleaning the repo.
+
+Next simulation follow-up:
+
+- Add a stronger assertion or separate fork/adapter check that compares Tycho VM amount out to live Baseline `quote*` results at block `24929814`.
+- Decide whether to keep broad limits or derive safer pool-specific limits.
 
 ### Milestone C: Execution
 

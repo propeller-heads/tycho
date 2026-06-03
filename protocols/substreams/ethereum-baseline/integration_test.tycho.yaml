@@ -13,7 +13,7 @@ initialized_accounts:
 tests:
   - name: test_mainnet_pool_creation
     start_block: 24929812
-    stop_block: 24929814
+    stop_block: 24930105
     expected_components:
       - id: "0x9fdbde76236998dc2836fe67a9954ede456a1d63"
         tokens:
@@ -24,5 +24,5 @@ tests:
           reserve: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
           manual_updates: "0x01"
         creation_tx: "0xe21a7f343e28c0dba205757179c92b7e99d38dc4874e4b59c7f4af5792b53a29"
-        skip_simulation: true # VM storage-surface tracing is still pending for Baseline quote simulation.
+        skip_simulation: false
         skip_execution: true # Execution tests will be enabled after VM simulation is validated.
