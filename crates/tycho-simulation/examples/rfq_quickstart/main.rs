@@ -72,7 +72,7 @@ struct Cli {
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
     /// Run PAMM RFQ protocols.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     run_pamm_protocols: bool,
 }
 

@@ -14,10 +14,6 @@
   "base": {},
   "arbitrum": {},
   "polygon": {},
-  "unichain": {
-    "vm:curve": {
-      "native_token_address": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-    }
-  },
+  "unichain": {},
   "bsc": {}
 }

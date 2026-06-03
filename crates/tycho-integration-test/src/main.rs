@@ -89,7 +89,7 @@ struct Cli {
     disable_rfq: bool,
 
     /// Run PAMM RFQ protocols.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     run_pamm_protocols: bool,
 
     /// Port for the Prometheus metrics server
