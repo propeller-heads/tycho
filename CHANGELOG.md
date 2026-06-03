@@ -1,3 +1,11 @@
+## [0.304.0](https://github.com/propeller-heads/tycho/compare/0.303.2...0.304.0) (2026-06-03)
+
+
+### Features
+
+* remove deprecated curve stream filter ([f8d5bd0](https://github.com/propeller-heads/tycho/commit/f8d5bd0c097ae28520d7e2b1ac91dd41045f3a23))
+* remove deprecated curve stream filter ([#1062](https://github.com/propeller-heads/tycho/issues/1062)) ([11777fb](https://github.com/propeller-heads/tycho/commit/11777fb8701e54fc9788dcd43ce50da36afcb380))
+
 ## [0.303.2](https://github.com/propeller-heads/tycho/compare/0.303.1...0.303.2) (2026-06-02)
 
 
