@@ -204,8 +204,8 @@ fn map_protocol_changes(
     params: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
-    balance_store: StoreDeltas,
     deltas: BlockBalanceDeltas,
+    balance_store: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let config: DeploymentConfig = serde_qs::from_str(params.as_str())?;
     // We merge contract changes by transaction (identified by transaction index)

@@ -72,6 +72,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
+        ("base-baseline", "ethereum-baseline"),
         ("unichain-curve", "ethereum-curve"),
     ])
 });
