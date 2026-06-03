@@ -576,6 +576,15 @@ Current execution testing checkpoint:
   generated executions at block `24930105`:
   - three bToken -> WETH sell simulations
   - three WETH -> bToken buy simulations
+- Fork deployment smoke test passed on a local Anvil Ethereum fork at block
+  `24930105`: `BaselineExecutor` deployed with relay constructor arg
+  `0xc81Fd894C0acE037d133aF4886550aC8133568E8`, `relay()` returned the relay,
+  `getTransferData()` resolved both Rust-generated buy/sell executor calldata
+  against live fork state, and deployed runtime bytecode matched
+  `protocols/testing/fixtures/BaselineExecutor.runtime.json`.
+  This was a manual `forge create` smoke, not the Hardhat CREATE2
+  `scripts/deploy-executors.js` path; before real deployment, add Baseline to
+  that script and verify the computed CREATE2 address.
 - Do not add a static BStaking implementation address. BStaking is a routed
   component behind the relay like BSwap and BLens. The current DCI path discovers
   it through relay `getCurrentRate(address)` and then swap simulation can call
