@@ -1,3 +1,12 @@
+## [0.304.2](https://github.com/propeller-heads/tycho/compare/0.304.1...0.304.2) (2026-06-03)
+
+
+### Bug Fixes
+
+* move schema to inside rule scope ([c4f6a9d](https://github.com/propeller-heads/tycho/commit/c4f6a9dbe9d483355437216cd39a0db5424219b5))
+* move schema to inside rule scope ([2b5ecea](https://github.com/propeller-heads/tycho/commit/2b5eceae0a9096d17678adc8ec2fbb544554c274))
+* move schema to inside rule scope ([#1064](https://github.com/propeller-heads/tycho/issues/1064)) ([7ff8d9b](https://github.com/propeller-heads/tycho/commit/7ff8d9bb59e54ea17c490365bf7e7661a4d0ab81))
+
 ## [0.304.1](https://github.com/propeller-heads/tycho/compare/0.304.0...0.304.1) (2026-06-03)
 
 
