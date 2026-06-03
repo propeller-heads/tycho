@@ -15,12 +15,18 @@ Recent checkpoint commits:
 - `e3d7f058b test: add baseline substreams fixtures`
 - `86a4603ad docs: update baseline tycho scope`
 - `7fefdf6fc feat: mark baseline controller state updates`
+- `fd9927cc2 Add Baseline VM adapter and substream scaffold`
+- `489ee4215 Discover Baseline staking route via DCI`
 
-Uncommitted checkpoint after those commits:
+Current committed checkpoint:
 
 - Baseline VM adapter runtime is generated and registered in `tycho-simulation`.
-- Ethereum mainnet range fixture has `skip_simulation: false` and passes.
+- Ethereum mainnet range fixture has `skip_simulation: false` and passes with
+  actual VM simulation in both directions.
 - Substreams emits DCI entrypoints for Baseline quote traces so Tycho dynamically discovers relay delegate implementation bytecode instead of relying on hardcoded implementation addresses.
+- DCI also includes a harmless BStaking view route,
+  `getCurrentRate(address)`, so Tycho discovers the BStaking implementation
+  needed by swap-time `sync(address)`.
 
 Only known unrelated local file:
 
@@ -174,7 +180,7 @@ Pool creation tx:
 Test range:
 
 - start block `24929812`
-- stop block `24929814`
+- stop block `24930105`
 
 This fixture keeps relay hydration enabled:
 
@@ -428,10 +434,10 @@ Remaining indexing questions:
 
 ### Milestone B: VM Simulation
 
-Status: uncommitted local work after `fd9927cc2`; Ethereum mainnet range
-indexing and VM simulation now pass for both directions.
+Status: committed through `489ee4215`; Ethereum mainnet range indexing and VM
+simulation now pass for both directions.
 
-Changed files in current uncommitted checkpoint:
+Files changed by the current VM/substreams checkpoint:
 
 - `protocols/adapter-integration/evm/src/baseline/BaselineSwapAdapter.sol`
 - `protocols/adapter-integration/evm/test/BaselineSwapAdapter.t.sol`
@@ -536,9 +542,36 @@ Note: `cargo fmt --check` scoped to `crates/tycho-simulation` currently fails on
 
 Next simulation follow-up:
 
-- Add a stronger assertion or separate fork/adapter check that compares Tycho VM amount out to live Baseline `quote*` results at block `24929814`.
+- Add a stronger assertion or separate fork/adapter check that compares Tycho VM
+  amount out to live Baseline `quote*` results at the same block. The current
+  Ethereum fixture stop block is `24930105`.
 - Confirm `ComponentUpgraded` route storage changes cause DCI to refresh BSwap,
   BLens, and BStaking implementation accounts after future upgrades.
+
+Next agent task:
+
+- Build the quote-equivalence check before starting execution work.
+- Target Ethereum mainnet first, not Base, because the Ethereum fixture currently
+  completes full range indexing plus VM simulation while Base is still blocked by
+  `debug_storageRangeAt` RPC support.
+- Pool/component id is the bToken
+  `0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63`.
+- Reserve is WETH `0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2`.
+- Relay/proxy is `0xc81Fd894C0acE037d133aF4886550aC8133568E8`; all Baseline
+  contract calls go through this relay.
+- Compare reserve -> bToken VM output against:
+  `quoteBuyExactIn(address,uint256)(uint256,uint256,uint256)`.
+- Compare bToken -> reserve VM output against:
+  `quoteSellExactIn(address,uint256)(uint256,uint256,uint256)`.
+- Use block `24930105` for live quote calls so the comparison is against the same
+  fixture state used by the passing range test.
+- Prefer a repo-native `protocol-testing` or `tycho-simulation` assertion over an
+  external script. If that harness cannot expose the simulated amount directly,
+  add the smallest focused test helper and document why.
+- Do not add a static BStaking implementation address. BStaking is a routed
+  component behind the relay like BSwap and BLens. The current DCI path discovers
+  it through relay `getCurrentRate(address)` and then swap simulation can call
+  relay `sync(address)`.
 
 ### Milestone C: Execution
 
@@ -586,7 +619,8 @@ Simulation:
 - Adapter Foundry tests for `getTokens`, `getLimits`, `capabilities`.
 - Tycho simulation test for mainnet reserve -> bToken quote.
 - Tycho simulation test for mainnet bToken -> reserve quote.
-- Compare VM simulation output to live `quote*` calls at block `24929814`.
+- Compare VM simulation output to live `quoteBuyExactIn` and
+  `quoteSellExactIn` calls at block `24930105`.
 
 Execution:
 
