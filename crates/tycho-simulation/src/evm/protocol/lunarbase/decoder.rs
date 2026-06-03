@@ -23,7 +23,6 @@ mod attrs {
     pub const BLOCK_DELAY: &str = "block_delay";
     pub const PAUSED: &str = "paused";
     pub const BLACKLIST_FEE_MULTIPLIER: &str = "blacklist_fee_multiplier";
-    pub const SWAP_CALLER_WHITELISTED: &str = "swap_caller_whitelisted";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,17 +65,6 @@ fn insert_u256(attrs: &mut AttributeMap, name: &'static str, value: U256) {
 fn require_bool(attrs: &AttributeMap, name: &'static str) -> Result<bool, AttributeError> {
     let value = require(attrs, name)?;
     decode_bool(name, value)
-}
-
-fn optional_bool(
-    attrs: &AttributeMap,
-    name: &'static str,
-    default: bool,
-) -> Result<bool, AttributeError> {
-    attrs
-        .get(name)
-        .map(|value| decode_bool(name, value))
-        .unwrap_or(Ok(default))
 }
 
 fn decode_bool(name: &'static str, value: &[u8]) -> Result<bool, AttributeError> {
@@ -193,7 +181,6 @@ pub fn encode_state(state: &LunarBaseState) -> AttributeMap {
     insert_u64(&mut attrs, attrs::BLOCK_DELAY, state.block_delay);
     insert_bool(&mut attrs, attrs::PAUSED, state.paused);
     insert_u256(&mut attrs, attrs::BLACKLIST_FEE_MULTIPLIER, state.blacklist_fee_multiplier);
-    insert_bool(&mut attrs, attrs::SWAP_CALLER_WHITELISTED, state.swap_caller_whitelisted);
     attrs
 }
 
@@ -219,7 +206,6 @@ pub fn decode_state(
             attrs::BLACKLIST_FEE_MULTIPLIER,
             U256::from(1u64),
         )?,
-        swap_caller_whitelisted: optional_bool(attrs, attrs::SWAP_CALLER_WHITELISTED, true)?,
     })
 }
 
@@ -347,7 +333,6 @@ mod tests {
             block_delay: 2,
             paused: false,
             blacklist_fee_multiplier: U256::from(1u64),
-            swap_caller_whitelisted: true,
         }
     }
 
@@ -367,11 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_fee_whitelist_attributes_for_legacy_snapshots() {
+    fn defaults_fee_multiplier_for_legacy_snapshots() {
         let state = state();
         let mut attrs = encode_state(&state);
         attrs.remove(attrs::BLACKLIST_FEE_MULTIPLIER);
-        attrs.remove(attrs::SWAP_CALLER_WHITELISTED);
 
         let decoded = decode_state(
             StaticStateAttributes {
@@ -384,7 +368,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.blacklist_fee_multiplier, U256::from(1u64));
-        assert!(decoded.swap_caller_whitelisted);
     }
 
     #[test]

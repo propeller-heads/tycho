@@ -5,7 +5,6 @@ use tycho_substreams::prelude as tycho;
 use crate::{
     lunarbase,
     modules::config::{Config, PoolConfig},
-    tycho_mapper::to_tycho_protocol_component,
 };
 
 #[substreams::handlers::map]
@@ -26,11 +25,7 @@ pub fn map_protocol_components(
         else {
             continue;
         };
-        let component = to_tycho_protocol_component(lunarbase::protocol_component(
-            pool.pool,
-            pool.token_x,
-            pool.token_y,
-        ));
+        let component = lunarbase::protocol_component(pool.pool, pool.token_x, pool.token_y);
         if let Some(existing) = tx_components
             .iter_mut()
             .find(|tx_components| {

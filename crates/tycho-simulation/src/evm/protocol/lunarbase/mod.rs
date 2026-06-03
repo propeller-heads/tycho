@@ -79,7 +79,6 @@ mod tests {
             block_delay: 2,
             paused: false,
             blacklist_fee_multiplier: U256::from(1u64),
-            swap_caller_whitelisted: true,
         }
     }
 
@@ -213,7 +212,6 @@ mod tests {
                 block_delay: 2,
                 paused: false,
                 blacklist_fee_multiplier: U256::from(1u64),
-                swap_caller_whitelisted: true,
             },
             head_block: 46_498_514,
         };

@@ -3,18 +3,14 @@ use substreams_ethereum::pb::eth;
 
 use crate::{
     abi::pool::events as pool_events,
-    lunarbase::{
-        state::{
-            attrs, insert_bool, insert_u128, insert_u256, insert_u32, insert_u64, AttributeMap,
-        },
-        Address,
+    lunarbase::state::{
+        attrs, insert_bool, insert_u128, insert_u256, insert_u32, insert_u64, AttributeMap,
     },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventApplyContext {
     pub block_number: u64,
-    pub tycho_router: Address,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,7 +24,6 @@ pub enum LunarBaseEvent {
     Sync { reserve_x: u128, reserve_y: u128 },
     BlockDelaySet { block_delay: u64 },
     ConcentrationKSet { concentration_k: u32 },
-    WhitelistSet { account: Address, whitelisted: bool },
     BlacklistFeeMultiplierSet { multiplier: U256 },
     Paused,
     Unpaused,
@@ -42,7 +37,6 @@ pub enum EventApplyError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogDecodeError {
     Decode { event: &'static str, message: String },
-    InvalidAddress { event: &'static str, field: &'static str, len: usize },
     IntegerOverflow(&'static str),
 }
 
@@ -92,12 +86,7 @@ pub fn decode_lunarbase_state_log(
     }
 
     if pool_events::WhitelistSet::match_log(log) {
-        let event = pool_events::WhitelistSet::decode(log)
-            .map_err(|message| LogDecodeError::Decode { event: "WhitelistSet", message })?;
-        return Ok(Some(LunarBaseEvent::WhitelistSet {
-            account: vec_to_address("WhitelistSet", "account", &event.account)?,
-            whitelisted: event.whitelisted,
-        }));
+        return Ok(None);
     }
 
     if pool_events::BlacklistFeeMultiplierSet::match_log(log) {
@@ -150,11 +139,6 @@ pub fn event_to_delta(
         LunarBaseEvent::ConcentrationKSet { concentration_k } => {
             insert_u32(&mut updated_attributes, attrs::CONCENTRATION_K, *concentration_k);
         }
-        LunarBaseEvent::WhitelistSet { account, whitelisted } => {
-            if *account == context.tycho_router {
-                insert_bool(&mut updated_attributes, attrs::SWAP_CALLER_WHITELISTED, *whitelisted);
-            }
-        }
         LunarBaseEvent::BlacklistFeeMultiplierSet { multiplier } => {
             insert_u256(&mut updated_attributes, attrs::BLACKLIST_FEE_MULTIPLIER, *multiplier);
         }
@@ -171,16 +155,6 @@ pub fn event_to_delta(
 
 fn uint24_max() -> u32 {
     (1u32 << 24) - 1
-}
-
-fn vec_to_address(
-    event: &'static str,
-    field: &'static str,
-    value: &[u8],
-) -> Result<Address, LogDecodeError> {
-    value
-        .try_into()
-        .map_err(|_| LogDecodeError::InvalidAddress { event, field, len: value.len() })
 }
 
 fn bigint_to_u32(

@@ -3,6 +3,5 @@
 mod abi;
 mod lunarbase;
 mod modules;
-mod tycho_mapper;
 
 pub use modules::*;

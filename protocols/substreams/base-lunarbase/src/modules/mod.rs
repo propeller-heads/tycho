@@ -30,7 +30,6 @@ mod config {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Config {
         pub pools: Vec<PoolConfig>,
-        pub tycho_router: lunarbase::Address,
     }
 
     impl Default for Config {
@@ -43,7 +42,6 @@ mod config {
                     bootstrap_block: None,
                     bootstrap_state: lunarbase::BootstrapState::default(),
                 }],
-                tycho_router: [0u8; 20],
             }
         }
     }
@@ -64,7 +62,6 @@ mod config {
                     "pool" => single_pool.pool = parse_address(value)?,
                     "token_x" => single_pool.token_x = parse_address(value)?,
                     "token_y" => single_pool.token_y = parse_address(value)?,
-                    "tycho_router" => config.tycho_router = parse_address(value)?,
                     "bootstrap_block" => single_pool.bootstrap_block = Some(value.parse()?),
                     "blacklist_fee_multiplier" => {
                         single_pool

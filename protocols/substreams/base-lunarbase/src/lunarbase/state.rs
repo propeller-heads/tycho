@@ -15,7 +15,6 @@ pub mod attrs {
     pub const BLOCK_DELAY: &str = "block_delay";
     pub const PAUSED: &str = "paused";
     pub const BLACKLIST_FEE_MULTIPLIER: &str = "blacklist_fee_multiplier";
-    pub const SWAP_CALLER_WHITELISTED: &str = "swap_caller_whitelisted";
 }
 
 pub fn insert_bool(attrs: &mut AttributeMap, name: &'static str, value: bool) {
