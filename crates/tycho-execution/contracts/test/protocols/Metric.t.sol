@@ -285,16 +285,13 @@ contract MetricExecutorTest is Test {
         token0.mint(address(executor), amountIn);
         token1.mint(address(pool), amountIn * 2);
 
-        bytes memory oracleCalldata = abi.encodeCall(
-            MockMetricOracle.updateBySignature,
-            (address(this), uint256(0), uint256(block.timestamp + 1), "")
+        bytes memory oracleArgs = abi.encode(
+            address(this), uint256(0), uint256(block.timestamp + 1), ""
         );
 
         executor.swap(
             amountIn,
-            _encodeData(
-                address(pool), true, ORACLE_UPDATE_ALWAYS, oracleCalldata
-            ),
+            _encodeData(address(pool), true, ORACLE_UPDATE_ALWAYS, oracleArgs),
             receiver
         );
 
@@ -308,18 +305,14 @@ contract MetricExecutorTest is Test {
         token0.mint(address(executor), amountIn);
         token1.mint(address(pool), amountIn * 2);
 
-        bytes memory oracleCalldata = abi.encodeCall(
-            MockMetricOracle.updateBySignature,
-            (address(this), uint256(0), uint256(block.timestamp + 1), "")
+        bytes memory oracleArgs = abi.encode(
+            address(this), uint256(0), uint256(block.timestamp + 1), ""
         );
 
         executor.swap(
             amountIn,
             _encodeData(
-                address(pool),
-                true,
-                ORACLE_UPDATE_RETRY_ON_REVERT,
-                oracleCalldata
+                address(pool), true, ORACLE_UPDATE_RETRY_ON_REVERT, oracleArgs
             ),
             receiver
         );
@@ -336,18 +329,14 @@ contract MetricExecutorTest is Test {
         token0.mint(address(executor), amountIn);
         token1.mint(address(pool), amountIn * 2);
 
-        bytes memory oracleCalldata = abi.encodeCall(
-            MockMetricOracle.updateBySignature,
-            (address(this), uint256(0), uint256(block.timestamp + 1), "")
+        bytes memory oracleArgs = abi.encode(
+            address(this), uint256(0), uint256(block.timestamp + 1), ""
         );
 
         executor.swap(
             amountIn,
             _encodeData(
-                address(pool),
-                true,
-                ORACLE_UPDATE_RETRY_ON_REVERT,
-                oracleCalldata
+                address(pool), true, ORACLE_UPDATE_RETRY_ON_REVERT, oracleArgs
             ),
             receiver
         );
@@ -413,7 +402,7 @@ contract MetricExecutorTest is Test {
         address pool,
         bool zeroForOne,
         uint8 oracleUpdateMode,
-        bytes memory oracleCalldata
+        bytes memory oracleArgs
     ) internal view returns (bytes memory) {
         bytes memory data = abi.encodePacked(
             _baseData(pool, zeroForOne), bytes1(oracleUpdateMode)
@@ -422,10 +411,7 @@ contract MetricExecutorTest is Test {
             return data;
         }
 
-        return
-            abi.encodePacked(
-                data, uint32(oracleCalldata.length), oracleCalldata
-            );
+        return abi.encodePacked(data, uint32(oracleArgs.length), oracleArgs);
     }
 
     function _baseData(address pool, bool zeroForOne)

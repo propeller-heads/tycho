@@ -14,6 +14,7 @@ use crate::encoding::{
 };
 
 const ORACLE_UPDATE_POLICY_ATTR: &str = "oracle_update_policy";
+const ORACLE_UPDATE_ARGS_ATTR: &str = "oracle_update_0_args";
 
 #[derive(Clone)]
 pub struct MetricSwapEncoder {
@@ -127,13 +128,13 @@ impl SwapEncoder for MetricSwapEncoder {
         encoded.push(oracle_update_policy as u8);
 
         if let Some(update) = oracle_update {
-            let calldata_len = u32::try_from(update.calldata.len()).map_err(|_| {
+            let args_len = u32::try_from(update.args.len()).map_err(|_| {
                 EncodingError::InvalidInput(
-                    "Metric oracle update calldata is too large to encode".to_string(),
+                    "Metric oracle update args are too large to encode".to_string(),
                 )
             })?;
-            encoded.extend_from_slice(&calldata_len.to_be_bytes());
-            encoded.extend_from_slice(&update.calldata);
+            encoded.extend_from_slice(&args_len.to_be_bytes());
+            encoded.extend_from_slice(&update.args);
         }
 
         Ok(encoded)
@@ -150,7 +151,7 @@ impl SwapEncoder for MetricSwapEncoder {
 
 #[derive(Debug)]
 struct MetricOracleUpdate {
-    calldata: Bytes,
+    args: Bytes,
 }
 
 impl MetricSwapEncoder {
@@ -197,20 +198,20 @@ impl MetricSwapEncoder {
             })
         })??;
 
-        let calldata = signed_oracle_update
+        let args = signed_oracle_update
             .quote_attributes
-            .get("oracle_update_0_calldata")
-            .ok_or(EncodingError::FatalError(
-                "Metric quote must have an oracle_update_0_calldata attribute".to_string(),
-            ))?
+            .get(ORACLE_UPDATE_ARGS_ATTR)
+            .ok_or(EncodingError::FatalError(format!(
+                "Metric quote must have an {ORACLE_UPDATE_ARGS_ATTR} attribute"
+            )))?
             .clone();
-        if calldata.is_empty() {
-            return Err(EncodingError::InvalidInput(
-                "Metric oracle_update_0_calldata cannot be empty".to_string(),
-            ));
+        if args.is_empty() {
+            return Err(EncodingError::InvalidInput(format!(
+                "Metric {ORACLE_UPDATE_ARGS_ATTR} cannot be empty"
+            )));
         }
 
-        Ok(MetricOracleUpdate { calldata })
+        Ok(MetricOracleUpdate { args })
     }
 }
 
@@ -313,13 +314,13 @@ mod tests {
     fn test_encode_metric_with_oracle_update() {
         let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
-        let first_oracle_calldata = Bytes::from_str("0x78ce3ae1aabbccdd").unwrap();
-        let second_oracle_calldata = Bytes::from_str("0x78ce3ae111223344").unwrap();
+        let first_oracle_args = Bytes::from_str("0xaabbccdd").unwrap();
+        let second_oracle_args = Bytes::from_str("0x11223344").unwrap();
         let quote_state = MockRFQState {
             quote_amount_out: BigUint::from(1u64),
             quote_data: HashMap::from([
-                ("oracle_update_0_calldata".to_string(), first_oracle_calldata.clone()),
-                ("oracle_update_1_calldata".to_string(), second_oracle_calldata.clone()),
+                (ORACLE_UPDATE_ARGS_ATTR.to_string(), first_oracle_args.clone()),
+                ("oracle_update_1_args".to_string(), second_oracle_args.clone()),
             ]),
         };
         let swap = Swap::new(
@@ -337,22 +338,19 @@ mod tests {
             .unwrap();
         let hex_swap = encode(&encoded_swap);
 
-        let expected_suffix = String::from(concat!("01", "00000008", "78ce3ae1aabbccdd",));
+        let expected_suffix = String::from(concat!("01", "00000004", "aabbccdd",));
         assert!(hex_swap.ends_with(&expected_suffix));
-        assert!(!hex_swap.contains("78ce3ae111223344"));
+        assert!(!hex_swap.contains("11223344"));
     }
 
     #[test]
     fn test_encode_metric_with_retry_oracle_update() {
         let token_in = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
-        let oracle_calldata = Bytes::from_str("0x78ce3ae1aabbccdd").unwrap();
+        let oracle_args = Bytes::from_str("0xaabbccdd").unwrap();
         let quote_state = MockRFQState {
             quote_amount_out: BigUint::from(1u64),
-            quote_data: HashMap::from([(
-                "oracle_update_0_calldata".to_string(),
-                oracle_calldata.clone(),
-            )]),
+            quote_data: HashMap::from([(ORACLE_UPDATE_ARGS_ATTR.to_string(), oracle_args.clone())]),
         };
         let swap = Swap::new(
             component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::RetryOnRevert),
@@ -369,7 +367,7 @@ mod tests {
             .unwrap();
         let hex_swap = encode(&encoded_swap);
 
-        let expected_suffix = String::from(concat!("02", "00000008", "78ce3ae1aabbccdd",));
+        let expected_suffix = String::from(concat!("02", "00000004", "aabbccdd",));
         assert!(hex_swap.ends_with(&expected_suffix));
     }
 

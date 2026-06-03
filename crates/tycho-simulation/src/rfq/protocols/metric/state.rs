@@ -541,7 +541,7 @@ impl IndicativelyPriced for MetricState {
             .amount;
 
         // Metric's swap path is independent from the quote API. Execution uses this hook to fetch
-        // signed oracle-update calldata that can be submitted before the pool swap.
+        // signed oracle-update args that can be submitted before the pool swap.
         Ok(self
             .client
             .request_oracle_update_for_pool(&self.metadata, &params, amount_out)
@@ -830,9 +830,6 @@ mod tests {
         assert!(signed_quote.amount_out > BigUint::from(0u8));
         assert_eq!(signed_quote.base_token, state.base_token.address);
         assert_eq!(signed_quote.quote_token, state.quote_token.address);
-        assert_eq!(
-            &signed_quote.quote_attributes["oracle_update_0_calldata"][..4],
-            &[0x78, 0xce, 0x3a, 0xe1]
-        );
+        assert!(!signed_quote.quote_attributes["oracle_update_0_args"].is_empty());
     }
 }

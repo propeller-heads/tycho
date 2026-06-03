@@ -6,7 +6,7 @@ use std::{
 };
 
 use alloy::{
-    primitives::{utils::keccak256, Address, Bytes as AlloyBytes, U256},
+    primitives::{Address, Bytes as AlloyBytes, U256},
     sol_types::SolValue,
 };
 use async_trait::async_trait;
@@ -390,8 +390,8 @@ impl MetricClient {
 
         let mut quote_attributes = HashMap::new();
         quote_attributes.insert(
-            "oracle_update_0_calldata".to_string(),
-            encode_oracle_update_calldata(&oracle_update.feed_creator, slot)?,
+            "oracle_update_0_args".to_string(),
+            encode_oracle_update_args(&oracle_update.feed_creator, slot)?,
         );
 
         Ok(SignedQuote {
@@ -544,20 +544,18 @@ fn bytes_to_alloy_address(address: &Bytes) -> Result<Address, RFQError> {
     Ok(Address::from_slice(address))
 }
 
-fn encode_oracle_update_calldata(
+fn encode_oracle_update_args(
     feed_creator: &Bytes,
     slot: &MetricSignedOracleUpdateSlot,
 ) -> Result<Bytes, RFQError> {
-    let args = (
+    Ok((
         bytes_to_alloy_address(feed_creator)?,
         U256::from(slot.deadline),
         biguint_decimal_to_u256(&slot.new_slot_value)?,
         AlloyBytes::from(slot.signature.to_vec()),
-    );
-    let selector = keccak256("updateBySignature(address,uint256,uint256,bytes)".as_bytes());
-    let mut calldata = selector[..4].to_vec();
-    calldata.extend(args.abi_encode());
-    Ok(calldata.into())
+    )
+        .abi_encode()
+        .into())
 }
 
 fn biguint_decimal_to_u256(value: &str) -> Result<U256, RFQError> {
@@ -930,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_oracle_update_calldata() {
+    fn test_encode_oracle_update_args() {
         let feed_creator = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
         let slot = MetricSignedOracleUpdateSlot {
             deadline: 1_700_000_000,
@@ -941,9 +939,9 @@ mod tests {
             .unwrap(),
         };
 
-        let calldata = encode_oracle_update_calldata(&feed_creator, &slot).unwrap();
+        let args = encode_oracle_update_args(&feed_creator, &slot).unwrap();
 
-        assert_eq!(&calldata[..4], &[0x78, 0xce, 0x3a, 0xe1]);
-        assert!(calldata.len() > 4);
+        assert!(!args.starts_with(&[0x78, 0xce, 0x3a, 0xe1]));
+        assert!(!args.is_empty());
     }
 }

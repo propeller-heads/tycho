@@ -3,7 +3,6 @@ pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
-import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {TransferManager} from "../TransferManager.sol";
 
 interface IMetricPool {
@@ -16,6 +15,15 @@ interface IMetricPool {
     ) external;
 }
 
+interface IMetricOracle {
+    function updateBySignature(
+        address feedCreator,
+        uint256 deadline,
+        uint256 newSlotValue,
+        bytes calldata signature
+    ) external;
+}
+
 error MetricExecutor__InvalidDataLength();
 error MetricExecutor__InvalidOracleUpdateFlag();
 error MetricExecutor__AmountInTooLarge();
@@ -23,10 +31,8 @@ error MetricExecutor__InvalidCallback();
 error MetricExecutor__InvalidOracle();
 
 contract MetricExecutor is IExecutor, ICallback {
-    using Address for address;
-
     uint256 private constant _BASE_DATA_LENGTH = 62;
-    uint256 private constant _ORACLE_UPDATE_HEADER_LENGTH = 4;
+    uint256 private constant _ORACLE_ARGS_HEADER_LENGTH = 4;
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
     // Keep this lined up with the MetricOracleUpdatePolicy byte from the Rust swap encoder.
     enum OracleUpdateMode {
@@ -43,13 +49,13 @@ contract MetricExecutor is IExecutor, ICallback {
     bytes32 private constant _CURRENT_METRIC_POOL_SLOT =
         0x4d22bc52e1e7b4ceea27d9d7b99b3dc629ed6f14191a4839f79502a7ee831121;
 
-    address public immutable oracle;
+    IMetricOracle public immutable oracle;
 
     constructor(address oracle_) {
         if (oracle_ == address(0)) {
             revert MetricExecutor__InvalidOracle();
         }
-        oracle = oracle_;
+        oracle = IMetricOracle(oracle_);
     }
 
     function fundsExpectedAddress(
@@ -71,7 +77,7 @@ contract MetricExecutor is IExecutor, ICallback {
             address pool,
             bool zeroForOne,
             OracleUpdateMode oracleUpdateMode,
-            bytes calldata oracleCalldata
+            bytes calldata oracleArgs
         ) = _decodeSwapData(data);
 
         if (amountIn > _INT128_MAX) {
@@ -80,10 +86,9 @@ contract MetricExecutor is IExecutor, ICallback {
 
         if (oracleUpdateMode == OracleUpdateMode.Always) {
             // Always mode updates the configured Metric oracle before the first swap.
-            // Keep the target on the immutable instead of calldata since this executor runs
+            // Keep the target on the immutable instead of user data since this executor runs
             // through TychoRouter delegatecall.
-            // slither-disable-next-line unused-return
-            oracle.functionCall(oracleCalldata);
+            _updateOracle(oracleArgs);
         }
 
         // We already checked that this fits in int128.
@@ -97,7 +102,7 @@ contract MetricExecutor is IExecutor, ICallback {
             // Retry mode tries the cheap path first. If the pool reverts, update the oracle and
             // try once more.
             _swapWithOracleRetry(
-                pool, receiver, zeroForOne, amountSpecified, oracleCalldata
+                pool, receiver, zeroForOne, amountSpecified, oracleArgs
             );
             return;
         }
@@ -170,23 +175,23 @@ contract MetricExecutor is IExecutor, ICallback {
             address pool,
             bool zeroForOne,
             OracleUpdateMode oracleUpdateMode,
-            bytes calldata oracleCalldata
+            bytes calldata oracleArgs
         )
     {
-        uint256 oracleCalldataLength = _validateDataLength(data);
+        uint256 oracleArgsLength = _validateDataLength(data);
         pool = address(bytes20(data[40:60]));
         zeroForOne = uint8(data[60]) > 0;
 
         oracleUpdateMode = OracleUpdateMode(uint8(data[61]));
-        oracleCalldata = data[data.length:data.length];
-        // For modes 1 and 2, the payload is just calldata. The oracle target comes from the
-        // immutable, so user-supplied swap bytes cannot redirect this call.
+        oracleArgs = data[data.length:data.length];
+        // For modes 1 and 2, the payload is just ABI-encoded oracle args. The oracle target
+        // comes from the immutable, so user-supplied swap bytes cannot redirect this call.
         if (oracleUpdateMode != OracleUpdateMode.Never) {
-            oracleCalldata = data[
+            oracleArgs = data[
                 _BASE_DATA_LENGTH
-                    + _ORACLE_UPDATE_HEADER_LENGTH:
-                    _BASE_DATA_LENGTH + _ORACLE_UPDATE_HEADER_LENGTH
-                        + oracleCalldataLength
+                    + _ORACLE_ARGS_HEADER_LENGTH:
+                    _BASE_DATA_LENGTH + _ORACLE_ARGS_HEADER_LENGTH
+                        + oracleArgsLength
             ];
         }
     }
@@ -194,7 +199,7 @@ contract MetricExecutor is IExecutor, ICallback {
     function _validateDataLength(bytes calldata data)
         internal
         pure
-        returns (uint256 oracleCalldataLength)
+        returns (uint256 oracleArgsLength)
     {
         if (data.length < _BASE_DATA_LENGTH) {
             revert MetricExecutor__InvalidDataLength();
@@ -212,13 +217,13 @@ contract MetricExecutor is IExecutor, ICallback {
             return 0;
         }
 
-        uint256 minLength = _BASE_DATA_LENGTH + _ORACLE_UPDATE_HEADER_LENGTH;
+        uint256 minLength = _BASE_DATA_LENGTH + _ORACLE_ARGS_HEADER_LENGTH;
         if (data.length < minLength) {
             revert MetricExecutor__InvalidDataLength();
         }
 
-        oracleCalldataLength = uint32(bytes4(data[62:66]));
-        if (data.length != minLength + oracleCalldataLength) {
+        oracleArgsLength = uint32(bytes4(data[62:66]));
+        if (data.length != minLength + oracleArgsLength) {
             revert MetricExecutor__InvalidDataLength();
         }
     }
@@ -228,7 +233,7 @@ contract MetricExecutor is IExecutor, ICallback {
         address receiver,
         bool zeroForOne,
         int128 amountSpecified,
-        bytes calldata oracleCalldata
+        bytes calldata oracleArgs
     ) internal {
         _setCurrentPool(pool);
         try IMetricPool(pool)
@@ -244,8 +249,7 @@ contract MetricExecutor is IExecutor, ICallback {
             // The first swap failed, so clear callback state before calling the oracle. Set it
             // again for the retry.
             _setCurrentPool(address(0));
-            // slither-disable-next-line unused-return
-            oracle.functionCall(oracleCalldata);
+            _updateOracle(oracleArgs);
             _setCurrentPool(pool);
             IMetricPool(pool)
                 .swap(
@@ -257,6 +261,17 @@ contract MetricExecutor is IExecutor, ICallback {
                 );
             _setCurrentPool(address(0));
         }
+    }
+
+    function _updateOracle(bytes calldata oracleArgs) internal {
+        (
+            address feedCreator,
+            uint256 deadline,
+            uint256 newSlotValue,
+            bytes memory signature
+        ) = abi.decode(oracleArgs, (address, uint256, uint256, bytes));
+
+        oracle.updateBySignature(feedCreator, deadline, newSlotValue, signature);
     }
 
     function _verifyCallbackSelector(bytes calldata data) internal pure {
