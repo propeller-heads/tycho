@@ -14,7 +14,7 @@ contract BaselineSwapAdapter is ISwapAdapter {
         relay = relay_;
     }
 
-    // TODO can add later using curvelib calculation
+    // PriceFunction is not advertised; Tycho estimates prices via swap probes.
     function price(bytes32, address, address, uint256[] memory)
         external
         pure
@@ -81,12 +81,11 @@ contract BaselineSwapAdapter is ISwapAdapter {
         limits[1] = _tokenLimit(bToken, reserve, buyToken);
     }
 
-    function getCapabilities(bytes32 poolId, address sellToken, address buyToken)
-        external
-        view
-        override
-        returns (Capability[] memory capabilities)
-    {
+    function getCapabilities(
+        bytes32 poolId,
+        address sellToken,
+        address buyToken
+    ) external view override returns (Capability[] memory capabilities) {
         (address bToken, address reserve) = _poolTokens(poolId);
         _validatePair(bToken, reserve, sellToken, buyToken);
 
@@ -225,7 +224,9 @@ contract BaselineSwapAdapter is ISwapAdapter {
         returns (address bToken, address reserve)
     {
         bToken = _bToken(poolId);
-        if (bToken == address(0)) revert InvalidOrder("Invalid bToken pool id");
+        if (bToken == address(0)) {
+            revert InvalidOrder("Invalid bToken pool id");
+        }
 
         reserve = IBaselineRelay(relay).reserve(bToken);
         if (reserve == address(0)) {
@@ -239,12 +240,8 @@ contract BaselineSwapAdapter is ISwapAdapter {
         address sellToken,
         address buyToken
     ) internal pure {
-        if (
-            !(
-                (sellToken == reserve && buyToken == bToken)
-                    || (sellToken == bToken && buyToken == reserve)
-            )
-        ) {
+        if (!((sellToken == reserve && buyToken == bToken)
+                    || (sellToken == bToken && buyToken == reserve))) {
             revert InvalidOrder("Token pair does not match bToken pool");
         }
     }
