@@ -16,8 +16,8 @@ use tycho_execution::encoding::{
 };
 
 use crate::common::{
-    alice_address, dai, encoding::encode_tycho_router_call, eth, eth_chain, get_signer,
-    get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
+    alice_address, baseline_btoken, dai, encoding::encode_tycho_router_call, eth, eth_chain,
+    get_signer, get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
 };
 
 #[test]
@@ -1657,6 +1657,108 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_aerodrome_v1", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_baseline_buy() {
+    // WETH -> (Baseline relay) -> bToken
+    let btoken = baseline_btoken();
+    let token_in = weth();
+    let token_out = btoken.clone();
+    let baseline_component = ProtocolComponent {
+        id: btoken.to_string(),
+        protocol_system: String::from("baseline"),
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        baseline_component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1000000000000000").unwrap(),
+        BigUint::from_str("675625833670487764").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_baseline_buy", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_baseline_sell() {
+    // bToken -> (Baseline relay) -> WETH
+    let btoken = baseline_btoken();
+    let token_in = btoken.clone();
+    let token_out = weth();
+    let baseline_component = ProtocolComponent {
+        id: btoken.to_string(),
+        protocol_system: String::from("baseline"),
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        baseline_component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1000000000000000000").unwrap(),
+        BigUint::from_str("1450991853685636").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_baseline_sell", hex_calldata.as_str());
 }
 
 #[test]

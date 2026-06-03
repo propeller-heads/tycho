@@ -165,8 +165,12 @@ contract BaselineSwapAdapterMainnetForkTest is Test, ISwapAdapterTypes {
     address internal constant WETH =
         address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
 
-    uint256 internal constant FORK_BLOCK = 24_930_104;
-    uint256 internal constant AMOUNT = 1e15;
+    uint256 internal constant FORK_BLOCK = 24_930_105;
+    uint256 internal constant BUY_EXACT_IN_AMOUNT = 1e15;
+    uint256 internal constant SELL_EXACT_IN_AMOUNT = 1e18;
+    uint256 internal constant EXPECTED_BUY_EXACT_IN_OUT = 675625833670487764;
+    uint256 internal constant EXPECTED_SELL_EXACT_IN_OUT = 1450991853685636;
+    uint256 internal constant EXACT_OUT_AMOUNT = 1e15;
 
     BaselineSwapAdapter internal adapter;
     bytes32 internal constant POOL_ID = bytes32(bytes20(MAINNET_BTOKEN));
@@ -177,56 +181,62 @@ contract BaselineSwapAdapterMainnetForkTest is Test, ISwapAdapterTypes {
     }
 
     function testBuyExactInMatchesMainnetQuote() public {
-        (uint256 expectedAmountOut,,) =
-            IBaselineRelayQuotes(RELAY).quoteBuyExactIn(MAINNET_BTOKEN, AMOUNT);
+        (uint256 expectedAmountOut,,) = IBaselineRelayQuotes(RELAY)
+            .quoteBuyExactIn(MAINNET_BTOKEN, BUY_EXACT_IN_AMOUNT);
+        assertEq(expectedAmountOut, EXPECTED_BUY_EXACT_IN_OUT);
 
-        deal(WETH, address(this), AMOUNT);
-        IERC20(WETH).approve(address(adapter), AMOUNT);
+        deal(WETH, address(this), BUY_EXACT_IN_AMOUNT);
+        IERC20(WETH).approve(address(adapter), BUY_EXACT_IN_AMOUNT);
 
-        Trade memory trade =
-            adapter.swap(POOL_ID, WETH, MAINNET_BTOKEN, OrderSide.Sell, AMOUNT);
+        Trade memory trade = adapter.swap(
+            POOL_ID, WETH, MAINNET_BTOKEN, OrderSide.Sell, BUY_EXACT_IN_AMOUNT
+        );
 
         assertEq(trade.calculatedAmount, expectedAmountOut);
         assertGt(trade.gasUsed, 0);
     }
 
     function testSellExactInMatchesMainnetQuote() public {
-        (uint256 expectedAmountOut,,) =
-            IBaselineRelayQuotes(RELAY).quoteSellExactIn(MAINNET_BTOKEN, AMOUNT);
+        (uint256 expectedAmountOut,,) = IBaselineRelayQuotes(RELAY)
+            .quoteSellExactIn(MAINNET_BTOKEN, SELL_EXACT_IN_AMOUNT);
+        assertEq(expectedAmountOut, EXPECTED_SELL_EXACT_IN_OUT);
 
-        deal(MAINNET_BTOKEN, address(this), AMOUNT);
-        IERC20(MAINNET_BTOKEN).approve(address(adapter), AMOUNT);
+        deal(MAINNET_BTOKEN, address(this), SELL_EXACT_IN_AMOUNT);
+        IERC20(MAINNET_BTOKEN).approve(address(adapter), SELL_EXACT_IN_AMOUNT);
 
-        Trade memory trade =
-            adapter.swap(POOL_ID, MAINNET_BTOKEN, WETH, OrderSide.Sell, AMOUNT);
+        Trade memory trade = adapter.swap(
+            POOL_ID, MAINNET_BTOKEN, WETH, OrderSide.Sell, SELL_EXACT_IN_AMOUNT
+        );
 
         assertEq(trade.calculatedAmount, expectedAmountOut);
         assertGt(trade.gasUsed, 0);
     }
 
     function testBuyExactOutMatchesMainnetQuote() public {
-        (uint256 expectedAmountIn,,) =
-            IBaselineRelayQuotes(RELAY).quoteBuyExactOut(MAINNET_BTOKEN, AMOUNT);
+        (uint256 expectedAmountIn,,) = IBaselineRelayQuotes(RELAY)
+            .quoteBuyExactOut(MAINNET_BTOKEN, EXACT_OUT_AMOUNT);
 
         deal(WETH, address(this), expectedAmountIn);
         IERC20(WETH).approve(address(adapter), expectedAmountIn);
 
-        Trade memory trade =
-            adapter.swap(POOL_ID, WETH, MAINNET_BTOKEN, OrderSide.Buy, AMOUNT);
+        Trade memory trade = adapter.swap(
+            POOL_ID, WETH, MAINNET_BTOKEN, OrderSide.Buy, EXACT_OUT_AMOUNT
+        );
 
         assertEq(trade.calculatedAmount, expectedAmountIn);
         assertGt(trade.gasUsed, 0);
     }
 
     function testSellExactOutMatchesMainnetQuote() public {
-        (uint256 expectedAmountIn,,) =
-            IBaselineRelayQuotes(RELAY).quoteSellExactOut(MAINNET_BTOKEN, AMOUNT);
+        (uint256 expectedAmountIn,,) = IBaselineRelayQuotes(RELAY)
+            .quoteSellExactOut(MAINNET_BTOKEN, EXACT_OUT_AMOUNT);
 
         deal(MAINNET_BTOKEN, address(this), expectedAmountIn);
         IERC20(MAINNET_BTOKEN).approve(address(adapter), expectedAmountIn);
 
-        Trade memory trade =
-            adapter.swap(POOL_ID, MAINNET_BTOKEN, WETH, OrderSide.Buy, AMOUNT);
+        Trade memory trade = adapter.swap(
+            POOL_ID, MAINNET_BTOKEN, WETH, OrderSide.Buy, EXACT_OUT_AMOUNT
+        );
 
         assertEq(trade.calculatedAmount, expectedAmountIn);
         assertGt(trade.gasUsed, 0);

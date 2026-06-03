@@ -8,8 +8,9 @@ use crate::encoding::{
         constants::{DEFAULT_EXECUTORS_JSON, PROTOCOL_SPECIFIC_CONFIG},
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
-            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, curve::CurveSwapEncoder,
-            ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
+            balancer_v3::BalancerV3SwapEncoder, baseline::BaselineSwapEncoder,
+            bebop::BebopSwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
+            ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
             etherfi::EtherfiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
             hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
@@ -105,6 +106,9 @@ impl SwapEncoderRegistry {
             }
             "aerodrome_v1" => {
                 Ok(Box::new(AerodromeV1SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "baseline" => {
+                Ok(Box::new(BaselineSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:balancer_v2" => {
                 Ok(Box::new(BalancerV2SwapEncoder::new(executor_address, self.chain, config)?))
