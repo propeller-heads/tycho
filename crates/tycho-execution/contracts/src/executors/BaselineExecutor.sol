@@ -24,9 +24,7 @@ contract BaselineExecutor is IExecutor {
     address public immutable relay;
 
     constructor(address relay_) {
-        if (relay_ == address(0)) {
-            revert BaselineExecutor__ZeroAddress();
-        }
+        if (relay_ == address(0)) revert BaselineExecutor__ZeroAddress();
         relay = relay_;
     }
 
