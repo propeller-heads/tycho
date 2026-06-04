@@ -166,16 +166,12 @@ contract FeeCalculatorTest is Constants {
     }
 
     function testCalculateRouterFeeOnClientFeeTooHigh() public {
-        // Set router fee on client fee > 100%
+        // Setting router fee on client fee > 100% reverts at the setter
         vm.prank(FEE_SETTER);
-        feeCalculator.setRouterFeeOnClientFee(10001); // 100.01%
-
-        uint256 amountIn = 1 ether;
-
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__FeeTooHigh.selector)
         );
-        feeCalculator.calculateFee(amountIn, ALICE, 100);
+        feeCalculator.setRouterFeeOnClientFee(10001); // 100.01%
     }
 
     function testCalculateWithCustomRouterFeeReceiver() public {
@@ -563,12 +559,27 @@ contract FeeCalculatorConfigTest is Constants {
         uint16 maxFee = type(uint16).max;
 
         vm.startPrank(FEE_SETTER);
+        vm.expectRevert(
+            abi.encodeWithSelector(FeeCalculator__FeeTooHigh.selector)
+        );
         feeCalculator.setRouterFeeOnOutput(maxFee);
+        vm.expectRevert(
+            abi.encodeWithSelector(FeeCalculator__FeeTooHigh.selector)
+        );
         feeCalculator.setRouterFeeOnClientFee(maxFee);
         vm.stopPrank();
+    }
 
-        assertEq(feeCalculator.getRouterFeeOnOutput(), maxFee);
-        assertEq(feeCalculator.getRouterFeeOnClientFee(), maxFee);
+    function testMaximumValidFee() public {
+        uint16 maxValidFee = 10000;
+
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(maxValidFee);
+        feeCalculator.setRouterFeeOnClientFee(maxValidFee);
+        vm.stopPrank();
+
+        assertEq(feeCalculator.getRouterFeeOnOutput(), maxValidFee);
+        assertEq(feeCalculator.getRouterFeeOnClientFee(), maxValidFee);
     }
 
     function testRoleHolderCanTransferOwnRole() public {

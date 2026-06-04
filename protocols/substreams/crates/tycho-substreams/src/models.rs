@@ -637,6 +637,7 @@ impl ContractChange {
         self.balance.is_empty() &&
             self.slots.is_empty() &&
             self.code.is_empty() &&
+            self.token_balances.is_empty() &&
             self.change == i32::from(ChangeType::Update)
     }
 }
@@ -791,6 +792,24 @@ mod test {
 
         let tx_changes = builder.build();
         assert!(tx_changes.is_none());
+    }
+
+    #[test]
+    fn test_transaction_changes_builder_keeps_token_balance_only_changes() {
+        let mut builder = TransactionChangesBuilder::new(&super::Transaction::default());
+        let mut contract_changes = InterimContractChange::new(&[1], false);
+        contract_changes.upsert_token_balance(&[2], &[3]);
+
+        builder.add_contract_changes(&contract_changes);
+
+        let tx_changes = builder.build().unwrap();
+        assert_eq!(tx_changes.contract_changes.len(), 1);
+
+        let contract_change = &tx_changes.contract_changes[0];
+        assert_eq!(contract_change.address, vec![1]);
+        assert_eq!(contract_change.token_balances.len(), 1);
+        assert_eq!(contract_change.token_balances[0].token, vec![2]);
+        assert_eq!(contract_change.token_balances[0].balance, vec![3]);
     }
 
     #[test]
