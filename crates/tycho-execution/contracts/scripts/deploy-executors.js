@@ -43,6 +43,7 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "rfq:metric",
+        "baseline",
     ],
     "unichain": [
         "uniswap_v2",
