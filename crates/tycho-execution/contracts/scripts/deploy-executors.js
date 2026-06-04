@@ -108,6 +108,11 @@ const executors_to_deploy = {
         {
             exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
         },
+        // Args: Baseline relay/proxy
+        {
+            exchange: "BaselineExecutor",
+            args: ["0xc81Fd894C0acE037d133aF4886550aC8133568E8"]
+        },
     ],
     "unichain": [
         // USV2 - Args: Fee BPS

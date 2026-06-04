@@ -605,6 +605,14 @@ Current execution testing checkpoint:
   For the real deploy, run the script with only the Baseline entry enabled, or
   first add an explicit skip-if-code-exists path; the unmodified Ethereum list
   will attempt already deployed executors before reaching Baseline.
+- The Hardhat CREATE2 deployment script also includes `BaselineExecutor` for
+  Base with the same relay constructor arg. With factory
+  `0x4e59b44847b379578588920cA78FbF26c0B4956C` and salt
+  `BaselineExecutor-base`, the computed Base executor address is
+  `0xB0057Dc8079Bf0D55E7ecf43b35c223b1AC96E42`.
+  This is deployment-script coverage only; do not add Base production executor
+  config until real deployment, TychoRouter whitelisting, and Base VM/execution
+  validation are complete.
 - Do not add a static BStaking implementation address. BStaking is a routed
   component behind the relay like BSwap and BLens. The current DCI path discovers
   it through relay `getCurrentRate(address)` and then swap simulation can call
