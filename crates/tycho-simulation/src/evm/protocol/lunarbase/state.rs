@@ -15,13 +15,13 @@ use tycho_common::{
     Bytes,
 };
 
-use super::decoder::{apply_delta, AttributeError, AttributeMap, StateDelta};
+use super::decoder::apply_delta;
 
 pub type Address = [u8; 20];
 const DEFAULT_GAS: u64 = 180_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LunarBaseState {
+pub struct LunarBaseTychoState {
     pub pool: Address,
     pub token_x: Address,
     pub token_y: Address,
@@ -34,10 +34,10 @@ pub struct LunarBaseState {
     pub concentration_k: u32,
     pub block_delay: u64,
     pub paused: bool,
-    pub blacklist_fee_multiplier: U256,
+    pub head_block: u64,
 }
 
-impl LunarBaseState {
+impl LunarBaseTychoState {
     pub fn pool_params(&self) -> PoolParams {
         PoolParams {
             sqrt_price_x96: self.anchor_price_x96,
@@ -49,21 +49,83 @@ impl LunarBaseState {
         }
     }
 
-    pub fn is_fresh(&self, block_number: u64) -> bool {
-        block_number <
+    pub fn is_fresh(&self) -> bool {
+        self.head_block <
             self.latest_update_block
                 .saturating_add(self.block_delay)
     }
 
-    pub fn fee_multiplier(&self) -> U256 {
-        U256::from(1u64)
-    }
-}
+    fn quote_exact_in(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+    ) -> Result<(U256, Self), QuoteError> {
+        if self.paused {
+            return Err(QuoteError::Paused);
+        }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LunarBaseTychoState {
-    pub state: LunarBaseState,
-    pub head_block: u64,
+        if !self.is_fresh() {
+            return Err(QuoteError::Stale {
+                block_number: self.head_block,
+                latest_update_block: self.latest_update_block,
+                block_delay: self.block_delay,
+            });
+        }
+
+        let params = self.pool_params();
+        if token_in == self.token_x && token_out == self.token_y {
+            let math_result = quote_x_to_y_with_multiplier(&params, amount_in, U256::from(1u64));
+            if math_result.amount_out.is_zero() {
+                return Err(QuoteError::Rejected);
+            }
+
+            let input = u256_to_u128(amount_in)?;
+            let gross_output = u256_to_u128(
+                math_result
+                    .amount_out
+                    .checked_add(math_result.fee)
+                    .ok_or(QuoteError::ReserveOverflow)?,
+            )?;
+            let mut next = self.clone();
+            next.reserve_x = next
+                .reserve_x
+                .checked_add(input)
+                .ok_or(QuoteError::ReserveOverflow)?;
+            next.reserve_y = next
+                .reserve_y
+                .checked_sub(gross_output)
+                .ok_or(QuoteError::ReserveUnderflow)?;
+            return Ok((math_result.amount_out, next));
+        }
+
+        if token_in == self.token_y && token_out == self.token_x {
+            let math_result = quote_y_to_x_with_multiplier(&params, amount_in, U256::from(1u64));
+            if math_result.amount_out.is_zero() {
+                return Err(QuoteError::Rejected);
+            }
+
+            let input = u256_to_u128(amount_in)?;
+            let gross_output = u256_to_u128(
+                math_result
+                    .amount_out
+                    .checked_add(math_result.fee)
+                    .ok_or(QuoteError::ReserveOverflow)?,
+            )?;
+            let mut next = self.clone();
+            next.reserve_y = next
+                .reserve_y
+                .checked_add(input)
+                .ok_or(QuoteError::ReserveOverflow)?;
+            next.reserve_x = next
+                .reserve_x
+                .checked_sub(gross_output)
+                .ok_or(QuoteError::ReserveUnderflow)?;
+            return Ok((math_result.amount_out, next));
+        }
+
+        Err(QuoteError::InvalidTokenPair)
+    }
 }
 
 #[typetag::serde]
@@ -75,11 +137,11 @@ impl ProtocolSim for LunarBaseTychoState {
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let token_in = address_from_bytes(base.address.as_ref())?;
         let token_out = address_from_bytes(quote.address.as_ref())?;
-        if token_in == self.state.token_x && token_out == self.state.token_y {
-            return spot_from_reserves(self.state.reserve_x, self.state.reserve_y, base, quote);
+        if token_in == self.token_x && token_out == self.token_y {
+            return spot_from_reserves(self.reserve_x, self.reserve_y, base, quote);
         }
-        if token_in == self.state.token_y && token_out == self.state.token_x {
-            return spot_from_reserves(self.state.reserve_y, self.state.reserve_x, base, quote);
+        if token_in == self.token_y && token_out == self.token_x {
+            return spot_from_reserves(self.reserve_y, self.reserve_x, base, quote);
         }
         Err(SimulationError::InvalidInput("invalid LunarBase token pair".to_owned(), None))
     }
@@ -90,21 +152,18 @@ impl ProtocolSim for LunarBaseTychoState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let quote = quote_exact_in(
-            &self.state,
-            QuoteRequest {
-                token_in: address_from_bytes(token_in.address.as_ref())?,
-                token_out: address_from_bytes(token_out.address.as_ref())?,
-                amount_in: biguint_to_u256(&amount_in)?,
-                block_number: self.head_block,
-            },
-        )
-        .map_err(map_quote_error)?;
+        let (amount_out, next_state) = self
+            .quote_exact_in(
+                address_from_bytes(token_in.address.as_ref())?,
+                address_from_bytes(token_out.address.as_ref())?,
+                biguint_to_u256(&amount_in)?,
+            )
+            .map_err(map_quote_error)?;
 
         Ok(GetAmountOutResult::new(
-            u256_to_biguint(quote.amount_out),
+            u256_to_biguint(amount_out),
             BigUint::from(DEFAULT_GAS),
-            Box::new(Self { state: quote.next_state, head_block: self.head_block }),
+            Box::new(next_state),
         ))
     }
 
@@ -115,11 +174,11 @@ impl ProtocolSim for LunarBaseTychoState {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let sell = address_from_bytes(sell_token.as_ref())?;
         let buy = address_from_bytes(buy_token.as_ref())?;
-        if sell == self.state.token_x && buy == self.state.token_y {
-            return quote_limit(&self.state, sell, buy, soft_limit(self.state.reserve_x));
+        if sell == self.token_x && buy == self.token_y {
+            return quote_limit(self, sell, buy, soft_limit(self.reserve_x));
         }
-        if sell == self.state.token_y && buy == self.state.token_x {
-            return quote_limit(&self.state, sell, buy, soft_limit(self.state.reserve_y));
+        if sell == self.token_y && buy == self.token_x {
+            return quote_limit(self, sell, buy, soft_limit(self.reserve_y));
         }
         Err(SimulationError::InvalidInput("invalid LunarBase token pair".to_owned(), None))
     }
@@ -139,19 +198,14 @@ impl ProtocolSim for LunarBaseTychoState {
         let head_block = delta
             .updated_attributes
             .get("block_number")
-            .map(|value| decode_block_number(value.as_ref()))
-            .transpose()
-            .map_err(|err| TransitionError::DecodeError(format!("{err:?}")))?;
+            .map(|value| u64::from(value.clone()));
 
-        let state_delta = StateDelta {
-            updated_attributes: delta
-                .updated_attributes
-                .into_iter()
-                .filter(|(key, _)| key != "block_number" && key != "block_timestamp")
-                .map(|(key, value)| (key, value.to_vec()))
-                .collect::<AttributeMap>(),
-        };
-        apply_delta(&mut self.state, &state_delta)
+        let updated_attributes = delta
+            .updated_attributes
+            .into_iter()
+            .filter(|(key, _)| key != "block_number" && key != "block_timestamp")
+            .collect();
+        apply_delta(self, updated_attributes)
             .map_err(|err| TransitionError::DecodeError(format!("{err:?}")))?;
         if let Some(head_block) = head_block {
             self.head_block = head_block;
@@ -180,26 +234,6 @@ impl ProtocolSim for LunarBaseTychoState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Direction {
-    XToY,
-    YToX,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct QuoteRequest {
-    token_in: Address,
-    token_out: Address,
-    amount_in: U256,
-    block_number: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct QuoteResult {
-    amount_out: U256,
-    next_state: LunarBaseState,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum QuoteError {
     Paused,
@@ -210,116 +244,12 @@ enum QuoteError {
     ReserveUnderflow,
 }
 
-fn quote_exact_in(
-    state: &LunarBaseState,
-    request: QuoteRequest,
-) -> Result<QuoteResult, QuoteError> {
-    if state.paused {
-        return Err(QuoteError::Paused);
-    }
-
-    if !state.is_fresh(request.block_number) {
-        return Err(QuoteError::Stale {
-            block_number: request.block_number,
-            latest_update_block: state.latest_update_block,
-            block_delay: state.block_delay,
-        });
-    }
-
-    let direction = resolve_direction(state, &request)?;
-    let params = state.pool_params();
-    let math_result = match direction {
-        Direction::XToY => {
-            quote_x_to_y_with_multiplier(&params, request.amount_in, state.fee_multiplier())
-        }
-        Direction::YToX => {
-            quote_y_to_x_with_multiplier(&params, request.amount_in, state.fee_multiplier())
-        }
-    };
-
-    if math_result.amount_out.is_zero() {
-        return Err(QuoteError::Rejected);
-    }
-
-    let next_state = transition_reserves(
-        state,
-        direction,
-        request.amount_in,
-        math_result.amount_out,
-        math_result.fee,
-    )?;
-
-    Ok(QuoteResult { amount_out: math_result.amount_out, next_state })
-}
-
-fn resolve_direction(
-    state: &LunarBaseState,
-    request: &QuoteRequest,
-) -> Result<Direction, QuoteError> {
-    if request.token_in == state.token_x && request.token_out == state.token_y {
-        return Ok(Direction::XToY);
-    }
-    if request.token_in == state.token_y && request.token_out == state.token_x {
-        return Ok(Direction::YToX);
-    }
-    Err(QuoteError::InvalidTokenPair)
-}
-
-fn transition_reserves(
-    state: &LunarBaseState,
-    direction: Direction,
-    amount_in: U256,
-    amount_out: U256,
-    fee: U256,
-) -> Result<LunarBaseState, QuoteError> {
-    let input = u256_to_u128(amount_in)?;
-    let gross_output = u256_to_u128(
-        amount_out
-            .checked_add(fee)
-            .ok_or(QuoteError::ReserveOverflow)?,
-    )?;
-
-    let mut next = state.clone();
-    match direction {
-        Direction::XToY => {
-            next.reserve_x = next
-                .reserve_x
-                .checked_add(input)
-                .ok_or(QuoteError::ReserveOverflow)?;
-            next.reserve_y = next
-                .reserve_y
-                .checked_sub(gross_output)
-                .ok_or(QuoteError::ReserveUnderflow)?;
-        }
-        Direction::YToX => {
-            next.reserve_y = next
-                .reserve_y
-                .checked_add(input)
-                .ok_or(QuoteError::ReserveOverflow)?;
-            next.reserve_x = next
-                .reserve_x
-                .checked_sub(gross_output)
-                .ok_or(QuoteError::ReserveUnderflow)?;
-        }
-    }
-    Ok(next)
-}
-
 fn u256_to_u128(value: U256) -> Result<u128, QuoteError> {
     if value.bit_len() > 128 {
         return Err(QuoteError::ReserveOverflow);
     }
     let limbs = value.as_limbs();
     Ok(((limbs[1] as u128) << 64) | limbs[0] as u128)
-}
-
-fn decode_block_number(value: &[u8]) -> Result<u64, AttributeError> {
-    if value.len() > 8 {
-        return Err(AttributeError::IntegerOverflow("block_number"));
-    }
-    let mut out = [0u8; 8];
-    out[8 - value.len()..].copy_from_slice(value);
-    Ok(u64::from_be_bytes(out))
 }
 
 fn spot_from_reserves(
@@ -340,7 +270,7 @@ fn soft_limit(reserve_in: u128) -> BigUint {
 }
 
 fn quote_limit(
-    state: &LunarBaseState,
+    state: &LunarBaseTychoState,
     token_in: Address,
     token_out: Address,
     mut amount_in: BigUint,
@@ -350,17 +280,8 @@ fn quote_limit(
     }
 
     loop {
-        let quote = quote_exact_in(
-            state,
-            QuoteRequest {
-                token_in,
-                token_out,
-                amount_in: biguint_to_u256(&amount_in)?,
-                block_number: state.latest_update_block,
-            },
-        );
-        match quote {
-            Ok(quote) => return Ok((amount_in, u256_to_biguint(quote.amount_out))),
+        match state.quote_exact_in(token_in, token_out, biguint_to_u256(&amount_in)?) {
+            Ok((amount_out, _)) => return Ok((amount_in, u256_to_biguint(amount_out))),
             Err(
                 QuoteError::Rejected | QuoteError::ReserveOverflow | QuoteError::ReserveUnderflow,
             ) => {
@@ -407,8 +328,8 @@ mod tests {
         [byte; 20]
     }
 
-    fn state() -> LunarBaseState {
-        LunarBaseState {
+    fn state() -> LunarBaseTychoState {
+        LunarBaseTychoState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),
@@ -421,51 +342,32 @@ mod tests {
             concentration_k: 0,
             block_delay: 2,
             paused: false,
-            blacklist_fee_multiplier: U256::from(1u64),
+            head_block: 100,
         }
-    }
-
-    #[test]
-    fn uses_base_fee_by_default() {
-        let mut state = state();
-        state.blacklist_fee_multiplier = U256::from(100u64);
-
-        assert_eq!(state.fee_multiplier(), U256::from(1u64));
     }
 
     #[test]
     fn quotes_x_to_y_and_transitions_reserves() {
         let state = state();
-        let quote = quote_exact_in(
-            &state,
-            QuoteRequest {
-                token_in: state.token_x,
-                token_out: state.token_y,
-                amount_in: U256::from(1_000u64),
-                block_number: 100,
-            },
-        )
-        .unwrap();
+        let (amount_out, next_state) = state
+            .quote_exact_in(state.token_x, state.token_y, U256::from(1_000u64))
+            .unwrap();
 
-        assert_eq!(quote.amount_out, U256::from(1_000u64));
-        assert_eq!(quote.next_state.reserve_x, 1_001_000);
-        assert_eq!(quote.next_state.reserve_y, 999_000);
-        assert_eq!(quote.next_state.anchor_price_x96, state.anchor_price_x96);
+        assert_eq!(amount_out, U256::from(1_000u64));
+        assert_eq!(next_state.reserve_x, 1_001_000);
+        assert_eq!(next_state.reserve_y, 999_000);
+        assert_eq!(next_state.anchor_price_x96, state.anchor_price_x96);
+        assert_eq!(next_state.head_block, state.head_block);
     }
 
     #[test]
     fn rejects_stale_state() {
-        let state = state();
-        let err = quote_exact_in(
-            &state,
-            QuoteRequest {
-                token_in: state.token_x,
-                token_out: state.token_y,
-                amount_in: U256::from(1_000u64),
-                block_number: 102,
-            },
-        )
-        .unwrap_err();
+        let mut state = state();
+        state.head_block = 102;
+
+        let err = state
+            .quote_exact_in(state.token_x, state.token_y, U256::from(1_000u64))
+            .unwrap_err();
 
         assert_eq!(
             err,

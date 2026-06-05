@@ -17,7 +17,6 @@ pub fn register_lunarbase_decoder(decoder: &mut TychoStreamDecoder<BlockHeader>)
 mod tests {
     use std::collections::HashMap;
 
-    use lunarbase_pmm_math::U256;
     use num_bigint::BigUint;
     use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
     use tycho_common::{
@@ -30,7 +29,7 @@ mod tests {
     use super::{
         decoder::{decode_lunarbase_snapshot, encode_state},
         register_lunarbase_decoder,
-        state::{Address, LunarBaseState, LunarBaseTychoState},
+        state::{Address, LunarBaseTychoState},
         PROTOCOL_SYSTEM,
     };
     use crate::{
@@ -64,8 +63,8 @@ mod tests {
         )
     }
 
-    fn state() -> LunarBaseState {
-        LunarBaseState {
+    fn state() -> LunarBaseTychoState {
+        LunarBaseTychoState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),
@@ -78,19 +77,16 @@ mod tests {
             concentration_k: 0,
             block_delay: 2,
             paused: false,
-            blacklist_fee_multiplier: U256::from(1u64),
+            head_block: 100,
         }
     }
 
-    fn snapshot(state: LunarBaseState) -> ComponentWithState {
+    fn snapshot(state: LunarBaseTychoState) -> ComponentWithState {
         let component_id = component_id(state.pool);
         ComponentWithState {
             state: ResponseProtocolState {
                 component_id: component_id.clone(),
-                attributes: encode_state(&state)
-                    .into_iter()
-                    .map(|(name, value)| (name, Bytes::from(value)))
-                    .collect(),
+                attributes: encode_state(&state),
                 balances: HashMap::new(),
             }
             .into(),
@@ -115,25 +111,7 @@ mod tests {
     }
 
     fn component_id(pool: Address) -> String {
-        address_to_hex(pool)
-    }
-
-    fn address_to_hex(address: Address) -> String {
-        let mut out = String::with_capacity(42);
-        out.push_str("0x");
-        for byte in address {
-            out.push(nibble_to_hex(byte >> 4));
-            out.push(nibble_to_hex(byte & 0x0f));
-        }
-        out
-    }
-
-    fn nibble_to_hex(value: u8) -> char {
-        match value {
-            0..=9 => (b'0' + value) as char,
-            10..=15 => (b'a' + value - 10) as char,
-            _ => unreachable!("nibble is always <= 15"),
-        }
+        format!("0x{}", hex::encode(pool))
     }
 
     #[test]
@@ -152,6 +130,8 @@ mod tests {
         let expected = state();
         let decoded = decode_lunarbase_snapshot(&snapshot(expected.clone())).unwrap();
 
+        let mut expected = expected;
+        expected.head_block = 0;
         assert_eq!(decoded, expected);
     }
 
@@ -168,13 +148,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(decoded.state, expected);
-        assert_eq!(decoded.head_block, 101);
+        let mut expected = expected;
+        expected.head_block = 101;
+        assert_eq!(decoded, expected);
     }
 
     #[test]
     fn delta_transition_updates_head_block_from_tycho_block_info() {
-        let mut state = LunarBaseTychoState { state: state(), head_block: 100 };
+        let mut state = state();
         let delta = ProtocolStateDelta {
             component_id: "component".to_owned(),
             updated_attributes: HashMap::from([(
@@ -197,22 +178,18 @@ mod tests {
         let native = addr(0);
         let usdc = address("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
         let state = LunarBaseTychoState {
-            state: LunarBaseState {
-                pool: address("0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"),
-                token_x: native,
-                token_y: usdc,
-                anchor_price_x96: u128::from_str_radix("000000000002ffb42f3bb2b1c0000000", 16)
-                    .unwrap(),
-                fee_ask_x24: u32::from_str_radix("000006f6", 16).unwrap(),
-                fee_bid_x24: u32::from_str_radix("000021ba", 16).unwrap(),
-                latest_update_block: 46_498_514,
-                reserve_x: u128::from_str_radix("000000000000000091c69269d1d44388", 16).unwrap(),
-                reserve_y: u128::from_str_radix("00000000000000000000000446add763", 16).unwrap(),
-                concentration_k: 0,
-                block_delay: 2,
-                paused: false,
-                blacklist_fee_multiplier: U256::from(1u64),
-            },
+            pool: address("0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"),
+            token_x: native,
+            token_y: usdc,
+            anchor_price_x96: u128::from_str_radix("000000000002ffb42f3bb2b1c0000000", 16).unwrap(),
+            fee_ask_x24: u32::from_str_radix("000006f6", 16).unwrap(),
+            fee_bid_x24: u32::from_str_radix("000021ba", 16).unwrap(),
+            latest_update_block: 46_498_514,
+            reserve_x: u128::from_str_radix("000000000000000091c69269d1d44388", 16).unwrap(),
+            reserve_y: u128::from_str_radix("00000000000000000000000446add763", 16).unwrap(),
+            concentration_k: 0,
+            block_delay: 2,
+            paused: false,
             head_block: 46_498_514,
         };
 
@@ -229,9 +206,9 @@ mod tests {
             .unwrap();
 
         assert!(quote.amount > BigUint::ZERO);
-        assert!(quote.amount < BigUint::from(state.state.reserve_y));
-        assert_eq!(next.state.reserve_x, state.state.reserve_x + 10_000_000_000_000_000u128);
-        assert!(next.state.reserve_y < state.state.reserve_y);
+        assert!(quote.amount < BigUint::from(state.reserve_y));
+        assert_eq!(next.reserve_x, state.reserve_x + 10_000_000_000_000_000u128);
+        assert!(next.reserve_y < state.reserve_y);
         println!(
             "LunarBase live quote: 0.01 ETH -> {} USDC base units at block {}",
             quote.amount, state.head_block

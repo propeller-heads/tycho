@@ -6,5 +6,3 @@ pub(crate) mod state;
 pub(crate) type Address = [u8; 20];
 
 pub(crate) use component::{component_id, protocol_component};
-pub(crate) use events::EventApplyContext;
-pub(crate) use indexed::{BlockChangesBuilder, BootstrapState};

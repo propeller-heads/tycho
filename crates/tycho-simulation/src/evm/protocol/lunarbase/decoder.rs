@@ -1,16 +1,13 @@
 use std::collections::HashMap;
 
-use lunarbase_pmm_math::U256;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
-use tycho_common::{models::token::Token, simulation::errors::SimulationError, Bytes};
+use tycho_common::{models::token::Token, Bytes};
 
-use super::state::{Address, LunarBaseState, LunarBaseTychoState};
+use super::state::{Address, LunarBaseTychoState};
 use crate::protocol::{
     errors::InvalidSnapshotError,
     models::{DecoderContext, TryFromWithBlock},
 };
-
-pub type AttributeMap = HashMap<String, Vec<u8>>;
 
 mod attrs {
     pub const ANCHOR_PRICE_X96: &str = "anchor_price_x96";
@@ -22,136 +19,6 @@ mod attrs {
     pub const CONCENTRATION_K: &str = "concentration_k";
     pub const BLOCK_DELAY: &str = "block_delay";
     pub const PAUSED: &str = "paused";
-    pub const BLACKLIST_FEE_MULTIPLIER: &str = "blacklist_fee_multiplier";
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AttributeError {
-    Missing(&'static str),
-    InvalidLength { name: &'static str, expected: usize, actual: usize },
-    IntegerOverflow(&'static str),
-}
-
-fn insert_bool(attrs: &mut AttributeMap, name: &'static str, value: bool) {
-    attrs.insert(name.to_owned(), vec![u8::from(value)]);
-}
-
-fn insert_u32(attrs: &mut AttributeMap, name: &'static str, value: u32) {
-    attrs.insert(name.to_owned(), value.to_be_bytes().to_vec());
-}
-
-fn insert_u64(attrs: &mut AttributeMap, name: &'static str, value: u64) {
-    attrs.insert(name.to_owned(), value.to_be_bytes().to_vec());
-}
-
-fn insert_u128(attrs: &mut AttributeMap, name: &'static str, value: u128) {
-    attrs.insert(name.to_owned(), value.to_be_bytes().to_vec());
-}
-
-fn insert_u256(attrs: &mut AttributeMap, name: &'static str, value: U256) {
-    let mut out = vec![0u8; 32];
-    value
-        .to_be_bytes_vec()
-        .iter()
-        .rev()
-        .take(32)
-        .enumerate()
-        .for_each(|(idx, byte)| {
-            out[31 - idx] = *byte;
-        });
-    attrs.insert(name.to_owned(), out);
-}
-
-fn require_bool(attrs: &AttributeMap, name: &'static str) -> Result<bool, AttributeError> {
-    let value = require(attrs, name)?;
-    decode_bool(name, value)
-}
-
-fn decode_bool(name: &'static str, value: &[u8]) -> Result<bool, AttributeError> {
-    if value.len() != 1 {
-        return Err(AttributeError::InvalidLength { name, expected: 1, actual: value.len() });
-    }
-    Ok(value[0] != 0)
-}
-
-fn require_u32(attrs: &AttributeMap, name: &'static str) -> Result<u32, AttributeError> {
-    decode_u32(name, require(attrs, name)?)
-}
-
-fn require_u64(attrs: &AttributeMap, name: &'static str) -> Result<u64, AttributeError> {
-    decode_u64(name, require(attrs, name)?)
-}
-
-fn require_u128(attrs: &AttributeMap, name: &'static str) -> Result<u128, AttributeError> {
-    decode_u128(name, require(attrs, name)?)
-}
-
-fn optional_u256(
-    attrs: &AttributeMap,
-    name: &'static str,
-    default: U256,
-) -> Result<U256, AttributeError> {
-    attrs
-        .get(name)
-        .map(|value| decode_u256(name, value))
-        .unwrap_or(Ok(default))
-}
-
-fn decode_u256(name: &'static str, value: &[u8]) -> Result<U256, AttributeError> {
-    if value.len() > 32 {
-        return Err(AttributeError::InvalidLength { name, expected: 32, actual: value.len() });
-    }
-    Ok(U256::from_be_slice(value))
-}
-
-fn require<'a>(attrs: &'a AttributeMap, name: &'static str) -> Result<&'a [u8], AttributeError> {
-    attrs
-        .get(name)
-        .map(Vec::as_slice)
-        .ok_or(AttributeError::Missing(name))
-}
-
-fn decode_u32(name: &'static str, value: &[u8]) -> Result<u32, AttributeError> {
-    if value.len() > 4 {
-        return Err(AttributeError::IntegerOverflow(name));
-    }
-    let mut out = [0u8; 4];
-    out[4 - value.len()..].copy_from_slice(value);
-    Ok(u32::from_be_bytes(out))
-}
-
-fn decode_u64(name: &'static str, value: &[u8]) -> Result<u64, AttributeError> {
-    if value.len() > 8 {
-        return Err(AttributeError::IntegerOverflow(name));
-    }
-    let mut out = [0u8; 8];
-    out[8 - value.len()..].copy_from_slice(value);
-    Ok(u64::from_be_bytes(out))
-}
-
-fn decode_u128(name: &'static str, value: &[u8]) -> Result<u128, AttributeError> {
-    if value.len() > 16 {
-        return Err(AttributeError::IntegerOverflow(name));
-    }
-    let mut out = [0u8; 16];
-    out[16 - value.len()..].copy_from_slice(value);
-    Ok(u128::from_be_bytes(out))
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StateDelta {
-    pub updated_attributes: AttributeMap,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StateDecodeError {
-    Attribute(AttributeError),
-}
-
-impl From<AttributeError> for StateDecodeError {
-    fn from(value: AttributeError) -> Self {
-        StateDecodeError::Attribute(value)
-    }
 }
 
 impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseTychoState {
@@ -164,89 +31,72 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseTychoState {
         _all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let state = decode_lunarbase_snapshot(&snapshot)?;
-        Ok(Self { state, head_block: block.number })
+        let mut state = decode_lunarbase_snapshot(&snapshot)?;
+        state.head_block = block.number;
+        Ok(state)
     }
 }
 
-pub fn encode_state(state: &LunarBaseState) -> AttributeMap {
-    let mut attrs = AttributeMap::new();
-    insert_u128(&mut attrs, attrs::ANCHOR_PRICE_X96, state.anchor_price_x96);
-    insert_u32(&mut attrs, attrs::FEE_ASK_X24, state.fee_ask_x24);
-    insert_u32(&mut attrs, attrs::FEE_BID_X24, state.fee_bid_x24);
-    insert_u64(&mut attrs, attrs::LATEST_UPDATE_BLOCK, state.latest_update_block);
-    insert_u128(&mut attrs, attrs::RESERVE_X, state.reserve_x);
-    insert_u128(&mut attrs, attrs::RESERVE_Y, state.reserve_y);
-    insert_u32(&mut attrs, attrs::CONCENTRATION_K, state.concentration_k);
-    insert_u64(&mut attrs, attrs::BLOCK_DELAY, state.block_delay);
-    insert_bool(&mut attrs, attrs::PAUSED, state.paused);
-    insert_u256(&mut attrs, attrs::BLACKLIST_FEE_MULTIPLIER, state.blacklist_fee_multiplier);
-    attrs
+#[cfg(test)]
+pub fn encode_state(state: &LunarBaseTychoState) -> HashMap<String, Bytes> {
+    HashMap::from([
+        (attrs::ANCHOR_PRICE_X96.to_owned(), Bytes::from(state.anchor_price_x96)),
+        (attrs::FEE_ASK_X24.to_owned(), Bytes::from(state.fee_ask_x24)),
+        (attrs::FEE_BID_X24.to_owned(), Bytes::from(state.fee_bid_x24)),
+        (attrs::LATEST_UPDATE_BLOCK.to_owned(), Bytes::from(state.latest_update_block)),
+        (attrs::RESERVE_X.to_owned(), Bytes::from(state.reserve_x)),
+        (attrs::RESERVE_Y.to_owned(), Bytes::from(state.reserve_y)),
+        (attrs::CONCENTRATION_K.to_owned(), Bytes::from(state.concentration_k)),
+        (attrs::BLOCK_DELAY.to_owned(), Bytes::from(state.block_delay)),
+        (attrs::PAUSED.to_owned(), Bytes::from([u8::from(state.paused)])),
+    ])
 }
 
-pub fn decode_state(
-    static_attrs: StaticStateAttributes,
-    attrs: &AttributeMap,
-) -> Result<LunarBaseState, StateDecodeError> {
-    Ok(LunarBaseState {
-        pool: static_attrs.pool,
-        token_x: static_attrs.token_x,
-        token_y: static_attrs.token_y,
-        anchor_price_x96: require_u128(attrs, attrs::ANCHOR_PRICE_X96)?,
-        fee_ask_x24: require_u32(attrs, attrs::FEE_ASK_X24)?,
-        fee_bid_x24: require_u32(attrs, attrs::FEE_BID_X24)?,
-        latest_update_block: require_u64(attrs, attrs::LATEST_UPDATE_BLOCK)?,
-        reserve_x: require_u128(attrs, attrs::RESERVE_X)?,
-        reserve_y: require_u128(attrs, attrs::RESERVE_Y)?,
-        concentration_k: require_u32(attrs, attrs::CONCENTRATION_K)?,
-        block_delay: require_u64(attrs, attrs::BLOCK_DELAY)?,
-        paused: require_bool(attrs, attrs::PAUSED)?,
-        blacklist_fee_multiplier: optional_u256(
-            attrs,
-            attrs::BLACKLIST_FEE_MULTIPLIER,
-            U256::from(1u64),
-        )?,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StaticStateAttributes {
-    pub pool: [u8; 20],
-    pub token_x: [u8; 20],
-    pub token_y: [u8; 20],
-}
-
-pub fn apply_delta(state: &mut LunarBaseState, delta: &StateDelta) -> Result<(), StateDecodeError> {
-    let mut attrs = encode_state(state);
-    attrs.extend(delta.updated_attributes.clone());
-    *state = decode_state(
-        StaticStateAttributes { pool: state.pool, token_x: state.token_x, token_y: state.token_y },
-        &attrs,
-    )?;
+pub fn apply_delta(
+    state: &mut LunarBaseTychoState,
+    updated_attributes: HashMap<String, Bytes>,
+) -> Result<(), InvalidSnapshotError> {
+    for (name, value) in updated_attributes {
+        match name.as_str() {
+            attrs::ANCHOR_PRICE_X96 => state.anchor_price_x96 = u128::from(value),
+            attrs::FEE_ASK_X24 => state.fee_ask_x24 = u32::from(value),
+            attrs::FEE_BID_X24 => state.fee_bid_x24 = u32::from(value),
+            attrs::LATEST_UPDATE_BLOCK => state.latest_update_block = u64::from(value),
+            attrs::RESERVE_X => state.reserve_x = u128::from(value),
+            attrs::RESERVE_Y => state.reserve_y = u128::from(value),
+            attrs::CONCENTRATION_K => state.concentration_k = u32::from(value),
+            attrs::BLOCK_DELAY => state.block_delay = u64::from(value),
+            attrs::PAUSED => state.paused = decode_bool(attrs::PAUSED, &value)?,
+            _ => {}
+        }
+    }
     Ok(())
 }
 
 pub fn decode_lunarbase_snapshot(
     snapshot: &ComponentWithState,
-) -> Result<LunarBaseState, InvalidSnapshotError> {
-    let mut attributes = AttributeMap::new();
-    for (name, value) in snapshot.state.attributes.iter() {
-        attributes.insert(name.clone(), value.to_vec());
-    }
+) -> Result<LunarBaseTychoState, InvalidSnapshotError> {
+    let attrs = &snapshot.state.attributes;
 
-    decode_state(
-        StaticStateAttributes {
-            pool: component_pool(snapshot)?,
-            token_x: component_token(snapshot, 0)?,
-            token_y: component_token(snapshot, 1)?,
-        },
-        &attributes,
-    )
-    .map_err(map_decode_error)
+    Ok(LunarBaseTychoState {
+        pool: component_pool(snapshot)?,
+        token_x: component_token(snapshot, 0)?,
+        token_y: component_token(snapshot, 1)?,
+        anchor_price_x96: u128::from(required_attr(attrs, attrs::ANCHOR_PRICE_X96)?.clone()),
+        fee_ask_x24: u32::from(required_attr(attrs, attrs::FEE_ASK_X24)?.clone()),
+        fee_bid_x24: u32::from(required_attr(attrs, attrs::FEE_BID_X24)?.clone()),
+        latest_update_block: u64::from(required_attr(attrs, attrs::LATEST_UPDATE_BLOCK)?.clone()),
+        reserve_x: u128::from(required_attr(attrs, attrs::RESERVE_X)?.clone()),
+        reserve_y: u128::from(required_attr(attrs, attrs::RESERVE_Y)?.clone()),
+        concentration_k: u32::from(required_attr(attrs, attrs::CONCENTRATION_K)?.clone()),
+        block_delay: u64::from(required_attr(attrs, attrs::BLOCK_DELAY)?.clone()),
+        paused: decode_bool(attrs::PAUSED, required_attr(attrs, attrs::PAUSED)?)?,
+        head_block: 0,
+    })
 }
 
 fn component_pool(snapshot: &ComponentWithState) -> Result<Address, InvalidSnapshotError> {
-    address_from_component_id(&snapshot.component.id).map_err(map_sim_error)
+    address_from_component_id(&snapshot.component.id)
 }
 
 fn component_token(
@@ -259,67 +109,67 @@ fn component_token(
         .get(idx)
         .map(|token| token.as_ref())
         .ok_or_else(|| InvalidSnapshotError::ValueError(format!("missing token index {idx}")))
-        .and_then(|value| address_from_bytes(value).map_err(map_sim_error))
+        .and_then(address_from_bytes)
 }
 
-fn address_from_bytes(value: &[u8]) -> Result<Address, SimulationError> {
+fn required_attr<'a>(
+    attrs: &'a HashMap<String, Bytes>,
+    name: &'static str,
+) -> Result<&'a Bytes, InvalidSnapshotError> {
+    attrs
+        .get(name)
+        .ok_or_else(|| InvalidSnapshotError::MissingAttribute(name.to_owned()))
+}
+
+fn decode_bool(name: &'static str, value: &Bytes) -> Result<bool, InvalidSnapshotError> {
+    if value.len() != 1 {
+        return Err(invalid_length(name, 1, value.len()));
+    }
+    Ok(value[0] != 0)
+}
+
+fn address_from_bytes(value: &[u8]) -> Result<Address, InvalidSnapshotError> {
     value.try_into().map_err(|_| {
-        SimulationError::InvalidInput(
-            format!("expected 20-byte address, got {}", value.len()),
-            None,
-        )
+        InvalidSnapshotError::ValueError(format!("expected 20-byte address, got {}", value.len()))
     })
 }
 
-fn address_from_component_id(value: &str) -> Result<Address, SimulationError> {
+fn address_from_component_id(value: &str) -> Result<Address, InvalidSnapshotError> {
     let value = value
         .strip_prefix("0x")
         .unwrap_or(value);
     if value.len() != 40 {
-        return Err(SimulationError::InvalidInput(
-            format!("expected 20-byte hex address component id, got {value}"),
-            None,
-        ));
+        return Err(InvalidSnapshotError::ValueError(format!(
+            "expected 20-byte hex address component id, got {value}"
+        )));
     }
 
     let mut out = [0u8; 20];
     for (idx, byte) in out.iter_mut().enumerate() {
         let start = idx * 2;
         *byte = u8::from_str_radix(&value[start..start + 2], 16).map_err(|err| {
-            SimulationError::InvalidInput(
-                format!("invalid LunarBase component id hex: {err}"),
-                None,
-            )
+            InvalidSnapshotError::ValueError(format!("invalid LunarBase component id hex: {err}"))
         })?;
     }
     Ok(out)
 }
 
-fn map_decode_error(err: StateDecodeError) -> InvalidSnapshotError {
-    match err {
-        StateDecodeError::Attribute(AttributeError::Missing(name)) => {
-            InvalidSnapshotError::MissingAttribute(name.to_string())
-        }
-        other => InvalidSnapshotError::ValueError(format!("{other:?}")),
-    }
-}
-
-fn map_sim_error(err: SimulationError) -> InvalidSnapshotError {
-    InvalidSnapshotError::ValueError(err.to_string())
+fn invalid_length(name: &'static str, expected: usize, actual: usize) -> InvalidSnapshotError {
+    InvalidSnapshotError::ValueError(format!(
+        "attribute {name} has invalid length: expected {expected}, got {actual}"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use lunarbase_pmm_math::U256;
-
     use super::*;
 
     fn addr(byte: u8) -> [u8; 20] {
         [byte; 20]
     }
 
-    fn state() -> LunarBaseState {
-        LunarBaseState {
+    fn state() -> LunarBaseTychoState {
+        LunarBaseTychoState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),
@@ -332,54 +182,31 @@ mod tests {
             concentration_k: 4096,
             block_delay: 2,
             paused: false,
-            blacklist_fee_multiplier: U256::from(1u64),
+            head_block: 100,
         }
     }
 
     #[test]
-    fn round_trips_full_state_attributes() {
-        let state = state();
-        let decoded = decode_state(
-            StaticStateAttributes {
-                pool: state.pool,
-                token_x: state.token_x,
-                token_y: state.token_y,
-            },
-            &encode_state(&state),
-        )
-        .unwrap();
-        assert_eq!(decoded, state);
-    }
+    fn encodes_full_state_attributes() {
+        let attrs = encode_state(&state());
 
-    #[test]
-    fn defaults_fee_multiplier_for_legacy_snapshots() {
-        let state = state();
-        let mut attrs = encode_state(&state);
-        attrs.remove(attrs::BLACKLIST_FEE_MULTIPLIER);
-
-        let decoded = decode_state(
-            StaticStateAttributes {
-                pool: state.pool,
-                token_x: state.token_x,
-                token_y: state.token_y,
-            },
-            &attrs,
-        )
-        .unwrap();
-
-        assert_eq!(decoded.blacklist_fee_multiplier, U256::from(1u64));
+        assert_eq!(u128::from(attrs[attrs::ANCHOR_PRICE_X96].clone()), 1u128 << 96);
+        assert_eq!(u32::from(attrs[attrs::FEE_ASK_X24].clone()), 10);
+        assert_eq!(u64::from(attrs[attrs::LATEST_UPDATE_BLOCK].clone()), 100);
+        assert!(!decode_bool(attrs::PAUSED, &attrs[attrs::PAUSED]).unwrap());
     }
 
     #[test]
     fn applies_partial_state_updated_delta() {
         let mut state = state();
-        let mut updated = AttributeMap::new();
-        insert_u128(&mut updated, attrs::ANCHOR_PRICE_X96, 2u128 << 96);
-        insert_u32(&mut updated, attrs::FEE_ASK_X24, 20);
-        insert_u32(&mut updated, attrs::FEE_BID_X24, 21);
-        insert_u64(&mut updated, attrs::LATEST_UPDATE_BLOCK, 101);
+        let updated = HashMap::from([
+            (attrs::ANCHOR_PRICE_X96.to_owned(), Bytes::from(2u128 << 96)),
+            (attrs::FEE_ASK_X24.to_owned(), Bytes::from(20u32)),
+            (attrs::FEE_BID_X24.to_owned(), Bytes::from(21u32)),
+            (attrs::LATEST_UPDATE_BLOCK.to_owned(), Bytes::from(101u64)),
+        ]);
 
-        apply_delta(&mut state, &StateDelta { updated_attributes: updated }).unwrap();
+        apply_delta(&mut state, updated).unwrap();
 
         assert_eq!(state.anchor_price_x96, 2u128 << 96);
         assert_eq!(state.fee_ask_x24, 20);

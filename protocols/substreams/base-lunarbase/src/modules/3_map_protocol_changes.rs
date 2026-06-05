@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Result;
 use substreams::store::{StoreGet, StoreGetProto};
 use substreams_ethereum::pb::eth;
@@ -19,27 +21,29 @@ pub fn map_protocol_changes(
     component_store: StoreGetProto<tycho::ProtocolComponent>,
 ) -> Result<tycho::BlockChanges> {
     let config = Config::parse(&params)?;
-    let known_components = config
+    let mut known_components = config
         .pools
         .iter()
         .filter_map(|pool| known_pool_component(pool, &component_store))
-        .collect::<Vec<_>>();
-    let mut builder = lunarbase::BlockChangesBuilder::new(known_components);
+        .collect::<HashSet<_>>();
+    let mut transaction_changes = HashMap::<u64, tycho::TransactionChangesBuilder>::new();
 
     for tx_components in new_components.tx_components.iter() {
         let Some(tx) = tx_components.tx.as_ref() else {
             continue;
         };
-        for pool in tx_components
-            .components
-            .iter()
-            .filter_map(|component| pool_by_component_id(&config, &component.id))
-        {
-            builder.register_component(
-                tx,
-                lunarbase::protocol_component(pool.pool, pool.token_x, pool.token_y),
-                pool.bootstrap_state,
-            );
+        let builder = transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| tycho::TransactionChangesBuilder::new(tx));
+
+        for component in tx_components.components.iter() {
+            let Some(pool) = pool_by_component_id(&config, &component.id) else {
+                continue;
+            };
+            let component = lunarbase::protocol_component(pool.pool, pool.token_x, pool.token_y);
+            known_components.insert(component.id.clone());
+            builder.add_protocol_component(&component);
+            builder.add_entity_change(&lunarbase::indexed::initial_entity_change(&component.id));
         }
     }
 
@@ -48,24 +52,43 @@ pub fn map_protocol_changes(
             let Some(pool) = pool_by_address(&config, &log.address) else {
                 continue;
             };
-            if !builder.is_known_component(&pool.component_id()) {
+            let component_id = pool.component_id();
+            if !known_components.contains(&component_id) {
                 continue;
             }
 
-            let indexed_tx: tycho::Transaction = tx.into();
-            if let Err(err) = builder.apply_log(
-                &indexed_tx,
-                log,
-                lunarbase::EventApplyContext { block_number: block.number },
-                pool.token_x,
-                pool.token_y,
-            ) {
-                substreams::log::info!("failed to apply LunarBase log: {:?}", err);
-            }
-        }
+            let event = match lunarbase::events::decode_lunarbase_state_log(log) {
+                Ok(Some(event)) => event,
+                Ok(None) => continue,
+                Err(err) => {
+                    substreams::log::info!("failed to decode LunarBase log: {:?}", err);
+                    continue;
+                }
+            };
+            let tx: tycho::Transaction = tx.into();
+            let builder = transaction_changes
+                .entry(tx.index)
+                .or_insert_with(|| tycho::TransactionChangesBuilder::new(&tx));
+            builder.add_entity_change(&lunarbase::indexed::entity_change_for_event(
+                &component_id,
+                &event,
+                block.number,
+            ));        }
     }
 
-    Ok(builder.finish((&block).into()))
+    let mut changes = transaction_changes
+        .into_values()
+        .filter_map(tycho::TransactionChangesBuilder::build)
+        .collect::<Vec<_>>();
+    changes.sort_unstable_by_key(|changes| {
+        changes
+            .tx
+            .as_ref()
+            .map(|tx| tx.index)
+            .unwrap_or_default()
+    });
+
+    Ok(tycho::BlockChanges { block: Some((&block).into()), changes, ..Default::default() })
 }
 
 fn known_pool_component(

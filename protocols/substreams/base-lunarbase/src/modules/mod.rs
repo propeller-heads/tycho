@@ -4,7 +4,6 @@ pub use store_protocol_components::store_protocol_components;
 
 mod config {
     use anyhow::{anyhow, Result};
-    use ethabi::ethereum_types::U256;
 
     use crate::lunarbase;
 
@@ -24,7 +23,6 @@ mod config {
         pub token_x: lunarbase::Address,
         pub token_y: lunarbase::Address,
         pub bootstrap_block: Option<u64>,
-        pub bootstrap_state: lunarbase::BootstrapState,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,7 +38,6 @@ mod config {
                     token_x: NATIVE_ETH_SENTINEL,
                     token_y: BASE_USDC,
                     bootstrap_block: None,
-                    bootstrap_state: lunarbase::BootstrapState::default(),
                 }],
             }
         }
@@ -63,11 +60,6 @@ mod config {
                     "token_x" => single_pool.token_x = parse_address(value)?,
                     "token_y" => single_pool.token_y = parse_address(value)?,
                     "bootstrap_block" => single_pool.bootstrap_block = Some(value.parse()?),
-                    "blacklist_fee_multiplier" => {
-                        single_pool
-                            .bootstrap_state
-                            .blacklist_fee_multiplier = parse_u256(value)?
-                    }
                     "pools" => config.pools = parse_pools(value)?,
                     _ => return Err(anyhow!("unknown LunarBase Substreams param `{key}`")),
                 }
@@ -119,14 +111,10 @@ mod config {
             .next()
             .map(str::parse)
             .transpose()?;
-        let mut bootstrap_state = lunarbase::BootstrapState::default();
-        if let Some(multiplier) = parts.next() {
-            bootstrap_state.blacklist_fee_multiplier = parse_u256(multiplier)?;
-        }
         if parts.next().is_some() {
             return Err(anyhow!("invalid LunarBase pool tuple `{value}`"));
         }
-        Ok(PoolConfig { pool, token_x, token_y, bootstrap_block, bootstrap_state })
+        Ok(PoolConfig { pool, token_x, token_y, bootstrap_block })
     }
 
     fn parse_address(value: &str) -> Result<lunarbase::Address> {
@@ -138,10 +126,6 @@ mod config {
             .as_slice()
             .try_into()
             .map_err(|_| anyhow!("address `{value}` is not 20 bytes"))
-    }
-
-    fn parse_u256(value: &str) -> Result<U256> {
-        U256::from_dec_str(value).map_err(|_| anyhow!("invalid uint256 `{value}`"))
     }
 }
 
@@ -171,12 +155,6 @@ mod tests {
         assert_eq!(config.pools[0].token_x, address(2));
         assert_eq!(config.pools[0].token_y, address(3));
         assert_eq!(config.pools[0].bootstrap_block, Some(10));
-        assert_eq!(
-            config.pools[0]
-                .bootstrap_state
-                .blacklist_fee_multiplier,
-            1.into()
-        );
     }
 
     #[test]
@@ -195,22 +173,10 @@ mod tests {
         assert_eq!(config.pools.len(), 2);
         assert_eq!(config.pools[0].pool, address(1));
         assert_eq!(config.pools[0].bootstrap_block, Some(10));
-        assert_eq!(
-            config.pools[0]
-                .bootstrap_state
-                .blacklist_fee_multiplier,
-            1.into()
-        );
         assert_eq!(config.pools[1].pool, address(4));
         assert_eq!(config.pools[1].token_x, address(5));
         assert_eq!(config.pools[1].token_y, address(6));
         assert_eq!(config.pools[1].bootstrap_block, Some(20));
-        assert_eq!(
-            config.pools[1]
-                .bootstrap_state
-                .blacklist_fee_multiplier,
-            1.into()
-        );
     }
 
     fn address(last_byte: u8) -> [u8; 20] {

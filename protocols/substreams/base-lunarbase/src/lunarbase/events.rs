@@ -1,22 +1,10 @@
-use ethabi::ethereum_types::U256;
 use substreams_ethereum::pb::eth;
+use tycho_substreams::prelude as tycho;
 
 use crate::{
     abi::pool::events as pool_events,
-    lunarbase::state::{
-        attrs, insert_bool, insert_u128, insert_u256, insert_u32, insert_u64, AttributeMap,
-    },
+    lunarbase::state::{attribute, attrs},
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EventApplyContext {
-    pub block_number: u64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StateDelta {
-    pub updated_attributes: AttributeMap,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LunarBaseEvent {
@@ -24,14 +12,8 @@ pub enum LunarBaseEvent {
     Sync { reserve_x: u128, reserve_y: u128 },
     BlockDelaySet { block_delay: u64 },
     ConcentrationKSet { concentration_k: u32 },
-    BlacklistFeeMultiplierSet { multiplier: U256 },
     Paused,
     Unpaused,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EventApplyError {
-    FeeOverflow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,19 +67,6 @@ pub fn decode_lunarbase_state_log(
         }));
     }
 
-    if pool_events::WhitelistSet::match_log(log) {
-        return Ok(None);
-    }
-
-    if pool_events::BlacklistFeeMultiplierSet::match_log(log) {
-        let event = pool_events::BlacklistFeeMultiplierSet::decode(log).map_err(|message| {
-            LogDecodeError::Decode { event: "BlacklistFeeMultiplierSet", message }
-        })?;
-        return Ok(Some(LunarBaseEvent::BlacklistFeeMultiplierSet {
-            multiplier: bigint_to_u256("BlacklistFeeMultiplierSet.multiplier", &event.multiplier)?,
-        }));
-    }
-
     if pool_events::Paused::match_log(log) {
         return Ok(Some(LunarBaseEvent::Paused));
     }
@@ -106,55 +75,30 @@ pub fn decode_lunarbase_state_log(
         return Ok(Some(LunarBaseEvent::Unpaused));
     }
 
-    if pool_events::SwapExecuted::match_log(log) {
-        return Ok(None);
-    }
-
     Ok(None)
 }
 
-pub fn event_to_delta(
-    event: &LunarBaseEvent,
-    context: EventApplyContext,
-) -> Result<StateDelta, EventApplyError> {
-    let mut updated_attributes = AttributeMap::new();
-
+pub fn event_attributes(event: &LunarBaseEvent, block_number: u64) -> Vec<tycho::Attribute> {
     match event {
-        LunarBaseEvent::StateUpdated { anchor_price_x96, fee_ask_x24, fee_bid_x24 } => {
-            if *fee_ask_x24 > uint24_max() || *fee_bid_x24 > uint24_max() {
-                return Err(EventApplyError::FeeOverflow);
-            }
-            insert_u128(&mut updated_attributes, attrs::ANCHOR_PRICE_X96, *anchor_price_x96);
-            insert_u32(&mut updated_attributes, attrs::FEE_ASK_X24, *fee_ask_x24);
-            insert_u32(&mut updated_attributes, attrs::FEE_BID_X24, *fee_bid_x24);
-            insert_u64(&mut updated_attributes, attrs::LATEST_UPDATE_BLOCK, context.block_number);
-        }
-        LunarBaseEvent::Sync { reserve_x, reserve_y } => {
-            insert_u128(&mut updated_attributes, attrs::RESERVE_X, *reserve_x);
-            insert_u128(&mut updated_attributes, attrs::RESERVE_Y, *reserve_y);
-        }
+        LunarBaseEvent::StateUpdated { anchor_price_x96, fee_ask_x24, fee_bid_x24 } => vec![
+            attribute(attrs::ANCHOR_PRICE_X96, anchor_price_x96.to_be_bytes().to_vec()),
+            attribute(attrs::FEE_ASK_X24, fee_ask_x24.to_be_bytes().to_vec()),
+            attribute(attrs::FEE_BID_X24, fee_bid_x24.to_be_bytes().to_vec()),
+            attribute(attrs::LATEST_UPDATE_BLOCK, block_number.to_be_bytes().to_vec()),
+        ],
+        LunarBaseEvent::Sync { reserve_x, reserve_y } => vec![
+            attribute(attrs::RESERVE_X, reserve_x.to_be_bytes().to_vec()),
+            attribute(attrs::RESERVE_Y, reserve_y.to_be_bytes().to_vec()),
+        ],
         LunarBaseEvent::BlockDelaySet { block_delay } => {
-            insert_u64(&mut updated_attributes, attrs::BLOCK_DELAY, *block_delay);
+            vec![attribute(attrs::BLOCK_DELAY, block_delay.to_be_bytes().to_vec())]
         }
         LunarBaseEvent::ConcentrationKSet { concentration_k } => {
-            insert_u32(&mut updated_attributes, attrs::CONCENTRATION_K, *concentration_k);
+            vec![attribute(attrs::CONCENTRATION_K, concentration_k.to_be_bytes().to_vec())]
         }
-        LunarBaseEvent::BlacklistFeeMultiplierSet { multiplier } => {
-            insert_u256(&mut updated_attributes, attrs::BLACKLIST_FEE_MULTIPLIER, *multiplier);
-        }
-        LunarBaseEvent::Paused => {
-            insert_bool(&mut updated_attributes, attrs::PAUSED, true);
-        }
-        LunarBaseEvent::Unpaused => {
-            insert_bool(&mut updated_attributes, attrs::PAUSED, false);
-        }
+        LunarBaseEvent::Paused => vec![attribute(attrs::PAUSED, vec![1u8])],
+        LunarBaseEvent::Unpaused => vec![attribute(attrs::PAUSED, vec![0u8])],
     }
-
-    Ok(StateDelta { updated_attributes })
-}
-
-fn uint24_max() -> u32 {
-    (1u32 << 24) - 1
 }
 
 fn bigint_to_u32(
@@ -185,11 +129,4 @@ fn bigint_to_u128(
         .to_string()
         .parse()
         .map_err(|_| LogDecodeError::IntegerOverflow(name))
-}
-
-fn bigint_to_u256(
-    name: &'static str,
-    value: &substreams::scalar::BigInt,
-) -> Result<U256, LogDecodeError> {
-    U256::from_dec_str(&value.to_string()).map_err(|_| LogDecodeError::IntegerOverflow(name))
 }
