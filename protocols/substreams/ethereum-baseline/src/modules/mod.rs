@@ -10,7 +10,7 @@ mod quote_state;
 use crate::{pool_factories, pool_factories::DeploymentConfig};
 use anyhow::Result;
 use itertools::Itertools;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use substreams::{
     pb::substreams::StoreDeltas,
     prelude::*,
@@ -24,6 +24,21 @@ use tycho_substreams::{
     entrypoint::create_entrypoint,
     prelude::{entry_point_params::TraceData, *},
 };
+
+#[derive(Clone, Copy)]
+enum QuoteStateAttributeChange {
+    Creation,
+    Update,
+}
+
+impl QuoteStateAttributeChange {
+    fn change_type(self) -> ChangeType {
+        match self {
+            Self::Creation => ChangeType::Creation,
+            Self::Update => ChangeType::Update,
+        }
+    }
+}
 
 /// Find and create all relevant protocol components.
 #[substreams::handlers::map]
@@ -107,6 +122,8 @@ fn map_protocol_changes(
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let config: DeploymentConfig = serde_qs::from_str(params.as_str())?;
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
+    let mut latest_quote_state_tx: HashMap<String, (u64, QuoteStateAttributeChange)> =
+        HashMap::new();
 
     new_components
         .tx_components
@@ -130,6 +147,10 @@ fn map_protocol_changes(
                             change: ChangeType::Creation.into(),
                         }],
                     });
+                    latest_quote_state_tx.insert(
+                        component.id.clone(),
+                        (tx.index, QuoteStateAttributeChange::Creation),
+                    );
 
                     let Some(b_token) = component.tokens.first() else {
                         return;
@@ -192,6 +213,7 @@ fn map_protocol_changes(
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(&tx));
             let mut contract_changes = InterimContractChange::new(&config.relay_address, false);
+            let mut updated_component_ids = HashSet::new();
             balances
                 .values()
                 .for_each(|token_bc_map| {
@@ -200,9 +222,18 @@ fn map_protocol_changes(
                         let component_id =
                             String::from_utf8(bc.component_id.clone()).expect("bad component id");
                         builder.mark_component_as_updated(&component_id);
+                        updated_component_ids.insert(component_id);
                         contract_changes
                             .upsert_token_balance(bc.token.as_slice(), bc.balance.as_slice())
                     })
+                });
+            updated_component_ids
+                .into_iter()
+                .for_each(|component_id| {
+                    latest_quote_state_tx
+                        .entry(component_id)
+                        .and_modify(|(index, _change)| *index = (*index).max(tx.index))
+                        .or_insert((tx.index, QuoteStateAttributeChange::Update));
                 });
             builder.add_contract_changes(&contract_changes);
         });
@@ -221,8 +252,31 @@ fn map_protocol_changes(
                     .entry(tx.index)
                     .or_insert_with(|| TransactionChangesBuilder::new(&tx));
                 builder.mark_component_as_updated(&component_id);
+                latest_quote_state_tx
+                    .entry(component_id)
+                    .and_modify(|(index, _change)| *index = (*index).max(tx.index))
+                    .or_insert((tx.index, QuoteStateAttributeChange::Update));
             });
     });
+
+    latest_quote_state_tx
+        .into_iter()
+        .for_each(|(component_id, (tx_index, change))| {
+            let Some(builder) = transaction_changes.get_mut(&tx_index) else {
+                return;
+            };
+            let quote_state_attributes = quote_state::attributes_for_component(
+                &config.relay_address,
+                &component_id,
+                change.change_type(),
+            );
+            if !quote_state_attributes.is_empty() {
+                builder.add_entity_change(&EntityChanges {
+                    component_id,
+                    attributes: quote_state_attributes,
+                });
+            }
+        });
 
     extract_contract_changes_builder(
         &block,
