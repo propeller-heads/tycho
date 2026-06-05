@@ -1,3 +1,11 @@
+## [0.305.0](https://github.com/propeller-heads/tycho/compare/0.304.2...0.305.0) (2026-06-05)
+
+
+### Features
+
+* add BlockStepController to ProtocolStreamBuilder for gated testing ([4bb3b5d](https://github.com/propeller-heads/tycho/commit/4bb3b5db9e19f2391901bd63a6611230caa63f51))
+* add BlockStepController to ProtocolStreamBuilder for gated testing ([#1067](https://github.com/propeller-heads/tycho/issues/1067)) ([1cea37f](https://github.com/propeller-heads/tycho/commit/1cea37fc85891f7733cc6481211b8225a3a6d0cc))
+
 ## [0.304.2](https://github.com/propeller-heads/tycho/compare/0.304.1...0.304.2) (2026-06-03)
 
 

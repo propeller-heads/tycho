@@ -50,6 +50,14 @@ We validate split swaps. A split swap is valid if:
    to the previous splits in the set (i.e., the remainder) to this pool.
 5. The sum of all non-remainder splits for each token is smaller than 1 (100%)
 
+{% hint style="info" %}
+**Split fractions are applied to the balance seen so far.** The router processes swaps
+sequentially. A non-zero `split` takes a fraction of the total amount produced for that token
+*up to that point in the swap array* — not the final total. A `split` of 0 consumes whatever
+remains. If more of the same token is produced by a later swap, it will not be included in
+any earlier split's calculation.
+{% endhint %}
+
 <details>
 
 <summary>Example Solution</summary>
