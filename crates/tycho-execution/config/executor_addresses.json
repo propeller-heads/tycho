@@ -28,6 +28,7 @@
     "uniswap_v4": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
     "rfq:bebop": "0xcDf4E28676b9f2e8C6a722Eb163e0c2f9c0716B7",
     "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
+    "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
     "native_wrap": "0x8aE978713c6952041d058D8a3fe3a2568f1e1aE1"
   },
   "unichain": {

@@ -99,6 +99,8 @@ const executors_to_deploy = {
         },
         // Aerodrome Slipstreams - Args: (none)
         {exchange: "SlipstreamsExecutor", args: []},
+        // Aerodrome V1 - Args: (none)
+        {exchange: "AerodromeV1Executor", args: []},
         // Args: Wrapped native token address
         {
             exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
