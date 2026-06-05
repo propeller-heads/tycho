@@ -1,3 +1,11 @@
+## [0.305.1](https://github.com/propeller-heads/tycho/compare/0.305.0...0.305.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* align native_wrapper component ID with consumers ([ff5b86b](https://github.com/propeller-heads/tycho/commit/ff5b86b7f56edfc1db4cab212b5be0ed41816283))
+* align native_wrapper component ID with consumers ([#1070](https://github.com/propeller-heads/tycho/issues/1070)) ([6658d14](https://github.com/propeller-heads/tycho/commit/6658d141a9de52453e57db8719c49afd62073a25))
+
 ## [0.305.0](https://github.com/propeller-heads/tycho/compare/0.304.2...0.305.0) (2026-06-05)
 
 
