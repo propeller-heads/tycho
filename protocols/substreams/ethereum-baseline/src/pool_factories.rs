@@ -1,6 +1,6 @@
 use crate::abi::b_factory::events::PoolCreated;
 use serde::Deserialize;
-use substreams_ethereum::pb::eth::v2::{Call, Log, TransactionTrace};
+use substreams_ethereum::pb::eth::v2::Log;
 use substreams_ethereum::Event;
 use tycho_substreams::models::{
     Attribute, ChangeType, FinancialType, ImplementationType, ProtocolComponent, ProtocolType,
@@ -20,12 +20,7 @@ pub struct DeploymentConfig {
 ///
 /// If this call creates a component in your protocol please contstruct and return it
 /// here. Otherwise, simply return None.
-pub fn maybe_create_component(
-    _call: &Call,
-    log: &Log,
-    _tx: &TransactionTrace,
-    config: &DeploymentConfig,
-) -> Option<ProtocolComponent> {
+pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<ProtocolComponent> {
     if log.address != config.relay_address {
         return None;
     }
