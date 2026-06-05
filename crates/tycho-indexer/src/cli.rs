@@ -204,6 +204,10 @@ pub struct RunSpkgArgs {
     #[clap(long)]
     pub protocol_system: String,
 
+    /// Protocol implementation type to persist for protocol types.
+    #[clap(long, default_value = "Vm")]
+    pub implementation_type: String,
+
     /// Substreams start block
     #[clap(long)]
     pub start_block: i64,
@@ -333,6 +337,7 @@ mod cli_tests {
                 module: "module_name".to_string(),
                 protocol_type_names: vec!["pt1".to_string(), "pt2".to_string()],
                 protocol_system: "test_protocol".to_string(),
+                implementation_type: "Vm".to_string(),
                 start_block: 17361664,
                 stop_block: None,
                 substreams_args: SubstreamsArgs {
@@ -349,6 +354,41 @@ mod cli_tests {
         };
 
         assert_eq!(cli, expected_args);
+    }
+
+    #[tokio::test]
+    async fn test_arg_parsing_run_cmd_custom_implementation_type() {
+        let cli = Cli::try_parse_from(vec![
+            "tycho-indexer",
+            "--endpoint",
+            "http://example.com",
+            "--database-url",
+            "my_db",
+            "--rpc-url",
+            "http://example.com",
+            "run",
+            "--api_token",
+            "your_api_token",
+            "--spkg",
+            "package.spkg",
+            "--module",
+            "module_name",
+            "--start-block",
+            "17361664",
+            "--protocol-type-names",
+            "pt1,pt2",
+            "--protocol-system",
+            "test_protocol",
+            "--implementation-type",
+            "Custom",
+        ])
+        .expect("parse errored");
+
+        let Command::Run(run_args) = cli.command() else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(run_args.implementation_type, "Custom");
     }
 
     #[tokio::test]

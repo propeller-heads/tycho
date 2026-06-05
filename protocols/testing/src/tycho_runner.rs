@@ -32,6 +32,7 @@ impl TychoRunner {
         start_block: u64,
         end_block: u64,
         protocol_type_names: &[String],
+        implementation_type: &str,
         protocol_system: &str,
         module_name: Option<String>,
     ) -> miette::Result<()> {
@@ -61,6 +62,8 @@ impl TychoRunner {
                 .unwrap_or("map_protocol_changes"),
             "--protocol-type-names",
             &protocol_type_names.join(","),
+            "--implementation-type",
+            implementation_type,
             "--protocol-system",
             protocol_system,
             "--start-block",
@@ -167,6 +170,7 @@ impl TychoRunner {
         spkg_path: &str,
         start_block: u64,
         protocol_type_names: &[String],
+        implementation_type: &str,
         protocol_system: &str,
         module_name: Option<String>,
     ) -> miette::Result<()> {
@@ -177,6 +181,7 @@ impl TychoRunner {
             spkg_path,
             start_block,
             protocol_type_names,
+            implementation_type,
             protocol_system,
             module_name,
         )?;
@@ -245,6 +250,7 @@ impl TychoRunner {
         spkg_path: &str,
         start_block: u64,
         protocol_type_names: &[String],
+        implementation_type: &str,
         protocol_system: &str,
         module_name: Option<String>,
     ) -> miette::Result<String> {
@@ -269,10 +275,11 @@ impl TychoRunner {
         };
 
         let config = format!(
-            "extractors:\n  {}:\n    name: \"{}\"\n    chain: {}\n    implementation_type: Vm\n    sync_batch_size: 1\n    start_block: {}\n    stop_block: null\n    protocol_types:\n{}\n    spkg: \"{}\"\n    module_name: \"{}\"\n{}\n    dci_plugin:\n      type: rpc\n",
+            "extractors:\n  {}:\n    name: \"{}\"\n    chain: {}\n    implementation_type: {}\n    sync_batch_size: 1\n    start_block: {}\n    stop_block: null\n    protocol_types:\n{}\n    spkg: \"{}\"\n    module_name: \"{}\"\n{}\n    dci_plugin:\n      type: rpc\n",
             protocol_system,
             protocol_system,
             self.chain.to_string().to_lowercase(),
+            implementation_type,
             start_block,
             protocol_types,
             spkg_path,
@@ -304,6 +311,36 @@ impl TychoRunner {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_yaml::Value;
+    use tycho_simulation::tycho_common::models::Chain;
+
+    use super::*;
+
+    #[test]
+    fn generated_extractor_config_uses_requested_implementation_type() {
+        let runner = TychoRunner::new(Chain::Ethereum, "postgres://test".to_string(), vec![]);
+
+        let config = runner
+            .create_extractors_config(
+                "baseline.spkg",
+                24929812,
+                &["baseline".to_string()],
+                "Custom",
+                "baseline",
+                Some("map_protocol_changes".to_string()),
+            )
+            .unwrap();
+
+        let parsed: Value = serde_yaml::from_str(&config).unwrap();
+        assert_eq!(
+            parsed["extractors"]["baseline"]["implementation_type"],
+            Value::String("Custom".to_string())
+        );
     }
 }
 

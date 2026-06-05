@@ -1693,6 +1693,7 @@ fn test_single_encoding_strategy_baseline_buy() {
         .encode_solutions(vec![solution.clone()])
         .unwrap()[0]
         .clone();
+    assert_eq!(encoded_solution.estimated_gas(), &BigUint::from(185_000u64));
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
@@ -1744,6 +1745,7 @@ fn test_single_encoding_strategy_baseline_sell() {
         .encode_solutions(vec![solution.clone()])
         .unwrap()[0]
         .clone();
+    assert_eq!(encoded_solution.estimated_gas(), &BigUint::from(185_000u64));
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
@@ -1759,6 +1761,50 @@ fn test_single_encoding_strategy_baseline_sell() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_baseline_sell", hex_calldata.as_str());
+}
+
+#[test]
+fn test_split_encoding_strategy_baseline_gas() {
+    let btoken = baseline_btoken();
+    let token_in = weth();
+    let token_out = btoken.clone();
+    let baseline_component = ProtocolComponent {
+        id: btoken.to_string(),
+        protocol_system: String::from("baseline"),
+        ..Default::default()
+    };
+    let split_swap = Swap::new(
+        baseline_component.clone(),
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_split(0.5);
+    let remainder_swap = Swap::new(
+        baseline_component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1000000000000000").unwrap(),
+        BigUint::from_str("675625833670487764").unwrap(),
+        vec![split_swap, remainder_swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution])
+        .unwrap()[0]
+        .clone();
+
+    assert_eq!(encoded_solution.estimated_gas(), &BigUint::from(330_000u64));
 }
 
 #[test]

@@ -54,7 +54,7 @@ pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<Pr
             name: config.protocol_type_name.clone(),
             financial_type: FinancialType::Swap.into(),
             attribute_schema: vec![],
-            implementation_type: ImplementationType::Vm.into(),
+            implementation_type: ImplementationType::Custom.into(),
         }),
     })
 }
@@ -62,6 +62,12 @@ pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<Pr
 #[cfg(test)]
 mod test {
     use super::*;
+
+    const POOL_CREATED_TOPIC: [u8; 32] = [
+        40, 223, 178, 227, 204, 62, 41, 94, 255, 129, 153, 40, 77, 121, 190, 109, 220, 73,
+        23, 27, 19, 130, 253, 168, 221, 46, 233, 52, 237, 146, 52, 131,
+    ];
+
     #[test]
     fn test_decode_config() {
         let config: DeploymentConfig =
@@ -69,5 +75,70 @@ mod test {
 
         assert_eq!(config.relay_address, [0u8, 1u8]);
         assert_eq!(config.protocol_type_name, "baseline");
+    }
+
+    #[test]
+    fn creates_custom_component_from_pool_created_log() {
+        let relay = address(3);
+        let b_token = address(1);
+        let reserve = address(2);
+        let log = substreams_ethereum::pb::eth::v2::Log {
+            address: relay.clone(),
+            topics: vec![POOL_CREATED_TOPIC.to_vec()],
+            data: pool_created_data(&b_token, &reserve),
+            ..Default::default()
+        };
+        let config = DeploymentConfig {
+            relay_address: relay.clone(),
+            protocol_type_name: "baseline".to_string(),
+        };
+
+        let component = maybe_create_component(&log, &config).expect("component");
+
+        assert_eq!(component.id, format!("0x{}", hex::encode(&b_token)));
+        assert_eq!(component.tokens, vec![b_token, reserve.clone()]);
+        assert_eq!(component.contracts, vec![relay.clone()]);
+        assert_eq!(
+            component
+                .protocol_type
+                .as_ref()
+                .expect("protocol type")
+                .implementation_type,
+            ImplementationType::Custom as i32
+        );
+        assert_eq!(
+            component
+                .static_att
+                .iter()
+                .find(|attr| attr.name == "reserve")
+                .expect("reserve attr")
+                .value,
+            reserve
+        );
+    }
+
+    fn pool_created_data(b_token: &[u8], reserve: &[u8]) -> Vec<u8> {
+        use ethabi::{Address, Token, Uint};
+
+        ethabi::encode(&[
+            Token::Address(Address::from_slice(b_token)),
+            Token::Address(Address::from_slice(reserve)),
+            Token::Address(Address::from_slice(&address(4))),
+            Token::Address(Address::from_slice(&address(5))),
+            Token::Uint(Uint::from(0)),
+            Token::Uint(Uint::from(1)),
+            Token::Uint(Uint::from(2)),
+            Token::Uint(Uint::from(3)),
+            Token::Uint(Uint::from(4)),
+            Token::Uint(Uint::from(5)),
+            Token::Uint(Uint::from(6)),
+            Token::FixedBytes(vec![7u8; 32]),
+        ])
+    }
+
+    fn address(last_byte: u8) -> Vec<u8> {
+        let mut address = vec![0u8; 20];
+        address[19] = last_byte;
+        address
     }
 }

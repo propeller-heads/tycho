@@ -316,7 +316,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
         ExtractorConfig::new(
             run_args.protocol_system.clone(),
             Chain::from_str(&run_args.chain).unwrap(),
-            ImplementationType::Vm,
+            parse_implementation_type(&run_args.implementation_type)?,
             1, /* TODO: if we want to increase this, we need to commit the cache when we reached
                 * `end_block` */
             run_args.start_block,
@@ -353,6 +353,16 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
 
     let (res, _, _) = select_all(all_tasks).await;
     res.expect("Extractor- nor ServiceTasks should panic!")
+}
+
+fn parse_implementation_type(value: &str) -> Result<ImplementationType, ExtractionError> {
+    match value {
+        "Vm" | "vm" => Ok(ImplementationType::Vm),
+        "Custom" | "custom" => Ok(ImplementationType::Custom),
+        _ => Err(ExtractionError::Setup(format!(
+            "Unknown implementation type: {value}"
+        ))),
+    }
 }
 
 #[tokio::main]
