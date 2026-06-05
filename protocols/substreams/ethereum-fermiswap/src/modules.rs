@@ -173,8 +173,8 @@ fn map_token_balance_deltas(
 
     for (tx, ord, token, transfer) in vault_transfers {
         let token_key = hex::encode(&token);
-        if new_token_keys.contains(&token_key)
-            || token_pairs_store
+        if new_token_keys.contains(&token_key) ||
+            token_pairs_store
                 .get_last(&token_key)
                 .is_none()
         {
@@ -403,9 +403,9 @@ fn map_protocol_changes(
     extract_contract_changes_builder(
         &block,
         |addr| {
-            addr == config.engine_address
-                || addr == config.swapper_address
-                || addr == config.registry_address
+            addr == config.engine_address ||
+                addr == config.swapper_address ||
+                addr == config.registry_address
         },
         &mut transaction_changes,
     );
