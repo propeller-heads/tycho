@@ -47,24 +47,30 @@ fn map_protocol_components(
     block: eth::v2::Block,
 ) -> Result<BlockTransactionProtocolComponents> {
     let config = serde_qs::from_str(params.as_str())?;
-    Ok(BlockTransactionProtocolComponents {
-        tx_components: block
-            .transactions()
-            .filter_map(|tx| {
-                let components = tx
-                    .logs_with_calls()
-                    .filter_map(|(log, call)| {
-                        pool_factories::maybe_create_component(call.call, log, tx, &config)
-                    })
-                    .collect::<Vec<_>>();
+    let mut tx_components_by_index: HashMap<u64, TransactionProtocolComponents> = HashMap::new();
 
-                if !components.is_empty() {
-                    Some(TransactionProtocolComponents { tx: Some(tx.into()), components })
-                } else {
-                    None
-                }
+    block.logs().for_each(|log| {
+        let Some(component) = pool_factories::maybe_create_component(log.log, &config) else {
+            return;
+        };
+
+        let tx: Transaction = log.receipt.transaction.into();
+        tx_components_by_index
+            .entry(tx.index)
+            .or_insert_with(|| TransactionProtocolComponents {
+                tx: Some(tx),
+                components: Vec::new(),
             })
-            .collect::<Vec<_>>(),
+            .components
+            .push(component);
+    });
+
+    Ok(BlockTransactionProtocolComponents {
+        tx_components: tx_components_by_index
+            .into_iter()
+            .sorted_unstable_by_key(|(index, _)| *index)
+            .map(|(_, tx_components)| tx_components)
+            .collect(),
     })
 }
 
