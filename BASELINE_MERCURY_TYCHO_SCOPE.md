@@ -2,6 +2,8 @@
 
 Status: working handoff document. Keep at repository root while implementing; remove or move before opening an upstream PR.
 
+Last updated: 2026-06-06
+
 ## Current State
 
 We are integrating the Baseline DEX / Mercury AMM with Tycho so Tycho users can discover, simulate, and execute Baseline swaps.
@@ -23,11 +25,28 @@ Recent checkpoint commits:
 
 Current checkpoint:
 
-- Baseline VM adapter runtime is generated and registered in `tycho-simulation`.
-- Ethereum mainnet range fixture has `skip_simulation: false` and passes with
-  actual VM simulation in both directions.
-- Ethereum mainnet range fixture has `skip_execution: false` and passes Tycho
-  execution in both directions.
+- Baseline native simulation is implemented in `tycho-simulation` and registered
+  for protocol-testing under protocol system `baseline`.
+- Baseline substreams now emits protocol components as `ImplementationType::Custom`
+  instead of `ImplementationType::Vm`.
+- A data migration updates existing `protocol_type.name = 'baseline'` rows from
+  `vm` to `custom` so previously indexed local/prod DBs do not keep stale VM
+  protocol type metadata.
+- Ethereum mainnet fixture has `skip_simulation: false`; it now uses the native
+  Baseline simulation state instead of the VM adapter path.
+- The Ethereum native fixture now stops at the first observed swap for the
+  current bToken after BLens v3 exposed the current 19-field `getQuoteState`
+  shape, so quote-state attributes are available to the native decoder.
+- Ethereum execution support was previously validated through protocol-testing
+  on the VM-backed fixture. Re-run the native fixture before treating the native
+  indexing/simulation/execution path as fully validated.
+- Base native quote parity is covered by an ignored RPC test that fetches relay
+  `getQuoteState(REPPO)` at block `46598229` and compares native buy/sell quote
+  output against live relay `quoteBuyExactIn` / `quoteSellExactIn`.
+- Base protocol-testing is configured as a creation-block native simulation
+  fixture. A direct Base RPC `eth_call` confirmed relay `getQuoteState(REPPO)`
+  succeeds and decodes at pool creation block `46596026`, so no later swap/update
+  block is required for initial quote-state attributes.
 - Substreams emits DCI entrypoints for Baseline quote traces so Tycho dynamically discovers relay delegate implementation bytecode instead of relying on hardcoded implementation addresses.
 - DCI also includes a harmless BStaking view route,
   `getCurrentRate(address)`, so Tycho discovers the BStaking implementation
@@ -38,6 +57,23 @@ Current checkpoint:
   - Executor validates token pairs against relay `reserve(bToken)`.
   - Protocol-testing has Baseline executor runtime bytecode and uses current
     TychoRouter/FeeCalculator runtime fixtures for execution simulation.
+  - Rust encoder tests, Solidity executor tests, and Ethereum TychoRouter fork
+    tests pass with the provided Ethereum RPC.
+
+Current review pause:
+
+- Base protocol-testing still needs a local run after the fixture was shortened
+  to block `46596026`.
+- The later REPPO swap block `46598229` remains useful for the ignored live RPC
+  quote-parity test, but is no longer the Base fixture stop block.
+- Gas estimator follow-up is intentionally deferred out of the Baseline
+  integration. Baseline uses `TransferManager.TransferType.ProtocolWillDebit`
+  and `outputToRouter = true`, so the current estimator likely overestimates
+  Baseline by one generic input transfer. Several existing executors also use
+  `ProtocolWillDebit` (`BalancerV2`, `Curve`, `ERC4626`, RFQ-style executors,
+  and others), so fixing this correctly should be handled as a separate
+  repo-level gas-accounting issue instead of a Baseline-specific change. Keep
+  the conservative Baseline gas assertions for now.
 
 Only known unrelated local file:
 
@@ -45,15 +81,31 @@ Only known unrelated local file:
 
 ## Strategy Update
 
-The original plan was Base-first using the REPPO pool. That is currently blocked for full Tycho VM/account hydration because every Base RPC tested so far returns `null` for `debug_storageRangeAt`.
+The original plan was VM-first, but full VM/account hydration on Base is blocked
+because Base RPCs do not support the required `debug_storageRangeAt` behavior.
+Tycho recommended moving Baseline to a native integration.
 
 The current strategy is:
 
-- Use **Ethereum mainnet** as the full range-test and VM tracing target for now.
-- Keep **Base** covered by an indexing-only fixture until a Base archive/debug RPC returns a real `debug_storageRangeAt` object.
-- Do not treat the Base RPC blocker as a reason to stop Ethereum mainnet simulation work.
+- Use **native simulation** backed by indexed relay `getQuoteState(bToken)` quote
+  attributes.
+- Use **Ethereum mainnet** for bounded range/protocol-testing smoke tests.
+- Keep **Base** on the same native path; this no longer depends on Base
+  `debug_storageRangeAt`.
+- Do not backfill quote-state attributes for pools that existed before
+  `getQuoteState` was routed. They receive quote-state attributes on the first
+  later swap or quote-relevant update.
 
-Production coverage still needs both Ethereum mainnet and Base, with more EVM chains expected later. Keep protocol ids and package names chain-neutral: the label should be `baseline`, not `baseline_mercury`.
+Production coverage still needs both Ethereum mainnet and Base, with more EVM
+chains expected later. Keep protocol ids and package names chain-neutral: the
+label should be `baseline`, not `baseline_mercury`.
+
+Do not move Base `start_block` back to the relay deployment block unless Tycho or
+StreamingFast specifically says the stores require it. The Base REPPO fixture
+only needs pool creation at `46596026`; a direct historical `eth_call` confirmed
+`getQuoteState(REPPO)` is already routed and decodable at that block. Starting at
+relay deployment would likely increase quota usage without improving fixture
+coverage.
 
 ## Repositories
 
@@ -84,8 +136,9 @@ Use `cx` for code navigation where possible.
 Tycho is now a monorepo. Relevant integration surfaces are in this repository:
 
 - Substreams indexing: `protocols/substreams/`
-- VM adapter Solidity: `protocols/adapter-integration/evm/`
-- VM adapter runtime registration: `crates/tycho-simulation/src/evm/protocol/vm/`
+- Native simulation: `crates/tycho-simulation/src/evm/protocol/baseline/`
+- Historical VM adapter Solidity: `protocols/adapter-integration/evm/`
+- Historical VM adapter runtime registration: `crates/tycho-simulation/src/evm/protocol/vm/`
 - Rust execution encoders: `crates/tycho-execution/src/encoding/evm/swap_encoder/`
 - Solidity executors: `crates/tycho-execution/contracts/src/executors/`
 
@@ -116,7 +169,7 @@ Natural Tycho component model:
 - Component id: bToken address string.
 - Tokens: `[bToken, reserve]`.
 - Protocol system/type label: `baseline`.
-- VM storage owner: relay/proxy, not the bToken.
+- Quote-state source: relay/proxy `getQuoteState(bToken)`, keyed by bToken.
 
 Canonical quote entrypoints on the relay/proxy:
 
@@ -132,7 +185,9 @@ Canonical swap entrypoints:
 - `sellTokensExactIn(bToken, amountIn, limitAmount)`
 - `sellTokensExactOut(bToken, amountOut, limitAmount)`
 
-Because canonical Solidity quote logic exists, continue with a Tycho VM integration first. Native Rust simulation is fallback only if indexed VM state is too broad or unstable.
+Native Rust simulation is now the primary path. It reconstructs the Baseline
+quoter from `BLens.getQuoteState(bToken)` output, using Mercury/Kyber quote math
+as the reference model.
 
 ## Current Substreams State
 
@@ -144,7 +199,7 @@ Current module flow:
 
 - `map_protocol_components`
   - Decodes `BFactory:PoolCreated`.
-  - Creates Tycho protocol components.
+  - Creates Tycho protocol components with `ImplementationType::Custom`.
 - `store_pool_reserves`
   - Stores reserve token address by component id.
 - `map_relative_component_balance`
@@ -191,33 +246,35 @@ Pool creation tx:
 Test range:
 
 - start block `24929812`
-- stop block `24930105`
+- stop block `25036613`
 
-This fixture keeps relay hydration enabled:
+This fixture no longer configures a VM adapter contract or relay
+`initialized_accounts`; native simulation decodes quote-state attributes emitted
+by the substream.
 
-```yaml
-initialized_accounts:
-  - "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
-```
+`getQuoteState(address)` was not available at the old VM fixture stop block
+`24930105`. The route existed by block `25001779`, but that older BLens
+implementation returned a 16-field quote-state shape. BLens v3 was installed at
+block `25035985`, and the current stop block `25036613` is the first observed
+swap for this bToken after that upgrade, so the substream can emit the full
+19-field native quote-state snapshot.
 
-Passing validation:
+Native validation command:
 
 ```bash
 cd /Users/indigo/projects/baseline/tycho-indexer/protocols/testing
 set -a; source /Users/indigo/projects/baseline/tycho-indexer/.substreams.env; set +a
 PATH="/Users/indigo/projects/baseline/tycho-indexer/target/debug:$PATH" \
-RPC_URL="<ethereum-mainnet-rpc-with-debug_storageRangeAt>" \
+    RPC_URL="<ethereum-mainnet-rpc>" \
 RUST_LOG=protocol_testing=info,tycho_client=error,tycho_indexer=error,error \
 cargo run -- range --package ethereum-baseline --chain ethereum --match-test test_mainnet_pool_creation
 ```
 
-Observed result:
-
-```text
-Batch execution complete: 6 successes, 0 failures
-✅ test_mainnet_pool_creation passed
-Passed 1/1
-```
+This native range has not been re-run after the VM-to-native conversion because
+it spans substantially more blocks than the old fixture. Run it once when
+Substreams allowance is acceptable, then update this section with the observed
+result. The previously validated Ethereum execution tests are listed in the
+Test Plan below.
 
 ### Base
 
@@ -229,8 +286,9 @@ Clone mapping:
 
 - `protocols/testing/src/test_runner.rs` currently maps `base-baseline` to the
   `ethereum-baseline` package so the Base fixture can reuse the same package.
-- Base is kept as an indexing-only fixture until a Base RPC with
-  `debug_storageRangeAt` support is available for VM hydration/range testing.
+- Base reuses the same native package path through the `base-baseline` clone
+  mapping. Simulation is enabled; execution is skipped until Base executor
+  address/config validation is added.
 
 Base REPPO bToken:
 
@@ -247,21 +305,55 @@ Pool creation tx:
 Test range:
 
 - start block `46596026`
-- stop block `46596028`
+- stop block `46596026`
 
-Base is currently indexing-only:
+The creation block is sufficient because relay `getQuoteState(REPPO)` is already
+routed and decodes at block `46596026`. This direct historical call passed:
+
+```bash
+cast call 0xc81Fd894C0acE037d133aF4886550aC8133568E8 \
+  'getQuoteState(address)((uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256),uint256,uint256,uint256,uint256,uint256,uint8,uint256,uint256,bool,uint256,uint256)' \
+  0xff8104251e7761163fac3211ef5583fb3f8583d6 \
+  --block 46596026 \
+  --rpc-url "<base-rpc>"
+```
+
+The first REPPO Baseline `Swap` observed after the StreamingFast session
+reported a `46598000` linear handoff remains useful for live quote parity:
+
+- tx `0x9564b135d702dc738be31068a85d85ce86cdd6ff2c24c1e61325cefecb7a5285`
+
+Base is currently native-simulation only:
 
 ```yaml
-initialized_accounts: []
-skip_simulation: true
+skip_simulation: false
 skip_execution: true
 ```
 
 Reason:
 
-- Base RPCs tested so far return `null` for `debug_storageRangeAt`, including Chainstack/QuickNode/RouteMesh/Chainnodes endpoints.
-- Direct `map_protocol_components` does decode the Base pool creation correctly.
-- Full `map_protocol_changes` for the REPPO fixture needs about 3.05M blocks of store preparation from the Base package initial block, so it is not currently a fast range-test path.
+- Base public RPCs support the historical relay `eth_call` needed to capture
+  quote-state/math parity. They do not need `debug_storageRangeAt` for the
+  native path.
+- Direct Base protocol-testing over the shortened `46596026 -> 46596026` fixture
+  is still pending after this adjustment.
+- Base execution still needs executor address/config validation before enabling
+  fixture execution.
+
+Base RPC quote parity command that passes:
+
+```bash
+cd /Users/indigo/projects/baseline/tycho-indexer
+BASE_RPC_URL="<base-rpc>" \
+cargo test -p tycho-simulation \
+    base_reppo_native_quotes_match_live_relay_at_swap_block \
+    --lib -- --ignored --nocapture
+```
+
+Local run used:
+
+- `BASE_RPC_URL=https://wispy-hidden-knowledge.base-mainnet.quiknode.pro/744cca7e0d6ab60a5bff9c19aee2599dbff70471/`
+- Result: `1 passed`
 
 Helper script for checking Base RPCs:
 
@@ -410,7 +502,7 @@ At the traced block, route slots resolve to implementation:
 
 ### Trace Interpretation
 
-The VM quote surface looks practical:
+The historical VM quote surface was practical on Ethereum:
 
 - Relay storage reads are compact and deterministic by bToken.
 - Implementation code is a single delegate target at the traced block.
@@ -443,10 +535,63 @@ Remaining indexing questions:
 - Whether Tycho needs a `balance_owner` attribute for the relay-held liquidity model, or whether current component balance output is enough for simulation/routing.
 - Whether the implementation/delegate target should be emitted as a normal contract or as stateless VM metadata.
 
-### Milestone B: VM Simulation
+### Milestone B: Native Simulation
 
-Status: committed through `489ee4215`; Ethereum mainnet range indexing and VM
-simulation now pass for both directions.
+Status: in progress after Tycho recommended moving Baseline off VM hydration for
+Base compatibility.
+
+Current native files:
+
+- `crates/tycho-simulation/src/evm/protocol/baseline/mod.rs`
+- `crates/tycho-simulation/src/evm/protocol/baseline/decoder.rs`
+- `crates/tycho-simulation/src/evm/protocol/baseline/math.rs`
+- `crates/tycho-simulation/src/evm/protocol/baseline/state.rs`
+- `crates/tycho-simulation/src/evm/protocol/mod.rs`
+- `protocols/testing/src/state_registry.rs`
+- `protocols/substreams/ethereum-baseline/src/modules/quote_state.rs`
+- `protocols/substreams/ethereum-baseline/src/pool_factories.rs`
+- `crates/tycho-storage/migrations/2026-06-05-baseline-custom-implementation/up.sql`
+- `crates/tycho-storage/migrations/2026-06-05-baseline-custom-implementation/down.sql`
+
+Native behavior:
+
+- Substreams emits Baseline components as `ImplementationType::Custom`.
+- Protocol-testing fixtures set `implementation_type: Custom` so fresh test DBs
+  create the Baseline `protocol_type` row with native simulation metadata.
+- Substreams calls relay `getQuoteState(bToken)` on pool creation and on later
+  quote-relevant updates. If the route is not available, no quote-state
+  attributes are emitted for that transaction.
+- Native decoding fails closed when quote-state attributes are absent or
+  malformed.
+- Simulation supports exact-in reserve -> bToken and bToken -> reserve quotes.
+- Simulation uses the current Mercury quote math as the reference model,
+  including the tolerance-based buy search and convexity safety cap.
+- Exact-out simulation remains out of scope for the initial native path.
+
+Native validation run locally:
+
+- `cargo test` in `protocols/substreams/ethereum-baseline`
+- `cargo test -p tycho-simulation baseline:: --lib`
+- `cargo test -p protocol-testing test_parse_all_configs`
+- `cargo test -p protocol-testing tycho_runner::tests::generated_extractor_config_uses_requested_implementation_type`
+- `cargo test -p tycho-indexer test_arg_parsing_run_cmd`
+- `cargo check -p protocol-testing`
+- `cargo check -p tycho-indexer`
+- `cargo check -p tycho-storage`
+- `cargo build --release --target wasm32-unknown-unknown` in
+  `protocols/substreams/ethereum-baseline`
+- `git diff --check`
+
+Pending native validation:
+
+- Run `protocols/runtest.sh` once Substreams allowance is acceptable. The native
+  fixture now spans `24929812` to `25036613` so it can include the first
+  post-BLens-v3 quote-state update for the fixture bToken.
+
+Historical VM checkpoint:
+
+Ethereum mainnet range indexing and VM simulation passed for both directions
+through `489ee4215`.
 
 Files changed by the current VM/substreams checkpoint:
 
@@ -611,7 +756,7 @@ Current execution testing checkpoint:
   `BaselineExecutor-base`, the computed Base executor address is
   `0xB0057Dc8079Bf0D55E7ecf43b35c223b1AC96E42`.
   This is deployment-script coverage only; do not add Base production executor
-  config until real deployment, TychoRouter whitelisting, and Base VM/execution
+  config until real deployment, TychoRouter whitelisting, and Base native/execution
   validation are complete.
 - Do not add a static BStaking implementation address. BStaking is a routed
   component behind the relay like BSwap and BLens. The current DCI path discovers
@@ -661,8 +806,13 @@ Confirmed executor fund flow:
 
 Substreams/indexing:
 
-- Mainnet `test_mainnet_pool_creation` passes.
-- Base `test_reppo_pool_creation` remains indexing-only until Base RPC hydration works.
+- Mainnet `test_mainnet_pool_creation` is configured for native simulation over
+  the first post-BLens-v3 quote-state update range; re-run when Substreams
+  allowance is acceptable.
+- Base `test_reppo_pool_creation` is configured for native simulation at the
+  REPPO pool-creation block. Execution remains skipped pending Base executor
+  config validation. End-to-end protocol-testing validation is pending after the
+  fixture was shortened to creation-only.
 - Quote-relevant non-swap state changes have been audited against Mercury source:
   controller `DeployerSet`, `CreatorFeePctSet`, and `LiquidityFeePctSet` are
   component-marked; swap-driven pool/maker/block-pricing changes are covered by
@@ -671,12 +821,25 @@ Substreams/indexing:
 
 Simulation:
 
-- Adapter Foundry tests for token direction validation.
-- Adapter Foundry tests for `getTokens`, `getLimits`, `capabilities`.
-- Tycho simulation test for mainnet reserve -> bToken quote.
-- Tycho simulation test for mainnet bToken -> reserve quote.
-- Compare VM simulation output to live `quoteBuyExactIn` and
-  `quoteSellExactIn` calls at block `24930105`.
+- Native decoder tests cover required static attributes, token metadata,
+  component/state id consistency, malformed numeric/bool attributes, and full
+  quote-state delta transitions.
+- Native math tests compare exact-in buy/sell outputs against current Mercury
+  solver expectations.
+- Native math tests compare exact-in sell output against live relay quote output
+  captured at Ethereum mainnet block `25036613`.
+- Native math tests compare exact-in buy/sell outputs against live relay quote
+  output captured at Base block `46596028`, whose routed BSwap implementation
+  uses the current tolerance-based buy solver.
+- Ignored live Base RPC parity test fetches relay `getQuoteState(REPPO)` at
+  block `46598229` and compares native exact-in buy/sell output against live
+  relay `quoteBuyExactIn` / `quoteSellExactIn`. Run with:
+  `BASE_RPC_URL=<base-rpc> cargo test -p tycho-simulation base_reppo_native_quotes_match_live_relay_at_swap_block --lib -- --ignored --nocapture`.
+- Native state tests cover exact-in reserve -> bToken and bToken -> reserve
+  quotes, spot price, limits, invalid pairs, non-mutating source state, and a
+  `query_pool_swap` smoke path through the generic EVM helper.
+- Protocol-testing native range validation is pending for the longer
+  `25036613` fixture.
 
 Execution:
 
@@ -685,13 +848,38 @@ Execution:
   encoder-produced bytes and assert transfer metadata plus buy/sell execution.
 - Solidity executor test verifies correct Mercury method is called for each direction.
 - Fork test verifies encoded calldata executes against Ethereum mainnet first.
-- Protocol-testing range execution verifies generated Tycho execution calldata
-  against the Ethereum mainnet fixture.
-- Add Base fork execution once a compatible Base RPC is available or another test harness avoids `debug_storageRangeAt`.
+- Focused execution commands verified locally:
+
+```bash
+cd /Users/indigo/projects/baseline/tycho-indexer
+cargo test -p tycho-execution baseline --lib --tests
+
+cd /Users/indigo/projects/baseline/tycho-indexer/crates/tycho-execution/contracts
+RPC_URL="<ethereum-rpc>" forge test --match-path 'test/protocols/Baseline.t.sol' -vv
+
+cd /Users/indigo/projects/baseline/tycho-indexer
+ETH_RPC_URL="<ethereum-rpc>" forge test --match-contract BaselineSwapAdapter --root protocols/adapter-integration/evm -vv
+```
+
+Local results:
+
+- `cargo test -p tycho-execution baseline --lib --tests`: 4 Baseline tests passed
+  across encoder and protocol integration test binaries.
+- `forge test --match-path 'test/protocols/Baseline.t.sol' -vv`: 17 passed.
+- `forge test --match-contract BaselineSwapAdapter --root protocols/adapter-integration/evm -vv`: 15 passed.
+- Historical VM-backed protocol-testing range execution verified generated Tycho
+  execution calldata against the Ethereum mainnet fixture.
+- Native protocol-testing range execution is pending for the longer `25036613`
+  fixture.
+- Add Base fork/native execution coverage once executor address/config
+  validation is in place.
 
 ## Risks
 
-- Base full VM/range testing is blocked on `debug_storageRangeAt` support.
+- Baseline gas estimation may currently be too high by one generic input
+  transfer. This does not break execution, but it can bias route selection and
+  should be fixed or explicitly justified before production.
+- Base execution testing is pending executor address/config validation.
 - Route/component upgrades can change implementation addresses and code.
 - `BlockPricing` state depends on block number and in-block flow accumulators; quote tests must use block-compatible fixtures.
 - Protocol-testing currently logs execution failures via an internal
@@ -703,7 +891,6 @@ Execution:
 
 ## Out Of Scope For Initial PR
 
-- Native Rust Mercury math.
 - Native reserve / ETH path.
 - Cross-chain deployment completeness beyond Ethereum mainnet and Base scaffolding.
 - Staking, lending, credit, and BLV analytics.
@@ -714,20 +901,21 @@ Execution:
 
 - Should route implementation code be emitted as a normal contract or as stateless VM metadata?
 - Does Tycho need a `balance_owner` attribute for relay-held liquidity?
-- Can Base testing use a better RPC later, or do we need a Base-specific test-only path that avoids `debug_storageRangeAt`?
+- Which Base executor address/config should protocol-testing use for execution
+  coverage?
 
 ## Go / No-Go Criteria
 
-Continue VM integration when:
+Continue native integration when:
 
-- Mainnet quote VM simulation and adapter fork tests continue to match live
-  `quoteBuyExactIn` and `quoteSellExactIn`.
-- Indexed relay storage remains compact and bToken-derivable.
+- Native exact-in simulation continues to match Mercury/Kyber quote math and live
+  relay quote output at compatible blocks.
+- Indexed quote-state attributes are emitted before simulation is enabled for a
+  fixture.
 - Component update marking can cover quote-relevant state changes.
-- Implementation code can be made available to Tycho VM cleanly.
 
-Pause and reassess native Rust simulation when:
+Pause and reassess when:
 
-- Quote calls require dynamic external storage not emitted or derivable by Substreams.
-- Route/component code cannot be made available to Tycho VM cleanly.
+- Quote calls require dynamic external state not emitted or derivable by
+  Substreams.
 - Block pricing makes same-block simulation impossible from indexed state.

@@ -388,6 +388,16 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     res.expect("Extractor- nor ServiceTasks should panic!")
 }
 
+fn parse_implementation_type(value: &str) -> Result<ImplementationType, ExtractionError> {
+    match value {
+        "Vm" | "vm" => Ok(ImplementationType::Vm),
+        "Custom" | "custom" => Ok(ImplementationType::Custom),
+        _ => Err(ExtractionError::Setup(format!(
+            "Unknown implementation type: {value}"
+        ))),
+    }
+}
+
 #[tokio::main]
 async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(), ExtractionError> {
     create_tracing_subscriber();

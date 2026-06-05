@@ -3,17 +3,18 @@ protocol_system: "baseline"
 module_name: "map_protocol_changes"
 protocol_type_names:
   - "baseline"
-adapter_contract: "BaselineSwapAdapter"
-adapter_build_signature: "constructor(address)"
-adapter_build_args: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+implementation_type: Custom
 skip_balance_check: true # Baseline is singleton-style; component liquidity is indexed from relay events, not component-address balances.
-initialized_accounts:
-  - "0xc81Fd894C0acE037d133aF4886550aC8133568E8" # Relay/proxy used by Baseline swaps.
 
 tests:
   - name: test_mainnet_pool_creation
     start_block: 24929812
-    stop_block: 24930105
+    # Native simulation needs quote-state attributes. The old VM fixture stopped
+    # at 24930105, before the relay exposed getQuoteState. The first
+    # getQuoteState route returned an older 16-field shape; 25036613 is the
+    # first observed swap for this bToken after BLens v3 returned the current
+    # 19-field quote-state shape.
+    stop_block: 25036613
     expected_components:
       - id: "0x9fdbde76236998dc2836fe67a9954ede456a1d63"
         tokens:

@@ -1,5 +1,6 @@
 pub mod aerodrome_slipstreams;
 pub mod aerodrome_v1;
+pub mod baseline;
 mod clmm;
 pub mod cowamm;
 mod cpmm;
