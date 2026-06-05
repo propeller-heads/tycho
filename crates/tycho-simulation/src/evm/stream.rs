@@ -131,7 +131,7 @@ use crate::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
         pending::PendingBlockProcessor,
         protocol::{
-            native_wrapper::state::{NativeWrapperState, NATIVE_WRAPPER_ID},
+            native_wrapper::state::NativeWrapperState,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
     },
@@ -784,8 +784,10 @@ fn inject_native_wrapper(
     chain: Chain,
 ) -> impl Stream<Item = Result<Update, StreamDecodeError>> + Send {
     let has_distinct_wrapper = chain.native_token().address != chain.wrapped_native_token().address;
+    // TODO: enable for all chains once native_wrapper executors are deployed
+    let has_executor = chain == Chain::Ethereum;
 
-    if !has_distinct_wrapper {
+    if !has_distinct_wrapper || !has_executor {
         return Either::Left(inner);
     }
 
@@ -795,14 +797,14 @@ fn inject_native_wrapper(
             let first = inner.next().await;
             let modified = first.into_iter().map(move |result| {
                 result.map(|mut update| {
-                    update.new_pairs.insert(
-                        NATIVE_WRAPPER_ID.to_string(),
-                        NativeWrapperState::component(chain),
-                    );
-                    update.states.insert(
-                        NATIVE_WRAPPER_ID.to_string(),
-                        Box::new(NativeWrapperState::new(chain)),
-                    );
+                    let component = NativeWrapperState::component(chain);
+                    let id = component.id.to_string();
+                    update
+                        .new_pairs
+                        .insert(id.clone(), component);
+                    update
+                        .states
+                        .insert(id, Box::new(NativeWrapperState::new(chain)));
                     debug!("Injected native_wrapper component for {chain}");
                     update
                 })
@@ -838,19 +840,21 @@ mod tests {
 
         assert_eq!(results.len(), 3);
 
+        let expected_id = NativeWrapperState::component(Chain::Ethereum)
+            .id
+            .to_string();
+
         let first = results[0]
             .as_ref()
             .expect("first update ok");
         assert!(
             first
                 .new_pairs
-                .contains_key(NATIVE_WRAPPER_ID),
+                .contains_key(&expected_id),
             "first message should have native_wrapper component"
         );
         assert!(
-            first
-                .states
-                .contains_key(NATIVE_WRAPPER_ID),
+            first.states.contains_key(&expected_id),
             "first message should have native_wrapper state"
         );
 
@@ -860,13 +864,11 @@ mod tests {
         assert!(
             !second
                 .new_pairs
-                .contains_key(NATIVE_WRAPPER_ID),
+                .contains_key(&expected_id),
             "second message should NOT have native_wrapper component"
         );
         assert!(
-            !second
-                .states
-                .contains_key(NATIVE_WRAPPER_ID),
+            !second.states.contains_key(&expected_id),
             "second message should NOT have native_wrapper state"
         );
     }
