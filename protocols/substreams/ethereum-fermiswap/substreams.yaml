@@ -27,14 +27,14 @@ network: mainnet
 networks:
   mainnet:
     initialBlock:
-      map_protocol_components: 24950688 # swapper creation block
-      store_pairs: 24950688
-      store_token_pairs: 24950688
-      map_token_balance_deltas: 24950688
-      store_token_balances: 24950688
-      map_balance_deltas: 24950688
-      store_balances: 24950688
-      map_protocol_changes: 24950688
+      map_protocol_components: 24936662 # trader_vault creation block
+      store_pairs: 24936662
+      store_token_pairs: 24936662
+      map_token_balance_deltas: 24936662
+      store_token_balances: 24936662
+      map_balance_deltas: 24936662
+      store_balances: 24936662
+      map_protocol_changes: 24936662
     params:
       map_protocol_components: "engine_address=e514A3c48DA8B233f65b5d15BA1905d6d35BFE48&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"
       map_token_balance_deltas: "engine_address=e514A3c48DA8B233f65b5d15BA1905d6d35BFE48&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"

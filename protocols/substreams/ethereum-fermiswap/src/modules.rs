@@ -24,7 +24,9 @@ use substreams_ethereum::{
 };
 use substreams_helper::event_handler::EventHandler;
 use tycho_substreams::{
-    abi::erc20, balances::aggregate_balances_changes, contract::extract_contract_changes_builder,
+    abi::{erc20, weth},
+    balances::aggregate_balances_changes,
+    contract::extract_contract_changes_builder,
     prelude::*,
 };
 
@@ -61,7 +63,7 @@ fn get_new_pairs(
                 component_id: component_id.clone(),
                 attributes: vec![Attribute {
                     name: PAUSED_ATTRIBUTE.to_string(),
-                    value: vec![{ 0u8 }], // default true at creation
+                    value: vec![{ 1u8 }],
                     change: ChangeType::Creation.into(),
                 }],
             }],
@@ -105,7 +107,7 @@ fn store_token_pairs(pair_changes: BlockEntityChanges, store: StoreAppend<String
 /// Emits global trader-vault token balance deltas, not component-scoped balance deltas.
 ///
 /// Newly tracked tokens are snapshotted once with `balanceOf`. Existing tokens are updated from
-/// ERC20 `Transfer` events involving the trader vault.
+/// ERC20 `Transfer` and WETH `Deposit`/`Withdrawal` events involving the trader vault.
 #[substreams::handlers::map]
 fn map_token_balance_deltas(
     params: String,
@@ -143,33 +145,58 @@ fn map_token_balance_deltas(
         });
     }
 
-    let mut transfers = Vec::new();
+    let trader_vault = config.trader_vault.as_slice();
+    let mut vault_token_deltas = Vec::new();
     for raw_tx in block.transactions() {
         let tycho_tx: Transaction = raw_tx.into();
         for (log, _) in raw_tx.logs_with_calls() {
-            let Some(transfer) = erc20::events::Transfer::match_and_decode(log) else {
-                continue;
-            };
-            transfers.push((tycho_tx.clone(), log.ordinal, log.address.clone(), transfer));
+            if let Some(transfer) = erc20::events::Transfer::match_and_decode(log) {
+                if transfer.from.as_slice() == trader_vault {
+                    vault_token_deltas.push((
+                        tycho_tx.clone(),
+                        log.ordinal,
+                        log.address.clone(),
+                        BigInt::zero() - transfer.value,
+                    ));
+                } else if transfer.to.as_slice() == trader_vault {
+                    vault_token_deltas.push((
+                        tycho_tx.clone(),
+                        log.ordinal,
+                        log.address.clone(),
+                        transfer.value,
+                    ));
+                }
+            } else if let Some(deposit) = weth::events::Deposit::match_and_decode(log) {
+                if deposit.dst.as_slice() == trader_vault {
+                    vault_token_deltas.push((
+                        tycho_tx.clone(),
+                        log.ordinal,
+                        log.address.clone(),
+                        deposit.wad,
+                    ));
+                }
+            } else if let Some(withdrawal) = weth::events::Withdrawal::match_and_decode(log) {
+                if withdrawal.src.as_slice() == trader_vault {
+                    vault_token_deltas.push((
+                        tycho_tx.clone(),
+                        log.ordinal,
+                        log.address.clone(),
+                        BigInt::zero() - withdrawal.wad,
+                    ));
+                }
+            }
         }
     }
 
-    let trader_vault = config.trader_vault.as_slice();
-    let vault_transfers = transfers
-        .into_iter()
-        .filter(|(_, _, _, transfer)| {
-            transfer.from.as_slice() == trader_vault || transfer.to.as_slice() == trader_vault
-        })
-        .collect::<Vec<_>>();
-    if vault_transfers.is_empty() {
+    if vault_token_deltas.is_empty() {
         balance_deltas.sort_unstable_by_key(|delta| delta.ord);
         return Ok(BlockBalanceDeltas { balance_deltas });
     }
 
-    for (tx, ord, token, transfer) in vault_transfers {
+    for (tx, ord, token, delta) in vault_token_deltas {
         let token_key = hex::encode(&token);
         // Newly tracked tokens were already snapshotted with `balanceOf` above. Applying their
-        // transfer deltas in the same block would double-count the trader-vault balance.
+        // event deltas in the same block would double-count the trader-vault balance.
         if new_token_keys.contains(&token_key) {
             continue;
         }
@@ -182,12 +209,6 @@ fn map_token_balance_deltas(
         {
             continue;
         }
-
-        let delta = if transfer.from.as_slice() == trader_vault {
-            BigInt::zero() - transfer.value
-        } else {
-            transfer.value
-        };
 
         balance_deltas.push(BalanceDelta {
             ord,
@@ -383,7 +404,8 @@ fn map_protocol_changes(
         |addr| {
             addr == config.engine_address ||
                 addr == config.swapper_address ||
-                addr == config.registry_address
+                addr == config.registry_address ||
+                addr == config.trader_vault
         },
         &mut transaction_changes,
     );
