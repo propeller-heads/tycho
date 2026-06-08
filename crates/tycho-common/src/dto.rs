@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     hash::{Hash, Hasher},
+    str::FromStr,
 };
 
 use chrono::{NaiveDateTime, Utc};
@@ -20,7 +21,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    models::{self, Address, Balance, Code, ComponentId, StoreKey, StoreVal},
+    models::{self, Address, Balance, Code, ComponentId, CustomChainConfig, StoreKey, StoreVal},
     serde_primitives::{
         hex_bytes, hex_bytes_option, hex_hashmap_key, hex_hashmap_key_value, hex_hashmap_value,
     },
@@ -29,22 +30,9 @@ use crate::{
 
 /// Currently supported Blockchains
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumString,
-    Display,
-    Default,
-    ToSchema,
-    DeepSizeOf,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, ToSchema, DeepSizeOf,
 )]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
 pub enum Chain {
     #[default]
     Ethereum,
@@ -55,6 +43,7 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    Custom(CustomChainConfig),
 }
 
 pub use models::TvlThresholdTier;
@@ -63,6 +52,20 @@ impl Chain {
     /// Returns a default TVL threshold in native token units for the given tier.
     pub fn default_tvl_threshold(&self, tier: TvlThresholdTier) -> f64 {
         models::Chain::from(*self).default_tvl_threshold(tier)
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        models::Chain::from(*self).fmt(f)
+    }
+}
+
+impl FromStr for Chain {
+    type Err = strum::ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        models::Chain::from_str(s).map(Chain::from)
     }
 }
 
@@ -99,6 +102,7 @@ impl From<models::Chain> for Chain {
             models::Chain::Bsc => Chain::Bsc,
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
+            models::Chain::Custom(cfg) => Chain::Custom(cfg),
         }
     }
 }
