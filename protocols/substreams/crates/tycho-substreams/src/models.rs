@@ -519,28 +519,6 @@ impl SlotValue {
     }
 }
 
-fn merge_slot_value(existing: &mut SlotValue, incoming: &SlotValue) {
-    existing.new_value.clear();
-    existing
-        .new_value
-        .extend_from_slice(&incoming.new_value);
-    // Trace-backed updates carry `old_value`; synthetic updates (e.g. Vault `reservesOf`
-    // from settle) do not. Only refresh `start_value` from trace data so we do not clobber
-    // a prior start when merging a synthetic update.
-    if incoming.start_value.is_empty() {
-        if existing.start_value == existing.new_value {
-            existing.start_value.clear();
-        }
-    } else {
-        if !existing.start_value.is_empty() {
-            existing.start_value.clear();
-            existing
-                .start_value
-                .extend_from_slice(&incoming.start_value);
-        }
-    }
-}
-
 impl From<&StorageChange> for SlotValue {
     fn from(change: &StorageChange) -> Self {
         Self { new_value: change.new_value.clone(), start_value: change.old_value.clone() }
@@ -574,18 +552,23 @@ impl InterimContractChange {
         if change.address != self.address {
             panic!("Bad storage change");
         }
-        let incoming = SlotValue::from(change);
         self.slots
             .entry(change.key.clone())
-            .and_modify(|existing| merge_slot_value(existing, &incoming))
-            .or_insert(incoming);
+            .and_modify(|sv| {
+                sv.new_value
+                    .copy_from_slice(&change.new_value)
+            })
+            .or_insert_with(|| change.into());
     }
 
     fn upsert_slots(&mut self, changes: &HashMap<Vec<u8>, SlotValue>) {
         for (slot, value) in changes.iter() {
             self.slots
                 .entry(slot.clone())
-                .and_modify(|existing| merge_slot_value(existing, value))
+                .and_modify(|sv| {
+                    sv.new_value
+                        .copy_from_slice(&value.new_value)
+                })
                 .or_insert(value.clone());
         }
     }
@@ -933,97 +916,6 @@ mod test {
             .unwrap();
         assert_eq!(paused_attr.value, vec![1u8]);
         assert_eq!(paused_attr.change, i32::from(ChangeType::Creation));
-    }
-
-    #[test]
-    fn upsert_slot_emits_after_trace_noop_then_synthetic_reserve_update() {
-        let key = vec![0xaa_u8; 32];
-        let value = vec![0x11u8; 32];
-
-        let trace_change = StorageChange {
-            address: vec![0u8; 20],
-            key: key.clone(),
-            old_value: value.clone(),
-            new_value: value.clone(),
-            ordinal: 1,
-        };
-        let reserve_change = StorageChange {
-            address: vec![0u8; 20],
-            key: key.clone(),
-            old_value: vec![],
-            new_value: value.clone(),
-            ordinal: 2,
-        };
-
-        let mut contract = InterimContractChange::new(&[0u8; 20], false);
-        contract.upsert_slot(&trace_change);
-        contract.upsert_slot(&reserve_change);
-
-        let emitted: Option<super::ContractChange> = contract.into();
-        let emitted = emitted.expect("slot should be emitted");
-        assert_eq!(emitted.slots.len(), 1);
-        assert_eq!(emitted.slots[0].value, value);
-    }
-
-    #[test]
-    fn upsert_slot_emits_after_synthetic_reserve_then_trace_noop_update() {
-        let key = vec![0xaa_u8; 32];
-        let value = vec![0x11u8; 32];
-
-        let reserve_change = StorageChange {
-            address: vec![0u8; 20],
-            key: key.clone(),
-            old_value: vec![],
-            new_value: value.clone(),
-            ordinal: 1,
-        };
-        let trace_change = StorageChange {
-            address: vec![0u8; 20],
-            key: key.clone(),
-            old_value: value.clone(),
-            new_value: value.clone(),
-            ordinal: 2,
-        };
-
-        let mut contract = InterimContractChange::new(&[0u8; 20], false);
-        contract.upsert_slot(&reserve_change);
-        contract.upsert_slot(&trace_change);
-
-        let emitted: Option<super::ContractChange> = contract.into();
-        let emitted = emitted.expect("slot should be emitted");
-        assert_eq!(emitted.slots.len(), 1);
-        assert_eq!(emitted.slots[0].value, value);
-    }
-
-    #[test]
-    fn add_contract_changes_emits_after_trace_noop_then_synthetic_reserve_update() {
-        let key = vec![0xaa_u8; 32];
-        let value = vec![0x11u8; 32];
-        let mut builder = TransactionChangesBuilder::new(&super::Transaction::default());
-
-        let mut trace_change = InterimContractChange::new(&[0u8; 20], false);
-        trace_change.upsert_slot(&StorageChange {
-            address: vec![0u8; 20],
-            key: key.clone(),
-            old_value: value.clone(),
-            new_value: value.clone(),
-            ordinal: 1,
-        });
-        let mut reserve_change = InterimContractChange::new(&[0u8; 20], false);
-        reserve_change.upsert_slot(&StorageChange {
-            address: vec![0u8; 20],
-            key,
-            old_value: vec![],
-            new_value: value,
-            ordinal: 2,
-        });
-
-        builder.add_contract_changes(&trace_change);
-        builder.add_contract_changes(&reserve_change);
-
-        let tx_changes = builder.build().expect("changes should be emitted");
-        assert_eq!(tx_changes.contract_changes.len(), 1);
-        assert_eq!(tx_changes.contract_changes[0].slots.len(), 1);
     }
 
     #[test]

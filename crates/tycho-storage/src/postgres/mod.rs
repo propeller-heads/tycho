@@ -130,7 +130,7 @@
 //! database operations.
 use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc, time::Duration};
 
-use chrono::{Duration as ChronoDuration, NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
     pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
@@ -598,15 +598,12 @@ impl PostgresGateway {
 /// - `Ok`: Contains a `Pool` of `AsyncPgConnection`s if the connection was established
 ///   successfully.
 /// - `Err`: Contains a `StorageError` if there was an issue creating the connection pool.
-async fn connect(
-    db_url: &str,
-    retention_horizon: Option<NaiveDateTime>,
-) -> Result<Pool<AsyncPgConnection>, StorageError> {
+async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
     let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
     let pool = Pool::builder(config)
         .build()
         .map_err(|err| StorageError::Unexpected(err.to_string()))?;
-    run_migrations(db_url, retention_horizon);
+    run_migrations(db_url);
     Ok(pool)
 }
 
@@ -733,78 +730,11 @@ async fn ensure_protocol_systems(protocol_systems: &[String], pool: Pool<AsyncPg
     debug!("Ensured protocol system enum presence for: {:?}", protocol_systems);
 }
 
-fn run_migrations(db_url: &str, retention_horizon: Option<NaiveDateTime>) {
+fn run_migrations(db_url: &str) {
     info!("Upgrading database...");
     let mut conn = PgConnection::establish(db_url).expect("Connection to database should succeed");
     conn.run_pending_migrations(MIGRATIONS)
         .expect("migrations should execute without errors");
-    backfill_historical_partitions(&mut conn, retention_horizon)
-        .expect("Failed to backfill historical partitions");
-}
-
-/// Ensures daily partitions exist for the past 3 months on all pg_partman-managed tables.
-///
-/// `pg_partman`'s `create_parent` only pre-creates future partitions (`p_premake` days ahead).
-/// In a freshly created database — e.g. an integration-test environment replaying historical
-/// blocks — there are no partitions for past dates, so archive rows with `valid_to` in that
-/// range fall into the default partition. The default partition carries a `UNIQUE (entity_key)`
-/// constraint that is already satisfied by the current row, which either aborts the write
-/// transaction or (with `on_conflict_do_nothing`) silently drops the archive row, breaking
-/// point-in-time reads at the stop block.
-///
-/// In production the partitions already exist (created day-by-day by pg_partman), so this call is
-/// a no-op. In a fresh database it creates missing partitions for the replay/retention window.
-///
-/// The range defaults to:
-/// - start: `retention_horizon` (if provided) or `now - 3 months`
-/// - end: `now`
-///
-/// Integration tests can override bounds via:
-/// - `PARTITION_BACKFILL_START` (NaiveDateTime format, e.g. `2024-01-01T00:00:00`)
-/// - `PARTITION_BACKFILL_END` (same format)
-fn backfill_historical_partitions(
-    conn: &mut PgConnection,
-    retention_horizon: Option<NaiveDateTime>,
-) -> Result<(), diesel::result::Error> {
-    const TABLES: &[&str] = &[
-        "public.contract_storage",
-        "public.protocol_state",
-        "public.component_balance",
-    ];
-
-    let now = Utc::now().naive_utc();
-    let default_start = retention_horizon.unwrap_or(now - ChronoDuration::days(90));
-    let start = std::env::var("PARTITION_BACKFILL_START")
-        .ok()
-        .and_then(|v| NaiveDateTime::parse_from_str(&v, "%Y-%m-%dT%H:%M:%S").ok())
-        .unwrap_or(default_start)
-        .min(now);
-    let end = std::env::var("PARTITION_BACKFILL_END")
-        .ok()
-        .and_then(|v| NaiveDateTime::parse_from_str(&v, "%Y-%m-%dT%H:%M:%S").ok())
-        .unwrap_or(now)
-        .max(start);
-
-    for table in TABLES {
-        diesel::RunQueryDsl::execute(
-            diesel::sql_query(format!(
-                "SELECT partman.create_partition_time(\
-                    p_parent_table    := '{table}', \
-                    p_partition_times := ARRAY(\
-                        SELECT generate_series(\
-                            date_trunc('day', $1),\
-                            date_trunc('day', $2),\
-                            '1 day'::interval\
-                        )::timestamptz\
-                    )\
-                )"
-            ))
-            .bind::<diesel::sql_types::Timestamptz, _>(start)
-            .bind::<diesel::sql_types::Timestamptz, _>(end),
-            conn,
-        )?;
-    }
-    Ok(())
 }
 
 // TODO: add cfg(test) once we have better mocks to be used in indexer crate

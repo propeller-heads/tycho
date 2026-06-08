@@ -301,13 +301,10 @@ impl TryFromMessage for TxWithChanges {
             new_protocol_components.insert(component.id.clone(), component);
         }
 
-        // Parse the account updates (merge multiple changes for the same address).
+        // Parse the account updates
         for contract_change in msg.contract_changes.clone().into_iter() {
             let update = AccountDelta::try_from_message((contract_change, block.chain))?;
-            account_updates
-                .entry(update.address.clone())
-                .and_modify(|existing| merge_account_delta(existing, &update))
-                .or_insert(update);
+            account_updates.insert(update.address.clone(), update);
         }
 
         // Parse the state updates
@@ -505,40 +502,9 @@ impl TryFromMessage for BlockChanges {
     }
 }
 
-fn merge_account_delta_payload(existing: &mut AccountDelta, incoming: &AccountDelta) {
-    for (slot, value) in &incoming.slots {
-        existing.slots.insert(slot.clone(), value.clone());
-    }
-    if incoming.balance.is_some() {
-        existing.balance = incoming.balance.clone();
-    }
-    if let Some(code) = incoming.code() {
-        existing.set_code(code.clone());
-    }
-}
-
-/// Merge multiple `ContractChange` messages targeting the same address in one tx.
-///
-/// Change precedence is explicit:
-/// - A later `Deletion` is terminal unless followed by `Creation`.
-/// - A later `Creation` resets state and becomes authoritative for the tx.
-/// - A later `Update` merges payload into the existing aggregate when the aggregate is
-///   `Update` or `Creation`; updates after a `Deletion` are ignored.
-fn merge_account_delta(existing: &mut AccountDelta, incoming: &AccountDelta) {
-    match (existing.change_type(), incoming.change_type()) {
-        (_, ChangeType::Creation | ChangeType::Deletion) => {
-            *existing = incoming.clone();
-        }
-        (ChangeType::Deletion, ChangeType::Update) => {}
-        (ChangeType::Creation | ChangeType::Update, ChangeType::Update) => {
-            merge_account_delta_payload(existing, incoming);
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, str::FromStr};
+    use std::str::FromStr;
 
     use rstest::rstest;
 
@@ -731,51 +697,5 @@ mod test {
         let result = TracingParams::try_from_message(msg).unwrap();
 
         assert_eq!(result, expected);
-    }
-
-    fn account_delta(change: ChangeType, slot: u8, value: u8) -> AccountDelta {
-        AccountDelta::new(
-            Chain::Ethereum,
-            Bytes::from(vec![0x11u8; 20]),
-            HashMap::from([(Bytes::from(vec![slot]), Some(Bytes::from(vec![value])))]),
-            None,
-            None,
-            change,
-        )
-    }
-
-    #[test]
-    fn test_merge_account_delta_keeps_creation_on_update() {
-        let mut existing = account_delta(ChangeType::Creation, 0x01, 0x01);
-        let incoming = account_delta(ChangeType::Update, 0x02, 0x02);
-
-        merge_account_delta(&mut existing, &incoming);
-
-        assert_eq!(existing.change_type(), ChangeType::Creation);
-        assert_eq!(existing.slots.len(), 2);
-    }
-
-    #[test]
-    fn test_merge_account_delta_ignores_update_after_deletion() {
-        let mut existing = account_delta(ChangeType::Deletion, 0x01, 0x01);
-        let incoming = account_delta(ChangeType::Update, 0x02, 0x02);
-
-        merge_account_delta(&mut existing, &incoming);
-
-        assert_eq!(existing.change_type(), ChangeType::Deletion);
-        assert_eq!(existing.slots.len(), 1);
-        assert!(existing.slots.contains_key(&Bytes::from(vec![0x01])));
-    }
-
-    #[test]
-    fn test_merge_account_delta_creation_overrides_prior_deletion() {
-        let mut existing = account_delta(ChangeType::Deletion, 0x01, 0x01);
-        let incoming = account_delta(ChangeType::Creation, 0x02, 0x02);
-
-        merge_account_delta(&mut existing, &incoming);
-
-        assert_eq!(existing.change_type(), ChangeType::Creation);
-        assert_eq!(existing.slots.len(), 1);
-        assert!(existing.slots.contains_key(&Bytes::from(vec![0x02])));
     }
 }

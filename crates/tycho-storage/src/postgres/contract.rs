@@ -24,46 +24,9 @@ use tycho_common::{
 
 use super::{
     maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
-    versioning::{
-        apply_partitioned_versioning, apply_versioning, PartitionedVersionedRow, VersioningEntry,
-    },
+    versioning::{apply_partitioned_versioning, apply_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
-
-/// When `apply_partitioned_versioning` does not emit an archive row for a superseded default
-/// partition row, move it into `contract_storage` so point-in-time reads remain correct.
-fn archive_missed_superseded_slot_rows(
-    db_existing: &[orm::NewSlot],
-    latest: &[orm::NewSlot],
-    mut to_archive: Vec<orm::NewSlot>,
-) -> Vec<orm::NewSlot> {
-    let superseding: HashMap<_, _> = latest
-        .iter()
-        .map(|row| (row.get_id(), row))
-        .collect();
-
-    for db_row in db_existing {
-        let id = db_row.get_id();
-        let Some(new_row) = superseding.get(&id) else {
-            continue;
-        };
-        if new_row.get_valid_from() <= db_row.get_valid_from() {
-            continue;
-        }
-        let already_archived = to_archive.iter().any(|archived| {
-            archived.get_id() == id && archived.get_valid_from() == db_row.get_valid_from()
-        });
-        if already_archived {
-            continue;
-        }
-        let mut archived = db_row.clone();
-        let mut next = (*new_row).clone();
-        archived.archive(&mut next);
-        to_archive.push(archived);
-    }
-
-    to_archive
-}
 
 struct CreatedOrDeleted<T> {
     /// Accounts that were created (and deltas are equal to their updates)
@@ -607,31 +570,8 @@ impl PostgresGateway {
             .into_iter()
             .map(|b| b.entity)
             .collect::<Vec<_>>();
-
-        let entity_ids: Vec<_> = sorted
-            .iter()
-            .filter_map(|entry| match entry {
-                VersioningEntry::Update(row) => Some(row.get_id()),
-                _ => None,
-            })
-            .collect();
-
-        let db_existing = if entity_ids.is_empty() {
-            Vec::new()
-        } else {
-            orm::NewSlot::latest_versions_by_ids(entity_ids, conn).await?
-        };
-
-        let (latest, mut to_archive, deleted) =
+        let (latest, to_archive, _) =
             apply_partitioned_versioning(&sorted, self.retention_horizon, conn).await?;
-
-        to_archive = archive_missed_superseded_slot_rows(&db_existing, &latest, to_archive);
-
-        let to_archive: Vec<_> = to_archive
-            .into_iter()
-            .filter(|row| row.get_valid_to() > self.retention_horizon)
-            .collect();
-
         let latest = latest
             .into_iter()
             .map(orm::NewSlotLatest::from)
@@ -671,22 +611,6 @@ impl PostgresGateway {
                 .map_err(PostgresError::from)?;
         }
 
-        if !deleted.is_empty() {
-            let mut delete_query =
-                diesel::delete(schema::contract_storage_default::table).into_boxed();
-            for (account_id, slot) in deleted {
-                delete_query = delete_query.or_filter(
-                    schema::contract_storage_default::account_id
-                        .eq(account_id)
-                        .and(schema::contract_storage_default::slot.eq(slot)),
-                );
-            }
-            delete_query
-                .execute(conn)
-                .await
-                .map_err(PostgresError::from)?;
-        }
-
         Ok(())
     }
 
@@ -716,70 +640,30 @@ impl PostgresGateway {
             None => Utc::now().naive_utc(),
         };
 
-        let chain_id = self.get_chain_id(chain)?;
-
-        // Historical rows live in the partitioned `contract_storage` table; the current version of
-        // each slot lives in `contract_storage_default`. Point-in-time reads need both.
         let slots = {
-            use diesel::sql_types::{Binary, Nullable, Timestamptz};
+            use schema::{account, contract_storage::dsl::*};
 
-            #[derive(QueryableByName)]
-            struct SlotRow {
-                #[diesel(sql_type = diesel::sql_types::BigInt)]
-                account_id: i64,
-                #[diesel(sql_type = Binary)]
-                slot: Vec<u8>,
-                #[diesel(sql_type = Nullable<Binary>)]
-                value: Option<Vec<u8>>,
+            let chain_id = self.get_chain_id(chain)?;
+            let mut q = contract_storage
+                .inner_join(account::table)
+                .filter(account::chain_id.eq(chain_id))
+                .filter(
+                    valid_from
+                        .le(version_ts)
+                        .and(valid_to.gt(version_ts)),
+                )
+                .order_by((account::id, slot, valid_from.desc(), ordinal.desc()))
+                .select((account::id, slot, value))
+                .distinct_on((account::id, slot))
+                .into_boxed();
+            if let Some(addresses) = contracts {
+                #[allow(clippy::mutable_key_type)]
+                let filter_val: HashSet<_> = addresses.iter().collect();
+                q = q.filter(account::address.eq_any(filter_val));
             }
-
-            let address_clause = contracts
-                .map(|_| "AND a.address = ANY($3)")
-                .unwrap_or_default();
-
-            let query = format!(
-                "SELECT DISTINCT ON (s.account_id, s.slot)
-                    s.account_id,
-                    s.slot,
-                    s.value
-                 FROM (
-                    SELECT cs.account_id, cs.slot, cs.value, cs.valid_from, cs.ordinal
-                    FROM contract_storage cs
-                    INNER JOIN account a ON a.id = cs.account_id
-                    WHERE a.chain_id = $1
-                      AND cs.valid_from <= $2
-                      AND cs.valid_to > $2
-                      {address_clause}
-                    UNION ALL
-                    SELECT cs.account_id, cs.slot, cs.value, cs.valid_from, cs.ordinal
-                    FROM contract_storage_default cs
-                    INNER JOIN account a ON a.id = cs.account_id
-                    WHERE a.chain_id = $1
-                      AND cs.valid_from <= $2
-                      {address_clause}
-                 ) s
-                 ORDER BY s.account_id, s.slot, s.valid_from DESC, s.ordinal DESC"
-            );
-
-            let rows = if let Some(addresses) = contracts {
-                diesel::sql_query(query)
-                    .bind::<diesel::sql_types::BigInt, _>(chain_id)
-                    .bind::<Timestamptz, _>(version_ts)
-                    .bind::<diesel::sql_types::Array<Binary>, _>(addresses)
-                    .load::<SlotRow>(conn)
-                    .await
-            } else {
-                diesel::sql_query(query)
-                    .bind::<diesel::sql_types::BigInt, _>(chain_id)
-                    .bind::<Timestamptz, _>(version_ts)
-                    .load::<SlotRow>(conn)
-                    .await
-            }
-            .map_err(PostgresError::from)?;
-
-            rows.into_iter()
-                .map(|row| (row.account_id, Bytes::from(row.slot), row.value.map(Bytes::from)))
-                .collect::<Vec<_>>()
+            q.get_results::<(i64, Bytes, Option<Bytes>)>(conn)
+                .await
+                .map_err(PostgresError::from)?
         };
         let accounts = orm::Account::get_addresses_by_id(slots.iter().map(|(cid, _, _)| cid), conn)
             .await

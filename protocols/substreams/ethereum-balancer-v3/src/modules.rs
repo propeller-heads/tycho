@@ -382,8 +382,6 @@ pub fn map_protocol_changes(
                 let mut vault_contract_tlv_changes =
                     InterimContractChange::new(VAULT_ADDRESS, false);
                 for (token_addr, reserve_value) in vault_balance_change_per_tx {
-                    vault_contract_tlv_changes
-                        .upsert_slot(&reserve_value.storage_change_for_slot());
                     vault_contract_tlv_changes.upsert_token_balance(
                         token_addr.as_slice(),
                         reserve_value.value.as_slice(),
@@ -506,20 +504,7 @@ fn get_vault_reserves(
 
 struct ReserveValue {
     ordinal: u64,
-    slot_key: Vec<u8>,
     value: Vec<u8>,
-}
-
-impl ReserveValue {
-    fn storage_change_for_slot(&self) -> StorageChange {
-        StorageChange {
-            address: VAULT_ADDRESS.to_vec(),
-            key: self.slot_key.clone(),
-            old_value: vec![],
-            new_value: self.value.clone(),
-            ordinal: self.ordinal,
-        }
-    }
 }
 
 fn add_change_if_accounted(
@@ -539,7 +524,7 @@ fn add_change_if_accounted(
                     v.ordinal = change.ordinal;
                 }
             })
-            .or_insert(ReserveValue { slot_key, value: change.new_value.clone(), ordinal: change.ordinal });
+            .or_insert(ReserveValue { value: change.new_value.clone(), ordinal: change.ordinal });
     }
 }
 
