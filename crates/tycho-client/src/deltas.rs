@@ -487,29 +487,29 @@ impl WsDeltasClient {
     /// This method acquires the lock for inner for a short period, then waits until the
     /// connection is established if not already connected.
     async fn ensure_connection(&self) -> Result<(), DeltasError> {
-        if self.dead.load(Ordering::SeqCst) {
-            return Err(DeltasError::NotConnected);
+        // Loop until either permanently dead or successfully connected. A single wait-and-check
+        // is not enough: the WS can reconnect briefly then drop again (e.g. server restart),
+        // which would fire conn_notify but leave is_connected() false. Looping retries
+        // automatically on that transient race.
+        loop {
+            if self.dead.load(Ordering::SeqCst) {
+                return Err(DeltasError::NotConnected);
+            }
+            if self.is_connected().await {
+                return Ok(());
+            }
+            // Enable the future BEFORE re-checking is_connected to close the race window where
+            // the reconnect task calls notify_waiters() between is_connected() returning false
+            // and notified().await — without enable(), that notification would be lost.
+            let notified = self.conn_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_connected().await {
+                notified.await;
+            }
+            // Loop back: recheck dead and is_connected. If the WS dropped again between the
+            // notification and here, we wait for the next reconnect rather than failing.
         }
-        if self.is_connected().await {
-            return Ok(());
-        }
-        // Enable the future BEFORE re-checking is_connected to close the race window where
-        // the reconnect task calls notify_waiters() between is_connected() returning false and
-        // notified().await — without enable(), that notification would be lost and this call
-        // would block until the next reconnect.
-        let notified = self.conn_notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if !self.is_connected().await {
-            notified.await;
-        }
-        if self.dead.load(Ordering::SeqCst) {
-            return Err(DeltasError::NotConnected);
-        }
-        if !self.is_connected().await {
-            return Err(DeltasError::NotConnected);
-        }
-        Ok(())
     }
 
     /// Main message handling logic
