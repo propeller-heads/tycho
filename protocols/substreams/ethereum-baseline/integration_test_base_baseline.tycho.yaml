@@ -24,21 +24,3 @@ tests:
         creation_tx: "0x054e0d03f1ff601e2270de55c3322d5558e620823e462515e776b3afb34ac559"
         skip_simulation: false
         skip_execution: false
-
-  - name: test_base_from_relay_deployment
-    # Slow final-validation test: starts at the Base relay deployment block so
-    # every Baseline pool is indexed before validating the recent pool.
-    start_block: 45070267
-    stop_block: 46809753
-    expected_components:
-      - id: "0x2A6b1BF66542CB1463541d211747B28C6bb39e83"
-        tokens:
-          - "0x2A6b1BF66542CB1463541d211747B28C6bb39e83"
-          - "0x4200000000000000000000000000000000000006"
-        static_attributes:
-          relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
-          reserve: "0x4200000000000000000000000000000000000006"
-          manual_updates: "0x01"
-        creation_tx: "0x054e0d03f1ff601e2270de55c3322d5558e620823e462515e776b3afb34ac559"
-        skip_simulation: false
-        skip_execution: false

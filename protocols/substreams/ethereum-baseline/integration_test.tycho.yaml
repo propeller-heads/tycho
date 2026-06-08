@@ -4,10 +4,10 @@ module_name: "map_protocol_changes"
 protocol_type_names:
   - "baseline"
 implementation_type: Custom
-skip_balance_check: true # Baseline is singleton-style; component liquidity is indexed from relay events, not component-address balances.
+skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
 
 tests:
-  - name: test_mainnet_pool_creation
+  - name: test_ethereum_from_relay_deployment
     # Start at the relay deployment block so range mode mirrors production sync:
     # every Baseline pool is indexed before later swap-triggered quote-state
     # updates are emitted. Native simulation needs quote-state attributes from a
