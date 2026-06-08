@@ -1,18 +1,25 @@
 use crate::{
-    abi::fermi::events::{PairActiveSet, PairRegistered, PairUnregistered},
+    abi::{
+        fermi::events::{PairActiveSet, PairRegistered, PairUnregistered},
+        registry::functions::{BatchUpdateStateWithSignature, UpdateState},
+    },
     pb::fermiswap::v1::Pair,
-    utils::{component_id, Config, PAUSED_ATTRIBUTE},
+    utils::{
+        component_id, lane_index, Config, OVERRIDE_BLOCK_NUMBER_ATTRIBUTE,
+        OVERRIDE_BLOCK_TIMESTAMP_ATTRIBUTE, PAUSED_ATTRIBUTE,
+    },
 };
 use anyhow::Result;
 use ethabi::ethereum_types::Address;
 use itertools::Itertools;
+use num_bigint::Sign;
 use std::collections::{HashMap, HashSet};
 use substreams::{
     pb::substreams::StoreDeltas,
     prelude::*,
     store::{
         Appender, StoreAdd, StoreAddBigInt, StoreAppend, StoreGet, StoreGetBigInt, StoreGetString,
-        StoreNew, StoreSetIfNotExists,
+        StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsString,
     },
 };
 use substreams_ethereum::{
@@ -20,7 +27,7 @@ use substreams_ethereum::{
         self,
         v2::{Block, Log, TransactionTrace},
     },
-    Event,
+    Event, Function,
 };
 use substreams_helper::event_handler::EventHandler;
 use tycho_substreams::{
@@ -54,18 +61,24 @@ fn get_new_pairs(
                 config.trader_vault.as_slice(),
                 config.registry_address.as_slice(),
             ])
-            .with_attributes(&[("balance_owner", config.trader_vault.as_slice())])
             .as_swap_type("fermiswap_pool", ImplementationType::Vm);
 
         new_pair_changes.push(TransactionEntityChanges {
             tx: Some(tycho_tx.clone()),
             entity_changes: vec![EntityChanges {
                 component_id: component_id.clone(),
-                attributes: vec![Attribute {
-                    name: PAUSED_ATTRIBUTE.to_string(),
-                    value: vec![{ 1u8 }],
-                    change: ChangeType::Creation.into(),
-                }],
+                attributes: vec![
+                    Attribute {
+                        name: PAUSED_ATTRIBUTE.to_string(),
+                        value: vec![{ 1u8 }],
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "balance_owner".to_string(),
+                        value: config.trader_vault.to_vec(),
+                        change: ChangeType::Creation.into(),
+                    },
+                ],
             }],
             component_changes: vec![new_component],
             balance_changes: vec![],
@@ -89,6 +102,18 @@ fn store_pairs(pair_changes: BlockEntityChanges, store: StoreSetIfNotExistsProto
                 quote_asset: component.tokens[1].clone(),
             };
             store.set_if_not_exists(0, &component.id, &pair);
+        }
+    }
+}
+
+#[substreams::handlers::store]
+fn store_lane_components(pair_changes: BlockEntityChanges, store: StoreSetIfNotExistsString) {
+    for tx_changes in pair_changes.changes {
+        for component in tx_changes.component_changes {
+            let base_asset = &component.tokens[0];
+            let quote_asset = &component.tokens[1];
+            store.set_if_not_exists(0, lane_index(base_asset, quote_asset), &component.id);
+            store.set_if_not_exists(0, lane_index(quote_asset, base_asset), &component.id);
         }
     }
 }
@@ -328,11 +353,14 @@ fn map_protocol_changes(
     block: eth::v2::Block,
     pair_changes: BlockEntityChanges,
     pair_store: StoreGetProto<Pair>,
+    lane_component_store: StoreGetString,
     vault_balance_deltas: BlockBalanceDeltas,
     vault_balance_store_deltas: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let config: Config = serde_qs::from_str(params.as_str())?;
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
+    let block_number = block.number;
+    let block_timestamp = block.timestamp_seconds();
 
     for tx_changes in pair_changes.changes {
         let Some(tycho_tx) = tx_changes.tx else {
@@ -356,6 +384,7 @@ fn map_protocol_changes(
         let builder = transaction_changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+        let mut block_overridden_components = HashSet::new();
 
         for (log, _) in trx.logs_with_calls() {
             if log.address != config.engine_address {
@@ -376,6 +405,54 @@ fn map_protocol_changes(
                     .is_some()
                 {
                     builder.change_component_pause_state(&component_id, true);
+                }
+            }
+        }
+
+        for call in trx
+            .calls
+            .iter()
+            .filter(|call| !call.state_reverted && call.address == config.registry_address)
+        {
+            // Fermi reads fresh oracle state with the current block env. When the registry update
+            // is for this block, pass that block env to VM simulation through component attrs.
+            if let Some(update) = UpdateState::match_and_decode(call) {
+                if let Some(component_id) = component_for_current_block_registry_update(
+                    &config,
+                    &lane_component_store,
+                    block_timestamp,
+                    &update.target,
+                    &update.lane_index,
+                    &update.update_timestamp,
+                ) {
+                    add_block_override_attributes(
+                        builder,
+                        &mut block_overridden_components,
+                        component_id,
+                        block_number,
+                        block_timestamp,
+                    );
+                }
+            } else if let Some(batch) = BatchUpdateStateWithSignature::match_and_decode(call) {
+                for (target, _signer, lane_index, update_timestamp, _slots, _signature) in
+                    batch.updates
+                {
+                    if let Some(component_id) = component_for_current_block_registry_update(
+                        &config,
+                        &lane_component_store,
+                        block_timestamp,
+                        &target,
+                        &lane_index,
+                        &update_timestamp,
+                    ) {
+                        add_block_override_attributes(
+                            builder,
+                            &mut block_overridden_components,
+                            component_id,
+                            block_number,
+                            block_timestamp,
+                        );
+                    }
                 }
             }
         }
@@ -419,4 +496,67 @@ fn map_protocol_changes(
             .collect::<Vec<_>>(),
         storage_changes: vec![],
     })
+}
+
+fn component_for_current_block_registry_update(
+    config: &Config,
+    lane_component_store: &StoreGetString,
+    block_timestamp: u64,
+    target: &[u8],
+    lane_index: &BigInt,
+    update_timestamp: &BigInt,
+) -> Option<String> {
+    if target != config.engine_address.as_slice() {
+        return None;
+    }
+    if update_timestamp.to_u64() != block_timestamp {
+        return None;
+    }
+
+    // Registry calldata only contains `laneIndex`, not the token pair. `laneIndex` is
+    // keccak256(abi.encode(tokenA, tokenB)), so this is a one-way lookup through the lane store
+    // populated when the pair was created.
+    let lane_key = lane_index_store_key(lane_index)?;
+    lane_component_store.get_last(lane_key)
+}
+
+fn add_block_override_attributes(
+    builder: &mut TransactionChangesBuilder,
+    block_overridden_components: &mut HashSet<String>,
+    component_id: String,
+    block_number: u64,
+    block_timestamp: u64,
+) {
+    // A batch can include repeated updates for the same component. The override value is
+    // block-wide, so emit it once per component per transaction.
+    if !block_overridden_components.insert(component_id.clone()) {
+        return;
+    }
+
+    builder.add_entity_change(&EntityChanges {
+        component_id,
+        attributes: vec![
+            Attribute {
+                name: OVERRIDE_BLOCK_NUMBER_ATTRIBUTE.to_string(),
+                value: block_number.to_be_bytes().to_vec(),
+                change: ChangeType::Update.into(),
+            },
+            Attribute {
+                name: OVERRIDE_BLOCK_TIMESTAMP_ATTRIBUTE.to_string(),
+                value: block_timestamp.to_be_bytes().to_vec(),
+                change: ChangeType::Update.into(),
+            },
+        ],
+    });
+}
+
+fn lane_index_store_key(value: &BigInt) -> Option<String> {
+    let (sign, bytes) = value.to_bytes_be();
+    if sign == Sign::Minus || bytes.len() > 32 {
+        return None;
+    }
+
+    let mut padded = [0u8; 32];
+    padded[32 - bytes.len()..].copy_from_slice(&bytes);
+    Some(format!("0x{}", hex::encode(padded)))
 }

@@ -29,6 +29,7 @@ networks:
     initialBlock:
       map_protocol_components: 24936662 # trader_vault creation block
       store_pairs: 24936662
+      store_lane_components: 24936662
       store_token_pairs: 24936662
       map_token_balance_deltas: 24936662
       store_token_balances: 24936662
@@ -53,6 +54,13 @@ modules:
     kind: store
     updatePolicy: set_if_not_exists
     valueType: proto:fermiswap.v1.Pair
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_lane_components
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: string
     inputs:
       - map: map_protocol_components
 
@@ -108,6 +116,8 @@ modules:
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
       - store: store_pairs
+        mode: get
+      - store: store_lane_components
         mode: get
       - map: map_balance_deltas
       - store: store_balances
