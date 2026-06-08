@@ -8,12 +8,11 @@ skip_balance_check: true # Baseline is singleton-style; component liquidity is i
 
 tests:
   - name: test_mainnet_pool_creation
-    start_block: 24929812
-    # Native simulation needs quote-state attributes. The old VM fixture stopped
-    # at 24930105, before the relay exposed getQuoteState. The first
-    # getQuoteState route returned an older 16-field shape; 25036613 is the
-    # first observed swap for this bToken after BLens v3 returned the current
-    # 19-field quote-state shape.
+    # Start at the relay deployment block so range mode mirrors production sync:
+    # every Baseline pool is indexed before later swap-triggered quote-state
+    # updates are emitted. Native simulation needs quote-state attributes from a
+    # later BLens v3 block, so this range intentionally spans past creation.
+    start_block: 24920863
     stop_block: 25036613
     expected_components:
       - id: "0x9fdbde76236998dc2836fe67a9954ede456a1d63"

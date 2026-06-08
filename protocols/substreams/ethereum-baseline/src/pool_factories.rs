@@ -31,7 +31,7 @@ pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<Pr
     Some(ProtocolComponent {
         id: component_id,
         tokens: vec![event.b_token_address, event.reserve_address.clone()],
-        contracts: vec![config.relay_address.clone()],
+        contracts: vec![],
         static_att: vec![
             Attribute {
                 name: "relay".to_string(),
@@ -64,8 +64,8 @@ mod test {
     use super::*;
 
     const POOL_CREATED_TOPIC: [u8; 32] = [
-        40, 223, 178, 227, 204, 62, 41, 94, 255, 129, 153, 40, 77, 121, 190, 109, 220, 73,
-        23, 27, 19, 130, 253, 168, 221, 46, 233, 52, 237, 146, 52, 131,
+        40, 223, 178, 227, 204, 62, 41, 94, 255, 129, 153, 40, 77, 121, 190, 109, 220, 73, 23, 27,
+        19, 130, 253, 168, 221, 46, 233, 52, 237, 146, 52, 131,
     ];
 
     #[test]
@@ -97,7 +97,7 @@ mod test {
 
         assert_eq!(component.id, format!("0x{}", hex::encode(&b_token)));
         assert_eq!(component.tokens, vec![b_token, reserve.clone()]);
-        assert_eq!(component.contracts, vec![relay.clone()]);
+        assert!(component.contracts.is_empty());
         assert_eq!(
             component
                 .protocol_type
