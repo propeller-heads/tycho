@@ -1,3 +1,11 @@
+## [0.306.0](https://github.com/propeller-heads/tycho/compare/0.305.1...0.306.0) (2026-06-08)
+
+
+### Features
+
+* add aerodrome v1 to integration test ([c1a2de8](https://github.com/propeller-heads/tycho/commit/c1a2de898bc5abae987a5bdde84eb4f0d67b1814))
+* add aerodrome v1 to integration test ([#1060](https://github.com/propeller-heads/tycho/issues/1060)) ([5f4f781](https://github.com/propeller-heads/tycho/commit/5f4f78128c8f3a283f266372ab9c3c94ed4456ba))
+
 ## [0.305.1](https://github.com/propeller-heads/tycho/compare/0.305.0...0.305.1) (2026-06-05)
 
 
