@@ -1839,7 +1839,7 @@ fn test_single_swap_with_univ4_angstrom() {
 #[test]
 fn test_single_encoding_strategy_weth_wrap() {
     let wrap_executor =
-        ProtocolComponent { protocol_system: String::from("native_wrap"), ..Default::default() };
+        ProtocolComponent { protocol_system: String::from("native_wrapper"), ..Default::default() };
     let token_in = eth();
     let token_out = weth();
     let swap = Swap::new(
@@ -1885,7 +1885,7 @@ fn test_single_encoding_strategy_weth_wrap() {
 #[test]
 fn test_single_encoding_strategy_weth_unwrap() {
     let wrap_executor =
-        ProtocolComponent { protocol_system: String::from("native_wrap"), ..Default::default() };
+        ProtocolComponent { protocol_system: String::from("native_wrapper"), ..Default::default() };
     let token_in = weth();
     let token_out = eth();
     let swap = Swap::new(

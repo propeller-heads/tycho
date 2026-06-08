@@ -157,7 +157,7 @@ impl SwapEncoderRegistry {
             "velodrome_slipstreams" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "native_wrap" => {
+            "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "etherfi" => {

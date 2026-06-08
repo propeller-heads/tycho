@@ -1,3 +1,54 @@
+## [0.305.1](https://github.com/propeller-heads/tycho/compare/0.305.0...0.305.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* align native_wrapper component ID with consumers ([ff5b86b](https://github.com/propeller-heads/tycho/commit/ff5b86b7f56edfc1db4cab212b5be0ed41816283))
+* align native_wrapper component ID with consumers ([#1070](https://github.com/propeller-heads/tycho/issues/1070)) ([6658d14](https://github.com/propeller-heads/tycho/commit/6658d141a9de52453e57db8719c49afd62073a25))
+
+## [0.305.0](https://github.com/propeller-heads/tycho/compare/0.304.2...0.305.0) (2026-06-05)
+
+
+### Features
+
+* add BlockStepController to ProtocolStreamBuilder for gated testing ([4bb3b5d](https://github.com/propeller-heads/tycho/commit/4bb3b5db9e19f2391901bd63a6611230caa63f51))
+* add BlockStepController to ProtocolStreamBuilder for gated testing ([#1067](https://github.com/propeller-heads/tycho/issues/1067)) ([1cea37f](https://github.com/propeller-heads/tycho/commit/1cea37fc85891f7733cc6481211b8225a3a6d0cc))
+
+## [0.304.2](https://github.com/propeller-heads/tycho/compare/0.304.1...0.304.2) (2026-06-03)
+
+
+### Bug Fixes
+
+* move schema to inside rule scope ([c4f6a9d](https://github.com/propeller-heads/tycho/commit/c4f6a9dbe9d483355437216cd39a0db5424219b5))
+* move schema to inside rule scope ([2b5ecea](https://github.com/propeller-heads/tycho/commit/2b5eceae0a9096d17678adc8ec2fbb544554c274))
+* move schema to inside rule scope ([#1064](https://github.com/propeller-heads/tycho/issues/1064)) ([7ff8d9b](https://github.com/propeller-heads/tycho/commit/7ff8d9bb59e54ea17c490365bf7e7661a4d0ab81))
+
+## [0.304.1](https://github.com/propeller-heads/tycho/compare/0.304.0...0.304.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* add block-not-found retry in integration-test ([ef01f0d](https://github.com/propeller-heads/tycho/commit/ef01f0db5720237709afec24eb4d4bbbca5da20e))
+* add block-not-found retry in integration-test ([#1063](https://github.com/propeller-heads/tycho/issues/1063)) ([f610783](https://github.com/propeller-heads/tycho/commit/f61078388353e3535c666cdcf3d5a8e34390a29a))
+
+## [0.304.0](https://github.com/propeller-heads/tycho/compare/0.303.2...0.304.0) (2026-06-03)
+
+
+### Features
+
+* remove deprecated curve stream filter ([f8d5bd0](https://github.com/propeller-heads/tycho/commit/f8d5bd0c097ae28520d7e2b1ac91dd41045f3a23))
+* remove deprecated curve stream filter ([#1062](https://github.com/propeller-heads/tycho/issues/1062)) ([11777fb](https://github.com/propeller-heads/tycho/commit/11777fb8701e54fc9788dcd43ce50da36afcb380))
+
+## [0.303.2](https://github.com/propeller-heads/tycho/compare/0.303.1...0.303.2) (2026-06-02)
+
+
+### Bug Fixes
+
+* **contracts:** guard Vault ERC20 deposit and FeeCalculator setters ([7532fd2](https://github.com/propeller-heads/tycho/commit/7532fd206c37e6ca341778ca5441451879667b1d))
+* **router:** guard Vault ERC20 deposit and FeeCalculator setters ([#1059](https://github.com/propeller-heads/tycho/issues/1059)) ([011391a](https://github.com/propeller-heads/tycho/commit/011391a28a9dbdee03b8e67cc54b5a24725560d0))
+* **router:** Reset deltas to allow batched calls ([b10c10a](https://github.com/propeller-heads/tycho/commit/b10c10a2d0fe9f63a9baabb1a980175f36028d7e))
+* **router:** Reset deltas to allow batched calls ([#1058](https://github.com/propeller-heads/tycho/issues/1058)) ([1fad7b4](https://github.com/propeller-heads/tycho/commit/1fad7b41946d209e419cef6cbb1af2e56d225ad5))
+
 ## [0.303.1](https://github.com/propeller-heads/tycho/compare/0.303.0...0.303.1) (2026-06-02)
 
 

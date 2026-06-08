@@ -59,7 +59,7 @@ mod tests {
     fn test_encode_wrap_wrapping() {
         // ETH -> (wrap) -> WETH
         let pool = ProtocolComponent {
-            protocol_system: String::from("native_wrap"),
+            protocol_system: String::from("native_wrapper"),
             ..Default::default()
         };
         let token_in = Bytes::from("0x0000000000000000000000000000000000000000");
