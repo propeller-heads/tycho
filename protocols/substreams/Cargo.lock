@@ -295,7 +295,6 @@ dependencies = [
  "ethabi 18.0.0",
  "getrandom 0.2.17",
  "hex",
- "itertools 0.12.1",
  "num-bigint",
  "serde_json",
  "substreams 0.5.22",

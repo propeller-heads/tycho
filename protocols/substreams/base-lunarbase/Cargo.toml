@@ -11,7 +11,6 @@ crate-type = ["cdylib"]
 anyhow = "1.0.95"
 ethabi = "18.0.0"
 hex = "0.4.3"
-itertools = "0.12.1"
 num-bigint = "0.4.6"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"

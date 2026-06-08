@@ -73,7 +73,8 @@ pub fn map_protocol_changes(
                 &component_id,
                 &event,
                 block.number,
-            ));        }
+            ));
+        }
     }
 
     let mut changes = transaction_changes
