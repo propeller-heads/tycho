@@ -1030,15 +1030,20 @@ impl DeltasClient for WsDeltasClient {
     #[instrument(skip(self))]
     async fn close(&self) -> Result<(), DeltasError> {
         info!("Closing TychoWebsocketClient");
-        let mut guard = self.inner.lock().await;
-        let inner = guard
-            .as_mut()
-            .ok_or_else(|| DeltasError::NotConnected)?;
-        inner
-            .cmd_tx
-            .send(())
-            .await
-            .map_err(|e| DeltasError::TransportError(e.to_string()))?;
+        {
+            let mut guard = self.inner.lock().await;
+            if let Some(inner) = guard.as_mut() {
+                inner
+                    .cmd_tx
+                    .send(())
+                    .await
+                    .map_err(|e| DeltasError::TransportError(e.to_string()))?;
+            }
+        }
+        // Mark dead and notify so any ensure_connection() callers blocked on conn_notify
+        // unblock immediately and return NotConnected rather than hanging forever.
+        self.dead.store(true, Ordering::SeqCst);
+        self.conn_notify.notify_waiters();
         Ok(())
     }
 }
