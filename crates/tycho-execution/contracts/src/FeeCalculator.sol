@@ -165,6 +165,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
+        if (feeBps > _MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
         uint16 oldFeeBps = _routerFeeOnOutputBps;
         _routerFeeOnOutputBps = feeBps;
         emit RouterFeeOnOutputUpdated(oldFeeBps, feeBps);
@@ -187,6 +188,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
+        if (feeBps > _MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
         CustomFees memory customFees = _customRouterFees[client];
         uint16 oldFeeBps = customFees.hasCustomFeeOnOutput
             ? customFees.feeBpsOnOutput
@@ -239,6 +241,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
+        if (feeBps > _MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
         uint16 oldFeeBps = _routerFeeOnClientFeeBps;
         _routerFeeOnClientFeeBps = feeBps;
         emit RouterFeeOnClientFeeUpdated(oldFeeBps, feeBps);
@@ -261,6 +264,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
+        if (feeBps > _MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
         CustomFees memory customFees = _customRouterFees[client];
         uint16 oldFeeBps = customFees.hasCustomFeeOnClientFee
             ? customFees.feeBpsOnClientFee
