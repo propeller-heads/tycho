@@ -1120,8 +1120,9 @@ impl TestRunner {
                         continue;
                     }
 
+                    let chain = self.chain.to_string();
                     let executors_json = json!({
-                        "ethereum": {
+                        chain: {
                             (protocol_system): EXECUTOR_ADDRESS
                         }
                     });

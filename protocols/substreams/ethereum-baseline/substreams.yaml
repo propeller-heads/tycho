@@ -21,29 +21,20 @@ networks:
   mainnet:
     initialBlock:
       map_protocol_components: 24920863
-      store_pool_reserves: 24920863
-      map_relative_component_balance: 24920863
-      store_component_balances: 24920863
       map_protocol_changes: 24920863
     params:
       map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      map_relative_component_balance: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
       map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
   base:
     initialBlock:
       map_protocol_components: 45070267
-      store_pool_reserves: 45070267
-      map_relative_component_balance: 45070267
-      store_component_balances: 45070267
       map_protocol_changes: 45070267
     params:
       map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      map_relative_component_balance: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
       map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
 
 params:
   map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-  map_relative_component_balance: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
   map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
 
 modules:
@@ -55,37 +46,11 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
 
-  - name: store_pool_reserves
-    kind: store
-    updatePolicy: set
-    valueType: string
-    inputs:
-      - map: map_protocol_components
-
-  - name: map_relative_component_balance
-    kind: map
-    inputs:
-      - params: string
-      - source: sf.ethereum.type.v2.Block
-      - store: store_pool_reserves
-    output:
-      type: proto:tycho.evm.v1.BlockBalanceDeltas
-
-  - name: store_component_balances
-    kind: store
-    updatePolicy: add
-    valueType: bigint
-    inputs:
-      - map: map_relative_component_balance
-
   - name: map_protocol_changes
     kind: map
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
-      - map: map_relative_component_balance
-      - store: store_component_balances
-        mode: deltas
     output:
       type: proto:tycho.evm.v1.BlockChanges

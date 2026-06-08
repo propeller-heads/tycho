@@ -5,10 +5,11 @@ set -a
 source ../.substreams.env
 set +a
 
-RPC_URL="${1:-https://wispy-hidden-knowledge.quiknode.pro/744cca7e0d6ab60a5bff9c19aee2599dbff70471}" \
+RPC_URL="${1:-${BASE_RPC_URL:-https://mainnet.base.org}}" \
 RUST_LOG=protocol_testing=info,tycho_client=info,tycho_indexer=error,error \
 PATH="/Users/indigo/projects/baseline/tycho-indexer/target/debug:$PATH" \
 cargo run --bin protocol-testing -- range \
-  --package ethereum-baseline \
-  --chain ethereum \
-  --match-test test_mainnet_pool_creation
+  --package base-baseline \
+  --chain base \
+  --match-test test_base_recent_pool_creation \
+  --reuse-last-sync
