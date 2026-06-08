@@ -1127,17 +1127,13 @@ mod tests {
     }
 
     fn subscribe_with_compression(compression: bool) -> String {
-        serde_json::json!({
-            "method": "subscribe",
-            "extractor_id": {
-                "chain": "ethereum",
-                "name": "vm:ambient"
-            },
-            "include_state": true,
-            "compression": compression,
-            "partial_blocks": false
+        serde_json::to_string(&Command::Subscribe {
+            extractor_id: dto::ExtractorIdentity::new(dto::Chain::Ethereum, "vm:ambient"),
+            include_state: true,
+            compression,
+            partial_blocks: false,
         })
-        .to_string()
+        .unwrap()
     }
 
     fn subscription_confirmation() -> String {
