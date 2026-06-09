@@ -743,14 +743,10 @@ where
         tokens: &HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError> {
-        if let (Some(block_number), Some(block_timestamp)) = (
-            delta
-                .updated_attributes
-                .get("override_block_number"),
-            delta
-                .updated_attributes
-                .get("override_block_timestamp"),
-        ) {
+        if let Some(block_number) = delta
+            .updated_attributes
+            .get("override_block_number")
+        {
             let number = <[u8; 8]>::try_from(block_number.as_ref())
                 .map(u64::from_be_bytes)
                 .map_err(|_| {
@@ -759,6 +755,15 @@ where
                             .to_string(),
                     )
                 })?;
+            self.block_overrides
+                .get_or_insert_with(BlockEnvOverrides::default)
+                .number = Some(number);
+        }
+
+        if let Some(block_timestamp) = delta
+            .updated_attributes
+            .get("override_block_timestamp")
+        {
             let timestamp = <[u8; 8]>::try_from(block_timestamp.as_ref())
                 .map(u64::from_be_bytes)
                 .map_err(|_| {
@@ -767,8 +772,9 @@ where
                             .to_string(),
                     )
                 })?;
-            self.block_overrides =
-                Some(BlockEnvOverrides { number: Some(number), timestamp: Some(timestamp) });
+            self.block_overrides
+                .get_or_insert_with(BlockEnvOverrides::default)
+                .timestamp = Some(timestamp);
         }
 
         if self.manual_updates {
@@ -1400,7 +1406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delta_transition_ignores_partial_block_overrides() {
+    async fn test_delta_transition_updates_partial_block_overrides() {
         let mut pool_state = setup_pool_state().await;
         pool_state.manual_updates = true;
         pool_state.block_overrides =
@@ -1421,7 +1427,7 @@ mod tests {
 
         assert_eq!(
             pool_state.block_overrides,
-            Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) })
+            Some(BlockEnvOverrides { number: Some(789), timestamp: Some(456) })
         );
     }
 

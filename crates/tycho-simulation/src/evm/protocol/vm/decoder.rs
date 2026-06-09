@@ -164,33 +164,41 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
         if let Some(trace) = &decoder_context.vm_traces {
             vm_traces = *trace;
         }
-        let block_overrides = if let (Some(block_number), Some(block_timestamp)) = (
-            snapshot
-                .state
-                .attributes
-                .get("override_block_number"),
-            snapshot
-                .state
-                .attributes
-                .get("override_block_timestamp"),
-        ) {
-            let number = <[u8; 8]>::try_from(block_number.as_ref())
-                .map(u64::from_be_bytes)
-                .map_err(|_| {
-                    InvalidSnapshotError::ValueError(
-                        "override_block_number attribute must be an 8-byte big-endian u64"
-                            .to_string(),
-                    )
-                })?;
-            let timestamp = <[u8; 8]>::try_from(block_timestamp.as_ref())
-                .map(u64::from_be_bytes)
-                .map_err(|_| {
-                    InvalidSnapshotError::ValueError(
-                        "override_block_timestamp attribute must be an 8-byte big-endian u64"
-                            .to_string(),
-                    )
-                })?;
-            Some(BlockEnvOverrides { number: Some(number), timestamp: Some(timestamp) })
+        // A protocol may override only one block env field. In that case the VM call will use the
+        // overridden field together with the current block's other field, so block.number and
+        // block.timestamp may not correspond to the same real chain block.
+        let block_number = snapshot
+            .state
+            .attributes
+            .get("override_block_number")
+            .map(|block_number| {
+                <[u8; 8]>::try_from(block_number.as_ref())
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| {
+                        InvalidSnapshotError::ValueError(
+                            "override_block_number attribute must be an 8-byte big-endian u64"
+                                .to_string(),
+                        )
+                    })
+            })
+            .transpose()?;
+        let block_timestamp = snapshot
+            .state
+            .attributes
+            .get("override_block_timestamp")
+            .map(|block_timestamp| {
+                <[u8; 8]>::try_from(block_timestamp.as_ref())
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| {
+                        InvalidSnapshotError::ValueError(
+                            "override_block_timestamp attribute must be an 8-byte big-endian u64"
+                                .to_string(),
+                        )
+                    })
+            })
+            .transpose()?;
+        let block_overrides = if block_number.is_some() || block_timestamp.is_some() {
+            Some(BlockEnvOverrides { number: block_number, timestamp: block_timestamp })
         } else {
             None
         };
