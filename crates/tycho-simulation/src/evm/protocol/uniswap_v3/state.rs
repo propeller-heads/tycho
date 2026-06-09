@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::{Sign, I256, U256};
 use num_bigint::BigUint;
@@ -58,7 +58,36 @@ pub struct UniswapV3State {
     sqrt_price: U256,
     fee: FeeAmount,
     tick: i32,
-    ticks: TickList,
+    // C1: ticks live behind an `Arc` so cloning a state -- the post-swap `new_state`, or a quote
+    // that chains simulation -- is a refcount bump instead of a deep copy of up to ~1k `TickInfo`
+    // entries. Every tick mutation goes through `Arc::make_mut` (copy-on-write), so a previously
+    // cloned or quoted state is never mutated through a shared `Arc`. Serialized as the inner
+    // `TickList` so the wire format is unchanged from before the `Arc`.
+    #[serde(with = "arc_tick_list")]
+    ticks: Arc<TickList>,
+}
+
+/// Serializes [`UniswapV3State::ticks`] as the inner [`TickList`] content (not via serde's `rc`
+/// feature), keeping the serialized form identical to the pre-`Arc` representation.
+mod arc_tick_list {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::TickList;
+
+    pub(super) fn serialize<S: Serializer>(
+        ticks: &Arc<TickList>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        TickList::serialize(ticks.as_ref(), serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<TickList>, D::Error> {
+        TickList::deserialize(deserializer).map(Arc::new)
+    }
 }
 
 impl UniswapV3State {
@@ -79,7 +108,7 @@ impl UniswapV3State {
     ) -> Result<Self, SimulationError> {
         let spacing = UniswapV3State::get_spacing(fee);
         let tick_list = TickList::from(spacing, ticks)?;
-        Ok(UniswapV3State { liquidity, sqrt_price, fee, tick, ticks: tick_list })
+        Ok(UniswapV3State { liquidity, sqrt_price, fee, tick, ticks: Arc::new(tick_list) })
     }
 
     fn get_spacing(fee: FeeAmount) -> u16 {
@@ -254,6 +283,39 @@ impl UniswapV3State {
         } else {
             sqrt_price_next
         }
+    }
+
+    /// Quote-only swap: runs the same swap as [`ProtocolSim::get_amount_out`] but returns just
+    /// `(amount_out, gas)` and constructs no post-swap `UniswapV3State` -- the C1 zero-alloc path
+    /// for callers that only need a quote. The partial-fill (Ticks-exceeded) and bail
+    /// (no-liquidity, price-limit, I256 overflow) paths propagate the identical errors
+    /// `get_amount_out` would, with the same amount/gas.
+    pub fn get_amount_out_quote(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        let zero_for_one = token_in < token_out;
+        let amount_specified = I256::checked_from_sign_and_abs(
+            Sign::Positive,
+            U256::from_be_slice(&amount_in.to_bytes_be()),
+        )
+        .ok_or_else(|| {
+            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+        })?;
+
+        let result = self.swap(zero_for_one, amount_specified, None)?;
+
+        Ok((
+            u256_to_biguint(
+                result
+                    .amount_calculated
+                    .abs()
+                    .into_raw(),
+            ),
+            u256_to_biguint(result.gas_used),
+        ))
     }
 }
 
@@ -475,7 +537,7 @@ impl ProtocolSim for UniswapV3State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -490,7 +552,7 @@ impl ProtocolSim for UniswapV3State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -873,6 +935,117 @@ mod tests {
                 .net_liquidity,
             9800
         );
+    }
+
+    #[test]
+    fn arc_tick_storage_is_copy_on_write() {
+        // C1: a cloned state shares ticks by Arc; mutating the clone must copy-on-write so the
+        // original's ticks stay untouched (otherwise a previously cloned/quoted state could be
+        // corrupted through the shared Arc).
+        let original = UniswapV3State::new(
+            1000,
+            U256::from(1000u64),
+            FeeAmount::Low,
+            100,
+            vec![TickInfo::new(255760, 10000).unwrap(), TickInfo::new(255900, -10000).unwrap()],
+        )
+        .unwrap();
+        let mut cloned = original.clone();
+
+        let attributes: HashMap<String, Bytes> = [(
+            "ticks/255760/net_liquidity".to_string(),
+            Bytes::from(99999_u64.to_be_bytes().to_vec()),
+        )]
+        .into_iter()
+        .collect();
+        cloned
+            .delta_transition(
+                ProtocolStateDelta {
+                    component_id: "State1".to_owned(),
+                    updated_attributes: attributes,
+                    deleted_attributes: HashSet::new(),
+                },
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            cloned
+                .ticks
+                .get_tick(255760)
+                .unwrap()
+                .net_liquidity,
+            99999
+        );
+        assert_eq!(
+            original
+                .ticks
+                .get_tick(255760)
+                .unwrap()
+                .net_liquidity,
+            10000
+        );
+    }
+
+    #[test]
+    fn arc_tick_serde_round_trips_as_inner_content() {
+        // C1: serializing through the Arc adapter yields the inner TickList and round-trips back to
+        // an equal state, so the wire format is unchanged from the pre-Arc representation.
+        let pool = create_basic_test_pool();
+        let json = serde_json::to_string(&pool).unwrap();
+        let restored: UniswapV3State = serde_json::from_str(&json).unwrap();
+        assert_eq!(pool, restored);
+    }
+
+    #[test]
+    fn get_amount_out_quote_matches_get_amount_out() {
+        // C1: the zero-alloc quote path returns the same amount and gas as the state-returning
+        // get_amount_out across a real multi-tick swap.
+        let wbtc = Token::new(
+            &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let pool = UniswapV3State::new(
+            377952820878029838,
+            U256::from_str("28437325270877025820973479874632004").unwrap(),
+            FeeAmount::Low,
+            255830,
+            vec![
+                TickInfo::new(255760, 1759015528199933i128).unwrap(),
+                TickInfo::new(255770, 6393138051835308i128).unwrap(),
+                TickInfo::new(255820, 1319490609195820i128).unwrap(),
+                TickInfo::new(255830, 678916926147901i128).unwrap(),
+                TickInfo::new(255840, 12208947683433103i128).unwrap(),
+                TickInfo::new(255900, 77340284046725227i128).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let amount_in = 500000000u64.to_biguint().unwrap();
+        let full = pool
+            .get_amount_out(amount_in.clone(), &wbtc, &weth)
+            .unwrap();
+        let (amount, gas) = pool
+            .get_amount_out_quote(amount_in, &wbtc, &weth)
+            .unwrap();
+
+        assert_eq!(amount, full.amount);
+        assert_eq!(gas, full.gas);
     }
 
     #[tokio::test]
