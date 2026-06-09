@@ -127,8 +127,10 @@ impl TychoRouterEncoder {
     fn _wrapping_bridge(&self, token_a: &Bytes, token_b: &Bytes, chain: &Chain) -> Option<Swap> {
         let native = chain.native_token();
         let wrapped_native = chain.wrapped_native_token();
-        let wrap_component =
-            ProtocolComponent { protocol_system: "native_wrap".to_string(), ..Default::default() };
+        let wrap_component = ProtocolComponent {
+            protocol_system: "native_wrapper".to_string(),
+            ..Default::default()
+        };
 
         if token_a == &wrapped_native.address && token_b == &native.address {
             Some(Swap::new(wrap_component, wrapped_native, native, BigUint::from(14_000u64)))
@@ -467,7 +469,7 @@ mod tests {
                 solution.swaps()[2]
                     .component()
                     .protocol_system,
-                "native_wrap"
+                "native_wrapper"
             );
         }
 
@@ -507,7 +509,7 @@ mod tests {
                 solution.swaps()[0]
                     .component()
                     .protocol_system,
-                "native_wrap"
+                "native_wrapper"
             );
         }
 
@@ -532,7 +534,7 @@ mod tests {
             assert_eq!(solution.swaps().len(), 2);
             assert_eq!(last_swap.token_in().address, eth());
             assert_eq!(last_swap.token_out().address, weth());
-            assert_eq!(last_swap.component().protocol_system, "native_wrap");
+            assert_eq!(last_swap.component().protocol_system, "native_wrapper");
         }
 
         #[test]
@@ -540,7 +542,7 @@ mod tests {
             // USDC -> ETH -> WETH (no swap needed to be added)
             let eth_weth_swap = Swap::new(
                 ProtocolComponent {
-                    protocol_system: "native_wrap".to_string(),
+                    protocol_system: "native_wrapper".to_string(),
                     ..Default::default()
                 },
                 default_token(eth()),

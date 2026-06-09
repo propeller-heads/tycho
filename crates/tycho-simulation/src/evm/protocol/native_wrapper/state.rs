@@ -16,7 +16,7 @@ use tycho_common::{
 use crate::protocol::models::ProtocolComponent;
 
 pub const NATIVE_WRAPPER_ID: &str = "native_wrapper";
-const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrap";
+const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
 const NATIVE_WRAPPER_PROTOCOL_TYPE: &str = "NativeWrapper";
 const WRAP_GAS: u64 = 7_000;
 const UNWRAP_GAS: u64 = 14_000;
@@ -221,7 +221,7 @@ mod tests {
     fn test_component_metadata() {
         let component = NativeWrapperState::component(Chain::Ethereum);
         assert_eq!(component.id, Bytes::from(NATIVE_WRAPPER_ID.as_bytes()));
-        assert_eq!(component.protocol_system, "native_wrap");
+        assert_eq!(component.protocol_system, "native_wrapper");
         assert_eq!(component.protocol_type_name, "NativeWrapper");
     }
 }
