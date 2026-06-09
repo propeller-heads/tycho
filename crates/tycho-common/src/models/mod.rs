@@ -11,6 +11,7 @@ use deepsize::DeepSizeOf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use token::Token;
+use utoipa::ToSchema;
 
 use crate::{dto, Bytes};
 
@@ -85,21 +86,24 @@ pub enum ChainAddressError {
     TooLong(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct ChainTokenConfig {
+    #[schema(value_type = String)]
     pub address: ChainAddress,
+    #[schema(value_type = String)]
     pub symbol: ArrayString<8>,
     pub decimals: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct TvlThresholds {
     pub low: u64,
     pub medium: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct CustomChainConfig {
+    #[schema(value_type = String)]
     pub name: ArrayString<32>,
     pub chain_id: u64,
     pub block_time_secs: u64,
