@@ -228,6 +228,14 @@ mod tests {
     }
 
     #[test]
+    fn test_ring_swap_v2_accounts_for_wrap_input_transfer() {
+        let solution = make_solution(vec![make_swap("ring_swap_v2")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        assert_eq!(gas, BigUint::from(260_000u64));
+    }
+
+    #[test]
     fn test_single_callback_protocol() {
         // uniswap_v3 is a callback protocol: the pool pulls funds inside the callback, so that
         // cost is already in pool gas. The only extra is the fee path's output transfer.

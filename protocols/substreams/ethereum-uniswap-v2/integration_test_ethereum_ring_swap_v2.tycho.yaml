@@ -1,0 +1,95 @@
+substreams_yaml_path: ./ethereum-ring-swap-v2.yaml
+protocol_system: "ring_swap_v2"
+protocol_type_names:
+  - "ring_swap_v2_pool"
+module_name: "map_pool_events"
+# Ring exposes underlying ERC-20 component tokens to solvers, while pair balances are held as
+# FewTokens. The generic raw balance check compares component token.balanceOf(pair), so it is not
+# applicable for this abstraction.
+skip_balance_check: true
+initialized_accounts:
+tests:
+  - name: test_ring_swap_v2_wbtc_weth_pair
+    start_block: 21162436
+    stop_block: 21162437
+    expected_components:
+      - id: "0x00b06862de00a7e67a2d6d3fbeea592a32460de0"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          fee: "0x1e"
+          fw_token0: "0x2078f336fdd260f708bec4a20c82b063274e1b23"
+          fw_token1: "0xa250cc729bb3323e7933022a67b52200fe354767"
+          underlying_token0: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          underlying_token1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          fw_decimals0: "0x08"
+          fw_decimals1: "0x12"
+          underlying_decimals0: "0x08"
+          underlying_decimals1: "0x12"
+          reserves_inverted: "0x00"
+        creation_tx: "0x61ddcb3471f1d11013ad5745c4290331b8778ab9eb9c0c44f22983353399c676"
+        skip_simulation: false
+  - name: test_ring_swap_v2_weth_usdt_pair
+    start_block: 20245909
+    stop_block: 20245910
+    expected_components:
+      - id: "0x147d15e009a63ebed5196ea029679329204f98fd"
+        tokens:
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          - "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        static_attributes:
+          fee: "0x1e"
+          fw_token0: "0xa250cc729bb3323e7933022a67b52200fe354767"
+          fw_token1: "0xef87f4608e601e8564800265aee1c1ffadf73283"
+          underlying_token0: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          underlying_token1: "0xdac17f958d2ee523a2206206994597c13d831ec7"
+          fw_decimals0: "0x12"
+          fw_decimals1: "0x06"
+          underlying_decimals0: "0x12"
+          underlying_decimals1: "0x06"
+          reserves_inverted: "0x00"
+        creation_tx: "0x41a270bde3a40fc54722a6fe2eb2e469abd3bd293eb4d4a18a10d266a5a5a74b"
+        skip_simulation: false
+  - name: test_ring_swap_v2_usdc_weth_pair
+    start_block: 20310159
+    stop_block: 20310160
+    expected_components:
+      - id: "0x54222f404dcfac705322045f01d100380b871450"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          fee: "0x1e"
+          fw_token0: "0x0492560fa7cfd6a85e50d8be3f77318994f8f429"
+          fw_token1: "0xa250cc729bb3323e7933022a67b52200fe354767"
+          underlying_token0: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          underlying_token1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          fw_decimals0: "0x06"
+          fw_decimals1: "0x12"
+          underlying_decimals0: "0x06"
+          underlying_decimals1: "0x12"
+          reserves_inverted: "0x00"
+        creation_tx: "0x15ad6d02bc5361f056c1a5ab667ce69a06ed85bad64a21fa6d6034e9a8d043af"
+        skip_simulation: false
+  - name: test_ring_swap_v2_dai_weth_pair
+    start_block: 20289357
+    stop_block: 20289358
+    expected_components:
+      - id: "0x68C498Df05982d635914ee0Ae6501C749A78B473"
+        tokens:
+          - "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        static_attributes:
+          fee: "0x1e"
+          fw_token0: "0x8A6fe57C08C84e0f4eE97aAe68a62e820a37d259"
+          fw_token1: "0xa250CC729Bb3323e7933022a67B52200fE354767"
+          underlying_token0: "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+          underlying_token1: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          fw_decimals0: "0x12"
+          fw_decimals1: "0x12"
+          underlying_decimals0: "0x12"
+          underlying_decimals1: "0x12"
+          reserves_inverted: "0x00"
+        creation_tx: "0x0fe2ab0096c69037cc48fb6c2799d7206726f3aa47b55308cc7bb003b8b27e4f"
+        skip_simulation: false

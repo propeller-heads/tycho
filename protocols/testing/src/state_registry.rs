@@ -25,7 +25,7 @@ pub fn register_protocol(
     let tvl = chain.default_tvl_threshold(TvlThresholdTier::Medium);
     let tvl_filter = ComponentFilter::with_tvl_range(tvl, tvl);
     let stream_builder = match protocol_system {
-        "uniswap_v2" | "sushiswap_v2" => stream_builder
+        "uniswap_v2" | "sushiswap_v2" | "ring_swap_v2" => stream_builder
             .exchange_with_decoder_context::<UniswapV2State>(
                 protocol_system,
                 tvl_filter,

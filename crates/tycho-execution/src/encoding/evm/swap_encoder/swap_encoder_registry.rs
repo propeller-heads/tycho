@@ -13,9 +13,10 @@ use crate::encoding::{
             etherfi::EtherfiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
             hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            native_wrap::WrapSwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
-            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            native_wrap::WrapSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
+            rocketpool::RocketpoolSwapEncoder, slipstreams::SlipstreamsSwapEncoder,
+            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
+            uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -103,6 +104,9 @@ impl SwapEncoderRegistry {
             "uniswap_v2" | "sushiswap_v2" | "pancakeswap_v2" | "quickswap_v2" => {
                 Ok(Box::new(UniswapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "ring_swap_v2" => {
+                Ok(Box::new(RingSwapV2SwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "aerodrome_v1" => {
                 Ok(Box::new(AerodromeV1SwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -168,5 +172,27 @@ impl SwapEncoderRegistry {
                 protocol_system
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tycho_common::models::Chain;
+
+    use super::SwapEncoderRegistry;
+
+    #[test]
+    fn loads_ring_swap_v2_test_encoder() {
+        let executors_addresses =
+            fs::read_to_string("config/test_executor_addresses.json").unwrap();
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors_addresses))
+            .unwrap();
+
+        assert!(registry
+            .get_encoder("ring_swap_v2")
+            .is_some());
     }
 }
