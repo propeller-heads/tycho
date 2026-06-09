@@ -19,6 +19,8 @@ use std::{
     sync::{mpsc, Arc},
 };
 
+use arrayvec::ArrayString;
+
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
 use chrono::{NaiveDateTime, Utc};
@@ -38,7 +40,8 @@ use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
         contract::AccountDelta,
-        Address, Chain, ExtractionState, ImplementationType,
+        Address, Chain, ChainAddress, ChainTokenConfig, CustomChainConfig, ExtractionState,
+        ImplementationType, TvlThresholds,
     },
     storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
@@ -68,14 +71,35 @@ use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
 mod ot;
 
+#[derive(Debug, Deserialize, Clone)]
+struct TokenConfig {
+    address: String,
+    symbol: String,
+    decimals: u8,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ChainConfig {
+    chain_id: u64,
+    block_time_secs: u64,
+    native_token: TokenConfig,
+    wrapped_native_token: TokenConfig,
+    tvl_thresholds: TvlThresholds,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExtractorConfigs {
     extractors: std::collections::HashMap<String, ExtractorConfig>,
+    #[serde(default)]
+    chains: std::collections::HashMap<String, ChainConfig>,
 }
 
 impl ExtractorConfigs {
-    fn new(extractors: std::collections::HashMap<String, ExtractorConfig>) -> Self {
-        Self { extractors }
+    fn new(
+        extractors: std::collections::HashMap<String, ExtractorConfig>,
+        chains: std::collections::HashMap<String, ChainConfig>,
+    ) -> Self {
+        Self { extractors, chains }
     }
 
     fn from_yaml(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -84,6 +108,51 @@ impl ExtractorConfigs {
         file.read_to_string(&mut contents)?;
         let config: ExtractorConfigs = serde_yaml::from_str(&contents)?;
         Ok(config)
+    }
+}
+
+fn parse_chain_token(token: &TokenConfig) -> Result<ChainTokenConfig, ExtractionError> {
+    let raw = hex::decode(token.address.trim_start_matches("0x")).map_err(|e| {
+        ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address))
+    })?;
+    let address = ChainAddress::new(&raw).map_err(|e| {
+        ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address))
+    })?;
+    let symbol = ArrayString::from(&token.symbol).map_err(|_| {
+        ExtractionError::Setup(format!(
+            "Symbol '{}' too long (max {} chars)",
+            token.symbol,
+            8
+        ))
+    })?;
+    Ok(ChainTokenConfig { address, symbol, decimals: token.decimals })
+}
+
+fn resolve_chain(
+    name: &str,
+    custom_chains: &HashMap<String, ChainConfig>,
+) -> Result<Chain, ExtractionError> {
+    match Chain::from_str(name) {
+        Ok(chain) => Ok(chain),
+        Err(_) => {
+            let entry = custom_chains.get(name).ok_or_else(|| {
+                ExtractionError::Setup(format!(
+                    "Unknown chain '{name}': add it to the [chains] config section"
+                ))
+            })?;
+            let chain_name = ArrayString::from(name).map_err(|_| {
+                ExtractionError::Setup(format!("Chain name '{name}' too long (max 32 chars)"))
+            })?;
+            let cfg = CustomChainConfig {
+                name: chain_name,
+                chain_id: entry.chain_id,
+                block_time_secs: entry.block_time_secs,
+                native: parse_chain_token(&entry.native_token)?,
+                wrapped_native: parse_chain_token(&entry.wrapped_native_token)?,
+                default_tvl_thresholds: entry.tvl_thresholds,
+            };
+            Ok(Chain::Custom(cfg))
+        }
     }
 }
 
@@ -247,17 +316,16 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .parse()
                 .expect("Failed to parse retention horizon");
 
+            let chains = index_args
+                .chains
+                .iter()
+                .map(|name| resolve_chain(name, &extractors_config.chains))
+                .collect::<Result<Vec<_>, _>>()?;
+
             let (extraction_tasks, other_tasks) = create_indexing_tasks(
                 &global_args,
                 &index_args.substreams_args,
-                &index_args
-                    .chains
-                    .iter()
-                    .map(|chain_str| {
-                        Chain::from_str(chain_str)
-                            .unwrap_or_else(|_| panic!("Unknown chain {chain_str}"))
-                    })
-                    .collect::<Vec<_>>(),
+                &chains,
                 retention_horizon,
                 extractors_config,
                 Some(extraction_runtime.handle()),
@@ -311,31 +379,34 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             _ => Err(ExtractionError::Setup(format!("Unknown DCI plugin: {s}"))),
         })?;
 
-    let config = ExtractorConfigs::new(HashMap::from([(
-        run_args.protocol_system.clone(),
-        ExtractorConfig::new(
+    let config = ExtractorConfigs::new(
+        HashMap::from([(
             run_args.protocol_system.clone(),
-            Chain::from_str(&run_args.chain).unwrap(),
-            ImplementationType::Vm,
-            1, /* TODO: if we want to increase this, we need to commit the cache when we reached
-                * `end_block` */
-            run_args.start_block,
-            run_args.stop_block(),
-            run_args
-                .protocol_type_names
-                .into_iter()
-                .map(|name| {
-                    ProtocolTypeConfig::new(name, tycho_common::models::FinancialType::Swap)
-                })
-                .collect::<Vec<_>>(),
-            run_args.spkg,
-            run_args.module,
-            run_args.initialized_accounts,
-            run_args.initialization_block,
-            None,
-            dci_plugin,
-        ),
-    )]));
+            ExtractorConfig::new(
+                run_args.protocol_system.clone(),
+                Chain::from_str(&run_args.chain).unwrap(),
+                ImplementationType::Vm,
+                1, /* TODO: if we want to increase this, we need to commit the cache when we reached
+                    * `end_block` */
+                run_args.start_block,
+                run_args.stop_block(),
+                run_args
+                    .protocol_type_names
+                    .into_iter()
+                    .map(|name| {
+                        ProtocolTypeConfig::new(name, tycho_common::models::FinancialType::Swap)
+                    })
+                    .collect::<Vec<_>>(),
+                run_args.spkg,
+                run_args.module,
+                run_args.initialized_accounts,
+                run_args.initialization_block,
+                None,
+                dci_plugin,
+            ),
+        )]),
+        HashMap::new(),
+    );
 
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,

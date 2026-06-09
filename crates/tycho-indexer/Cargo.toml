@@ -81,6 +81,7 @@ opentelemetry-otlp = { version = "0.15", default-features = false, features = [
     "grpc-tonic",
 ] }
 opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
+arrayvec = { version = "0.7" }
 rand.workspace = true
 serde_yaml = "0.9.32"
 tracing-opentelemetry = { version = "0.23", default-features = false }
