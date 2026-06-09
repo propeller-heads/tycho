@@ -37,7 +37,7 @@ contract EtherfiExecutorTest is Constants, TestUtils {
     EtherfiExecutorExposed etherfiExposed;
 
     function setUp() public {
-        uint256 forkBlock = 23934489;
+        uint256 forkBlock = 24332199;
         vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
         etherfiExposed = new EtherfiExecutorExposed(
             ETH_ADDR,
@@ -61,6 +61,17 @@ contract EtherfiExecutorTest is Constants, TestUtils {
         );
         uint256 balAfter = IERC20(EETH_ADDR).balanceOf(address(etherfiExposed));
         minted = balAfter - balBefore;
+    }
+
+    function testConstructorNotAContract() public {
+        vm.expectRevert(EtherfiExecutor__NotAContract.selector);
+        new EtherfiExecutorExposed(
+            ETH_ADDR,
+            address(0x1),
+            LIQUIDITY_POOL_ADDR,
+            WEETH_ADDR,
+            REDEMPTION_MANAGER_ADDR
+        );
     }
 
     function testDecodeParams() public view {
@@ -136,6 +147,28 @@ contract EtherfiExecutorTest is Constants, TestUtils {
             IERC20(EETH_ADDR).balanceOf(address(etherfiExposed));
 
         assertGt(balanceAfter, balanceBefore);
+    }
+
+    function testSwapEethToEth() public {
+        uint256 minted = _mintEethToExecutor(1 ether);
+        bytes memory protocolData = abi.encodePacked(EtherfiDirection.EethToEth);
+
+        vm.prank(address(etherfiExposed));
+        IERC20(EETH_ADDR).approve(REDEMPTION_MANAGER_ADDR, type(uint256).max);
+
+        uint256 ethBefore = address(etherfiExposed).balance;
+        etherfiExposed.swap(minted, protocolData, address(etherfiExposed));
+        uint256 ethAfter = address(etherfiExposed).balance;
+
+        assertGt(ethAfter, ethBefore, "ETH should be received");
+        // eETH is share-based: up to 1 wei dust may remain after redemption
+        // due to share rounding. The Dispatcher tracks output via balance-diff
+        // so this dust does not affect swap accounting.
+        assertLe(
+            IERC20(EETH_ADDR).balanceOf(address(etherfiExposed)),
+            1,
+            "at most 1 wei eETH dust may remain"
+        );
     }
 }
 
