@@ -1595,10 +1595,33 @@ pub struct ExtractorPgGateway {
 #[automock]
 #[async_trait]
 pub trait ExtractorGateway: Send + Sync {
+    /// Returns the last persisted Substreams cursor together with the hash of the block it was
+    /// saved at.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::NotFound`] when no cursor has ever been persisted for this
+    /// extractor, i.e. on the very first run before any block has been processed. Callers use
+    /// this to distinguish a fresh extractor from a resumed one.
     async fn get_cursor(&self) -> Result<(Vec<u8>, Bytes), StorageError>;
 
-    async fn ensure_protocol_types(&self, new_protocol_types: &[ProtocolType]);
+    /// Idempotently registers `new_protocol_types`, inserting any that do not yet exist and
+    /// leaving already-present types untouched.
+    ///
+    /// This call returns no result: a failure to write is treated as unrecoverable (the extractor
+    /// cannot operate without its protocol types) and therefore panics rather than surfacing an
+    /// error.
+    async fn ensure_protocol_types(&self, new_protocol_types: &[ProtocolType]); //TODO make it not panic, it should return an error instead.
 
+    /// Persists every change in `changes` for a single block and records `new_cursor` as the
+    /// latest processed position.
+    ///
+    /// All writes for the block are staged within one transaction. When `force_commit` is `true`
+    /// the transaction is flushed to the store immediately; otherwise it is only flushed once
+    /// enough blocks have accumulated to reach the configured batch size.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] if any staged write or the commit fails. On error the block's
+    /// changes are not committed.
     async fn advance(
         &self,
         changes: &BlockChanges,
@@ -1606,20 +1629,61 @@ pub trait ExtractorGateway: Send + Sync {
         force_commit: bool,
     ) -> Result<(), StorageError>;
 
+    /// Returns the current state of the protocol components identified by `component_ids`.
+    ///
+    /// Only components that exist in the store are returned: unknown ids are silently omitted
+    /// rather than producing an error, so the result may be shorter than `component_ids` (and
+    /// empty if none are found).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] only on an underlying store failure, never for missing ids.
     async fn get_protocol_states<'a>(
         &self,
         component_ids: &[&'a str],
     ) -> Result<Vec<ProtocolComponentState>, StorageError>;
 
+    /// Returns the contracts at the given `addresses`, including their storage slots.
+    ///
+    /// Only addresses that exist in the store are returned: unknown addresses are silently
+    /// omitted rather than producing an error, so the result may be shorter than `addresses`
+    /// (and empty if none are found).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] only on an underlying store failure, never for missing
+    /// addresses.
     async fn get_contracts(&self, addresses: &[Address]) -> Result<Vec<Account>, StorageError>;
 
+    /// Returns component balances keyed by component id and then by token address.
+    ///
+    /// Only components that have stored balances appear in the map: unknown or balance-less
+    /// `component_ids` are simply absent rather than producing an error, so the map may have
+    /// fewer keys than `component_ids` (and be empty if none are found).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] only on an underlying store failure, never for missing ids.
     async fn get_components_balances<'a>(
         &self,
         component_ids: &[&'a str],
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError>;
 
+    /// Returns the block identified by the given hash.
+    ///
+    /// Note: despite the `block_number` parameter name, the value is interpreted as a block
+    /// **hash**, not a number.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::NotFound`] when no block with that hash exists in the store. Unlike
+    /// the collection getters, a missing block is an error because a single value is expected.
     async fn get_block(&self, block_number: Bytes) -> Result<Block, StorageError>;
 
+    /// Returns account balances keyed by account address and then by token address.
+    ///
+    /// Only accounts that have stored balances appear in the map: unknown or balance-less
+    /// accounts are simply absent rather than producing an error, so the map may have fewer keys
+    /// than `accounts` (and be empty if none are found).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] only on an underlying store failure, never for missing accounts.
     async fn get_account_balances(
         &self,
         accounts: &[Address],
