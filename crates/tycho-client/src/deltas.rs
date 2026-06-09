@@ -1127,13 +1127,10 @@ mod tests {
     }
 
     fn subscribe_with_compression(compression: bool) -> String {
-        serde_json::to_string(&Command::Subscribe {
-            extractor_id: dto::ExtractorIdentity::new(dto::Chain::Ethereum, "vm:ambient"),
-            include_state: true,
-            compression,
-            partial_blocks: false,
-        })
-        .unwrap()
+        // Field order matches Command::Subscribe's serde tag + struct field declaration order.
+        format!(
+            r#"{{"method":"subscribe","extractor_id":{{"chain":"ethereum","name":"vm:ambient"}},"include_state":true,"compression":{compression},"partial_blocks":false}}"#
+        )
     }
 
     fn subscription_confirmation() -> String {
