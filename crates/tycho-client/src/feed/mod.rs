@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
@@ -100,6 +102,7 @@ impl HeaderLike for BlockHeader {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Error, Debug)]
 pub enum BlockSynchronizerError {
     #[error("Failed to initialize extractor '{extractor}': {source}")]

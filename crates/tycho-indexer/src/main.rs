@@ -764,14 +764,6 @@ async fn run_analyze_tokens(
 mod tests {
     use super::*;
 
-    fn eth_token(symbol: &str) -> TokenConfig {
-        TokenConfig {
-            address: "0x0000000000000000000000000000000000000000".to_string(),
-            symbol: symbol.to_string(),
-            decimals: 18,
-        }
-    }
-
     #[test]
     fn test_resolve_unknown_chain_fails() {
         let err = resolve_chain("notachain", &HashMap::new()).unwrap_err();
