@@ -48,6 +48,38 @@ class Chain(str, Enum):
     polygon = "polygon"
 
 
+class ChainTokenConfig(BaseModel):
+    address: str
+    symbol: str
+    decimals: int
+
+
+class TvlThresholds(BaseModel):
+    low: int
+    medium: int
+
+
+class CustomChainConfig(BaseModel):
+    name: str
+    chain_id: int
+    block_time_secs: int
+    native: ChainTokenConfig
+    wrapped_native: ChainTokenConfig
+    default_tvl_thresholds: TvlThresholds
+
+    def __str__(self) -> str:
+        return self.name
+
+    @root_validator(pre=True)
+    def _unwrap_serde_tag(cls, values):
+        # Rust serialises Custom(cfg) as {"custom": {...}} — unwrap the tag.
+        if "custom" in values and len(values) == 1:
+            return values["custom"]
+        return values
+
+
+
+
 class ChangeType(str, Enum):
     update = "Update"
     deletion = "Deletion"
@@ -56,7 +88,7 @@ class ChangeType(str, Enum):
 
 
 class ExtractorIdentity(BaseModel):
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     name: str
 
 
@@ -93,13 +125,13 @@ class Block(BaseModel):
     number: int
     hash: HexBytes
     parent_hash: HexBytes
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     ts: datetime
 
 
 class BlockParam(BaseModel):
     hash: Optional[HexBytes] = None
-    chain: Optional[Chain] = None
+    chain: Optional[Union[Chain, CustomChainConfig]] = None
     number: Optional[int] = None
 
 
@@ -120,7 +152,7 @@ class TokenBalances(BaseModel):
 
 class AccountUpdate(BaseModel):
     address: HexBytes
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     slots: Dict[HexBytes, HexBytes]
     balance: Optional[HexBytes] = None
     code: Optional[HexBytes] = None
@@ -137,7 +169,7 @@ class ProtocolComponent(BaseModel):
     id: str
     protocol_system: str
     protocol_type_name: str
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     tokens: List[HexBytes]
     contract_ids: List[HexBytes]
     static_attributes: Dict[str, HexBytes]
@@ -147,7 +179,7 @@ class ProtocolComponent(BaseModel):
 
 
 class ResponseToken(BaseModel):
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     address: HexBytes = Field(..., example="0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")
     symbol: str = Field(..., example="WETH")
     decimals: int
@@ -158,7 +190,7 @@ class ResponseToken(BaseModel):
 
 class BlockChanges(BaseModel):
     extractor: str
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     block: Block
     finalized_block_height: int
     revert: bool
@@ -186,7 +218,7 @@ class ComponentWithState(BaseModel):
 
 
 class ResponseAccount(BaseModel):
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     address: HexBytes
     title: str
     slots: Dict[HexBytes, HexBytes]
@@ -257,13 +289,13 @@ class PaginationParams(BaseModel):
 
 
 class ProtocolId(BaseModel):
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
     id: str
 
 
 class ContractId(BaseModel):
     address: HexBytes
-    chain: Chain
+    chain: Union[Chain, CustomChainConfig]
 
 
 class VersionParams(BaseModel):
@@ -324,7 +356,7 @@ class TokensParams(BaseModel):
 
 
 class ProtocolSystemsParams(BaseModel):
-    chain: Optional[Chain] = None
+    chain: Optional[Union[Chain, CustomChainConfig]] = None
     pagination: Optional[PaginationParams] = None
 
     class Config:
@@ -332,7 +364,7 @@ class ProtocolSystemsParams(BaseModel):
 
 
 class ComponentTvlParams(BaseModel):
-    chain: Optional[Chain] = None
+    chain: Optional[Union[Chain, CustomChainConfig]] = None
     protocol_system: Optional[str] = Field(default=None, alias="protocolSystem")
     component_ids: Optional[List[str]] = Field(default=None)
     pagination: Optional[PaginationParams] = None
@@ -342,7 +374,7 @@ class ComponentTvlParams(BaseModel):
 
 
 class TracedEntryPointParams(BaseModel):
-    chain: Optional[Chain] = None
+    chain: Optional[Union[Chain, CustomChainConfig]] = None
     protocol_system: str
     component_ids: Optional[List[str]] = Field(default=None)
     pagination: Optional[PaginationParams] = None
