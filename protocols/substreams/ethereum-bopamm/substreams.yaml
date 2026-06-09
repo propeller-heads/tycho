@@ -1,0 +1,88 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_bopamm"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_bopamm.wasm
+
+network: mainnet
+
+# Deployment config (addresses + storage layout) is passed as params so the module can be
+# re-pointed at another BopAMM deployment without code changes. Hex, no `0x` prefix.
+params:
+  map_components: &config "settlement=db13ad0fcd134e9c48f2fdaea8f6751a0f5349ca&module=bc60639345dfa607d73b74e88c2d54d8b8ad7cc3&registry=da7afeed01fe625cf15d187a19f94b45f00b8c5f&usdc=a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&asset_config_base_slot=3&maker_slot=1471eb6eb2c5e789fc3de43f8ce62938c7d1836ec861730447e2ada8fd81017b"
+  store_maker: *config
+  map_relative_balances: *config
+  map_protocol_changes: *config
+
+modules:
+  - name: map_components
+    kind: map
+    initialBlock: 25099176
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_components
+    kind: store
+    initialBlock: 25099176
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_components
+
+  - name: store_maker
+    kind: store
+    initialBlock: 25099176
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_relative_balances
+    kind: map
+    initialBlock: 25099176
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_components
+      - store: store_maker
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 25099176
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 25099176
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - map: map_relative_balances
+      - store: store_components
+      - store: store_maker
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

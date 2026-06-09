@@ -1,0 +1,45 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "vm:bopamm"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "bopamm_book"
+
+# VM swap adapter is not implemented yet; simulation/execution are skipped below until it
+# and the quote-override stream (which pins block.number/timestamp to the committed quote)
+# exist. This test validates on-chain component discovery + tracked-contract indexing only.
+adapter_contract: "BopAMMSwapAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"
+
+# Maker inventory balances require the off-chain-driven quote state to be meaningful and the
+# venue is intermittently idle; balance assertions are validated separately once the adapter
+# and override stream land.
+skip_balance_check: true # No VM adapter / override stream yet (see above).
+
+tests:
+  - name: test_book_discovery
+    # Covers the settlement/module/registry deployments (~25171611-12), the asset-config
+    # write that creates both books (25171616), and the maker assignment (25171618).
+    start_block: 25171610
+    stop_block: 25171620
+    expected_components:
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca-0"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" # WETH
+        static_attributes:
+          asset_id: "0x0000000000000000"
+          manual_updates: "0x01"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: true # No VM adapter / quote-override stream yet.
+        skip_execution: true # No VM adapter yet.
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca-1"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599" # WBTC
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+        static_attributes:
+          asset_id: "0x0000000000000001"
+          manual_updates: "0x01"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: true # No VM adapter / quote-override stream yet.
+        skip_execution: true # No VM adapter yet.
