@@ -19,10 +19,9 @@ use std::{
     sync::{mpsc, Arc},
 };
 
-use arrayvec::ArrayString;
-
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
+use arrayvec::ArrayString;
 use chrono::{NaiveDateTime, Utc};
 use clap::Parser;
 use futures03::future::select_all;
@@ -112,18 +111,12 @@ impl ExtractorConfigs {
 }
 
 fn parse_chain_token(token: &TokenConfig) -> Result<ChainTokenConfig, ExtractionError> {
-    let raw = hex::decode(token.address.trim_start_matches("0x")).map_err(|e| {
-        ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address))
-    })?;
-    let address = ChainAddress::new(&raw).map_err(|e| {
-        ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address))
-    })?;
+    let raw = hex::decode(token.address.trim_start_matches("0x"))
+        .map_err(|e| ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address)))?;
+    let address = ChainAddress::new(&raw)
+        .map_err(|e| ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address)))?;
     let symbol = ArrayString::from(&token.symbol).map_err(|_| {
-        ExtractionError::Setup(format!(
-            "Symbol '{}' too long (max {} chars)",
-            token.symbol,
-            8
-        ))
+        ExtractionError::Setup(format!("Symbol '{}' too long (max {} chars)", token.symbol, 8))
     })?;
     Ok(ChainTokenConfig { address, symbol, decimals: token.decimals })
 }
@@ -386,8 +379,8 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
                 run_args.protocol_system.clone(),
                 Chain::from_str(&run_args.chain).unwrap(),
                 ImplementationType::Vm,
-                1, /* TODO: if we want to increase this, we need to commit the cache when we reached
-                    * `end_block` */
+                1, /* TODO: if we want to increase this, we need to commit the cache when we
+                    * reached `end_block` */
                 run_args.start_block,
                 run_args.stop_block(),
                 run_args
@@ -765,6 +758,86 @@ async fn run_analyze_tokens(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eth_token(symbol: &str) -> TokenConfig {
+        TokenConfig {
+            address: "0x0000000000000000000000000000000000000000".to_string(),
+            symbol: symbol.to_string(),
+            decimals: 18,
+        }
+    }
+
+    #[test]
+    fn test_resolve_unknown_chain_fails() {
+        let err = resolve_chain("notachain", &HashMap::new()).unwrap_err();
+        assert!(matches!(err, ExtractionError::Setup(msg) if msg.contains("notachain")));
+    }
+
+    #[test]
+    fn test_parse_chain_token_invalid_hex() {
+        let token = TokenConfig {
+            address: "0xGGGGGGGG".to_string(),
+            symbol: "ETH".to_string(),
+            decimals: 18,
+        };
+        assert!(parse_chain_token(&token).is_err());
+    }
+
+    #[test]
+    fn test_parse_chain_token_symbol_too_long() {
+        let token = TokenConfig {
+            address: "0x0000000000000000000000000000000000000000".to_string(),
+            symbol: "TOOLONGSYM".to_string(),
+            decimals: 18,
+        };
+        assert!(parse_chain_token(&token).is_err());
+    }
+
+    #[test]
+    fn test_resolve_custom_chain_from_yaml() {
+        let yaml = r#"
+extractors: {}
+chains:
+  mychain:
+    chain_id: 99999
+    block_time_secs: 2
+    native_token:
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "ETH"
+      decimals: 18
+    wrapped_native_token:
+      address: "0x4200000000000000000000000000000000000006"
+      symbol: "WETH"
+      decimals: 18
+    tvl_thresholds:
+      low: 1000
+      medium: 10000
+"#;
+        let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
+        let Chain::Custom(cfg) = resolve_chain("mychain", &config.chains).expect("resolve failed")
+        else {
+            panic!("expected Chain::Custom")
+        };
+
+        assert_eq!(cfg.name.as_str(), "mychain");
+        assert_eq!(cfg.chain_id, 99999);
+        assert_eq!(cfg.block_time_secs, 2);
+        assert_eq!(cfg.default_tvl_thresholds, TvlThresholds { low: 1000, medium: 10000 });
+        assert_eq!(cfg.native.symbol.as_str(), "ETH");
+        assert_eq!(cfg.native.decimals, 18);
+        assert_eq!(cfg.native.address.as_bytes(), [0u8; 20].as_slice());
+        assert_eq!(
+            cfg.wrapped_native.address.as_bytes(),
+            hex::decode("4200000000000000000000000000000000000006")
+                .unwrap()
+                .as_slice()
+        );
+    }
 }
 
 #[cfg(test)]
