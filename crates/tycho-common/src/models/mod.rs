@@ -625,10 +625,7 @@ mod tests {
 
     #[test]
     fn test_chain_address_new_rejects_oversized_input() {
-        assert_eq!(
-            ChainAddress::new(&[0u8; 33]),
-            Err(ChainAddressError::TooLong(33))
-        );
+        assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainAddressError::TooLong(33)));
     }
 
     #[test]
