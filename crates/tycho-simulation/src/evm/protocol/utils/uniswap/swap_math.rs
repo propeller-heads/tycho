@@ -4,7 +4,7 @@ use tycho_common::simulation::errors::SimulationError;
 use super::sqrt_price_math;
 use crate::evm::protocol::{
     safe_math::safe_sub_u256,
-    utils::solidity_math::{mul_div, mul_div_rounding_up},
+    utils::solidity_math::{mul_div_384, mul_div_rounding_up_384},
 };
 
 pub(crate) fn compute_swap_step(
@@ -21,7 +21,7 @@ pub(crate) fn compute_swap_step(
     let mut amount_out = U256::from(0u64);
 
     if exact_in {
-        let amount_remaining_less_fee = mul_div(
+        let amount_remaining_less_fee = mul_div_384(
             amount_remaining.into_raw(),
             U256::from(1_000_000 - fee_pips),
             U256::from(1_000_000),
@@ -132,7 +132,7 @@ pub(crate) fn compute_swap_step(
     let fee_amount = if exact_in && sqrt_ratio_next != sqrt_ratio_target {
         safe_sub_u256(amount_remaining.abs().into_raw(), amount_in)?
     } else {
-        mul_div_rounding_up(amount_in, U256::from(fee_pips), U256::from(1_000_000 - fee_pips))?
+        mul_div_rounding_up_384(amount_in, U256::from(fee_pips), U256::from(1_000_000 - fee_pips))?
     };
     Ok((sqrt_ratio_next, amount_in, amount_out, fee_amount))
 }
