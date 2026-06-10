@@ -65,7 +65,7 @@ impl FromStr for Chain {
     type Err = strum::ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        models::Chain::from_str(s).map(Chain::from)
+        models::Chain::from_str(s).map(Self::from)
     }
 }
 
