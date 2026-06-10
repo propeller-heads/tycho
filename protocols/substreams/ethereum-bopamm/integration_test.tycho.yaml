@@ -1,0 +1,44 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "vm:bopamm"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "bopamm_book"
+
+# Simulation/execution are skipped below: simulating a book requires tycho-simulation's
+# `override_block_timestamp` support (PR #1034) to pass the registry's exact-timestamp
+# StaleUpdate() gate, and that is not on main yet. The adapter itself lives in
+# protocols/adapter-integration/evm/src/bopamm. This test validates on-chain component
+# discovery + tracked-contract indexing only.
+adapter_contract: "BopAMMAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"
+
+skip_balance_check: true # Venue is intermittently idle; balances validated separately.
+
+tests:
+  - name: test_book_discovery
+    # Covers the settlement/module/registry deployments (~25171611-12), the asset-config
+    # write that creates both books (25171616), and the maker assignment (25171618).
+    start_block: 25171610
+    stop_block: 25171620
+    expected_components:
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" # WETH
+        static_attributes:
+          asset_id: "0x0000000000000000"
+          manual_updates: "0x01"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: true # Needs override_block_timestamp support (PR #1034) on main.
+        skip_execution: true # No vm:bopamm executor is registered yet.
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000001"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599" # WBTC
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+        static_attributes:
+          asset_id: "0x0000000000000001"
+          manual_updates: "0x01"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: true # Needs override_block_timestamp support (PR #1034) on main.
+        skip_execution: true # No vm:bopamm executor is registered yet.
