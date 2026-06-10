@@ -2,7 +2,7 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
-evm_version = 'cancun'
+evm_version = 'osaka'
 optimizer = true
 optimizer_runs = 200
 via_ir = true
@@ -12,7 +12,7 @@ fs_permissions = [{ access = "read", path = "./test/assets" }, { access = "write
 src = 'src'
 out = 'out'
 libs = ['lib']
-evm_version = 'cancun'
+evm_version = 'osaka'
 optimizer = true
 optimizer_runs = 1000
 via_ir = true
