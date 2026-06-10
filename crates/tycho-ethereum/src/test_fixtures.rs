@@ -55,6 +55,9 @@ pub const USDC_HOLDER_BALANCE: u64 = 74743132960379_u64; // Balance at the test 
 // WETH holder - Uniswap V2 WETH-USDC pair has significant WETH balance
 pub const WETH_HOLDER_ADDR: &str = "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc";
 
+// USDT holder - Curve 3pool holds a large, stable USDT balance
+pub const USDT_HOLDER_ADDR: &str = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7";
+
 /// Lazily-initialized map of Ethereum mainnet token addresses to their known holders and balances.
 /// This is useful for `TokenOwnerStore` setup in tests.
 pub static TOKEN_HOLDERS: LazyLock<HashMap<Address, (Bytes, Bytes)>> = LazyLock::new(|| {
@@ -71,6 +74,13 @@ pub static TOKEN_HOLDERS: LazyLock<HashMap<Address, (Bytes, Bytes)>> = LazyLock:
             (
                 Bytes::from_str(WETH_HOLDER_ADDR).unwrap(),
                 Bytes::from_str("0x2386f26fc10000").unwrap(), // ~0.01 WETH
+            ),
+        ),
+        (
+            Address::from_str(USDT_STR).unwrap(),
+            (
+                Bytes::from_str(USDT_HOLDER_ADDR).unwrap(),
+                Bytes::from_str("0x1556ebfbe99d").unwrap(), // ~23.4M USDT (6 decimals)
             ),
         ),
     ])
