@@ -119,6 +119,9 @@ pub fn create_router_overwrites_data(
 
     let executor_bytecode = load_executor_bytecode(protocol_system)?;
 
+    // The overwritten TychoRouter runtime reads `_feeCalculator` during execution.
+    // Plant a zero-fee calculator at a deterministic address so protocol execution
+    // tests exercise router accounting without depending on production fee config.
     let fee_calculator_bytecode = {
         let json_value: serde_json::Value = serde_json::from_str(FEE_CALCULATOR_BYTECODE_JSON)
             .into_diagnostic()

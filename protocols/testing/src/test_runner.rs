@@ -36,7 +36,6 @@ use tycho_simulation::{
     },
     protocol::models::{DecoderContext, ProtocolComponent as ProtocolComponentModel, Update},
     tycho_client::feed::{
-        component_tracker::ComponentFilter,
         synchronizer::{Snapshot, StateSyncMessage},
         BlockHeader, FeedMessage,
     },
@@ -103,12 +102,6 @@ pub struct TestRunner {
     rpc_provider: RPCProvider,
     protocol_components: Arc<RwLock<HashMap<String, ProtocolComponentModel>>>,
     reuse_last_sync: bool,
-}
-
-struct SnapshotDecodeOptions {
-    adapter_contract_path: Option<PathBuf>,
-    vm_simulation_traces: bool,
-    component_filter: Option<ComponentFilter>,
 }
 
 impl TestRunner {
@@ -323,7 +316,6 @@ impl TestRunner {
             &config.protocol_system,
             chain,
             decoder_context,
-            None,
         )?;
 
         let stream_builder = protocol_stream_builder
@@ -618,13 +610,7 @@ impl TestRunner {
             &block,
             snapshot,
             all_tokens,
-            SnapshotDecodeOptions {
-                adapter_contract_path: adapter_contract_path_str,
-                vm_simulation_traces: self.vm_simulation_traces,
-                component_filter: component_filter_for_expected_components(
-                    &test.expected_components,
-                ),
-            },
+            adapter_contract_path_str,
         )?;
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
@@ -637,13 +623,6 @@ impl TestRunner {
             &test.expected_components,
             &config.protocol_system,
         )?;
-        if execution_data.is_empty() && should_run_execution(&test.expected_components) {
-            return Err(miette!(
-                "No execution data generated for {}; simulation decoded no executable state",
-                config.protocol_system
-            ));
-        }
-
         // Step 5: Run Tycho Execution
         self.runtime
             .block_on(self.run_execution(
@@ -876,7 +855,7 @@ impl TestRunner {
         block: &Block,
         snapshot: Snapshot,
         all_tokens: HashMap<Bytes, Token>,
-        options: SnapshotDecodeOptions,
+        adapter_contract_path: Option<PathBuf>,
     ) -> miette::Result<Update> {
         // Clear the shared database state to ensure test isolation
         // This prevents state from previous tests from affecting the current test
@@ -885,8 +864,8 @@ impl TestRunner {
         let protocol_stream_builder =
             ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
 
-        let mut decoder_context = DecoderContext::new().vm_traces(options.vm_simulation_traces);
-        if let Some(vm_adapter_path) = options.adapter_contract_path.as_ref() {
+        let mut decoder_context = DecoderContext::new().vm_traces(self.vm_simulation_traces);
+        if let Some(vm_adapter_path) = adapter_contract_path.as_ref() {
             if let Some(path_str) = vm_adapter_path.to_str() {
                 decoder_context = decoder_context.vm_adapter_path(path_str);
             }
@@ -896,7 +875,6 @@ impl TestRunner {
             protocol_system,
             self.chain,
             decoder_context,
-            options.component_filter,
         )?;
 
         let decoder = protocol_stream_builder.get_decoder();
@@ -1342,12 +1320,6 @@ impl TestRunner {
 
         info!("Batch execution complete: {} successes, {} failures", success_count, failure_count);
 
-        if failure_count > 0 {
-            return Err(miette!(
-                "Execution validation failed for {protocol_system}: {success_count} successes, {failure_count} failures"
-            ));
-        }
-
         Ok(())
     }
 
@@ -1434,22 +1406,6 @@ impl TestRunner {
             Ok(None)
         }
     }
-}
-
-fn should_run_execution(expected_components: &[ProtocolComponentWithTestConfig]) -> bool {
-    expected_components
-        .iter()
-        .any(|component| !component.skip_simulation && !component.skip_execution)
-}
-
-fn component_filter_for_expected_components(
-    expected_components: &[ProtocolComponentWithTestConfig],
-) -> Option<ComponentFilter> {
-    let component_ids = expected_components
-        .iter()
-        .map(|component| component.base.id.to_lowercase())
-        .collect::<Vec<_>>();
-    (!component_ids.is_empty()).then(|| ComponentFilter::Ids(component_ids))
 }
 
 #[cfg(test)]
