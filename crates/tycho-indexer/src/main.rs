@@ -21,7 +21,6 @@ use std::{
 
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
-use arrayvec::ArrayString;
 use chrono::{NaiveDateTime, Utc};
 use clap::Parser;
 use futures03::future::select_all;
@@ -39,7 +38,7 @@ use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
         contract::AccountDelta,
-        Address, Chain, ChainAddress, ChainTokenConfig, CustomChainConfig, ExtractionState,
+        Address, Chain, ChainConfigError, ChainTokenConfig, CustomChainConfig, ExtractionState,
         ImplementationType, TvlThresholds,
     },
     storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
@@ -110,17 +109,6 @@ impl ExtractorConfigs {
     }
 }
 
-fn parse_chain_token(token: &TokenConfig) -> Result<ChainTokenConfig, ExtractionError> {
-    let raw = hex::decode(token.address.trim_start_matches("0x"))
-        .map_err(|e| ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address)))?;
-    let address = ChainAddress::new(&raw)
-        .map_err(|e| ExtractionError::Setup(format!("Invalid address '{}': {e}", token.address)))?;
-    let symbol = ArrayString::from(&token.symbol).map_err(|_| {
-        ExtractionError::Setup(format!("Symbol '{}' too long (max {} chars)", token.symbol, 8))
-    })?;
-    Ok(ChainTokenConfig { address, symbol, decimals: token.decimals })
-}
-
 fn resolve_chain(
     name: &str,
     custom_chains: &HashMap<String, ChainConfig>,
@@ -133,17 +121,28 @@ fn resolve_chain(
                     "Unknown chain '{name}': add it to the [chains] config section"
                 ))
             })?;
-            let chain_name = ArrayString::from(name).map_err(|_| {
-                ExtractionError::Setup(format!("Chain name '{name}' too long (max 32 chars)"))
-            })?;
-            let cfg = CustomChainConfig {
-                name: chain_name,
-                chain_id: entry.chain_id,
-                block_time_secs: entry.block_time_secs,
-                native: parse_chain_token(&entry.native_token)?,
-                wrapped_native: parse_chain_token(&entry.wrapped_native_token)?,
-                default_tvl_thresholds: entry.tvl_thresholds,
-            };
+            let map_err = |e: ChainConfigError| ExtractionError::Setup(e.to_string());
+            let native = ChainTokenConfig::try_new(
+                &entry.native_token.address,
+                &entry.native_token.symbol,
+                entry.native_token.decimals,
+            )
+            .map_err(map_err)?;
+            let wrapped_native = ChainTokenConfig::try_new(
+                &entry.wrapped_native_token.address,
+                &entry.wrapped_native_token.symbol,
+                entry.wrapped_native_token.decimals,
+            )
+            .map_err(map_err)?;
+            let cfg = CustomChainConfig::try_new(
+                name,
+                entry.chain_id,
+                entry.block_time_secs,
+                native,
+                wrapped_native,
+                entry.tvl_thresholds,
+            )
+            .map_err(map_err)?;
             Ok(Chain::Custom(cfg))
         }
     }
@@ -771,23 +770,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_chain_token_invalid_hex() {
-        let token = TokenConfig {
-            address: "0xGGGGGGGG".to_string(),
-            symbol: "ETH".to_string(),
-            decimals: 18,
-        };
-        assert!(parse_chain_token(&token).is_err());
+    fn test_chain_token_invalid_hex() {
+        assert!(ChainTokenConfig::try_new("0xGGGGGGGG", "ETH", 18).is_err());
     }
 
     #[test]
-    fn test_parse_chain_token_symbol_too_long() {
-        let token = TokenConfig {
-            address: "0x0000000000000000000000000000000000000000".to_string(),
-            symbol: "TOOLONGSYM".to_string(),
-            decimals: 18,
-        };
-        assert!(parse_chain_token(&token).is_err());
+    fn test_chain_token_symbol_too_long() {
+        assert!(ChainTokenConfig::try_new(
+            "0x0000000000000000000000000000000000000000",
+            "TOOLONGSYM",
+            18
+        )
+        .is_err());
     }
 
     #[test]
@@ -816,19 +810,22 @@ chains:
             panic!("expected Chain::Custom")
         };
 
-        assert_eq!(cfg.name.as_str(), "mychain");
-        assert_eq!(cfg.chain_id, 99999);
-        assert_eq!(cfg.block_time_secs, 2);
-        assert_eq!(cfg.default_tvl_thresholds, TvlThresholds { low: 1000, medium: 10000 });
-        assert_eq!(cfg.native.symbol.as_str(), "ETH");
-        assert_eq!(cfg.native.decimals, 18);
-        assert_eq!(cfg.native.address.as_bytes(), [0u8; 20].as_slice());
-        assert_eq!(
-            cfg.wrapped_native.address.as_bytes(),
-            hex::decode("4200000000000000000000000000000000000006")
-                .unwrap()
-                .as_slice()
-        );
+        let expected_native =
+            ChainTokenConfig::try_new("0x0000000000000000000000000000000000000000", "ETH", 18)
+                .unwrap();
+        let expected_wrapped =
+            ChainTokenConfig::try_new("0x4200000000000000000000000000000000000006", "WETH", 18)
+                .unwrap();
+        let expected_cfg = CustomChainConfig::try_new(
+            "mychain",
+            99999,
+            2,
+            expected_native,
+            expected_wrapped,
+            TvlThresholds::new(1000, 10000),
+        )
+        .unwrap();
+        assert_eq!(cfg, expected_cfg);
     }
 }
 

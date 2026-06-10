@@ -86,30 +86,81 @@ pub enum ChainAddressError {
     TooLong(usize),
 }
 
+#[derive(Error, Debug, PartialEq)]
+pub enum ChainConfigError {
+    #[error("invalid hex address '{0}': {1}")]
+    InvalidAddress(String, String),
+    #[error("address '{0}': {1}")]
+    AddressTooLong(String, String),
+    #[error("symbol '{0}' too long (max 8 chars)")]
+    SymbolTooLong(String),
+    #[error("chain name '{0}' too long (max 32 chars)")]
+    NameTooLong(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct ChainTokenConfig {
     #[schema(value_type = String)]
-    pub address: ChainAddress,
+    address: ChainAddress,
     #[schema(value_type = String)]
-    pub symbol: ArrayString<8>,
-    pub decimals: u8,
+    symbol: ArrayString<8>,
+    decimals: u8,
+}
+
+impl ChainTokenConfig {
+    pub fn try_new(
+        address_hex: &str,
+        symbol: &str,
+        decimals: u8,
+    ) -> Result<Self, ChainConfigError> {
+        let raw = hex::decode(address_hex.trim_start_matches("0x"))
+            .map_err(|e| ChainConfigError::InvalidAddress(address_hex.to_owned(), e.to_string()))?;
+        let address = ChainAddress::new(&raw)
+            .map_err(|e| ChainConfigError::AddressTooLong(address_hex.to_owned(), e.to_string()))?;
+        let symbol = ArrayString::from(symbol)
+            .map_err(|_| ChainConfigError::SymbolTooLong(symbol.to_owned()))?;
+        Ok(Self { address, symbol, decimals })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct TvlThresholds {
-    pub low: u64,
-    pub medium: u64,
+    low: u64,
+    medium: u64,
+}
+
+impl TvlThresholds {
+    pub fn new(low: u64, medium: u64) -> Self {
+        Self { low, medium }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct CustomChainConfig {
     #[schema(value_type = String)]
-    pub name: ArrayString<32>,
-    pub chain_id: u64,
+    name: ArrayString<32>,
+    chain_id: u64,
     pub block_time_secs: u64,
-    pub native: ChainTokenConfig,
-    pub wrapped_native: ChainTokenConfig,
-    pub default_tvl_thresholds: TvlThresholds,
+    native: ChainTokenConfig,
+    wrapped_native: ChainTokenConfig,
+    default_tvl_thresholds: TvlThresholds,
+}
+
+impl CustomChainConfig {
+    pub fn try_new(
+        name: &str,
+        chain_id: u64,
+        block_time_secs: u64,
+        native: ChainTokenConfig,
+        wrapped_native: ChainTokenConfig,
+        default_tvl_thresholds: TvlThresholds,
+    ) -> Result<Self, ChainConfigError> {
+        let name =
+            ArrayString::from(name).map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))?;
+        Ok(Self { name, chain_id, block_time_secs, native, wrapped_native, default_tvl_thresholds })
+    }
+
+
 }
 
 impl DeepSizeOf for CustomChainConfig {
