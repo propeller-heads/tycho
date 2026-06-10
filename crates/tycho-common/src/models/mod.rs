@@ -123,15 +123,30 @@ impl ChainTokenConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub struct TvlThresholds {
-    low: u64,
-    medium: u64,
+    low: f64,
+    medium: f64,
 }
 
 impl TvlThresholds {
-    pub fn new(low: u64, medium: u64) -> Self {
+    pub fn new(low: f64, medium: f64) -> Self {
         Self { low, medium }
+    }
+}
+
+impl PartialEq for TvlThresholds {
+    fn eq(&self, other: &Self) -> bool {
+        self.low.to_bits() == other.low.to_bits() && self.medium.to_bits() == other.medium.to_bits()
+    }
+}
+
+impl Eq for TvlThresholds {}
+
+impl std::hash::Hash for TvlThresholds {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.low.to_bits().hash(state);
+        self.medium.to_bits().hash(state);
     }
 }
 
@@ -387,10 +402,8 @@ impl Chain {
             (Chain::Bsc, TvlThresholdTier::Low) => 32.0,
             (Chain::Bsc, TvlThresholdTier::Medium) => 320.0,
 
-            (Chain::Custom(cfg), TvlThresholdTier::Low) => cfg.default_tvl_thresholds.low as f64,
-            (Chain::Custom(cfg), TvlThresholdTier::Medium) => {
-                cfg.default_tvl_thresholds.medium as f64
-            }
+            (Chain::Custom(cfg), TvlThresholdTier::Low) => cfg.default_tvl_thresholds.low,
+            (Chain::Custom(cfg), TvlThresholdTier::Medium) => cfg.default_tvl_thresholds.medium,
         }
     }
 
@@ -622,7 +635,7 @@ mod tests {
                 symbol: ArrayString::from("WTST").unwrap(),
                 decimals: 18,
             },
-            default_tvl_thresholds: TvlThresholds { low: 50, medium: 500 },
+            default_tvl_thresholds: TvlThresholds { low: 50.0, medium: 500.0 },
         }
     }
 
