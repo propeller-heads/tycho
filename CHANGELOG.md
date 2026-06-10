@@ -1,3 +1,11 @@
+## [0.306.1](https://github.com/propeller-heads/tycho/compare/0.306.0...0.306.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* revert ChangeType::Creation attributes without DB lookup ([941ba6e](https://github.com/propeller-heads/tycho/commit/941ba6e07593ab477bb18a45fd277cfd904a766b))
+* revert ChangeType::Creation attributes without DB lookup ([#1072](https://github.com/propeller-heads/tycho/issues/1072)) ([0e6c61d](https://github.com/propeller-heads/tycho/commit/0e6c61d96b5a2fcceecbc7c0a3ead609c8b3f6a4))
+
 ## [0.306.0](https://github.com/propeller-heads/tycho/compare/0.305.1...0.306.0) (2026-06-08)
 
 
