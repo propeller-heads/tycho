@@ -1,5 +1,6 @@
 use num_bigint::BigUint;
 
+use super::group_swaps::group_swaps;
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
 
 /// Default gas usage for an ERC-20 `transferFrom` or `transfer`. Used as fallback when the token
@@ -47,13 +48,14 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 
 /// Estimates the total gas cost for executing a `Solution`.
 ///
-/// Sums, for every swap in the solution:
+/// Groups consecutive swaps on the same groupable protocol (UniswapV4, BalancerV3, Ekubo) via
+/// `group_swaps`, which discounts intermediate token transfers saved by flash accounting. For each
+/// group (or ungrouped swap), sums:
 ///
-/// - **Pool gas** (`swap.estimated_gas()`): the simulation-reported cost of the protocol's `swap()`
-///   call, which might already include any transfers the pool performs internally (see
-///   `estimate_transfer_overhead` for the conventions).
+/// - **Pool gas** (`group.estimated_gas`): the simulation-reported cost with intermediate transfer
+///   savings already subtracted for multi-swap groups (see `compute_group_gas`).
 /// - **Transfer overhead**: the input transfer, approval, and output transfer gas that is NOT
-///   captured by `get_amount_out`, computed via `estimate_transfer_overhead`.
+///   captured by `get_amount_out`, computed via `estimate_transfer_overhead` once per group.
 /// - **Router overhead**: the user input transfer and — when `ROUTER_FEES_ACTIVE` — the extra
 ///   output transfer from the fee path. For non-split swaps, callback protocols already include a
 ///   regular `transferFrom` in their pool gas, so only the Permit2 delta (`USER_PERMIT2_TRANSFER -
@@ -63,20 +65,25 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   regardless of protocol type.
 pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     let mut total_gas = BigUint::ZERO;
-    for swap in solution.swaps() {
-        let swap_transfer_overhead = estimate_transfer_overhead(
-            &swap.component().protocol_system,
-            swap.token_in(),
-            swap.token_out(),
+    let swap_groups = group_swaps(solution.swaps());
+    for group in &swap_groups {
+        let first_swap = &group.swaps[0];
+        let last_swap = &group.swaps[group.swaps.len() - 1];
+        let group_transfer_overhead = estimate_transfer_overhead(
+            &first_swap.component().protocol_system,
+            first_swap.token_in(),
+            last_swap.token_out(),
             &strategy,
         );
-        total_gas += swap_transfer_overhead + swap.estimated_gas();
+        total_gas += group_transfer_overhead + &group.estimated_gas;
     }
 
     // Add user transfer overhead
     if strategy != Strategy::Split {
-        if let Some(first_swap) = solution.swaps().first() {
-            let protocol: &str = &first_swap.component().protocol_system;
+        if let Some(first_group) = swap_groups.first() {
+            let protocol: &str = &first_group.swaps[0]
+                .component()
+                .protocol_system;
             // if the solution is not a split swap, the protocol gas usage for callback protocols
             // already includes a regular transfer gas usage:
             // - for the permit2 case we need to deduct the transfer usage already included
@@ -105,7 +112,8 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
 
     // Add fees overhead: when fees are active and the last swap's protocol does not
     // already route output through the router, the fee path adds an extra transfer.
-    if let Some(last_swap) = solution.swaps().last() {
+    if let Some(last_group) = swap_groups.last() {
+        let last_swap = &last_group.swaps[last_group.swaps.len() - 1];
         let protocol: &str = &last_swap.component().protocol_system;
         let final_swap_output_to_router = (ROUTER_FEES_ACTIVE || strategy == Strategy::Split) &&
             !PROTOCOLS_OUTPUT_TO_ROUTER.contains(&protocol);
