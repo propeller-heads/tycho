@@ -9871,7 +9871,6 @@ dependencies = [
  "actix-web-opentelemetry",
  "alloy",
  "anyhow",
- "arrayvec",
  "async-stream",
  "async-trait",
  "aws-config",
