@@ -19,6 +19,8 @@ use super::decoder::apply_delta;
 
 pub type Address = [u8; 20];
 const DEFAULT_GAS: u64 = 180_000;
+const LIMIT_PROBE_NUMERATOR: u32 = 2162;
+const LIMIT_PROBE_DENOMINATOR: u32 = 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LunarBaseTychoState {
@@ -50,8 +52,9 @@ impl LunarBaseTychoState {
     }
 
     pub fn is_fresh(&self) -> bool {
-        self.head_block <
-            self.latest_update_block
+        self.head_block
+            < self
+                .latest_update_block
                 .saturating_add(self.block_delay)
     }
 
@@ -265,6 +268,14 @@ fn spot_from_reserves(
     Ok((reserve_out as f64 / reserve_in as f64) * decimals_adjustment)
 }
 
+// This soft bound mirrors Tycho's CPMM `get_limits` convention:
+// https://github.com/propeller-heads/tycho/blob/main/crates/tycho-simulation/src/evm/protocol/cpmm/protocol.rs/#L113
+//
+// CPMM uses `(sqrt(10) - 1) * reserve_in ~= 2.162 * reserve_in` as the
+// amount-in that would produce roughly 90% price impact in a fee-less
+// constant-product pool. LunarBase does not treat this as a protocol limit;
+// it is only the initial probe for `quote_limit`, which halves the amount
+// until the LunarBase quote math accepts it.
 fn soft_limit(reserve_in: u128) -> BigUint {
     BigUint::from(reserve_in) * 2162u32 / 1000u32
 }

@@ -9,8 +9,7 @@ import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 import {
     ILunarBasePool,
     LunarBaseExecutor,
-    LunarBaseExecutor__InvalidDataLength,
-    LunarBaseExecutor__MsgValueMismatch
+    LunarBaseExecutor__InvalidDataLength
 } from "@src/executors/LunarBaseExecutor.sol";
 
 contract LunarBaseExecutorExposed is LunarBaseExecutor {
@@ -136,12 +135,24 @@ contract LunarBaseExecutorTest is Constants, TestUtils {
         assertEq(lunarBaseExecutor.fundsExpectedAddress(params), address(this));
     }
 
-    function testSwapNativeInputRevertsOnMsgValueMismatch() public {
+    function testSwapNativeInputAllowsSurplusMsgValue() public {
+        uint256 amountIn = 0.01 ether;
+        uint256 msgValue = 0.02 ether;
         bytes memory params =
             abi.encodePacked(LUNARBASE_POOL, ETH_ADDRESS, BASE_USDC);
+        uint256 expectedAmountOut = _quoteAs(
+            address(lunarBaseExecutor), NATIVE_TOKEN, BASE_USDC, amountIn
+        );
 
-        vm.expectRevert(LunarBaseExecutor__MsgValueMismatch.selector);
-        lunarBaseExecutor.swap{value: 0.005 ether}(0.01 ether, params, BOB);
+        assertGt(expectedAmountOut, 0);
+        vm.deal(address(this), msgValue);
+
+        uint256 balanceBefore = IERC20(BASE_USDC).balanceOf(BOB);
+        lunarBaseExecutor.swap{value: msgValue}(amountIn, params, BOB);
+        uint256 balanceAfter = IERC20(BASE_USDC).balanceOf(BOB);
+
+        assertEq(balanceAfter - balanceBefore, expectedAmountOut);
+        assertEq(address(lunarBaseExecutor).balance, msgValue - amountIn);
     }
 
     function testSwapNativeInput() public {

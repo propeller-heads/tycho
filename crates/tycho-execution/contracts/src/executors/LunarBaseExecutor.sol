@@ -28,7 +28,6 @@ interface ILunarBasePool {
 }
 
 error LunarBaseExecutor__InvalidDataLength();
-error LunarBaseExecutor__MsgValueMismatch();
 
 contract LunarBaseExecutor is IExecutor {
     address internal constant LUNARBASE_NATIVE_TOKEN =
@@ -53,9 +52,6 @@ contract LunarBaseExecutor is IExecutor {
         (address pool, address tokenIn, address tokenOut,) = _decodeData(data);
 
         if (tokenIn == ETH_ADDRESS) {
-            if (msg.value != amountIn) {
-                revert LunarBaseExecutor__MsgValueMismatch();
-            }
             // slither-disable-next-line arbitrary-send-eth,unused-return
             ILunarBasePool(pool).swapExactInNative{value: amountIn}(
                 _toLunarBaseToken(tokenOut), receiver, 0, block.timestamp
