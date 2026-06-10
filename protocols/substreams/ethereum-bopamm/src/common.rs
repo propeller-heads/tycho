@@ -27,9 +27,17 @@ pub const SEL_BATCH_UPDATE: [u8; 4] = hex!("e50de8ea");
 /// Upper bound on enumerable book ids (assetIds are small sequential integers).
 pub const MAX_ASSET_ID: u64 = 64;
 
-/// Deterministic component id for a book: `0x{settlement}-{assetId}`.
+/// Deterministic component id for a book: 32 bytes = `settlement (20) ‖ assetId (12, BE)`,
+/// hex-encoded.
+///
+/// The id must hex-decode to at most 32 bytes: `tycho-simulation` converts it into the swap
+/// adapter's `bytes32 poolId` via `string_to_bytes32`, and the adapter recovers the
+/// settlement from the first 20 bytes and the asset id from the low 12.
 pub fn component_id(settlement: &[u8], asset_id: u64) -> String {
-    format!("0x{}-{}", hex::encode(settlement), asset_id)
+    let mut id = [0u8; 32];
+    id[..20].copy_from_slice(settlement);
+    id[24..].copy_from_slice(&asset_id.to_be_bytes());
+    format!("0x{}", hex::encode(id))
 }
 
 /// Storage slot of `assetConfig[asset_id]` = `keccak256(abi.encode(asset_id, base_slot))`.
@@ -188,9 +196,15 @@ mod tests {
     }
 
     #[test]
-    fn component_id_is_settlement_scoped() {
-        assert_eq!(component_id(&SETTLEMENT, 0), "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca-0");
-        assert_eq!(component_id(&SETTLEMENT, 1), "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca-1");
+    fn component_id_is_settlement_scoped_bytes32() {
+        assert_eq!(
+            component_id(&SETTLEMENT, 0),
+            "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"
+        );
+        assert_eq!(
+            component_id(&SETTLEMENT, 1),
+            "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000001"
+        );
     }
 
     #[test]
@@ -216,7 +230,7 @@ mod tests {
         let (book_id, _) = updates[0];
         assert_eq!(
             component_id(&SETTLEMENT, book_id),
-            "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca-0"
+            "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"
         );
         assert_eq!(
             hex::encode(asset_config_slot(book_id, 3)),

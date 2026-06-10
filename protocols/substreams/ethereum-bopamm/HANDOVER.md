@@ -127,7 +127,9 @@ timestamps are independent, so each book is pinned separately.
 Type: **VM**, `protocol_system = vm:bopamm`, `protocol_type = bopamm_book` (Swap), one
 component **per book** (`asset/USDC`).
 
-Component id = `0x{settlement}-{assetId}`. tokens = `[asset, USDC]` (sorted ascending).
+Component id = `0x` + `settlement (20 bytes) ‖ assetId (12 bytes, BE)` — exactly 32 hex
+bytes, because `tycho-simulation` hex-decodes the id into the adapter's `bytes32 poolId`
+(`string_to_bytes32`). tokens = `[asset, USDC]` (sorted ascending).
 contracts = `[settlement, module, registry]` (same three for every book). All deployment
 addresses + storage slots are passed via **substreams `params`** (`DeploymentConfig`) — no
 hardcoded addresses; the package can target another deployment by changing params.
@@ -147,8 +149,8 @@ hardcoded addresses; the package can target another deployment by changing param
 5. **`store_balances`** — `StoreAddBigInt` → absolute balances.
 6. **`map_protocol_changes`** — assembles `BlockChanges`: new components + `balance_owner`
    dynamic attr, absolute balances, full storage+code of the three contracts
-   (`extract_contract_changes`, fixed predicate, **no DCI**), per-book `committed_ts` +
-   `committed_block` decoded from `updateState`/batch calldata, and `Paused`/`Unpaused`
+   (`extract_contract_changes`, fixed predicate, **no DCI**), the per-book
+   `override_block_timestamp` decoded from `updateState`/batch calldata, and `Paused`/`Unpaused`
    pause state. `manual_updates` components are explicitly `mark_component_as_updated` on
    each quote refresh and on shared-module changes.
 
@@ -161,8 +163,10 @@ hardcoded addresses; the package can target another deployment by changing param
 - **`balance_owner` is a dynamic attribute**, emitted whenever the maker slot is written
   (`extract_maker_changes`) — because the maker is configured *after* book creation, and the
   maker can rotate.
-- **`committed_ts`/`committed_block`** are read from the `bookId`/`ts` in the registry update
-  **calldata** (not by reverse-engineering lane slots).
+- **`override_block_timestamp`** (8-byte BE u64) is read from the `bookId`/`ts` in the
+  registry update **calldata** (not by reverse-engineering lane slots). `tycho-simulation`
+  pins `block.timestamp` to it when simulating the book (generic mechanism added in PR
+  #1034), which passes the registry's exact-timestamp `StaleUpdate()` gate.
 - **`batchUpdateStateWithSignature`** is decoded for completeness (ethabi) but is currently
   only synthetic-tested (never called on-chain).
 
@@ -182,18 +186,18 @@ hardcoded addresses; the package can target another deployment by changing param
 
 ## 8. Remaining work (next steps)
 
-1. **`tycho-simulation` VM adapter (`BopAMMSwapAdapter`)** — `get_amount_out` over the indexed
-   storage. **Must inject the maker's token balance** into the simulated token storage (it is
-   *not* in the tracked contract set; pricing doesn't need it but `swap()`/limits do), and
-   pin `block.timestamp`/`block.number` to the book's committed snapshot (the override
-   stream). This is where the §5 timestamp gate is handled.
-2. **Quote-override stream** — supplies, per book, the committed lane snapshot + its
-   timestamp/block so the adapter can simulate at head without `StaleUpdate()`.
-3. **`extractors.yaml` `vm:bopamm` entry** — the entry itself is 8 trivial fields (see PR
+1. ~~VM swap adapter~~ — **done**: `BopAMMAdapter` under
+   `protocols/adapter-integration/evm/src/bopamm/` (sell-side; quote-driven limits via
+   bisection; see its manifest). The §5 timestamp gate is handled by the
+   `override_block_timestamp` attribute consumed by `tycho-simulation` (PR #1034); no
+   separate quote-override stream is needed. When simulating `swap()` (not just `quote()`),
+   the maker's token balance must still be present in the simulated token contracts — it is
+   *not* in the tracked contract set; pricing doesn't need it but settlement transfers do.
+2. **`extractors.yaml` `vm:bopamm` entry** — the entry itself is 8 trivial fields (see PR
    description / repo `extractors.yaml`); the real prerequisite is **releasing the spkg to
    S3** via `protocols/substreams/release.sh ethereum-bopamm` (spkgs are gitignored, fetched
    from S3 at runtime). Params are baked into the spkg by `substreams pack`.
-4. **Robustness gaps** (documented, not blocking the MVP):
+3. **Robustness gaps** (documented, not blocking the MVP):
    - Asset **delisting** (`non-zero→0` config) is not handled → a removed book stays
      "active". Components are immutable; would need a deactivation signal.
    - **Maker rotation** to a pre-funded wallet under-reports TVL until the new maker's first
@@ -209,8 +213,8 @@ hardcoded addresses; the package can target another deployment by changing param
   pack` succeeds.
 - Two adversarial review agents + a live `substreams run` against
   `mainnet.eth.streamingfast.io` over the creation range (25171610–21) and an active range
-  (~25.26M): both books created with correct ids/tokens/attrs/creation_tx; `committed_ts`/
-  `committed_block` on `updateState`; maker balances under both books; `balance_owner` emitted
+  (~25.26M): both books created with correct ids/tokens/attrs/creation_tx; the quote
+  timestamp attribute on `updateState`; maker balances under both books; `balance_owner` emitted
   at 25171618. Two bugs were found and fixed during review (balance_owner timing; token-index
   sort-order dropping WETH balances).
 

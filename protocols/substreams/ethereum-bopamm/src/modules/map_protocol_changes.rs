@@ -114,12 +114,12 @@ fn add_new_components(
     }
 }
 
-/// Records each book's committed quote freshness from registry update calls: `committed_ts`
-/// (the `ts` decoded from the update calldata) and `committed_block` (the current block
-/// number).
+/// Records each book's committed quote freshness from registry update calls as the
+/// `override_block_timestamp` attribute (the `ts` decoded from the update calldata, 8-byte
+/// big-endian u64).
 ///
-/// The committed timestamp is the quote validity used by the simulation override stream to
-/// pin `block.timestamp`; `committed_block` lets it pin `block.number` too. Marking the book
+/// `tycho-simulation` pins `block.timestamp` to this value when simulating the book, which
+/// is what passes the registry's exact-timestamp `StaleUpdate()` gate. Marking the book
 /// updated is required because `manual_updates` components only re-simulate when marked.
 fn extract_committed_quotes(
     block: &eth::v2::Block,
@@ -147,18 +147,13 @@ fn extract_committed_quotes(
                 let id = component_id(&config.settlement, book_id);
                 builder.add_entity_change(&EntityChanges {
                     component_id: id.clone(),
-                    attributes: vec![
-                        Attribute {
-                            name: "committed_ts".to_string(),
-                            value: committed_ts.to_be_bytes().to_vec(),
-                            change: ChangeType::Update.into(),
-                        },
-                        Attribute {
-                            name: "committed_block".to_string(),
-                            value: block.number.to_be_bytes().to_vec(),
-                            change: ChangeType::Update.into(),
-                        },
-                    ],
+                    attributes: vec![Attribute {
+                        name: "override_block_timestamp".to_string(),
+                        value: u64::from(committed_ts)
+                            .to_be_bytes()
+                            .to_vec(),
+                        change: ChangeType::Update.into(),
+                    }],
                 });
                 builder.mark_component_as_updated(&id);
             }
