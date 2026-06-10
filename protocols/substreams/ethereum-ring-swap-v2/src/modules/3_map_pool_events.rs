@@ -1,6 +1,9 @@
 use itertools::Itertools;
 use std::collections::HashMap;
-use substreams::store::{StoreGet, StoreGetProto};
+use substreams::{
+    prelude::BigInt,
+    store::{StoreGet, StoreGetProto},
+};
 use substreams_ethereum::pb::eth::v2::{self as eth};
 
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
@@ -66,8 +69,8 @@ pub fn map_pool_events(
 /// Handle the sync events and update the reserves of the pools.
 ///
 /// This function is called for each block, and it will handle the sync events for each transaction.
-/// On UniswapV2, Sync events are emitted on every reserve-altering function call, so we can use
-/// only this event to keep track of the pool state.
+/// Ring Swap V2 pairs are UniswapV2-style and emit Sync on every reserve-altering function call,
+/// so we can use it as the only event to keep track of the pool state.
 ///
 /// This function also relies on an intermediate HashMap to store the changes for each transaction.
 /// This is necessary because we need to consolidate the changes for each transaction before adding
@@ -83,8 +86,10 @@ fn handle_sync(
 
         let pool =
             store.must_get_last(StoreKey::Pool.get_unique_pool_key(pool_address_hex.as_str()));
-        // Convert reserves to bytes
-        let reserves_bytes = [event.reserve0, event.reserve1];
+        // Ring pairs keep reserves in FewToken units while components expose the underlying
+        // ERC-20s as tokens. Normalize reserves into the exposed underlying token order and
+        // decimals so UniswapV2State can simulate the route as a standard ERC-20 pool.
+        let reserves = exposed_reserves(&pool, event.reserve0, event.reserve1);
 
         let tx_change = tx_changes
             .entry(_tx.hash.clone())
@@ -94,7 +99,7 @@ fn handle_sync(
                 balance_changes: HashMap::new(),
             });
 
-        for (i, reserve_bytes) in reserves_bytes.iter().enumerate() {
+        for (i, reserve) in reserves.iter().enumerate() {
             let attribute_name = format!("reserve{}", i);
             // By using a HashMap, we can overwrite the previous value of the reserve attribute if
             // it is for the same pool and the same attribute name (reserves).
@@ -102,9 +107,7 @@ fn handle_sync(
                 ComponentKey::new(pool_address_hex.clone(), attribute_name.clone()),
                 Attribute {
                     name: attribute_name,
-                    value: reserve_bytes
-                        .clone()
-                        .to_signed_bytes_be(),
+                    value: reserve.clone().to_signed_bytes_be(),
                     change: ChangeType::Update.into(),
                 },
             );
@@ -112,7 +115,7 @@ fn handle_sync(
 
         // Update balance changes for each token
         for (index, token) in pool.tokens.iter().enumerate() {
-            let balance = &reserves_bytes[index];
+            let balance = &reserves[index];
             // HashMap also prevents having duplicate balance changes for the same pool and token.
             tx_change.balance_changes.insert(
                 ComponentKey::new(pool_address_hex.clone(), token.clone()),
@@ -131,6 +134,50 @@ fn handle_sync(
     eh.filter_by_address(PoolAddresser { store });
     eh.on::<Sync, _>(&mut on_sync);
     eh.handle_events();
+}
+
+/// Convert raw pair reserves (FewToken units, FewToken order) into the reserves of the exposed
+/// component (underlying ERC-20 units, sorted underlying order).
+fn exposed_reserves(pool: &ProtocolComponent, reserve0: BigInt, reserve1: BigInt) -> [BigInt; 2] {
+    let reserve0 = normalize_reserve(
+        reserve0,
+        static_attribute_byte(pool, "fw_decimals0"),
+        static_attribute_byte(pool, "underlying_decimals0"),
+    );
+    let reserve1 = normalize_reserve(
+        reserve1,
+        static_attribute_byte(pool, "fw_decimals1"),
+        static_attribute_byte(pool, "underlying_decimals1"),
+    );
+
+    if static_attribute_byte(pool, "reserves_inverted") == 1 {
+        [reserve1, reserve0]
+    } else {
+        [reserve0, reserve1]
+    }
+}
+
+fn normalize_reserve(reserve: BigInt, from_decimals: u8, to_decimals: u8) -> BigInt {
+    match from_decimals.cmp(&to_decimals) {
+        std::cmp::Ordering::Equal => reserve,
+        std::cmp::Ordering::Less => {
+            reserve * BigInt::from(10u64).pow(u32::from(to_decimals - from_decimals))
+        }
+        std::cmp::Ordering::Greater => {
+            reserve / BigInt::from(10u64).pow(u32::from(from_decimals - to_decimals))
+        }
+    }
+}
+
+/// Read a single-byte static attribute written by map_pools_created. Every pool stored by this
+/// package is guaranteed to carry the Ring attributes, so a missing one is a bug, not a data case.
+fn static_attribute_byte(pool: &ProtocolComponent, name: &str) -> u8 {
+    pool.static_att
+        .iter()
+        .find(|att| att.name == name)
+        .and_then(|att| att.value.last())
+        .copied()
+        .unwrap_or_else(|| panic!("Ring pool {} is missing the {} static attribute", pool.id, name))
 }
 
 /// Merge the changes from the sync events with the create_pool events previously mapped on
@@ -220,4 +267,75 @@ fn merge_block(
     block_entity_changes.changes = tx_entity_changes_map
         .into_values()
         .collect();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ring_pool(attributes: &[(&str, u8)]) -> ProtocolComponent {
+        ProtocolComponent {
+            static_att: attributes
+                .iter()
+                .map(|(name, value)| Attribute {
+                    name: name.to_string(),
+                    value: vec![*value],
+                    change: ChangeType::Creation.into(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn normalize_reserve_keeps_equal_decimals() {
+        assert_eq!(normalize_reserve(BigInt::from(1_000_000u64), 6, 6), BigInt::from(1_000_000u64));
+    }
+
+    #[test]
+    fn normalize_reserve_scales_down_to_underlying_decimals() {
+        assert_eq!(
+            normalize_reserve(BigInt::from(1_000_000_000_000_000_000u64), 18, 6),
+            BigInt::from(1_000_000u64)
+        );
+    }
+
+    #[test]
+    fn normalize_reserve_scales_up_to_underlying_decimals() {
+        assert_eq!(
+            normalize_reserve(BigInt::from(1_000_000u64), 6, 18),
+            BigInt::from(1_000_000_000_000_000_000u64)
+        );
+    }
+
+    #[test]
+    fn exposed_reserves_normalizes_decimals_in_pair_order() {
+        let pool = ring_pool(&[
+            ("fw_decimals0", 18),
+            ("fw_decimals1", 18),
+            ("underlying_decimals0", 18),
+            ("underlying_decimals1", 6),
+            ("reserves_inverted", 0),
+        ]);
+
+        let reserves =
+            exposed_reserves(&pool, BigInt::from(5u64), BigInt::from(2_000_000_000_000u64));
+
+        assert_eq!(reserves, [BigInt::from(5u64), BigInt::from(2u64)]);
+    }
+
+    #[test]
+    fn exposed_reserves_swaps_inverted_reserves() {
+        let pool = ring_pool(&[
+            ("fw_decimals0", 18),
+            ("fw_decimals1", 6),
+            ("underlying_decimals0", 18),
+            ("underlying_decimals1", 6),
+            ("reserves_inverted", 1),
+        ]);
+
+        let reserves = exposed_reserves(&pool, BigInt::from(7u64), BigInt::from(9u64));
+
+        assert_eq!(reserves, [BigInt::from(9u64), BigInt::from(7u64)]);
+    }
 }

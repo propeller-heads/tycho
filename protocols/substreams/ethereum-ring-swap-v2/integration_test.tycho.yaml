@@ -19,6 +19,7 @@ tests:
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
           fee: "0x1e"
+          pool_factory: "0xeb2a625b704d73e82946d8d026e1f588eed06416"
           fw_token0: "0x2078f336fdd260f708bec4a20c82b063274e1b23"
           fw_token1: "0xa250cc729bb3323e7933022a67b52200fe354767"
           underlying_token0: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
@@ -40,6 +41,7 @@ tests:
           - "0xdac17f958d2ee523a2206206994597c13d831ec7"
         static_attributes:
           fee: "0x1e"
+          pool_factory: "0xeb2a625b704d73e82946d8d026e1f588eed06416"
           fw_token0: "0xa250cc729bb3323e7933022a67b52200fe354767"
           fw_token1: "0xef87f4608e601e8564800265aee1c1ffadf73283"
           underlying_token0: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
@@ -61,6 +63,7 @@ tests:
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
           fee: "0x1e"
+          pool_factory: "0xeb2a625b704d73e82946d8d026e1f588eed06416"
           fw_token0: "0x0492560fa7cfd6a85e50d8be3f77318994f8f429"
           fw_token1: "0xa250cc729bb3323e7933022a67b52200fe354767"
           underlying_token0: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -82,6 +85,7 @@ tests:
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
         static_attributes:
           fee: "0x1e"
+          pool_factory: "0xeb2a625b704d73e82946d8d026e1f588eed06416"
           fw_token0: "0x8A6fe57C08C84e0f4eE97aAe68a62e820a37d259"
           fw_token1: "0xa250CC729Bb3323e7933022a67B52200fE354767"
           underlying_token0: "0x6B175474E89094C44Da98b954EedeAC495271d0F"

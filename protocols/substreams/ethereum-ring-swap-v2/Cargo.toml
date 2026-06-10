@@ -1,10 +1,10 @@
 [package]
-name = "ethereum-uniswap-v2"
-version = "0.3.1"
+name = "ethereum-ring-swap-v2"
+version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "ethereum_uniswap_v2"
+name = "ethereum_ring_swap_v2"
 crate-type = ["cdylib"]
 
 [dependencies]
