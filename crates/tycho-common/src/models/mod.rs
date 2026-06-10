@@ -159,15 +159,9 @@ impl CustomChainConfig {
             ArrayString::from(name).map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))?;
         Ok(Self { name, chain_id, block_time_secs, native, wrapped_native, default_tvl_thresholds })
     }
-
-
 }
 
 impl DeepSizeOf for CustomChainConfig {
-    fn deep_size_of(&self) -> usize {
-        0
-    }
-
     fn deep_size_of_children(&self, _context: &mut deepsize::Context) -> usize {
         0
     }
