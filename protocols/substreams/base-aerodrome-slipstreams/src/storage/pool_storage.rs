@@ -75,14 +75,31 @@ impl<'a> SlipstreamsPoolStorage<'a> {
 
                     // Check if there is a change in the data
                     if old_data != new_data {
-                        let value = match storage_location.signed {
+                        let old_value = match storage_location.signed {
+                            true => BigInt::from_signed_bytes_be(old_data),
+                            false => BigInt::from_unsigned_bytes_be(old_data),
+                        };
+
+                        let new_value = match storage_location.signed {
                             true => BigInt::from_signed_bytes_be(new_data),
                             false => BigInt::from_unsigned_bytes_be(new_data),
                         };
+
+                        let old_is_zero_or_empty = old_data.is_empty() || old_value.is_zero();
+                        let new_is_zero_or_empty = new_data.is_empty() || new_value.is_zero();
+
+                        let change_type = if old_is_zero_or_empty {
+                            ChangeType::Creation
+                        } else if new_is_zero_or_empty {
+                            ChangeType::Deletion
+                        } else {
+                            ChangeType::Update
+                        };
+
                         attributes.push(Attribute {
                             name: storage_location.name.to_string(),
-                            value: value.to_signed_bytes_be(),
-                            change: ChangeType::Update.into(),
+                            value: new_value.to_signed_bytes_be(),
+                            change: change_type.into(),
                         });
                     }
                 }
