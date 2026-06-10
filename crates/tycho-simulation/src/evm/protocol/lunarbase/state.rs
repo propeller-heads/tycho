@@ -19,8 +19,6 @@ use super::decoder::apply_delta;
 
 pub type Address = [u8; 20];
 const DEFAULT_GAS: u64 = 180_000;
-const LIMIT_PROBE_NUMERATOR: u32 = 2162;
-const LIMIT_PROBE_DENOMINATOR: u32 = 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LunarBaseTychoState {
