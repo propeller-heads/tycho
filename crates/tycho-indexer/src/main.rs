@@ -822,7 +822,7 @@ chains:
             2,
             expected_native,
             expected_wrapped,
-            TvlThresholds::new(1000, 10000),
+            TvlThresholds::new(1000.0, 10000.0),
         )
         .unwrap();
         assert_eq!(cfg, expected_cfg);
