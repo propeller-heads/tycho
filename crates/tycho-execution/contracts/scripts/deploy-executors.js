@@ -79,6 +79,10 @@ const executors_to_deploy = {
                 "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
             ]
         },
+        // Args: Metric Oracle
+        {
+          exchange: "MetricExecutor", args: ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+        }
     ],
     "base": [
         // USV2 - Args: Fee BPS
