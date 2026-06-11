@@ -624,6 +624,7 @@ impl TestRunner {
             &test.expected_components,
             &config.protocol_system,
         )?;
+
         // Step 5: Run Tycho Execution
         self.runtime
             .block_on(self.run_execution(
@@ -1115,12 +1116,12 @@ impl TestRunner {
                         continue;
                     }
 
-                    let chain_model = self.chain;
                     let executors_json = json!({
-                        (chain_model.to_string()): {
+                        "ethereum": {
                             (protocol_system): EXECUTOR_ADDRESS
                         }
                     });
+                    let chain_model = self.chain;
                     let (solution, calldata) = encode_swap(
                         component,
                         None,
