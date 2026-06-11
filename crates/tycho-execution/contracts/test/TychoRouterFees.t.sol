@@ -492,4 +492,112 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.stopPrank();
     }
+
+    function testSingleSwapAppliesTxOriginCustomFee() public {
+        // ALICE (tx.origin) has a custom 1% router fee that overrides the 2% default.
+        // No client signature is provided, so tx.origin is used for the fee lookup.
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
+        feeCalculator.setRouterFeeOnOutput(2_000_000); // 2% default
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, 1_000_000); // 1% override for ALICE
+        vm.stopPrank();
+
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+
+        // ALICE is both msg.sender and tx.origin
+        vm.startPrank(ALICE, ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        uint256 minAmountOut = 1900 * 1e18;
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+        vm.stopPrank();
+
+        // 1 WETH -> 2018817438608734439722 DAI
+        // ALICE's custom 1% fee is used, not the 2% default
+        // 2% would be 40376348772174688794; 1% confirms the override
+        uint256 expectedRouterFee = 20188174386087344397;
+        uint256 expectedAmountOut = 1998629264222647095325;
+
+        assertEq(amountOut, expectedAmountOut);
+        assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), expectedAmountOut);
+        assertEq(
+            tychoRouter.balanceOf(
+                routerFeeReceiver, uint256(uint160(DAI_ADDR))
+            ),
+            expectedRouterFee
+        );
+        // No client fee — address(0) vault stays empty
+        assertEq(
+            tychoRouter.balanceOf(address(0), uint256(uint160(DAI_ADDR))), 0
+        );
+    }
+
+    function testSingleSwapSignatureTakesPrecedenceOverTxOrigin() public {
+        // ALICE (tx.origin) has a custom 2% router fee.
+        // A signed client fee for clientFeeReceiver is also provided.
+        // The signed clientFeeReceiver's fee (default, 0%) should be used, not ALICE's 2%.
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, 2_000_000); // 2% for tx.origin
+        vm.stopPrank();
+
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+
+        vm.startPrank(ALICE, ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        uint256 minAmountOut = 1900 * 1e18;
+
+        // Signed params: clientFeeReceiver has no custom fee (uses default 0%)
+        ClientFeeParams memory feeParams = makeClientFeeParams(
+            0,
+            0,
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            ALICE,
+            swap,
+            tychoRouterAddr,
+            CLIENT_FEE_RECEIVER_PK
+        );
+
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, ALICE, feeParams, swap
+        );
+        vm.stopPrank();
+
+        // clientFeeReceiver (default, 0% router fee) was used — no router fee collected
+        uint256 routerFeeBalance = tychoRouter.balanceOf(
+            routerFeeReceiver, uint256(uint160(DAI_ADDR))
+        );
+        assertEq(
+            routerFeeBalance,
+            0,
+            "ALICE tx.origin fee must not apply when signature present"
+        );
+
+        // Full output minus zero fees goes to ALICE
+        assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), amountOut);
+    }
 }
