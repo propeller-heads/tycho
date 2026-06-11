@@ -10,7 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
-prost = "0.11"
 ethabi = "18.0.0"
 substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", rev = "b8aeaa3" }
 tycho-substreams = "0.8.0"

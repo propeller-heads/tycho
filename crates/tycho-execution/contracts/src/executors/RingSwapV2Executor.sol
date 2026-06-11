@@ -54,7 +54,9 @@ contract RingSwapV2Executor is IExecutor {
             IUniswapV2Pair(target), fwAmountIn, zeroForOne, address(this)
         );
 
-        IFewWrappedToken(fwTokenOut).unwrapTo(fwAmountOut, receiver);
+        uint256 amountOut =
+            IFewWrappedToken(fwTokenOut).unwrapTo(fwAmountOut, receiver);
+        require(amountOut > 0, "U");
     }
 
     function _swap(

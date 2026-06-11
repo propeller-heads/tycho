@@ -957,7 +957,6 @@ dependencies = [
  "getrandom 0.2.17",
  "itertools 0.12.1",
  "num-bigint",
- "prost 0.11.9",
  "serde",
  "serde_qs 0.13.0",
  "substreams 0.5.22",
