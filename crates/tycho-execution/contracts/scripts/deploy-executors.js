@@ -79,6 +79,11 @@ const executors_to_deploy = {
                 "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
             ]
         },
+        // Args: BopAmmV2 settlement
+        {
+            exchange: "BopAMMExecutor",
+            args: ["0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"]
+        },
     ],
     "base": [
         // USV2 - Args: Fee BPS

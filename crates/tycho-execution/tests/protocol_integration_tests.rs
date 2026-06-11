@@ -1422,6 +1422,57 @@ fn test_single_encoding_strategy_rocketpool_burn() {
 }
 
 #[test]
+fn test_single_encoding_strategy_bopamm_weth_usdc() {
+    // WETH -> (BopAMM) -> USDC
+    // Amount stays below the committed lane size at the test fork block
+    // (~0.646 WETH for book 0 at block 25266710).
+    let token_in = weth();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"),
+            protocol_system: String::from("vm:bopamm"),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("100000000000000000").unwrap(),
+        BigUint::from(160_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_bopamm_weth_usdc", hex_calldata.as_str());
+}
+
+#[test]
 fn test_single_encoding_strategy_slipstreams() {
     // WETH -> (Slipstreams) -> USDC
     let static_attributes = HashMap::from([(
