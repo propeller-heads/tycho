@@ -55,11 +55,13 @@ interface IFeeCalculator {
         returns (uint32);
 
     /**
-     * @notice Returns all clients with custom fee overrides and their current settings
-     * @return clients Addresses of all clients with at least one custom fee
+     * @notice Returns a page of clients with custom fee overrides and their current settings
+     * @param start Index to start reading from (0-indexed)
+     * @param count Maximum number of entries to return
+     * @return clients Addresses of clients with at least one custom fee
      * @return fees Custom fee configuration for each client (parallel array)
      */
-    function getAllClientFees()
+    function getAllClientFees(uint256 start, uint256 count)
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);

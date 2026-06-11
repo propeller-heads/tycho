@@ -631,7 +631,7 @@ contract FeeCalculatorConfigTest is Constants {
 
     function testGetAllClientFeesEmpty() public view {
         (address[] memory clients, CustomFees[] memory fees) =
-            feeCalculator.getAllClientFees();
+            feeCalculator.getAllClientFees(0, type(uint256).max);
         assertEq(clients.length, 0);
         assertEq(fees.length, 0);
     }
@@ -644,7 +644,7 @@ contract FeeCalculatorConfigTest is Constants {
         vm.stopPrank();
 
         (address[] memory clients, CustomFees[] memory fees) =
-            feeCalculator.getAllClientFees();
+            feeCalculator.getAllClientFees(0, type(uint256).max);
 
         assertEq(clients.length, 2);
 
@@ -669,6 +669,27 @@ contract FeeCalculatorConfigTest is Constants {
         assertTrue(foundBob);
     }
 
+    function testGetAllClientFeesPagination() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, _HALF_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _1_PCT);
+        address CAROL = makeAddr("carol");
+        feeCalculator.setCustomRouterFeeOnOutput(CAROL, _5_PCT);
+        vm.stopPrank();
+
+        // First page: 2 entries
+        (address[] memory page1,) = feeCalculator.getAllClientFees(0, 2);
+        assertEq(page1.length, 2);
+
+        // Second page: remaining 1 entry
+        (address[] memory page2,) = feeCalculator.getAllClientFees(2, 2);
+        assertEq(page2.length, 1);
+
+        // Out-of-bounds start returns empty
+        (address[] memory empty,) = feeCalculator.getAllClientFees(10, 2);
+        assertEq(empty.length, 0);
+    }
+
     function testGetAllClientFeesAfterRemovingClient() public {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setCustomRouterFeeOnOutput(ALICE, _HALF_PCT);
@@ -678,7 +699,7 @@ contract FeeCalculatorConfigTest is Constants {
         vm.prank(FEE_SETTER);
         feeCalculator.removeCustomRouterFeeOnOutput(ALICE);
 
-        (address[] memory clients,) = feeCalculator.getAllClientFees();
+        (address[] memory clients,) = feeCalculator.getAllClientFees(0, 10);
 
         assertEq(clients.length, 1);
         assertEq(clients[0], BOB);
@@ -694,7 +715,7 @@ contract FeeCalculatorConfigTest is Constants {
         feeCalculator.removeCustomRouterFeeOnOutput(BOB);
 
         (address[] memory clients, CustomFees[] memory fees) =
-            feeCalculator.getAllClientFees();
+            feeCalculator.getAllClientFees(0, 10);
 
         assertEq(clients.length, 1);
         assertEq(clients[0], BOB);
