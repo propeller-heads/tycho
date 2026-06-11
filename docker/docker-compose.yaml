@@ -16,8 +16,10 @@ services:
       - postgres_data:/bitnami/postgresql
     shm_size: '2gb'
   
-  # Grafana LGTM stack for observability (Loki, Grafana, Tempo, Mimir)
+  # Grafana LGTM stack for observability (Loki, Grafana, Tempo, Mimir) — opt-in, resource-heavy
+  # Enable with: docker compose --profile observability up
   lgtm:
+    profiles: [observability]
     image: grafana/otel-lgtm:latest
     restart: "always"
     ports:
@@ -30,8 +32,10 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
   
-  # Promtail for log collection
+  # Promtail for log collection — opt-in, not available on macOS (no /var/lib/docker/containers)
+  # Enable with: docker compose --profile observability up
   promtail:
+    profiles: [observability]
     image: grafana/promtail:2.9.0
     restart: "always"
     depends_on:
@@ -46,30 +50,34 @@ services:
     image: ${TYCHO_IMAGE}
     restart: "no"
     depends_on:
-      - db
-      - lgtm
-      - promtail
+      db:
+        condition: service_started
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      test: [ "CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/4242'" ]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     env_file:
       - .env
     environment:
       SUBSTREAMS_API_TOKEN: ${SUBSTREAMS_API_TOKEN:-readme}
       RPC_URL: ${RPC_URL:-readme}
       TRACE_RPC_URL: ${TRACE_RPC_URL:-readme}
-      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:mypassword@db:5432/tycho_indexer_0}
+      DATABASE_URL: postgres://postgres:mypassword@db:5432/tycho_indexer_0
       RUST_LOG: ${RUST_LOG:-info}
-      # Configure OTLP endpoint for tracing
-      OTLP_EXPORTER_ENDPOINT: ${OTLP_EXPORTER_ENDPOINT:-http://lgtm:4317}
+      OTLP_EXPORTER_ENDPOINT: ${OTLP_EXPORTER_ENDPOINT:-}
+      AUTH_API_KEY: ${AUTH_API_KEY:-local-dev-key}
+      # Override to use a chain-specific extractors file, e.g. ./extractors-tempo.yaml
+      EXTRACTORS_CONFIG: ${EXTRACTORS_CONFIG:-/opt/tycho-indexer/extractors.yaml}
     ports:
       - "4242:4242"
     volumes:
       - ./wait-for-postgres.sh:/usr/wait-for-postgres.sh
       - ./extractors.yaml:/opt/tycho-indexer/extractors.yaml
       - ./substreams/:/opt/tycho-indexer/substreams/
+      # Path to a local tycho-protocol-sdk checkout; override with TYCHO_PROTOCOL_SDK_PATH
+      - ${TYCHO_PROTOCOL_SDK_PATH:-../tycho-protocol-sdk}/substreams:/opt/tycho-indexer/substreams-sdk:ro
     # Configure logging driver for better log collection
     logging:
       driver: "json-file"
@@ -81,8 +89,63 @@ services:
       - "service=tycho-indexer"
       - "version=0.76.0"
     entrypoint: [ "/usr/wait-for-postgres.sh", "db" ]
-    command: [ "/opt/tycho-indexer/tycho-indexer", "--endpoint", "https://mainnet.eth.streamingfast.io:443", "index", "--retention-horizon", "2025-07-23T00:00:00"]
+    command: [ "/opt/tycho-indexer/tycho-indexer", "--endpoint", "${SUBSTREAMS_ENDPOINT:-https://mainnet.eth.streamingfast.io:443}", "index", "--chains", "${CHAINS:-ethereum}", "--retention-horizon", "${RETENTION_HORIZON:-2000-01-01T00:00:00}"]
+
+  # Self-hosted Firehose + Substreams stack backed by an EVM JSON-RPC node.
+  # NOTE: This is a single-machine deployment — all components run in one container.
+  # It is suitable for development and testing but not for production workloads that
+  # require high availability. For a distributed, fault-tolerant setup see:
+  # https://firehose.streamingfast.io/firehose/overview/deployment-and-scaling
+  # Opt-in: docker compose --profile substreams-endpoint up
+  # Reuses RPC_URL from the tycho-indexer service.
+  # Optional: START_BLOCK (default: 0), CHAIN_NAME (default: mainnet)
+  substreams-endpoint:
+    profiles: [substreams-endpoint]
+    image: ghcr.io/streamingfast/firehose-ethereum:f8e2132
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/10016'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    environment:
+      START_BLOCK: ${START_BLOCK:-0}
+      CHAIN_NAME: ${CHAIN_NAME:-mainnet}
+      RPC_URL: ${RPC_URL}
+    volumes:
+      - firehose-data:/data
+    ports:
+      - "10015:10015"   # Firehose gRPC
+      - "10016:10016"   # Substreams Tier1 gRPC
+    # The poller (protocol v3) pipes blocks into reader-node-stdin.
+    # poll-rpc-blocks emits protocol v2 and is incompatible with this fireeth build.
+    # RESUME auto-detects the highest stored one-block file so restarts skip already-fetched blocks.
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        FIRST_ONEBLOCK=$$(ls /data/storage/one-blocks/ 2>/dev/null | sort | head -1 | cut -d'-' -f1 | sed 's/^0*//')
+        LAST_ONEBLOCK=$$(ls /data/storage/one-blocks/ 2>/dev/null | sort | tail -1 | cut -d'-' -f1 | sed 's/^0*//')
+        FIRST_MERGED=$$(ls /data/storage/merged-blocks/ 2>/dev/null | sort | head -1 | sed 's/\..*$$//' | sed 's/^0*//')
+        FIRST_STREAMABLE=$${FIRST_MERGED:-$${FIRST_ONEBLOCK:-$$START_BLOCK}}
+        RESUME=$${LAST_ONEBLOCK:-$$START_BLOCK}
+        echo "First streamable block: $$FIRST_STREAMABLE, resuming poller from: $$RESUME"
+        fireeth tools poller generic-evm $$RPC_URL $$RESUME \
+          --interval-between-fetch=0ms \
+        | fireeth --config-file= start reader-node-stdin merger relayer firehose substreams-tier1 substreams-tier2 \
+          --data-dir=/data \
+          --common-first-streamable-block=$$FIRST_STREAMABLE \
+          --advertise-chain-name=$$CHAIN_NAME \
+          --firehose-grpc-listen-addr=:10015 \
+          --substreams-tier1-grpc-listen-addr=:10016 \
+          --substreams-tier2-grpc-listen-addr=:10017 \
+          --substreams-tier1-subrequests-plaintext=true \
+          --substreams-tier1-subrequests-endpoint=:10017 \
+          --substreams-state-bundle-size=1000 \
+          --substreams-state-store-url=/data/substreams-states
 
 volumes:
   postgres_data:
   lgtm_data:
+  firehose-data:
