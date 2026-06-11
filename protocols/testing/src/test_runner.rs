@@ -611,6 +611,7 @@ impl TestRunner {
             snapshot,
             all_tokens,
             adapter_contract_path_str,
+            self.vm_simulation_traces,
         )?;
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
@@ -856,6 +857,7 @@ impl TestRunner {
         snapshot: Snapshot,
         all_tokens: HashMap<Bytes, Token>,
         adapter_contract_path: Option<PathBuf>,
+        vm_simulation_traces: bool,
     ) -> miette::Result<Update> {
         // Clear the shared database state to ensure test isolation
         // This prevents state from previous tests from affecting the current test
@@ -864,7 +866,7 @@ impl TestRunner {
         let protocol_stream_builder =
             ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
 
-        let mut decoder_context = DecoderContext::new().vm_traces(self.vm_simulation_traces);
+        let mut decoder_context = DecoderContext::new().vm_traces(vm_simulation_traces);
         if let Some(vm_adapter_path) = adapter_contract_path.as_ref() {
             if let Some(path_str) = vm_adapter_path.to_str() {
                 decoder_context = decoder_context.vm_adapter_path(path_str);

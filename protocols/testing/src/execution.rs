@@ -24,7 +24,6 @@ const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.j
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
 const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
-const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculator.runtime.json");
 
 /// Mapping from protocol component patterns to executor bytecode JSON strings
 static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -119,27 +118,5 @@ pub fn create_router_overwrites_data(
 
     let executor_bytecode = load_executor_bytecode(protocol_system)?;
 
-    // The overwritten TychoRouter runtime reads `_feeCalculator` during execution.
-    // Plant a zero-fee calculator at a deterministic address so protocol execution
-    // tests exercise router accounting without depending on production fee config.
-    let fee_calculator_bytecode = {
-        let json_value: serde_json::Value = serde_json::from_str(FEE_CALCULATOR_BYTECODE_JSON)
-            .into_diagnostic()
-            .wrap_err("Failed to parse fee calculator JSON")?;
-        let bytecode_str = json_value["runtimeBytecode"]
-            .as_str()
-            .ok_or_else(|| {
-                miette::miette!("No runtimeBytecode field found in fee calculator JSON")
-            })?;
-        let bytecode_hex = if let Some(stripped) = bytecode_str.strip_prefix("0x") {
-            stripped
-        } else {
-            bytecode_str
-        };
-        hex::decode(bytecode_hex)
-            .into_diagnostic()
-            .wrap_err("Failed to decode fee calculator bytecode from hex")?
-    };
-
-    Ok(RouterOverwritesData { router_bytecode, executor_bytecode, fee_calculator_bytecode })
+    Ok(RouterOverwritesData { router_bytecode, executor_bytecode })
 }

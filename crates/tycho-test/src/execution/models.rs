@@ -77,7 +77,6 @@ pub(super) enum SimulationResult {
 pub struct RouterOverwritesData {
     pub router_bytecode: Vec<u8>,
     pub executor_bytecode: Vec<u8>,
-    pub fee_calculator_bytecode: Vec<u8>,
 }
 
 /// An encoded EVM transaction ready to be submitted on-chain.

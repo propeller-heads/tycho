@@ -68,7 +68,6 @@ pub async fn simulate_swap_transaction(
                     bytes_to_address(&to_address).map_err(|e| (miette!("{e}"), None, None))?,
                     router_overwrites_data.router_bytecode,
                     router_overwrites_data.executor_bytecode,
-                    router_overwrites_data.fee_calculator_bytecode,
                 )
                 .await
                 .map_err(|e| (e, None, None))?,

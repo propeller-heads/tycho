@@ -37,8 +37,6 @@ const GAS_LIMIT: u64 = 100_000_000;
 // 1_000 native tokens (10^21 wei): covers 100M gas at up to ~10_000 gwei
 const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
-// Fixed address used to plant FeeCalculator bytecode in state overrides.
-pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
 
 /// Contains the detected storage slots for a token.
 #[derive(Debug, Clone, Default)]
@@ -513,40 +511,22 @@ pub async fn setup_router_overwrites(
     router_address: Address,
     router_bytecode: Vec<u8>,
     executor_bytecode: Vec<u8>,
-    fee_calculator_bytecode: Vec<u8>,
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let mut state_overwrites = AddressHashMap::default();
 
     let executor_address = Address::from_str(EXECUTOR_ADDRESS).into_diagnostic()?;
-    let fee_calculator_address = Address::from_str(FEE_CALCULATOR_ADDRESS).into_diagnostic()?;
 
-    // Router override: bytecode + executor approval slot + _feeCalculator slot
+    // Router override: bytecode + executor approval slot
     let executor_storage_slot = calculate_executor_storage_slot(executor_address);
-    // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouter storageLayout`)
-    let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
-    let fee_calculator_slot_value = {
-        let mut v = [0u8; 32];
-        v[12..].copy_from_slice(fee_calculator_address.as_slice());
-        FixedBytes::<32>::from(v)
-    };
 
     let tycho_router_override = AccountOverride::default()
         .with_code(router_bytecode)
-        .with_state_diff(vec![
-            (executor_storage_slot, FixedBytes::<32>::from(U256::ONE)),
-            (fee_calculator_slot, fee_calculator_slot_value),
-        ]);
+        .with_state_diff(vec![(executor_storage_slot, FixedBytes::<32>::from(U256::ONE))]);
     state_overwrites.insert(router_address, tycho_router_override);
 
     // Executor bytecode override
     state_overwrites
         .insert(executor_address, AccountOverride::default().with_code(executor_bytecode));
-
-    // FeeCalculator bytecode override (returns zero fees for all clients)
-    state_overwrites.insert(
-        fee_calculator_address,
-        AccountOverride::default().with_code(fee_calculator_bytecode),
-    );
 
     Ok(state_overwrites)
 }
