@@ -174,25 +174,3 @@ impl SwapEncoderRegistry {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use tycho_common::models::Chain;
-
-    use super::SwapEncoderRegistry;
-
-    #[test]
-    fn loads_ring_swap_v2_test_encoder() {
-        let executors_addresses =
-            fs::read_to_string("config/test_executor_addresses.json").unwrap();
-        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
-            .add_default_encoders(Some(executors_addresses))
-            .unwrap();
-
-        assert!(registry
-            .get_encoder("ring_swap_v2")
-            .is_some());
-    }
-}

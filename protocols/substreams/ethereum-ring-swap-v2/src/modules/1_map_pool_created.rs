@@ -9,9 +9,9 @@ use substreams_ethereum::{
 };
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 
-use crate::abi::{erc20, factory::events::PairCreated, few_wrapped_token};
+use crate::abi::{factory::events::PairCreated, few_wrapped_token};
 
-use tycho_substreams::prelude::*;
+use tycho_substreams::{abi::erc20, prelude::*};
 
 #[derive(Debug, Deserialize)]
 struct Params {
@@ -32,7 +32,7 @@ pub fn map_pools_created(
 
     let tycho_block: Block = (&block).into();
 
-    Ok(BlockChanges { block: Some(tycho_block), changes: new_pools })
+    Ok(BlockChanges { block: Some(tycho_block), changes: new_pools, storage_changes: vec![] })
 }
 
 fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params: &Params) {
@@ -51,7 +51,7 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
         };
 
         new_pools.push(TransactionChanges {
-            tx: Some(tycho_tx.clone()),
+            tx: Some(tycho_tx),
             contract_changes: vec![],
             entity_changes: vec![EntityChanges {
                 component_id: event.pair.to_hex(),
@@ -80,7 +80,6 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                     attribute_schema: vec![],
                     implementation_type: ImplementationType::Custom.into(),
                 }),
-                tx: Some(tycho_tx),
             }],
             balance_changes: vec![
                 BalanceChange {
@@ -94,6 +93,8 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                     component_id: event.pair.to_hex().as_bytes().to_vec(),
                 },
             ],
+            entrypoints: vec![],
+            entrypoint_params: vec![],
         })
     };
 

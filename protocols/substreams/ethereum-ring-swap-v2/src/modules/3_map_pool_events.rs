@@ -260,6 +260,8 @@ fn merge_block(
                     .into_values()
                     .collect(),
                 component_changes: vec![],
+                entrypoints: vec![],
+                entrypoint_params: vec![],
             },
         );
     }
