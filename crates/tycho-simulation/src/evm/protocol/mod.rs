@@ -1,6 +1,8 @@
 pub mod aerodrome_slipstreams;
 pub mod aerodrome_v1;
 mod clmm;
+#[cfg(test)]
+mod clmm_capture;
 pub mod cowamm;
 mod cpmm;
 pub mod ekubo;

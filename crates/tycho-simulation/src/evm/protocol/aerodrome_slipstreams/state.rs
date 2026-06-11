@@ -139,7 +139,7 @@ impl AerodromeSlipstreamsState {
         )
     }
 
-    fn swap(
+    pub(crate) fn swap(
         &self,
         zero_for_one: bool,
         amount_specified: I256,
