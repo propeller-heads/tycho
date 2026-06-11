@@ -1,3 +1,18 @@
+## [0.307.0](https://github.com/propeller-heads/tycho/compare/0.306.1...0.307.0) (2026-06-11)
+
+
+### Features
+
+* **LiquoriceExecutor:** Deploy it and set new address ([9d2a6dd](https://github.com/propeller-heads/tycho/commit/9d2a6dde3ecc36141e8deb1134790cd44c972475))
+
+
+### Bug Fixes
+
+* **ekubo-v3-executor:** Remove unnecessary constructor ([92320e3](https://github.com/propeller-heads/tycho/commit/92320e301db022b1c6ff44f2e7bfdf4f34b891ab))
+* **etherfi-executor:** Address small audit comments ([42bc57f](https://github.com/propeller-heads/tycho/commit/42bc57f27c952b2449a508152c2c68832d11d9e8))
+* **execution:** Address small audit comments to new executors ([#1078](https://github.com/propeller-heads/tycho/issues/1078)) ([2ba9cdb](https://github.com/propeller-heads/tycho/commit/2ba9cdbd98f6d6cb85a8bd856cda6e15e7dc79f8))
+* **liquorice-executor:** Address small audit comments ([2373d8b](https://github.com/propeller-heads/tycho/commit/2373d8bb1132b9db110fbb41e080a6e522805ebf))
+
 ## [0.306.1](https://github.com/propeller-heads/tycho/compare/0.306.0...0.306.1) (2026-06-10)
 
 
