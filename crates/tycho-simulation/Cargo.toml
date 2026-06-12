@@ -102,6 +102,13 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
+proptest = "1.11.0"
+criterion = "0.8.2"
+
+[[bench]]
+name = "trade_limit_price"
+harness = false
+required-features = ["evm"]
 
 [features]
 default = ["evm", "rfq"]
