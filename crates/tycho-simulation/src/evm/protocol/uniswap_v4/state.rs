@@ -22,7 +22,7 @@ use super::hooks::utils::{has_permission, HookOptions};
 use crate::{
     evm::protocol::{
         clmm::clmm_swap_to_price,
-        safe_math::{safe_add_u256, safe_sub_u256},
+        safe_math::safe_sub_u256,
         u256_num::u256_to_biguint,
         uniswap_v4::hooks::{
             hook_handler::HookHandler,
@@ -189,7 +189,8 @@ impl UniswapV4State {
         let price_limit = if let Some(limit) = sqrt_price_limit {
             limit
         } else if zero_for_one {
-            safe_add_u256(MIN_SQRT_RATIO, U256::from(1u64))?
+            // SAFETY: MIN_SQRT_RATIO is a small constant (~2^32); +1 cannot wrap.
+            MIN_SQRT_RATIO.wrapping_add(U256::from(1u64))
         } else {
             safe_sub_u256(MAX_SQRT_RATIO, U256::from(1u64))?
         };
@@ -220,7 +221,10 @@ impl UniswapV4State {
                 .next_swap_step(state.tick, zero_for_one)
             {
                 Ok(step) => {
-                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_LOOKUP))?;
+                    // SAFETY: gas_used grows by at most ~21k per loop iteration and the walk is
+                    // bounded by the in-memory tick list (far below 2^32 iterations), so
+                    // gas_used stays below 2^64 and the gas adds in this loop cannot wrap U256.
+                    gas_used = gas_used.wrapping_add(U256::from(GAS_PER_BITMAP_LOOKUP));
                     step
                 }
                 Err(tick_err) => match tick_err.kind {
@@ -272,22 +276,24 @@ impl UniswapV4State {
                 amount_out,
                 fee_amount,
             };
+            // SAFETY: compute_swap_step bounds amount_in below 2^193 (u128 liquidity times
+            // in-range Q64.96 sqrt-price ratios) and fee_amount by
+            // max(|amount_remaining| <= 2^255, amount_in * fee_pips < 2^225), so the sum stays
+            // below 2^256 and cannot wrap.
+            let amount_in_plus_fee = step
+                .amount_in
+                .wrapping_add(step.fee_amount);
+            debug_assert!(amount_in_plus_fee >= step.amount_in, "amount_in + fee_amount wrapped");
             if exact_input {
-                state.amount_remaining += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_remaining +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, amount_in_plus_fee).unwrap();
                 state.amount_calculated -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
             } else {
                 state.amount_remaining -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
-                state.amount_calculated += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_calculated +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, amount_in_plus_fee).unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if step.initialized {
@@ -303,7 +309,7 @@ impl UniswapV4State {
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
-                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_TICK))?;
+                    gas_used = gas_used.wrapping_add(U256::from(GAS_PER_TICK));
                 }
                 state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
             } else if state.sqrt_price != step.sqrt_price_start {
@@ -318,7 +324,10 @@ impl UniswapV4State {
             sqrt_price: state.sqrt_price,
             liquidity: state.liquidity,
             tick: state.tick,
-            gas_used: safe_add_u256(gas_used, U256::from(V4_CALLBACK_SETTLEMENT_GAS))?,
+            gas_used: {
+                debug_assert!(gas_used.bit_len() <= 64, "gas accounting exceeded the u64 bound");
+                gas_used.wrapping_add(U256::from(V4_CALLBACK_SETTLEMENT_GAS))
+            },
         })
     }
 
@@ -764,8 +773,15 @@ impl ProtocolSim for UniswapV4State {
             };
 
             // Accumulate total amounts for this tick range
-            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
-            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
+            // SAFETY: each per-tick delta is < 2^193 (u128 liquidity times in-range Q64.96
+            // sqrt-price ratios) and iteration is capped at MAX_TICKS_CROSSED (< 2^10), so the
+            // running totals stay far below 2^256 and cannot wrap.
+            total_amount_in = total_amount_in.wrapping_add(amount_in);
+            total_amount_out = total_amount_out.wrapping_add(amount_out);
+            debug_assert!(
+                total_amount_in >= amount_in && total_amount_out >= amount_out,
+                "get_limits accumulator wrapped"
+            );
 
             // If this tick is "initialized" (meaning its someone's position boundary), update the
             // liquidity when crossing it
