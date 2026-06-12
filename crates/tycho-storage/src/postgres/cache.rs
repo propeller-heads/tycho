@@ -43,6 +43,7 @@ use tycho_common::{
 use super::{PostgresError, PostgresGateway};
 
 /// Represents different types of database write operations.
+#[allow(clippy::large_enum_variant)]
 #[derive(PartialEq, Clone, Debug)]
 pub(crate) enum WriteOp {
     // Simply merge

@@ -38,7 +38,8 @@ use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
         contract::AccountDelta,
-        Address, Chain, ExtractionState, ImplementationType,
+        Address, Chain, ChainConfigError, ChainTokenConfig, CustomChainConfig, ExtractionState,
+        ImplementationType, TvlThresholds,
     },
     storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
@@ -68,14 +69,35 @@ use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
 mod ot;
 
+#[derive(Debug, Deserialize, Clone)]
+struct TokenConfig {
+    address: String,
+    symbol: String,
+    decimals: u8,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ChainConfig {
+    chain_id: u64,
+    block_time_secs: u64,
+    native_token: TokenConfig,
+    wrapped_native_token: TokenConfig,
+    tvl_thresholds: TvlThresholds,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExtractorConfigs {
     extractors: std::collections::HashMap<String, ExtractorConfig>,
+    #[serde(default)]
+    chains: std::collections::HashMap<String, ChainConfig>,
 }
 
 impl ExtractorConfigs {
-    fn new(extractors: std::collections::HashMap<String, ExtractorConfig>) -> Self {
-        Self { extractors }
+    fn new(
+        extractors: std::collections::HashMap<String, ExtractorConfig>,
+        chains: std::collections::HashMap<String, ChainConfig>,
+    ) -> Self {
+        Self { extractors, chains }
     }
 
     fn from_yaml(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -84,6 +106,45 @@ impl ExtractorConfigs {
         file.read_to_string(&mut contents)?;
         let config: ExtractorConfigs = serde_yaml::from_str(&contents)?;
         Ok(config)
+    }
+}
+
+fn resolve_chain(
+    name: &str,
+    custom_chains: &HashMap<String, ChainConfig>,
+) -> Result<Chain, ExtractionError> {
+    match Chain::from_str(name) {
+        Ok(chain) => Ok(chain),
+        Err(_) => {
+            let entry = custom_chains.get(name).ok_or_else(|| {
+                ExtractionError::Setup(format!(
+                    "Unknown chain '{name}': add it to the [chains] config section"
+                ))
+            })?;
+            let map_err = |e: ChainConfigError| ExtractionError::Setup(e.to_string());
+            let native = ChainTokenConfig::try_new(
+                &entry.native_token.address,
+                &entry.native_token.symbol,
+                entry.native_token.decimals,
+            )
+            .map_err(map_err)?;
+            let wrapped_native = ChainTokenConfig::try_new(
+                &entry.wrapped_native_token.address,
+                &entry.wrapped_native_token.symbol,
+                entry.wrapped_native_token.decimals,
+            )
+            .map_err(map_err)?;
+            let cfg = CustomChainConfig::try_new(
+                name,
+                entry.chain_id,
+                entry.block_time_secs,
+                native,
+                wrapped_native,
+                entry.tvl_thresholds,
+            )
+            .map_err(map_err)?;
+            Ok(Chain::Custom(cfg))
+        }
     }
 }
 
@@ -247,17 +308,16 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .parse()
                 .expect("Failed to parse retention horizon");
 
+            let chains = index_args
+                .chains
+                .iter()
+                .map(|name| resolve_chain(name, &extractors_config.chains))
+                .collect::<Result<Vec<_>, _>>()?;
+
             let (extraction_tasks, other_tasks) = create_indexing_tasks(
                 &global_args,
                 &index_args.substreams_args,
-                &index_args
-                    .chains
-                    .iter()
-                    .map(|chain_str| {
-                        Chain::from_str(chain_str)
-                            .unwrap_or_else(|_| panic!("Unknown chain {chain_str}"))
-                    })
-                    .collect::<Vec<_>>(),
+                &chains,
                 retention_horizon,
                 extractors_config,
                 Some(extraction_runtime.handle()),
@@ -311,31 +371,34 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             _ => Err(ExtractionError::Setup(format!("Unknown DCI plugin: {s}"))),
         })?;
 
-    let config = ExtractorConfigs::new(HashMap::from([(
-        run_args.protocol_system.clone(),
-        ExtractorConfig::new(
+    let config = ExtractorConfigs::new(
+        HashMap::from([(
             run_args.protocol_system.clone(),
-            Chain::from_str(&run_args.chain).unwrap(),
-            ImplementationType::Vm,
-            1, /* TODO: if we want to increase this, we need to commit the cache when we reached
-                * `end_block` */
-            run_args.start_block,
-            run_args.stop_block(),
-            run_args
-                .protocol_type_names
-                .into_iter()
-                .map(|name| {
-                    ProtocolTypeConfig::new(name, tycho_common::models::FinancialType::Swap)
-                })
-                .collect::<Vec<_>>(),
-            run_args.spkg,
-            run_args.module,
-            run_args.initialized_accounts,
-            run_args.initialization_block,
-            None,
-            dci_plugin,
-        ),
-    )]));
+            ExtractorConfig::new(
+                run_args.protocol_system.clone(),
+                Chain::from_str(&run_args.chain).unwrap(),
+                ImplementationType::Vm,
+                1, /* TODO: if we want to increase this, we need to commit the cache when we
+                    * reached `end_block` */
+                run_args.start_block,
+                run_args.stop_block(),
+                run_args
+                    .protocol_type_names
+                    .into_iter()
+                    .map(|name| {
+                        ProtocolTypeConfig::new(name, tycho_common::models::FinancialType::Swap)
+                    })
+                    .collect::<Vec<_>>(),
+                run_args.spkg,
+                run_args.module,
+                run_args.initialized_accounts,
+                run_args.initialization_block,
+                None,
+                dci_plugin,
+            ),
+        )]),
+        HashMap::new(),
+    );
 
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,
@@ -694,6 +757,76 @@ async fn run_analyze_tokens(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_unknown_chain_fails() {
+        let err = resolve_chain("notachain", &HashMap::new()).unwrap_err();
+        assert!(matches!(err, ExtractionError::Setup(msg) if msg.contains("notachain")));
+    }
+
+    #[test]
+    fn test_chain_token_invalid_hex() {
+        assert!(ChainTokenConfig::try_new("0xGGGGGGGG", "ETH", 18).is_err());
+    }
+
+    #[test]
+    fn test_chain_token_symbol_too_long() {
+        assert!(ChainTokenConfig::try_new(
+            "0x0000000000000000000000000000000000000000",
+            "TOOLONGSYM",
+            18
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_resolve_custom_chain_from_yaml() {
+        let yaml = r#"
+extractors: {}
+chains:
+  mychain:
+    chain_id: 99999
+    block_time_secs: 2
+    native_token:
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "ETH"
+      decimals: 18
+    wrapped_native_token:
+      address: "0x4200000000000000000000000000000000000006"
+      symbol: "WETH"
+      decimals: 18
+    tvl_thresholds:
+      low: 1000
+      medium: 10000
+"#;
+        let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
+        let Chain::Custom(cfg) = resolve_chain("mychain", &config.chains).expect("resolve failed")
+        else {
+            panic!("expected Chain::Custom")
+        };
+
+        let expected_native =
+            ChainTokenConfig::try_new("0x0000000000000000000000000000000000000000", "ETH", 18)
+                .unwrap();
+        let expected_wrapped =
+            ChainTokenConfig::try_new("0x4200000000000000000000000000000000000006", "WETH", 18)
+                .unwrap();
+        let expected_cfg = CustomChainConfig::try_new(
+            "mychain",
+            99999,
+            2,
+            expected_native,
+            expected_wrapped,
+            TvlThresholds::new(1000.0, 10000.0),
+        )
+        .unwrap();
+        assert_eq!(cfg, expected_cfg);
+    }
 }
 
 #[cfg(test)]

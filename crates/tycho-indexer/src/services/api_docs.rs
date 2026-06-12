@@ -1,13 +1,16 @@
-use tycho_common::dto::{
-    AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
-    ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,
-    PaginationParams, PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
-    ProtocolComponentsRequestBody, ProtocolId, ProtocolStateDelta, ProtocolStateRequestBody,
-    ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
-    RPCTracerParams, ResponseAccount, ResponseProtocolState, ResponseToken, StateRequestBody,
-    StateRequestResponse, StorageOverride, TokensRequestBody, TokensRequestResponse,
-    TracedEntryPointRequestBody, TracedEntryPointRequestResponse, TracingParams, TracingResult,
-    VersionParam,
+use tycho_common::{
+    dto::{
+        AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
+        ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,
+        PaginationParams, PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
+        ProtocolComponentsRequestBody, ProtocolId, ProtocolStateDelta, ProtocolStateRequestBody,
+        ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
+        RPCTracerParams, ResponseAccount, ResponseProtocolState, ResponseToken, StateRequestBody,
+        StateRequestResponse, StorageOverride, TokensRequestBody, TokensRequestResponse,
+        TracedEntryPointRequestBody, TracedEntryPointRequestResponse, TracingParams, TracingResult,
+        VersionParam,
+    },
+    models::{ChainTokenConfig, CustomChainConfig, TvlThresholds},
 };
 use utoipa::{
     openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
@@ -81,6 +84,9 @@ impl Modify for SecurityAddon {
         schemas(RPCTracerParams),
         schemas(AccountOverrides),
         schemas(StorageOverride),
+        schemas(CustomChainConfig),
+        schemas(ChainTokenConfig),
+        schemas(TvlThresholds),
     ),
     modifiers(&SecurityAddon),
 )]

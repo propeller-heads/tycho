@@ -100,6 +100,7 @@ impl HeaderLike for BlockHeader {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Error, Debug)]
 pub enum BlockSynchronizerError {
     #[error("Failed to initialize extractor '{extractor}': {source}")]
@@ -242,6 +243,7 @@ impl SynchronizerStream {
             rx,
         }
     }
+    #[allow(clippy::result_large_err)]
     async fn try_advance(
         &mut self,
         block_history: &BlockHistory,
@@ -417,6 +419,7 @@ impl SynchronizerStream {
     }
 
     /// Helper method to check if synchronizer should transition to stale based on time elapsed
+    #[allow(clippy::result_large_err)]
     fn check_and_transition_to_stale_if_needed(
         &mut self,
         stale_threshold: std::time::Duration,
@@ -455,6 +458,7 @@ impl SynchronizerStream {
     /// - Next expected block -> Ready state
     /// - Latest/Delayed block -> Either Delayed or Stale (if >60s since last update)
     /// - Advanced block -> Advanced state (block ahead of expected position)
+    #[allow(clippy::result_large_err)]
     fn transition(
         &mut self,
         latest_retrieved: BlockHeader,
@@ -940,6 +944,7 @@ where
     /// ## Note
     /// This method assumes that at least one synchronizer is in Advanced, Ready or
     /// Delayed state, it will return an error in case this is not the case.
+    #[allow(clippy::result_large_err)]
     fn reinit_block_history(
         sync_streams: &mut [SynchronizerStream],
         block_history: &mut BlockHistory,
@@ -983,6 +988,7 @@ where
     ///
     /// Used once before entering the main loop, where all-Stale is a fatal configuration
     /// problem (nothing to sync from), not a temporary disconnect.
+    #[allow(clippy::result_large_err)]
     fn require_active_stream(sync_streams: &[SynchronizerStream]) -> BlockSyncResult<()> {
         if sync_streams
             .iter()
@@ -1006,6 +1012,7 @@ where
     ///
     /// Returns `Err` if at least one synchronizer has permanently ended while all
     /// remaining ones are stale — no recovery path exists.
+    #[allow(clippy::result_large_err)]
     fn check_streams(sync_streams: &[SynchronizerStream]) -> BlockSyncResult<()> {
         let mut has_any_ended = false;
         let mut latest_ended_stream: Option<&SynchronizerStream> = None;
