@@ -257,8 +257,10 @@ impl WsActor {
                                 item.drop_state().into()
                             };
 
-                            yield Ok((subscription_id, result));
+                            yield ExtractorEvent::Message(subscription_id, Box::new(result));
                         }
+                        // Channel closed: extractor restarted or stopped.
+                        yield ExtractorEvent::ChannelClosed(subscription_id);
                     };
 
                     Some((subscription_id, stream, extractor_id_for_future.clone()))
@@ -418,19 +420,24 @@ impl Actor for WsActor {
     }
 }
 
-/// Handle incoming messages from the extractor and forward them to the WS connection
-impl StreamHandler<Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>> for WsActor {
+enum ExtractorEvent {
+    Message(Uuid, Box<BlockAggregatedChanges>),
+    ChannelClosed(Uuid),
+}
+
+/// Handle incoming messages from the extractor and forward them to the WS connection.
+///
+/// `ExtractorEvent::ChannelClosed` is emitted when the extractor's channel closes (e.g. after a
+/// restart). It lets the actor send `SubscriptionEnded` to the client and clean up the
+/// subscription without dropping the entire WebSocket connection.
+impl StreamHandler<ExtractorEvent> for WsActor {
     #[instrument(skip_all, fields(WsActor.id = %self.id))]
-    fn handle(
-        &mut self,
-        msg: Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>,
-        ctx: &mut Self::Context,
-    ) {
-        trace!("Message received from extractor");
+    fn handle(&mut self, msg: ExtractorEvent, ctx: &mut Self::Context) {
         match msg {
-            Ok((subscription_id, deltas)) => {
+            ExtractorEvent::Message(subscription_id, deltas) => {
                 trace!("Forwarding message to client");
-                let msg = WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id };
+                let msg =
+                    WebSocketMessage::BlockAggregatedChanges { deltas: *deltas, subscription_id };
                 let json_str = serde_json::to_string(&msg).unwrap();
 
                 // Check if compression is enabled for this subscription
@@ -472,9 +479,43 @@ impl StreamHandler<Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>> fo
                     ctx.text(json_str);
                 }
             }
-            Err(e) => {
-                error!(error = %e, "Failed to receive message from extractor");
+            ExtractorEvent::ChannelClosed(subscription_id) => {
+                // Extractor channel closed — clean up this subscription and notify the client.
+                // Other subscriptions on this connection are unaffected.
+                warn!(
+                    %subscription_id,
+                    "Extractor channel closed; notifying client and ending subscription"
+                );
+                if let Some(sub) = self
+                    .subscriptions
+                    .remove(&subscription_id)
+                {
+                    self.compression_enabled
+                        .remove(&subscription_id);
+                    gauge!(
+                        "websocket_subscriptions_active",
+                        "user_identity" => self.user_identity.as_deref().unwrap_or("unknown").to_owned(),
+                        "chain" => sub.chain,
+                        "extractor" => sub.extractor,
+                        "partial_blocks" => sub.partial_blocks.to_string(),
+                    )
+                    .decrement(1);
+                }
+                let message = Response::SubscriptionEnded { subscription_id };
+                ctx.text(serde_json::to_string(&message).unwrap());
             }
+        }
+    }
+
+    fn finished(&mut self, ctx: &mut <Self as Actor>::Context) {
+        // If no subscriptions remain, close the connection. If other subscriptions are still
+        // active, keep the connection open; they were unaffected by this stream ending.
+        if self.subscriptions.is_empty() {
+            ctx.close(Some(ws::CloseReason {
+                code: ws::CloseCode::Normal,
+                description: Some("All subscriptions ended".into()),
+            }));
+            ctx.stop();
         }
     }
 }
@@ -1623,5 +1664,177 @@ mod tests {
             .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
             .await
             .expect("Failed to send close message");
+    }
+
+    /// A sender that immediately closes the channel after subscribe, simulating an extractor
+    /// that fails or restarts right after the subscription is established.
+    pub struct ClosingMessageSender;
+
+    #[async_trait]
+    impl MessageSender for ClosingMessageSender {
+        async fn subscribe(&self) -> Result<Receiver<ExtractorMsg>, SendError<ControlMessage>> {
+            let (_tx, rx) = mpsc::channel::<ExtractorMsg>(1);
+            // _tx is dropped here, closing the channel immediately.
+            Ok(rx)
+        }
+    }
+
+    /// Verifies that when an extractor's channel closes the client receives `SubscriptionEnded`
+    /// for that subscription and the WebSocket connection stays open.
+    #[actix_rt::test]
+    async fn test_subscription_ended_on_channel_close() -> Result<(), String> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .try_init()
+            .unwrap_or_else(|_| debug!("Subscriber already initialized"));
+
+        let closing_id = ExtractorIdentity::new(Chain::Ethereum, "closing_extractor");
+        let live_id = ExtractorIdentity::new(Chain::Ethereum, "live_extractor");
+
+        let mut subscribers_map = HashMap::new();
+        subscribers_map.insert(
+            closing_id.clone(),
+            Arc::new(ClosingMessageSender) as Arc<dyn MessageSender + Send + Sync>,
+        );
+        subscribers_map.insert(
+            live_id.clone(),
+            Arc::new(MyMessageSender::new(live_id.clone())) as Arc<dyn MessageSender + Send + Sync>,
+        );
+
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .wrap(RequestTracing::new())
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+
+        let url = server
+            .url("/ws/")
+            .to_string()
+            .replacen("http://", "ws://", 1);
+        let (mut connection, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+
+        // Subscribe to the live extractor first so we can verify the connection survives.
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: live_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get live subscription");
+
+        // Subscribe to the closing extractor — its channel closes immediately.
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: closing_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get closing subscription");
+
+        // The channel was already closed, so we should receive SubscriptionEnded.
+        wait_for_subscription_ended(&mut connection)
+            .await
+            .expect("Expected SubscriptionEnded when extractor channel closes");
+
+        // The live subscription must still be delivering messages — the connection is intact.
+        wait_for_dummy_message(&mut connection, live_id)
+            .await
+            .expect("Live extractor should still send messages after peer subscription ended");
+
+        connection
+            .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
+            .await
+            .ok();
+
+        Ok(())
+    }
+
+    /// Verifies that when the last subscription's channel closes, the WS connection itself
+    /// is closed — an idle connection with no subscriptions wastes a client connection slot.
+    #[actix_rt::test]
+    async fn test_connection_closed_when_last_subscription_ends() -> Result<(), String> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .try_init()
+            .unwrap_or_else(|_| debug!("Subscriber already initialized"));
+
+        let closing_id = ExtractorIdentity::new(Chain::Ethereum, "only_extractor");
+        let mut subscribers_map = HashMap::new();
+        subscribers_map.insert(
+            closing_id.clone(),
+            Arc::new(ClosingMessageSender) as Arc<dyn MessageSender + Send + Sync>,
+        );
+
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .wrap(RequestTracing::new())
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+
+        let url = server
+            .url("/ws/")
+            .to_string()
+            .replacen("http://", "ws://", 1);
+        let (mut connection, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+
+        connection
+            .send(Message::Text(
+                serde_json::to_string(&Command::Subscribe {
+                    extractor_id: closing_id.clone().into(),
+                    include_state: false,
+                    compression: false,
+                    partial_blocks: false,
+                })
+                .unwrap(),
+            ))
+            .await
+            .expect("Failed to send subscribe");
+        wait_for_new_subscription(&mut connection)
+            .await
+            .expect("Failed to get subscription");
+
+        // The channel closes immediately, so we get SubscriptionEnded.
+        wait_for_subscription_ended(&mut connection)
+            .await
+            .expect("Expected SubscriptionEnded");
+
+        // With no subscriptions left the actor should stop, closing the connection.
+        let closed = timeout(Duration::from_secs(2), connection.next()).await;
+        match closed {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
+            other => panic!("Expected connection close, got: {:?}", other),
+        }
+
+        Ok(())
     }
 }

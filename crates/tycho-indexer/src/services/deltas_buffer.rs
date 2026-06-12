@@ -9,7 +9,7 @@ use futures03::{stream, StreamExt};
 use metrics::gauge;
 use thiserror::Error;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error, instrument, trace, Level};
+use tracing::{debug, error, info, instrument, trace, warn, Level};
 use tycho_common::{
     models::{
         blockchain::BlockAggregatedChanges,
@@ -23,7 +23,7 @@ use tycho_common::{
 
 use crate::extractor::{
     reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer},
-    runner::MessageSender,
+    DeltaCommand,
 };
 
 /// The `PendingDeltas` struct manages access to the reorg buffers maintained by each extractor.
@@ -249,16 +249,19 @@ impl PendingDeltas {
         )))
     }
 
+    /// Runs the PendingDeltas message loop.
+    ///
+    /// Accepts one receiver per extractor. Each receiver carries [`DeltaCommand`]s: block
+    /// messages and restart notifications on the same channel.
     pub async fn run(
         self,
-        extractors: impl IntoIterator<Item = Arc<dyn MessageSender + Send + Sync>>,
+        receivers: Vec<tokio::sync::mpsc::Receiver<DeltaCommand>>,
         start_tx: SyncSender<()>,
     ) -> anyhow::Result<()> {
-        let mut rxs = Vec::new();
-        for extractor in extractors.into_iter() {
-            let res = ReceiverStream::new(extractor.subscribe().await?);
-            rxs.push(res);
-        }
+        let rxs: Vec<ReceiverStream<_>> = receivers
+            .into_iter()
+            .map(ReceiverStream::new)
+            .collect();
 
         // Send the start signal to the startup task
         start_tx
@@ -275,18 +278,50 @@ impl PendingDeltas {
             }
         });
 
-        let all_messages = stream::select_all(rxs);
+        let mut all_messages = stream::select_all(rxs);
 
-        // What happens if an extractor restarts - it might just end here and be dropped?
-        // Ideally the Runner should never restart.
-        all_messages
-            .for_each(|message| async {
-                // Skip partial messages - only full-block updates go to the reorg buffer.
-                if message.partial_block_index.is_none() {
-                    self.insert(message).unwrap();
+        loop {
+            match all_messages.next().await {
+                Some(DeltaCommand::Block(message)) => {
+                    // Skip partial messages - only full-block updates go to the reorg buffer.
+                    if message.partial_block_index.is_none() {
+                        self.insert(message).map_err(|e| {
+                            error!(error = %e, "Failed to insert into PendingDeltas buffer");
+                            e
+                        })?;
+                    }
                 }
-            })
-            .await;
+                Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
+                    debug!(extractor = %extractor_name, "Resetting PendingDeltas buffer for extractor");
+                    if let Some(buffer) = self.buffers.get(&extractor_name) {
+                        match buffer.lock() {
+                            Ok(mut guard) => {
+                                *guard = ReorgBuffer::new();
+                                debug!(extractor = %extractor_name, "PendingDeltas buffer reset");
+                            }
+                            Err(err) => {
+                                error!(
+                                    extractor = %extractor_name,
+                                    error = %err,
+                                    "Failed to lock buffer for reset"
+                                );
+                                return Err(PendingDeltasError::LockError(
+                                    extractor_name,
+                                    err.to_string(),
+                                )
+                                .into());
+                            }
+                        }
+                    } else {
+                        warn!(extractor = %extractor_name, "No buffer found for reset — extractor unknown");
+                    }
+                }
+                None => {
+                    info!("All PendingDeltas streams ended");
+                    break;
+                }
+            }
+        }
 
         Ok(())
     }
