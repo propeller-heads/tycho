@@ -1,5 +1,7 @@
 ## Foundry
 
+<!-- CI trigger: verify Foundry workflow behavior for fork PRs. -->
+
 **Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
 
 Foundry consists of:

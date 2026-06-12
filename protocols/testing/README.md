@@ -1,5 +1,7 @@
 # Protocol Testing
 
+<!-- CI trigger: verify Rust EVM workflow behavior for fork PRs. -->
+
 Rust-based integration testing framework for Tycho protocol implementations. See our full
 docs [here](https://docs.propellerheads.xyz/tycho/for-dexs/protocol-integration/3.-testing).
 
