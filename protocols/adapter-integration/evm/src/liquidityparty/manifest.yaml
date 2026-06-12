@@ -4,9 +4,10 @@ author:
 
 constants:
   # This is our median gas cost for a 10-asset pool. Gas varies by pool size from 120k to 200k.
-  protocol_gas: 139307
+  protocol_gas: 150857
   capabilities:
     - SellSide
+    - BuySide
     - PriceFunction
     - MarginalPrice
 
@@ -18,5 +19,5 @@ instances:
       name: mainnet
       id: 1
     arguments:
-      - "0xe6C22aA3e1B3e11AA6C1C6E3086883b3C5071071"  # PartyPlanner
-      - "0x5f1B901f2955CAD0B28978eF6f0D3054C102F244"  # PartyInfo
+      - "0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3"  # PartyPlanner
+      - "0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643"  # PartyInfo

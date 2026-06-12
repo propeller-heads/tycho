@@ -5,6 +5,9 @@ import {
     IERC20
 } from "../../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {
+    IERC20Metadata
+} from "../../lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {
     SafeERC20
 } from "../../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ISwapAdapter} from "../interfaces/ISwapAdapter.sol";
@@ -45,7 +48,9 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
             uint256 amount = specifiedAmounts[i];
             if (amount == 0) {
                 // Marginal price support
-                prices[i] = _marginalPrice(pool, indexIn, indexOut);
+                prices[i] = _marginalPrice(
+                    pool, sellToken, buyToken, indexIn, indexOut
+                );
             } else {
                 // Regular slippage calculation.
                 // slither-disable-next-line unused-return calls-loop
@@ -65,7 +70,7 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         bytes32 poolId,
         address sellToken,
         address buyToken,
-        OrderSide,
+        OrderSide side,
         uint256 specifiedAmount
     ) external returns (Trade memory trade) {
         // Setup
@@ -74,10 +79,26 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         (uint256 indexIn, uint256 indexOut) =
             _tokenIndexes(pool, sellToken, buyToken);
 
+        // The pool only performs exact-input swaps. For a sell, the specified
+        // amount is the input. For a buy, the specified amount is the desired
+        // net output, so we first quote the required input via the exact-output
+        // quoter and constrain the swap with minAmountOut = the desired output.
+        uint256 amountIn;
+        uint256 minAmountOut;
+        if (side == OrderSide.Sell) {
+            amountIn = specifiedAmount;
+            minAmountOut = 0;
+        } else {
+            // slither-disable-next-line unused-return
+            (amountIn,) = INFO.swapAmountsForExactOutput(
+                pool, indexIn, indexOut, specifiedAmount
+            );
+            minAmountOut = specifiedAmount;
+        }
+
         // Transfer and Swap
         uint256 startingGas = gasleft();
-        IERC20(sellToken)
-            .safeTransferFrom(swapper, address(pool), specifiedAmount);
+        IERC20(sellToken).safeTransferFrom(swapper, address(pool), amountIn);
         // slither-disable-next-line unused-return
         try pool.swap(
             address(this), // pool requires msg.sender == payer for PREFUNDING
@@ -85,8 +106,8 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
             swapper,
             indexIn,
             indexOut,
-            specifiedAmount,
-            0,
+            amountIn,
+            minAmountOut,
             0,
             false,
             ""
@@ -95,9 +116,14 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         ) {
             uint256 endingGas = gasleft();
             uint256 gasUsed = startingGas - endingGas;
-            Fraction memory poolPrice = _marginalPrice(pool, indexIn, indexOut);
+            Fraction memory poolPrice =
+                _marginalPrice(pool, sellToken, buyToken, indexIn, indexOut);
+            // For a sell the calculated amount is the output received; for a
+            // buy it is the input spent.
+            uint256 calculatedAmount =
+                side == OrderSide.Sell ? amountOut : amountIn;
             // forge-lint: disable-next-line(named-struct-fields)
-            return Trade(amountOut, gasUsed, poolPrice);
+            return Trade(calculatedAmount, gasUsed, poolPrice);
         } catch Error(string memory reason) {
             bytes32 hash = keccak256(bytes(reason));
             if (hash == keccak256("too small")) {
@@ -112,6 +138,10 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
                 revert Unavailable("pool has been permanently killed");
             } else if (hash == keccak256("LMSR: size metric zero")) {
                 revert Unavailable("pool currently has no LP assets");
+            } else if (hash == keccak256("slippage control")) {
+                // A buy quote that the pool could not fill at the requested
+                // output (e.g. rounding at the feasibility boundary).
+                revert LimitExceeded(0);
             } else {
                 // re-raise
                 revert(string(abi.encodePacked("unhandled: ", reason)));
@@ -135,10 +165,10 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         // here to practical ranges. Instead of estimating actual
         // input limits based on a maximum target slippage, we merely return a
         // fixed fraction of the input token's current inventory as a practical
-        // limit. Current limit is 10% of the inventory of the input token
+        // limit.
         limits[0] = IERC20(sellToken).balanceOf(pool);
 
-        // output token limit: the pool's current balance (an overestimate)
+        // output token limit: the pool's current balance
         limits[1] = IERC20(buyToken).balanceOf(pool);
     }
 
@@ -147,10 +177,11 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         pure
         returns (Capability[] memory capabilities)
     {
-        capabilities = new Capability[](3);
+        capabilities = new Capability[](4);
         capabilities[0] = Capability.SellOrder;
-        capabilities[1] = Capability.PriceFunction;
-        capabilities[2] = Capability.MarginalPrice;
+        capabilities[1] = Capability.BuyOrder;
+        capabilities[2] = Capability.PriceFunction;
+        capabilities[3] = Capability.MarginalPrice;
         return capabilities;
     }
 
@@ -194,7 +225,7 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         indexIn = NONE;
         indexOut = NONE;
         address[] memory tokens = pool.allTokens();
-        uint256 numTokens = pool.numTokens();
+        uint256 numTokens = tokens.length;
         for (uint256 i = 0; i < numTokens; i++) {
             if (tokens[i] == sellToken) {
                 indexIn = i;
@@ -207,20 +238,43 @@ contract LiquidityPartySwapAdapter is ISwapAdapter {
         require(indexIn != NONE && indexOut != NONE, "tokens not in pool");
     }
 
-    function _marginalPrice(IPartyPool pool, uint256 indexIn, uint256 indexOut)
-        internal
-        view
-        returns (Fraction memory poolPrice)
-    {
-        // Liquidity Party prices are Q128.128 fixed point format
+    function _marginalPrice(
+        IPartyPool pool,
+        address sellToken,
+        address buyToken,
+        uint256 indexIn,
+        uint256 indexOut
+    ) internal view returns (Fraction memory poolPrice) {
+        // INFO.price() returns the Q128.128 *input-per-output* marginal price
+        // in external (decimal-adjusted) token units. The rest of this adapter
+        // reports prices as *output-per-input* in raw token units (see the
+        // finite-amount branch of price(), which returns amountOut/amount). We
+        // therefore invert and remove the external-unit decimal adjustment:
+        //
+        //   rawOutPerIn = (2^128 / price) * 10^(decOut - decIn) * (1 - fee)
+        //
+        // To keep the resulting Fraction small enough that FractionMath's
+        // cross-multiplication does not overflow, we fold only the decimal
+        // *difference* into one side of the fraction rather than 10^decOut and
+        // 10^decIn separately.
         // slither-disable-next-line calls-loop
         uint256 price128x128 = INFO.price(pool, indexIn, indexOut);
-        uint256[] memory poolFees = pool.fees();
-        uint256 feePpm = poolFees[indexIn] + poolFees[indexOut];
-        price128x128 *= 1_000_000 - feePpm;
-        price128x128 /= 1_000_000;
-        // forge-lint: disable-next-line(unsafe-typecast,named-struct-fields)
-        return Fraction(price128x128, 1 << 128);
+        // slither-disable-next-line calls-loop
+        uint256[] memory poolFees = INFO.fees(pool);
+        uint256 netPpm = 1_000_000 - (poolFees[indexIn] + poolFees[indexOut]);
+
+        uint8 decIn = IERC20Metadata(sellToken).decimals();
+        uint8 decOut = IERC20Metadata(buyToken).decimals();
+
+        uint256 numerator = (uint256(1) << 128) * netPpm;
+        uint256 denominator = price128x128 * 1_000_000;
+        if (decOut >= decIn) {
+            numerator *= 10 ** (decOut - decIn);
+        } else {
+            denominator *= 10 ** (decIn - decOut);
+        }
+        // forge-lint: disable-next-line(named-struct-fields)
+        return Fraction(numerator, denominator);
     }
 
     function _poolFromId(bytes32 poolId) internal pure returns (IPartyPool) {

@@ -32,7 +32,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
 
     // LiquidityParty pool address
     address constant LIQUIDITY_PARTY_POOL =
-        0x353D535b9febe7C0Ff261c9e55aD941f712F54ae;
+        0x1270Da05Cf1d047763CEEfDe25a4a5438b26fdA6;
 
     // Token indices in the pool
     uint8 constant USDC_INDEX = 0;
@@ -47,7 +47,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
         address(0x1234567890123456789012345678901234567890);
 
     function setUp() public {
-        uint256 forkBlock = 25088884;
+        uint256 forkBlock = 25301915;
         vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
         liquidityPartyExposed = new LiquidityPartyExecutorExposed();
     }
@@ -142,7 +142,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
         bytes memory protocolData =
             loadCallDataFromFile("test_encode_liquidityparty");
         uint256 amountIn = 1e13; // 0.00001 WETH
-        uint256 expectedAmountOut = 233734190647806; // AAVE out at fork block
+        uint256 expectedAmountOut = 258564911454692; // AAVE out at fork block
         address expectedReceiver = makeAddr("decode_swap_receiver");
         _fundPool(WETH_ADDR, amountIn);
         liquidityPartyExposed.swap(amountIn, protocolData, expectedReceiver);
@@ -152,7 +152,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
 
     function testSwapWETHToAAVE() public {
         uint256 amountIn = 1e13; // 0.00001 WETH
-        uint256 expectedAmountOut = 233734190647806; // AAVE out at fork block
+        uint256 expectedAmountOut = 258564911454692; // AAVE out at fork block
         bytes memory protocolData = abi.encodePacked(
             LIQUIDITY_PARTY_POOL, WETH_ADDR, AAVE_ADDR, WETH_INDEX, AAVE_INDEX
         );
@@ -166,7 +166,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
 
     function testSwapAAVEToWETH() public {
         uint256 amountIn = 1e13; // 0.00001 AAVE (18 decimals)
-        uint256 expectedAmountOut = 423239306117; // WETH out at fork block
+        uint256 expectedAmountOut = 384925572039; // WETH out at fork block
         bytes memory protocolData = abi.encodePacked(
             LIQUIDITY_PARTY_POOL, AAVE_ADDR, WETH_ADDR, AAVE_INDEX, WETH_INDEX
         );
@@ -180,7 +180,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
 
     function testSwapUSDCToWETH() public {
         uint256 amountIn = 10000; // 0.01 USDC (6 decimals)
-        uint256 expectedAmountOut = 4413929793265; // WETH out at fork block
+        uint256 expectedAmountOut = 6002311486634; // WETH out at fork block
         bytes memory protocolData = abi.encodePacked(
             LIQUIDITY_PARTY_POOL, USDC_ADDR, WETH_ADDR, USDC_INDEX, WETH_INDEX
         );

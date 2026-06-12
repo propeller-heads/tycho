@@ -95,7 +95,7 @@ mod tests {
     fn test_encode_liquidityparty() {
         let liqp_pool = ProtocolComponent {
             // mainnet test pool — 3-token USDC/WETH/AAVE pool
-            id: String::from("0x353D535b9febe7C0Ff261c9e55aD941f712F54ae"),
+            id: String::from("0x1270Da05Cf1d047763CEEfDe25a4a5438b26fdA6"),
             tokens: [
                 Address::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), // USDC [0]
                 Address::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH [1]
@@ -132,7 +132,7 @@ mod tests {
             hex_swap,
             String::from(concat!(
                 // pool address
-                "353d535b9febe7c0ff261c9e55ad941f712f54ae",
+                "1270da05cf1d047763ceefde25a4a5438b26fda6",
                 // in token address (WETH)
                 "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
                 // out token address (AAVE)

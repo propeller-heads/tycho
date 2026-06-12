@@ -2,29 +2,29 @@ substreams_yaml_path: ./ethereum-liquidityparty.yaml
 adapter_contract: "LiquidityPartySwapAdapter"
 adapter_build_signature: "constructor(address,address)"
 # Adapter constructor args are (PartyPlanner, PartyInfo)
-adapter_build_args: "0xe6C22aA3e1B3e11AA6C1C6E3086883b3C5071071,0x5f1B901f2955CAD0B28978eF6f0D3054C102F244"
+adapter_build_args: "0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3,0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643"
 skip_balance_check: false
 protocol_type_names:
   - "liquidityparty_pool"
 protocol_system: "vm:liquidityparty"
 initialized_accounts: [
-  "0xe6C22aA3e1B3e11AA6C1C6E3086883b3C5071071", # PartyPlanner
-  "0x5f1B901f2955CAD0B28978eF6f0D3054C102F244", # PartyInfo
-  "0xDF2535B88D97Bf52649D87D41986e4C5B7aB60f5", # PartyPoolMintImpl
-  "0x5f34B189ca58EeC3B6c1Ac432f3D5F85058ACbf7", # PartyPoolExtraImpl
+  "0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3", # PartyPlanner
+  "0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643", # PartyInfo
+  "0xAcb7089D62b67545299842bc7133582f8bE9eB86", # PartyPoolExtraImpl1
+  "0x669a9B0cBdEFb31380b912C1dF3b77fA7C18D821", # PartyPoolExtraImpl2
 ]
 
 tests:
   - name: test_pool_creation
-    start_block: 25088883
-    stop_block: 25088884
+    start_block: 25301915
+    stop_block: 25301916
     expected_components:
-      - id: "0x353d535b9febe7c0ff261c9e55ad941f712f54ae"
+      - id: "0x1270da05cf1d047763ceefde25a4a5438b26fda6"
         tokens:
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
           - "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9" # AAVE
         static_attributes: {}
-        creation_tx: "0x2b1cdc3220b9ff9a6cde869800fc58a44de787e92a00f13db1bdbdd286fe1df6"
+        creation_tx: "0xf63725e6d81e5700652bb1ac5b42495fab98fa171c0228aa3605a225bded66ba"
         skip_simulation: false
         skip_execution: false

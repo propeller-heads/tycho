@@ -14,12 +14,17 @@
     "inputs": [],
     "outputs": [
       {
-        "name": "",
+        "name": "lmsr",
         "type": "tuple",
-        "internalType": "struct LMSRStabilized.State",
+        "internalType": "struct LMSRKernel.State",
         "components": [
           {
             "name": "kappa",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "effectiveSigmaQ",
             "type": "int128",
             "internalType": "int128"
           },
@@ -166,6 +171,11 @@
         "internalType": "uint256"
       },
       {
+        "name": "minAmountsOut",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      },
+      {
         "name": "deadline",
         "type": "uint256",
         "internalType": "uint256"
@@ -261,76 +271,76 @@
   },
   {
     "type": "function",
-    "name": "denominators",
+    "name": "guardian",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "fees",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "flashFeePpm",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "flashLoan",
-    "inputs": [
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "contract IERC3156FlashBorrower"
-      },
-      {
-        "name": "tokenAddr",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "data",
-        "type": "bytes",
-        "internalType": "bytes"
       }
     ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "immutables",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bool",
-        "internalType": "bool"
+        "type": "tuple",
+        "internalType": "struct IPartyPool.Immutables",
+        "components": [
+          {
+            "name": "wrapper",
+            "type": "address",
+            "internalType": "contract NativeWrapper"
+          },
+          {
+            "name": "permit2",
+            "type": "address",
+            "internalType": "contract IPermit2"
+          },
+          {
+            "name": "bfStore",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "numTokens",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "protocolFeePpm",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "mintDeviationPpm",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "emaShiftBlocks",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "maxGammaPerWindowPpm",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "mintLockBlocks",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
       }
     ],
-    "stateMutability": "nonpayable"
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -378,6 +388,25 @@
   },
   {
     "type": "function",
+    "name": "lockedBalanceOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "mint",
     "inputs": [
       {
@@ -401,6 +430,21 @@
         "internalType": "uint256"
       },
       {
+        "name": "maxAmountsIn",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      },
+      {
+        "name": "minLpOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "partialFillAllowed",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
         "name": "deadline",
         "type": "uint256",
         "internalType": "uint256"
@@ -416,9 +460,54 @@
         "name": "lpMinted",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "gammaFilled",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "mintState",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct IPartyPool.MintState",
+        "components": [
+          {
+            "name": "sigmaSwap",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "sigmaSwapLastUpdateBlock",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "prevBlockEndSigmaQ",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "gammaAccum",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "gammaAccumLastBlock",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -435,13 +524,13 @@
   },
   {
     "type": "function",
-    "name": "numTokens",
+    "name": "nonce",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -487,16 +576,16 @@
   },
   {
     "type": "function",
-    "name": "protocolFeePpm",
-    "inputs": [],
-    "outputs": [
+    "name": "setGuardian",
+    "inputs": [
       {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "guardian_",
+        "type": "address",
+        "internalType": "address"
       }
     ],
-    "stateMutability": "view"
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -578,7 +667,7 @@
         "internalType": "uint256"
       },
       {
-        "name": "inFee",
+        "name": "outFee",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -620,6 +709,16 @@
         "internalType": "uint256"
       },
       {
+        "name": "minLpOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "partialFillAllowed",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
         "name": "deadline",
         "type": "uint256",
         "internalType": "uint256"
@@ -645,6 +744,11 @@
         "name": "inFee",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "gammaFilled",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "payable"
@@ -658,25 +762,6 @@
         "name": "",
         "type": "string",
         "internalType": "string"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "token",
-    "inputs": [
-      {
-        "name": "i",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract IERC20"
       }
     ],
     "stateMutability": "view"
@@ -759,19 +844,6 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "wrapperToken",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract NativeWrapper"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "event",
@@ -880,43 +952,19 @@
   },
   {
     "type": "event",
-    "name": "Flash",
+    "name": "GuardianChanged",
     "inputs": [
       {
-        "name": "initiator",
+        "name": "previous",
         "type": "address",
         "indexed": true,
         "internalType": "address"
       },
       {
-        "name": "receiver",
+        "name": "current",
         "type": "address",
         "indexed": true,
-        "internalType": "contract IERC3156FlashBorrower"
-      },
-      {
-        "name": "token",
-        "type": "address",
-        "indexed": true,
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "lpFee",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "protocolFee",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
+        "internalType": "address"
       }
     ],
     "anonymous": false
@@ -951,6 +999,18 @@
       },
       {
         "name": "lpMinted",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "gammaRequested",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "gammaFilled",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1099,6 +1159,12 @@
       },
       {
         "name": "protocolFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "gammaFilled",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"

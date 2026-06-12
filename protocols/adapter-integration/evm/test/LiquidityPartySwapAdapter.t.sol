@@ -20,17 +20,17 @@ contract LiquidityPartyFunctionTest is AdapterTest {
     using FractionMath for Fraction;
 
     IPartyPlanner internal constant PLANNER =
-        IPartyPlanner(0xe6C22aA3e1B3e11AA6C1C6E3086883b3C5071071);
+        IPartyPlanner(0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3);
     IPartyInfo internal constant INFO =
-        IPartyInfo(0x5f1B901f2955CAD0B28978eF6f0D3054C102F244);
-    address internal constant MINT_IMPL =
-        0xDF2535B88D97Bf52649D87D41986e4C5B7aB60f5;
-    address internal constant EXTRA_IMPL =
-        0x5f34B189ca58EeC3B6c1Ac432f3D5F85058ACbf7;
+        IPartyInfo(0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643);
+    address internal constant EXTRA_IMPL1 =
+        0xAcb7089D62b67545299842bc7133582f8bE9eB86;
+    address internal constant EXTRA_IMPL2 =
+        0x669a9B0cBdEFb31380b912C1dF3b77fA7C18D821;
     IPartyPool internal constant POOL =
-        IPartyPool(0x353D535b9febe7C0Ff261c9e55aD941f712F54ae);
+        IPartyPool(0x1270Da05Cf1d047763CEEfDe25a4a5438b26fdA6);
     bytes32 internal constant POOL_ID = bytes32(bytes20(address(POOL)));
-    uint256 internal constant FORK_BLOCK = 25088884;
+    uint256 internal constant FORK_BLOCK = 25301915;
 
     LiquidityPartySwapAdapter internal adapter;
     uint256 internal constant TEST_ITERATIONS = 10;
@@ -57,8 +57,8 @@ contract LiquidityPartyFunctionTest is AdapterTest {
 
         vm.label(address(PLANNER), "PartyPlanner");
         vm.label(address(INFO), "PartyInfo");
-        vm.label(address(MINT_IMPL), "PartyPoolMintImpl");
-        vm.label(address(EXTRA_IMPL), "PartyPoolExtraImpl");
+        vm.label(address(EXTRA_IMPL1), "PartyPoolExtraImpl1");
+        vm.label(address(EXTRA_IMPL2), "PartyPoolExtraImpl2");
         vm.label(address(POOL), "PartyPool");
         vm.label(address(adapter), "LiquidityPartySwapAdapter");
         for (uint256 i = 0; i < tokens.length; i++) {
@@ -156,10 +156,13 @@ contract LiquidityPartyFunctionTest is AdapterTest {
 
         for (uint256 i = 0; i < TEST_ITERATIONS - 1; i++) {
             assertLe(trades[i].calculatedAmount, trades[i + 1].calculatedAmount);
-            assertEq(
-                trades[i].price.denominator, trades[i + 1].price.denominator
-            ); // must share a basis
-            assertGe(trades[i].price.numerator, trades[i + 1].price.numerator);
+            // Marginal price (output-per-input) does not increase as the sell
+            // size grows. INFO.price is input-per-output, which the adapter
+            // inverts, so the fractions no longer share a constant denominator
+            // basis — compare them directly instead of per-field.
+            assertGe(
+                int256(trades[i].price.compareFractions(trades[i + 1].price)), 0
+            );
         }
     }
 
@@ -201,5 +204,35 @@ contract LiquidityPartyFunctionTest is AdapterTest {
         IERC20(AAVE).approve(address(adapter), type(uint256).max);
         testPricesForPair(adapter, POOL_ID, WETH, AAVE, true);
         testPricesForPair(adapter, POOL_ID, AAVE, WETH, true);
+    }
+
+    // Exact-output (buy) swap: specify the desired output amount and confirm
+    // the adapter quotes the required input via swapAmountsForExactOutput and
+    // the
+    // pool delivers at least the requested output.
+    function testSwapBuy() public {
+        // A small, feasible amount of the output token relative to the pool's
+        // inventory.
+        uint256 buyAmount = IERC20(OUTPUT_TOKEN).balanceOf(address(POOL)) / 100;
+        assertGt(buyAmount, 0);
+
+        deal(INPUT_TOKEN, address(this), type(uint128).max);
+        IERC20(INPUT_TOKEN).approve(address(adapter), type(uint256).max);
+
+        uint256 inBefore = IERC20(INPUT_TOKEN).balanceOf(address(this));
+        uint256 outBefore = IERC20(OUTPUT_TOKEN).balanceOf(address(this));
+
+        Trade memory trade = adapter.swap(
+            POOL_ID, INPUT_TOKEN, OUTPUT_TOKEN, OrderSide.Buy, buyAmount
+        );
+
+        uint256 spent = inBefore - IERC20(INPUT_TOKEN).balanceOf(address(this));
+        uint256 received =
+            IERC20(OUTPUT_TOKEN).balanceOf(address(this)) - outBefore;
+
+        // For a buy, the calculated amount is the input spent.
+        assertEq(trade.calculatedAmount, spent);
+        // We received at least the requested output.
+        assertGe(received, buyAmount);
     }
 }

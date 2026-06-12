@@ -177,9 +177,12 @@ fn map_relative_component_balance(
                 push(token.clone(), amount.neg());
             }
         } else if let Some(ev) = party_pool::events::Swap::match_and_decode(log) {
-            // Excludes the protocol fee taken the from input amount
-            push(ev.token_in, ev.amount_in - ev.protocol_fee);
-            push(ev.token_out, ev.amount_out.neg());
+            // Fee-on-output: the full input enters the pool. The protocol fee is
+            // taken from the output token and moved to the protocol-fee ledger
+            // (excluded from TVL), so the LP-owned reserve loses the net output
+            // plus the protocol fee. The LP fee stays in the reserve.
+            push(ev.token_in, ev.amount_in);
+            push(ev.token_out, (ev.amount_out + ev.protocol_fee).neg());
         } else if let Some(ev) = party_pool::events::SwapMint::match_and_decode(log) {
             // Excludes the protocol fee taken the from input amount
             push(ev.token_in, ev.amount_in - ev.protocol_fee);
@@ -187,9 +190,6 @@ fn map_relative_component_balance(
             // The output amount is what the user receives, but the pool TVL also
             // loses the protocol fee.
             push(ev.token_out, (ev.amount_out + ev.protocol_fee).neg());
-        } else if let Some(ev) = party_pool::events::Flash::match_and_decode(log) {
-            // Includes only the LP's share of the fee.
-            push(ev.token, ev.lp_fee);
         }
     }
 
@@ -305,8 +305,8 @@ fn map_protocol_changes(
             components_store
                 .get_last(addr_str)
                 .is_some() ||
-                addr == params.mint_impl.as_slice() ||
-                addr == params.extra_impl.as_slice() ||
+                addr == params.extra_impl1.as_slice() ||
+                addr == params.extra_impl2.as_slice() ||
                 addr == params.planner.as_slice() ||
                 addr == params.info.as_slice()
         },

@@ -15,9 +15,6 @@ interface IPartyPool {
     /// only burns (withdrawals) working.
     function killed() external view returns (bool);
 
-    /// @notice Returns the number of tokens (n) in the pool.
-    function numTokens() external view returns (uint256);
-
     /// @notice Returns the list of all token addresses in the pool (copy).
     function allTokens() external view returns (address[] memory);
 
@@ -29,14 +26,17 @@ interface IPartyPool {
     /// @param receiver address that will receive the output tokens
     /// @param inputTokenIndex index of input asset
     /// @param outputTokenIndex index of output asset
-    /// @param maxAmountIn maximum gross input to transfer (inclusive of fees)
-    /// @param minAmountOut minimum output tokens to receive; reverts if not met
-    /// (0 = disabled)
+    /// @param maxAmountIn exact input to transfer (fee is on the output side,
+    /// not added to the input)
+    /// @param minAmountOut minimum net output tokens to receive; reverts with
+    /// "slippage control" if not met (0 = disabled)
     /// @param deadline timestamp after which the call reverts; pass 0 to ignore
     /// @param unwrap if true, native wrapper output is unwrapped
     /// @param cbData callback data for callback-style fundingSelectors
-    /// @return amountIn actual input used (uint256), amountOut actual output
-    /// sent (uint256), inFee fee taken from the input (uint256)
+    /// @return amountIn actual input transferred (uint256), amountOut net
+    /// output sent to the receiver (uint256), outFee fee taken from the gross
+    /// output
+    /// (uint256)
     function swap(
         address payer,
         bytes4 fundingSelector,
@@ -51,9 +51,5 @@ interface IPartyPool {
     )
         external
         payable
-        returns (uint256 amountIn, uint256 amountOut, uint256 inFee);
-
-    /// @notice Per-asset swap fees in ppm. Effective pair fee for a swap
-    /// i→j is fees()[i] + fees()[j].
-    function fees() external view returns (uint256[] memory);
+        returns (uint256 amountIn, uint256 amountOut, uint256 outFee);
 }
