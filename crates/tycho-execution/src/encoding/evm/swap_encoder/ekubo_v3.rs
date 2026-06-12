@@ -63,6 +63,26 @@ impl SwapEncoder for EkuboV3SwapEncoder {
         encoded.extend(token_out);
         encoded.extend((extension, fee, pool_type_config).abi_encode_packed());
 
+        // A signed (SignedExclusiveSwap, forward-only) hop carries a self-describing tail so the
+        // executor's length-aware walk can skip past it to any following hop. When `user_data` is
+        // absent the hop is byte-identical to a normal hop, preserving existing behavior.
+        if swap.user_data().is_some() {
+            // TODO: split user_data into meta(32) | minBalanceUpdate(32) | signature(N),
+            // then append meta | minBalanceUpdate | (signature length as u16 be) | signature.
+            // The `#[allow]` covers the warnings inherent to a diverging `todo!()` scaffold: the
+            // binding is "unused" and the `extend` call is "unreachable" only until this is
+            // implemented. Remove the attribute together with the `todo!()`.
+            #[allow(
+                unreachable_code,
+                unused_variables,
+                reason = "scaffold: todo!() diverges until the signed tail is implemented"
+            )]
+            {
+                let signed_tail: Vec<u8> = todo!("encode signed-swap tail from swap.user_data()");
+                encoded.extend(signed_tail);
+            }
+        }
+
         Ok(encoded)
     }
 
@@ -129,6 +149,73 @@ mod tests {
                 "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
                 // pool config 1st swap
                 "517e506700271aea091b02f42756f5e174af5230000000000000000000000000",
+            ),
+        );
+    }
+
+    #[test]
+    #[ignore = "scaffold: signed-swap tail encoding is not yet implemented (todo!())"]
+    fn test_encode_signed_swap() {
+        let token_in = Bytes::from(Address::ZERO.as_slice());
+        let token_out = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
+
+        let static_attributes = HashMap::from([
+            // SignedExclusiveSwap extension placeholder used by signed pools.
+            ("extension".to_string(), Bytes::from("0x5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e")),
+            ("fee".to_string(), Bytes::from(0_u64)),
+            ("pool_type_config".to_string(), Bytes::from(0_u32)),
+        ]);
+
+        let component = ProtocolComponent { static_attributes, ..Default::default() };
+
+        // `user_data` is the packed concatenation meta(32) | minBalanceUpdate(32) | signature(N).
+        // The encoder splits it and inserts the 2-byte big-endian signature length.
+        let meta = "1111111111111111111111111111111111111111111111111111111111111111";
+        let min_balance_update =
+            "2222222222222222222222222222222222222222222222222222222222222222";
+        let signature = "abcdef0123456789"; // 8-byte signature
+        let user_data =
+            Bytes::from_str(&format!("0x{meta}{min_balance_update}{signature}")).unwrap();
+
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_user_data(user_data);
+
+        let encoding_context = EncodingContext {
+            group_token_in: token_in.clone(),
+            group_token_out: token_out.clone(),
+            router_address: Some(Bytes::default()),
+        };
+
+        let encoder = EkuboV3SwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
+
+        let encoded_swap = encoder
+            .encode_swap(&swap, &encoding_context)
+            .unwrap();
+
+        let hex_swap = encode(&encoded_swap);
+
+        assert_eq!(
+            hex_swap,
+            concat!(
+                // group token in (ETH_ADDRESS)
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                // token out
+                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                // pool config (extension = SIGNED_EXCLUSIVE_SWAP placeholder)
+                "5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e000000000000000000000000",
+                // meta(32)
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                // minBalanceUpdate(32)
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                // sigLen(2, u16 be) = 8
+                "0008",
+                // signature(8)
+                "abcdef0123456789",
             ),
         );
     }
