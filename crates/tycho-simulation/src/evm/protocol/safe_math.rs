@@ -195,10 +195,22 @@ pub fn sqrt_u256(value: U256) -> Result<U256, SimulationError> {
 /// Uses temp variable t for intermediate calculations
 /// Ref: https://hal.inria.fr/file/index/docid/72854/filename/RR-3805.pdf
 fn compute_karatsuba_sqrt(x: U256, r: &mut U256, t: &mut U256, bits: usize) -> U256 {
-    // Base case: use simple method for small numbers
+    // Base case: f64 sqrt as a seed, then exact integer correction. The f64 conversion
+    // of a 64-bit integer loses up to 11 mantissa bits, so the seed can land one step off
+    // the true floor (and at u64::MAX the rounded sqrt is 2^32, whose square overflows u64).
+    // Clamp to the largest representable root and step until result² ≤ x < (result+1)².
     if bits <= 64 {
         let x_small = x.as_limbs()[0];
-        let result = (x_small as f64).sqrt() as u64;
+        let mut result = ((x_small as f64).sqrt() as u64).min(u32::MAX as u64);
+        while result * result > x_small {
+            result -= 1;
+        }
+        while let Some(next) = result.checked_add(1) {
+            match next.checked_mul(next) {
+                Some(square) if square <= x_small => result = next,
+                _ => break,
+            }
+        }
         *r = x - U256::from(result * result);
         return U256::from(result);
     }
@@ -549,22 +561,87 @@ mod safe_math_tests {
         assert!((sqrt_large + U512::from(1u32)) * (sqrt_large + U512::from(1u32)) > large);
     }
 
-    // RED: these tests expose the f64 base-case bug in compute_karatsuba_sqrt.
-    // u64::MAX as f64 rounds up to 2^64; sqrt → 2^32; 2^32 * 2^32 overflows u64 → panic.
+    // u64::MAX as f64 rounds up to 2^64, so the unclamped f64 seed would be 2^32 and
+    // its square would overflow u64.
     #[test]
-    #[should_panic]
-    fn test_sqrt_u256_panics_on_u64_max() {
-        let _ = sqrt_u256(U256::from(u64::MAX));
+    fn test_sqrt_u256_u64_max() {
+        let result = sqrt_u256(U256::from(u64::MAX)).unwrap();
+        assert_eq!(result, U256::from(u32::MAX));
     }
 
-    // 67108865^2 - 1: f64 rounds sqrt up by 1; result² > x violates the floor invariant.
+    // 67108865^2 - 1: the f64 seed rounds up by 1; the correction step must restore the
+    // floor invariant result² ≤ x < (result+1)².
     #[test]
-    fn test_sqrt_u256_wrong_floor_near_perfect_square() {
+    fn test_sqrt_u256_floor_near_perfect_square() {
         let x = U256::from(67108865u64 * 67108865u64 - 1);
         let result = sqrt_u256(x).unwrap();
-        assert!(
-            result * result <= x,
-            "floor invariant violated: sqrt({x}) returned {result}, but {result}² > x"
-        );
+        assert_eq!(result, U256::from(67108864u64));
+    }
+
+    // Whole-input-range sweep: boundary values and deterministic pseudo-random draws at
+    // every bit length 1..=256. The floor invariant result² ≤ x < (result+1)² fully
+    // characterizes integer sqrt, checked in U512 so x near U256::MAX cannot overflow.
+    #[test]
+    fn test_sqrt_u256_floor_invariant_full_range() {
+        let mut rng_state = 0x9E3779B97F4A7C15u64;
+        let mut next_rand = move || {
+            rng_state ^= rng_state >> 12;
+            rng_state ^= rng_state << 25;
+            rng_state ^= rng_state >> 27;
+            rng_state.wrapping_mul(0x2545F4914F6CDD1D)
+        };
+
+        let mut cases: Vec<U256> = vec![U256::ZERO, U256::from(1u64), U256::MAX];
+        for bits in 1..=256u32 {
+            let low = U256::from(1u64) << (bits - 1);
+            let high =
+                if bits == 256 { U256::MAX } else { (U256::from(1u64) << bits) - U256::from(1u64) };
+            cases.push(low);
+            cases.push(high);
+            for _ in 0..4 {
+                let mut draw = U256::ZERO;
+                for limb in 0..4 {
+                    draw |= U256::from(next_rand()) << (64 * limb);
+                }
+                cases.push(low + draw % (high - low + U256::from(1u64)));
+            }
+        }
+
+        for x in cases {
+            let result = sqrt_u256(x).unwrap();
+            let wide = U512::from(result);
+            let x_wide = U512::from(x);
+            assert!(wide * wide <= x_wide, "floor violated for x={x}");
+            let next = wide + U512::from(1u64);
+            assert!(next * next > x_wide, "not the greatest root for x={x}");
+        }
+    }
+
+    #[test]
+    fn test_sqrt_u256_floor_invariant_in_base_case_range() {
+        for x_small in [
+            0u64,
+            1,
+            2,
+            3,
+            4,
+            (1 << 26) - 1,
+            1 << 26,
+            (1 << 53) - 1,
+            1 << 53,
+            (1 << 53) + 1,
+            67108864 * 67108864,
+            u32::MAX as u64,
+            (u32::MAX as u64).pow(2),
+            (u32::MAX as u64).pow(2) - 1,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            let x = U256::from(x_small);
+            let result = sqrt_u256(x).unwrap();
+            assert!(result * result <= x, "floor violated for {x_small}");
+            let next = result + U256::from(1u64);
+            assert!(next * next > x, "not the greatest root for {x_small}");
+        }
     }
 }
