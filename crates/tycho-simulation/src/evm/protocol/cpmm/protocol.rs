@@ -76,7 +76,15 @@ pub fn cpmm_get_amount_out(
 
     let amount_in_with_fee = safe_mul_u256(amount_in, fee.numerator)?;
     let numerator = safe_mul_u256(amount_in_with_fee, reserve_out)?;
-    let denominator = safe_add_u256(safe_mul_u256(reserve_in, fee.precision)?, amount_in_with_fee)?;
+    // SAFETY: callers (uniswap_v2, pancakeswap_v2) decode reserves from on-chain uint112
+    // storage, so reserve_in < 2^112, and fee.precision <= 10^4 < 2^14, keeping the product
+    // below 2^126 -- it cannot wrap U256.
+    let reserve_in_scaled = reserve_in.wrapping_mul(fee.precision);
+    debug_assert!(
+        fee.precision.is_zero() || reserve_in_scaled / fee.precision == reserve_in,
+        "reserve_in * fee.precision exceeded the proven uint112 x 10^4 bound"
+    );
+    let denominator = safe_add_u256(reserve_in_scaled, amount_in_with_fee)?;
 
     safe_div_u256(numerator, denominator)
 }
@@ -237,13 +245,24 @@ pub fn cpmm_swap_to_price(
     // Cross-multiply to avoid division: swap_price_num * reserve_out * FEE_NUMERATOR >=
     // swap_price_den * reserve_in * FEE_PRECISION
     // Use U512 precision to match the calculation of new reserves
-    let target_price_cross_mult = U512::from(swap_price_num)
-        .checked_mul(U512::from(reserve_out))
-        .and_then(|x| x.checked_mul(U512::from(fee.numerator)))
+    // SAFETY: each first factor pair is two widened U256 values, so the product is
+    // < (2^256 - 1)^2 < 2^512 and the wrapping mul cannot wrap. The subsequent fee factor stays
+    // checked: aerodrome_v1 reserves are uint256 on-chain, so the triple product has no provable
+    // headroom there.
+    let target_two_factor = U512::from(swap_price_num).wrapping_mul(U512::from(reserve_out));
+    let current_two_factor = U512::from(swap_price_den).wrapping_mul(U512::from(reserve_in));
+    debug_assert!(
+        (reserve_out.is_zero() ||
+            target_two_factor / U512::from(reserve_out) == U512::from(swap_price_num)) &&
+            (reserve_in.is_zero() ||
+                current_two_factor / U512::from(reserve_in) == U512::from(swap_price_den)),
+        "U256 x U256 product wrapped past 2^512"
+    );
+    let target_price_cross_mult = target_two_factor
+        .checked_mul(U512::from(fee.numerator))
         .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
-    let current_price_cross_mult = U512::from(swap_price_den)
-        .checked_mul(U512::from(reserve_in))
-        .and_then(|x| x.checked_mul(U512::from(fee.precision)))
+    let current_price_cross_mult = current_two_factor
+        .checked_mul(U512::from(fee.precision))
         .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
 
     if target_price_cross_mult < current_price_cross_mult {
