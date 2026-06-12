@@ -1,6 +1,8 @@
 use alloy::primitives::{I256, U256};
 use tycho_common::Bytes;
 
+#[cfg(test)]
+pub(crate) mod elision_reference;
 pub(crate) mod liquidity_math;
 pub(crate) mod lp_fee;
 pub(crate) mod sqrt_price_math;

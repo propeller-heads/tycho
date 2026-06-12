@@ -296,3 +296,183 @@ pub fn cpmm_swap_to_price(
 
     Ok((u256_to_biguint(amount_in), u256_to_biguint(implied_amount_out)))
 }
+
+#[cfg(test)]
+mod elision_differential_tests {
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::elision_reference::{
+        assert_result_eq, mul_div_reference, Rng,
+    };
+
+    /// Frozen pre-elision copy of [`cpmm_get_amount_out`] (all-checked arithmetic).
+    fn cpmm_get_amount_out_reference(
+        amount_in: U256,
+        reserve_in: U256,
+        reserve_out: U256,
+        fee: ProtocolFee,
+    ) -> Result<U256, SimulationError> {
+        if amount_in == U256::from(0u64) {
+            return Err(SimulationError::InvalidInput("Amount in cannot be zero".to_string(), None));
+        }
+
+        if reserve_in == U256::from(0u64) || reserve_out == U256::from(0u64) {
+            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
+        }
+
+        let amount_in_with_fee = safe_mul_u256(amount_in, fee.numerator)?;
+        let numerator = safe_mul_u256(amount_in_with_fee, reserve_out)?;
+        let denominator =
+            safe_add_u256(safe_mul_u256(reserve_in, fee.precision)?, amount_in_with_fee)?;
+
+        safe_div_u256(numerator, denominator)
+    }
+
+    /// Frozen pre-elision copy of [`cpmm_swap_to_price`] (checked U512 cross-mult chains).
+    fn cpmm_swap_to_price_reference(
+        reserve_in: U256,
+        reserve_out: U256,
+        target_price: &Price,
+        fee: ProtocolFee,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        if reserve_in == U256::ZERO || reserve_out == U256::ZERO {
+            return Err(SimulationError::FatalError("Reserves cannot be zero".to_string()));
+        }
+
+        let swap_price_num = biguint_to_u256(&target_price.denominator);
+        let swap_price_den = biguint_to_u256(&target_price.numerator);
+
+        let target_price_cross_mult = U512::from(swap_price_num)
+            .checked_mul(U512::from(reserve_out))
+            .and_then(|x| x.checked_mul(U512::from(fee.numerator)))
+            .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
+        let current_price_cross_mult = U512::from(swap_price_den)
+            .checked_mul(U512::from(reserve_in))
+            .and_then(|x| x.checked_mul(U512::from(fee.precision)))
+            .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
+
+        if target_price_cross_mult < current_price_cross_mult {
+            return Err(SimulationError::InvalidInput(
+                "Target price is unreachable (already below current spot price)".to_string(),
+                None,
+            ));
+        }
+
+        let k = U512::from(reserve_in) * U512::from(reserve_out);
+        let k_times_price = k * U512::from(swap_price_num) * U512::from(fee.numerator) /
+            (U512::from(swap_price_den) * U512::from(fee.precision));
+        let x_prime_u512 = sqrt_u512(k_times_price);
+
+        let limbs = x_prime_u512.as_limbs();
+        let x_prime = U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]);
+
+        if x_prime <= reserve_in {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
+
+        let amount_in = safe_sub_u256(x_prime, reserve_in)?;
+        if amount_in == U256::ZERO {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
+
+        let implied_amount_out = mul_div_reference(amount_in, swap_price_den, swap_price_num)?;
+
+        Ok((u256_to_biguint(amount_in), u256_to_biguint(implied_amount_out)))
+    }
+
+    const CASES: usize = 100_000;
+    // The real (numerator, precision) pairs passed by uniswap_v2, pancakeswap_v2 and
+    // aerodrome_v1.
+    const FEES: [(u64, u64); 3] = [(9970, 10_000), (9975, 10_000), (9990, 10_000)];
+
+    /// Reserves stay in the on-chain uint112 domain (the proof premise of the elided
+    /// `reserve_in * fee.precision` check); amounts span the full U256 range.
+    #[test]
+    fn cpmm_get_amount_out_matches_reference_in_domain() {
+        let mut rng = Rng(0xC9A4_0001);
+        let u112_max = (U256::from(1u8) << 112) - U256::from(1u8);
+        for case in 0..CASES {
+            let reserve = |rng: &mut Rng, case: usize| match case % 8 {
+                0 => U256::ZERO,
+                1 => U256::from(1u8),
+                2 => u112_max,
+                _ => rng.u256_up_to_bits(112),
+            };
+            let reserve_in = reserve(&mut rng, case);
+            let reserve_out = reserve(&mut rng, case / 2);
+            let amount_in = match case % 16 {
+                0 => U256::ZERO,
+                1 => U256::MAX,
+                _ => rng.u256_up_to_bits(256),
+            };
+            let (n, p) = FEES[rng.below(FEES.len() as u64) as usize];
+            assert_result_eq(
+                &cpmm_get_amount_out(
+                    amount_in,
+                    reserve_in,
+                    reserve_out,
+                    ProtocolFee::new(U256::from(n), U256::from(p)),
+                ),
+                &cpmm_get_amount_out_reference(
+                    amount_in,
+                    reserve_in,
+                    reserve_out,
+                    ProtocolFee::new(U256::from(n), U256::from(p)),
+                ),
+                &(amount_in, reserve_in, reserve_out, n, p),
+            );
+        }
+    }
+
+    /// A reserve far past the uint112 proof boundary must scream in debug builds.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "uint112 x 10^4 bound")]
+    fn cpmm_get_amount_out_reserve_out_of_domain_screams() {
+        let huge_reserve = U256::MAX - U256::from(1u8);
+        let _ = cpmm_get_amount_out(
+            U256::from(1u8),
+            huge_reserve,
+            U256::from(1u8),
+            ProtocolFee::new(U256::from(9970u64), U256::from(10_000u64)),
+        );
+    }
+
+    /// The elided first mul of each cross-mult chain is unconditionally dead (two widened
+    /// U256 factors), so the full U256 input space is in-domain, including operands large
+    /// enough to drive the kept-checked fee mul into its overflow error.
+    #[test]
+    fn cpmm_swap_to_price_matches_reference_full_range() {
+        let mut rng = Rng(0xC9A4_0002);
+        for case in 0..CASES {
+            let operand = |rng: &mut Rng, case: usize| match case % 8 {
+                0 => U256::from(1u8),
+                1 => U256::MAX,
+                2 => rng.u256_up_to_bits(112),
+                _ => rng.u256_up_to_bits(256),
+            };
+            let reserve_in = operand(&mut rng, case);
+            let reserve_out = operand(&mut rng, case / 2);
+            // Zero price numerators/denominators hit a pre-existing U512 div-by-zero panic in
+            // both implementations, so keep them nonzero like every real `Price`.
+            let price_num = operand(&mut rng, case / 3).max(U256::from(1u8));
+            let price_den = operand(&mut rng, case / 5).max(U256::from(1u8));
+            let target_price = Price::new(u256_to_biguint(price_num), u256_to_biguint(price_den));
+            let (n, p) = FEES[rng.below(FEES.len() as u64) as usize];
+            assert_result_eq(
+                &cpmm_swap_to_price(
+                    reserve_in,
+                    reserve_out,
+                    &target_price,
+                    ProtocolFee::new(U256::from(n), U256::from(p)),
+                ),
+                &cpmm_swap_to_price_reference(
+                    reserve_in,
+                    reserve_out,
+                    &target_price,
+                    ProtocolFee::new(U256::from(n), U256::from(p)),
+                ),
+                &(reserve_in, reserve_out, price_num, price_den, n, p),
+            );
+        }
+    }
+}
