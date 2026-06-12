@@ -1,0 +1,28 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "baseline"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "baseline"
+implementation_type: Custom
+skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
+
+tests:
+  - name: test_ethereum_from_relay_deployment
+    # Start at the relay deployment block so range mode mirrors production sync:
+    # every Baseline pool is indexed before later swap-triggered quote-state
+    # updates are emitted. Native simulation needs quote-state attributes from a
+    # later BLens v3 block, so this range intentionally spans past creation.
+    start_block: 24920863
+    stop_block: 25036613
+    expected_components:
+      - id: "0x9fdbde76236998dc2836fe67a9954ede456a1d63"
+        tokens:
+          - "0x9fdbde76236998dc2836fe67a9954ede456a1d63"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+          reserve: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          manual_updates: "0x01"
+        creation_tx: "0xe21a7f343e28c0dba205757179c92b7e99d38dc4874e4b59c7f4af5792b53a29"
+        skip_simulation: false
+        skip_execution: false

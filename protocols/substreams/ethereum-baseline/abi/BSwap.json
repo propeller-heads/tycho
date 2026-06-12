@@ -1,0 +1,602 @@
+[
+  {
+    "type": "function",
+    "name": "LABEL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "ROUTES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "routes_",
+        "type": "bytes4[]",
+        "internalType": "bytes4[]"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "VERSION",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "buyTokensExactIn",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_limitAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountOut_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "buyTokensExactOut",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_limitAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountIn_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "getCurveParams",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct CurveParams",
+        "components": [
+          {
+            "name": "BLV",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "circ",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "supply",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "swapFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reserves",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalSupply",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "convexityExp",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "lastInvariant",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteBuyExactIn",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_reservesIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "tokensOut_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "slippage_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteBuyExactOut",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountIn_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "slippage_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteSellExactIn",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountOut_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "slippage_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteSellExactOut",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_reservesOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "tokensIn_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "slippage_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sellTokensExactIn",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_limitAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountOut_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "sellTokensExactOut",
+    "inputs": [
+      {
+        "name": "_bToken",
+        "type": "address",
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "_amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_limitAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountIn_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "feesReceived_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "supportsInterface",
+    "inputs": [
+      {
+        "name": "_interfaceId",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "event",
+    "name": "Distributed",
+    "inputs": [
+      {
+        "name": "bToken",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "reserve",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "totalAmount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "protocolFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "creatorFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "stakingFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Swap",
+    "inputs": [
+      {
+        "name": "bToken",
+        "type": "address",
+        "indexed": false,
+        "internalType": "contract BToken"
+      },
+      {
+        "name": "user",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "activePrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "blvPrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "bTokenDelta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "reserveDelta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "totalFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "liquidityFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "BlockPricingLib_InvalidDeltaDirection",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BlockPricingLib_SellExceedsSameBlockCapacity",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BlockPricingLib_SellFloorExceedsCurveRelease",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Component_NotPermitted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_Insolvent",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_InsufficientSettledReserves",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_Paused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_Reentrant",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "GuardLib_ReserveAccountingMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidConvexityExp",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidOutput",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidParameters",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSwapDirection",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvariantDecreased",
+    "inputs": [
+      {
+        "name": "prevInvariant",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "newInvariant",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NativeLib_AmountMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NativeLib_NotWrapped",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PriceMustChange",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SlippageExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SolverFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TradeExceedsLimit",
+    "inputs": []
+  }
+]

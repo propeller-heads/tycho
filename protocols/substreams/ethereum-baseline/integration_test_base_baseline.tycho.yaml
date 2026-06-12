@@ -1,0 +1,26 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "baseline"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "baseline"
+implementation_type: Custom
+skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
+
+tests:
+  - name: test_base_recent_pool_creation
+    # Recent Base pool where getQuoteState is available at creation, keeping
+    # range mode short while validating indexing, native simulation, and execution.
+    start_block: 46809753
+    stop_block: 46809753
+    expected_components:
+      - id: "0x2A6b1BF66542CB1463541d211747B28C6bb39e83"
+        tokens:
+          - "0x2A6b1BF66542CB1463541d211747B28C6bb39e83"
+          - "0x4200000000000000000000000000000000000006"
+        static_attributes:
+          relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+          reserve: "0x4200000000000000000000000000000000000006"
+          manual_updates: "0x01"
+        creation_tx: "0x054e0d03f1ff601e2270de55c3322d5558e620823e462515e776b3afb34ac559"
+        skip_simulation: false
+        skip_execution: false

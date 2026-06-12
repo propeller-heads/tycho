@@ -36,12 +36,12 @@ pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
 /// The protocol's `transferFrom` is inside `swap()` and already in the gas computation of
 /// `get_amount_out`, but the approval is not.
 pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] =
-    &["vm:balancer_v2", "vm:curve", "rfq:bebop", "rfq:hashflow", "rfq:liquorice", "erc4626"];
+    &["vm:balancer_v2", "vm:curve", "rfq:bebop", "rfq:hashflow", "rfq:liquorice", "erc4626", "baseline"];
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper"];
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrap", "baseline"];
 
 pub const ROUTER_FEES_ACTIVE: bool = true;
 

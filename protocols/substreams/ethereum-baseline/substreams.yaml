@@ -1,0 +1,56 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_baseline"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_baseline.wasm
+
+network: mainnet
+networks:
+  mainnet:
+    initialBlock:
+      map_protocol_components: 24920863
+      map_protocol_changes: 24920863
+    params:
+      map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
+      map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
+  base:
+    initialBlock:
+      map_protocol_components: 45070267
+      map_protocol_changes: 45070267
+    params:
+      map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
+      map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
+
+params:
+  map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
+  map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

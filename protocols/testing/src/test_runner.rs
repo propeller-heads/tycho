@@ -73,6 +73,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
+        ("base-baseline", "ethereum-baseline"),
         ("unichain-curve", "ethereum-curve"),
     ])
 });
@@ -241,6 +242,7 @@ impl TestRunner {
 
         let spkg_path_for_index = spkg_path.clone();
         let protocol_type_names = config.protocol_type_names.clone();
+        let implementation_type = config.implementation_type.clone();
         let protocol_system = config.protocol_system.clone();
         let module_name = config.module_name.clone();
 
@@ -249,6 +251,7 @@ impl TestRunner {
                 &spkg_path_for_index,
                 start_block,
                 &protocol_type_names,
+                &implementation_type,
                 &protocol_system,
                 module_name,
             ) {
@@ -510,6 +513,7 @@ impl TestRunner {
                         test.start_block,
                         test.stop_block,
                         &config.protocol_type_names,
+                        &config.implementation_type,
                         &config.protocol_system,
                         config.module_name.clone(),
                     )
@@ -1116,8 +1120,9 @@ impl TestRunner {
                         continue;
                     }
 
+                    let chain = self.chain.to_string();
                     let executors_json = json!({
-                        "ethereum": {
+                        chain: {
                             (protocol_system): EXECUTOR_ADDRESS
                         }
                     });
@@ -1428,11 +1433,11 @@ mod tests {
         let parent_dir = curr_dir.parent().unwrap();
         env::set_current_dir(parent_dir).expect("Failed to set working directory");
 
-        let pattern = "./substreams/*/integration_test.tycho.yaml";
+        let pattern = "./substreams/*/integration_test*.tycho.yaml";
         let mut results = Vec::new();
 
         if glob(pattern).unwrap().count() == 0 {
-            panic!("No integration_test.tycho.yaml files found in substreams/*/");
+            panic!("No integration_test*.tycho.yaml files found in substreams/*/");
         }
         for entry in glob(pattern).unwrap() {
             match entry {

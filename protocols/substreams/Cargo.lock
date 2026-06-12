@@ -774,6 +774,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-baseline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "hex",
+ "itertools 0.10.5",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-cowamm"
 version = "0.1.3"
 dependencies = [

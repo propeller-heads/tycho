@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::LazyLock};
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tycho_test::execution::models::RouterOverwritesData;
 pub const ROUTER_BYTECODE_JSON: &str = include_str!("../fixtures/TychoRouter.runtime.json");
+const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculator.runtime.json");
 
 // Include all executor bytecode files at compile time
 const UNISWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV2.runtime.json");
@@ -18,6 +19,7 @@ const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Angstrom.runtime.json");
 const BALANCER_V2_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV2.runtime.json");
 const BALANCER_V3_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV3.runtime.json");
+const BASELINE_BYTECODE_JSON: &str = include_str!("../fixtures/BaselineExecutor.runtime.json");
 const CURVE_BYTECODE_JSON: &str = include_str!("../fixtures/Curve.runtime.json");
 const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.runtime.json");
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
@@ -38,6 +40,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("uniswap_v4_hooks", UNISWAP_V4_ANGSTROM_BYTECODE_JSON);
     map.insert("vm:balancer_v2", BALANCER_V2_BYTECODE_JSON);
     map.insert("vm:balancer_v3", BALANCER_V3_BYTECODE_JSON);
+    map.insert("baseline", BASELINE_BYTECODE_JSON);
     map.insert("vm:curve", CURVE_BYTECODE_JSON);
     map.insert("vm:maverick_v2", MAVERICK_V2_BYTECODE_JSON);
     map.insert("ekubo_v3", EKUBO_V3_BYTECODE_JSON);
@@ -60,21 +63,24 @@ fn get_executor_bytecode_json(protocol_system: &str) -> miette::Result<&'static 
 pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> {
     let executor_json = get_executor_bytecode_json(protocol_system)?;
 
-    let json_value: serde_json::Value = serde_json::from_str(executor_json)
+    load_runtime_bytecode(executor_json, "executor")
+}
+
+fn load_runtime_bytecode(bytecode_json: &str, label: &str) -> miette::Result<Vec<u8>> {
+    let json_value: serde_json::Value = serde_json::from_str(bytecode_json)
         .into_diagnostic()
-        .wrap_err("Failed to parse executor JSON")?;
+        .wrap_err(format!("Failed to parse {label} JSON"))?;
 
     let bytecode_str = json_value["runtimeBytecode"]
         .as_str()
-        .ok_or_else(|| miette!("No bytecode field found in executor JSON"))?;
+        .ok_or_else(|| miette!("No runtimeBytecode field found in {label} JSON"))?;
 
-    // Remove 0x prefix if present
     let bytecode_hex =
         if let Some(stripped) = bytecode_str.strip_prefix("0x") { stripped } else { bytecode_str };
 
     hex::decode(bytecode_hex)
         .into_diagnostic()
-        .wrap_err("Failed to decode executor bytecode from hex")
+        .wrap_err(format!("Failed to decode {label} bytecode from hex"))
 }
 
 /// Creates router overwrites data for execution simulation.
@@ -97,24 +103,10 @@ pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> 
 pub fn create_router_overwrites_data(
     protocol_system: &str,
 ) -> miette::Result<RouterOverwritesData> {
-    let router_bytecode = {
-        let json_value: serde_json::Value = serde_json::from_str(ROUTER_BYTECODE_JSON)
-            .into_diagnostic()
-            .wrap_err("Failed to parse router JSON")?;
-        let bytecode_str = json_value["runtimeBytecode"]
-            .as_str()
-            .ok_or_else(|| miette::miette!("No runtimeBytecode field found in router JSON"))?;
-        let bytecode_hex = if let Some(stripped) = bytecode_str.strip_prefix("0x") {
-            stripped
-        } else {
-            bytecode_str
-        };
-        hex::decode(bytecode_hex)
-            .into_diagnostic()
-            .wrap_err("Failed to decode router bytecode from hex")?
-    };
-
+    let router_bytecode = load_runtime_bytecode(ROUTER_BYTECODE_JSON, "router")?;
     let executor_bytecode = load_executor_bytecode(protocol_system)?;
+    let fee_calculator_bytecode =
+        load_runtime_bytecode(FEE_CALCULATOR_BYTECODE_JSON, "fee calculator")?;
 
-    Ok(RouterOverwritesData { router_bytecode, executor_bytecode, fee_calculator_bytecode: vec![] })
+    Ok(RouterOverwritesData { router_bytecode, executor_bytecode, fee_calculator_bytecode })
 }
