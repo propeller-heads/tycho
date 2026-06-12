@@ -256,16 +256,14 @@ async fn fetch_range_tx_inputs(
 
 // ─── Conversion helpers ──────────────────────────────────────────────────────
 
-/// Normalise a component_id from substreams output to lower-case hex without "0x".
-fn normalise_component_id(raw: &[u8]) -> String {
-    let s = std::str::from_utf8(raw).unwrap_or_default();
-    s.trim_start_matches("0x")
-        .to_lowercase()
-}
-
-fn normalise_str_id(s: &str) -> String {
-    s.trim_start_matches("0x")
-        .to_lowercase()
+/// Decodes a substreams balance-change component_id (the UTF-8 bytes of the id string).
+///
+/// Ids are kept exactly as the substreams emit them ("0x"-prefixed lower-case hex) — the
+/// processor must produce byte-identical ids, so the comparison asserts the format too.
+fn component_id_from_bytes(raw: &[u8]) -> String {
+    std::str::from_utf8(raw)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Converts a substreams proto `BlockChanges` to a `BlockAggregatedChanges`, aggregating
@@ -292,7 +290,7 @@ fn substreams_proto_to_model(
 
     for tx_changes in &proto.changes {
         for comp in &tx_changes.component_changes {
-            let id = normalise_str_id(&comp.id);
+            let id = comp.id.clone();
             new_protocol_components
                 .entry(id.clone())
                 .or_insert_with(|| ProtocolComponent {
@@ -307,7 +305,7 @@ fn substreams_proto_to_model(
         }
 
         for ec in &tx_changes.entity_changes {
-            let cid = normalise_str_id(&ec.component_id);
+            let cid = ec.component_id.clone();
             let delta = state_deltas
                 .entry(cid.clone())
                 .or_insert_with(|| ProtocolComponentStateDelta {
@@ -335,7 +333,7 @@ fn substreams_proto_to_model(
         }
 
         for bc in &tx_changes.balance_changes {
-            let cid = normalise_component_id(&bc.component_id);
+            let cid = component_id_from_bytes(&bc.component_id);
             let token = Bytes::from(bc.token.clone());
             let balance = Bytes::from(bc.balance.clone());
             let balance_float = BigInt::from_bytes_be(Sign::Plus, balance.as_ref())
@@ -394,7 +392,7 @@ fn substreams_to_comparable_block(
 
     for tx_changes in &proto.changes {
         for ec in &tx_changes.entity_changes {
-            let cid = normalise_str_id(&ec.component_id);
+            let cid = ec.component_id.clone();
             if !known_pools.contains(&cid) {
                 continue;
             }
@@ -411,7 +409,7 @@ fn substreams_to_comparable_block(
         }
 
         for bc in &tx_changes.balance_changes {
-            let cid = normalise_component_id(&bc.component_id);
+            let cid = component_id_from_bytes(&bc.component_id);
             if !known_pools.contains(&cid) {
                 continue;
             }

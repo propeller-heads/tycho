@@ -52,8 +52,10 @@ consumed by an event must reflect all prior Initialize/Swap-type events in the s
   **clamped to zero** (mirrors `tycho_substreams::balances`)
 - Tick net-liquidity change type, checked in this order: Creation if the previous running
   value was missing **or zero**; Deletion if the new value is zero; else Update
-- Component ids: registry keys and emitted ids are lowercase hex without `0x`
-  (`hex::encode`); trim `0x` before `hex::decode` of ids from `apply_block`
+- Component ids: normalize incoming ids at the `apply_block` boundary (trim `0x`,
+  lowercase) for internal registry keys, but emit ids from `generate_deltas` exactly as
+  the substreams do (`0x`-prefixed lower-case hex) so they match decoder state keys —
+  copy `normalize_id`/`emitted_id` from uniswap-v4's `processor.rs`
 - `apply_block` must reconstruct ALL state the transforms consume (e.g. uniswap-v4 tracks
   `sqrt_price_x96` because ModifyLiquidity balance math depends on it)
 - Pools created in block N are invisible to `generate_deltas` until `apply_block(N)` ran —
