@@ -49,11 +49,20 @@ Covers all Rust crates under `crates/` and `protocols/testing/`. Triggered on PR
 - **`lint`** — `cargo fmt` and `cargo clippy` on nightly toolchain.
 - **`test-unit`** — Unit tests excluding anything requiring a database, RPC, or anvil.
 - **`test-db`** — Tests requiring a live Postgres instance. Spins up a custom Postgres Docker image (built from `docker/postgres.Dockerfile`) with pg_cron. Runs parallel and serial DB test suites separately.
-- **`test-evm`** — Tests requiring a live Ethereum RPC. Uses `ETH_RPC_URL` secret.
 - **`doc`** — `cargo doc` with broken intra-doc link detection.
 - **`check-no-default-features`** — Ensures the workspace compiles without default features enabled.
 
 All jobs use `cargo nextest` and `--locked` to enforce lockfile consistency.
+
+---
+
+### `ci-rust-evm.yaml` — Rust EVM CI
+
+Runs the Rust tests that need live RPC access. Uses `pull_request_target` so approved fork PR workflow runs can access `ETH_RPC_URL`.
+
+**Jobs:**
+
+- **`test-evm`** — EVM and fork tests requiring a live Ethereum RPC.
 
 ---
 
