@@ -10277,6 +10277,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniswap-v4-core"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "dotenv",
+ "ethabi 18.0.0",
+ "getrandom 0.2.16",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "prost 0.11.9",
+ "rstest 0.24.0",
+ "substreams",
+ "substreams-ethereum",
+ "tokio",
+ "tokio-stream",
+ "tycho-common",
+ "tycho-indexer",
+ "tycho-substreams 0.8.0",
+]
+
+[[package]]
 name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
