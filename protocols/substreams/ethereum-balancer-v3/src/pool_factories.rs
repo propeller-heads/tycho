@@ -1,4 +1,4 @@
-use crate::{abi, modules::VAULT_ADDRESS};
+use crate::{abi, constants::VAULT_ADDRESS, utils::address_id};
 use abi::{
     reclamm_pool_factory_contract::{
         events::PoolCreated as ReClammPoolCreated, functions::Create as ReClammPoolCreate,
@@ -23,7 +23,7 @@ use tycho_substreams::{
 // Token config: (token_address, rate, rate_provider_address, is_exempt_from_yield_fees)
 type TokenConfig = Vec<(Vec<u8>, substreams::scalar::BigInt, Vec<u8>, bool)>;
 
-pub fn collect_rate_providers(tokens: &TokenConfig) -> Vec<Vec<u8>> {
+fn collect_rate_providers(tokens: &TokenConfig) -> Vec<Vec<u8>> {
     tokens
         .iter()
         .filter(|token| token.1 == BigInt::from(1)) // WITH_RATE == 1
@@ -72,13 +72,7 @@ pub fn address_map(
                 attributes.push(("rate_providers", &rate_providers_bytes));
             }
 
-            Some(
-                ProtocolComponent::new(&format!("0x{}", hex::encode(&pool)))
-                    .with_contracts(&[pool, VAULT_ADDRESS.to_vec()])
-                    .with_tokens(tokens.as_slice())
-                    .with_attributes(&attributes)
-                    .as_swap_type("balancer_v3_pool", ImplementationType::Vm),
-            )
+            Some(create_pool_component(&pool, tokens.as_slice(), &attributes))
         }
         hex!("B9d01CA61b9C181dA1051bFDd28e1097e920AB14") => {
             let StablePoolCreate { tokens: token_config, swap_fee_percentage, .. } =
@@ -109,13 +103,7 @@ pub fn address_map(
                 attributes.push(("rate_providers", &rate_providers_bytes));
             }
 
-            Some(
-                ProtocolComponent::new(&format!("0x{}", hex::encode(&pool)))
-                    .with_contracts(&[pool.to_owned(), VAULT_ADDRESS.to_vec()])
-                    .with_tokens(tokens.as_slice())
-                    .with_attributes(&attributes)
-                    .as_swap_type("balancer_v3_pool", ImplementationType::Vm),
-            )
+            Some(create_pool_component(&pool, tokens.as_slice(), &attributes))
         }
         hex!("3ccD78683efFffdDc1A16f5553C896ac6D3ab7FF") => {
             let ReClammPoolCreate {
@@ -161,14 +149,20 @@ pub fn address_map(
                 attributes.push(("rate_providers", &rate_providers_bytes));
             }
 
-            Some(
-                ProtocolComponent::new(&format!("0x{}", hex::encode(&pool)))
-                    .with_contracts(&[pool, VAULT_ADDRESS.to_vec()])
-                    .with_tokens(tokens.as_slice())
-                    .with_attributes(&attributes)
-                    .as_swap_type("balancer_v3_pool", ImplementationType::Vm),
-            )
+            Some(create_pool_component(&pool, tokens.as_slice(), &attributes))
         }
         _ => None,
     }
+}
+
+fn create_pool_component(
+    pool: &[u8],
+    tokens: &[Vec<u8>],
+    attributes: &[(&str, &[u8])],
+) -> ProtocolComponent {
+    ProtocolComponent::new(&address_id(pool))
+        .with_contracts(&[pool.to_vec(), VAULT_ADDRESS.to_vec()])
+        .with_tokens(tokens)
+        .with_attributes(attributes)
+        .as_swap_type("balancer_v3_pool", ImplementationType::Vm)
 }

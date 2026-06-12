@@ -66,7 +66,7 @@ where
         let selector = "price(bytes32,address,address,uint256[])";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None)?
+            .call(selector, args, overwrites, Some(Address::ZERO), U256::from(0u64), None)?
             .return_value;
 
         let decoded: PriceReturn = PriceReturn::abi_decode(&res).map_err(|e| {

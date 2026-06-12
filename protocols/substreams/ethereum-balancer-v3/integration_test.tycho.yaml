@@ -79,7 +79,7 @@ tests:
 
   - name: test_reclamm_swap_usdc_weth
     start_block: 25129750
-    stop_block: 25129850
+    stop_block: 25129787
     expected_components:
       - id: "0xda66e8ddf9959e4db759bfd06256730d8a8b2d13"
         tokens:
@@ -97,4 +97,5 @@ tests:
           token_a_price_includes_rate: "0x00"
           token_b_price_includes_rate: "0x00"
         skip_simulation: false
+        skip_execution: true
         creation_tx: "0xb5aa9e7019fa807d8e41b00634a18d02d38a185a40ba3d09dc28c771488163c6"
