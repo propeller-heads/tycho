@@ -61,7 +61,7 @@ pub fn store_components(
             tx_pc
                 .components
                 .into_iter()
-                .for_each(|pc| store.set_if_not_exists(0, format!("pool:{0}", &pc.id), &pc))
+                .for_each(|pc| store.set_if_not_exists(0, format!("pool:{}", pc.id), &pc))
         });
 }
 
@@ -299,8 +299,8 @@ pub fn map_protocol_changes(
         |addr| {
             components_store
                 .get_last(pool_store_key(addr))
-                .is_some() ||
-                addr.eq(VAULT_ADDRESS)
+                .is_some()
+                || addr.eq(VAULT_ADDRESS)
         },
         &mut transaction_changes,
     );
