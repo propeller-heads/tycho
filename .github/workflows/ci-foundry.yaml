@@ -1,7 +1,7 @@
 name: Foundry CI
 
 on:
-  pull_request:
+  pull_request_target:
     # No path filter here. Path filtering is handled inside the `changes` job so
     # that the skip-* jobs below always execute on every PR. GitHub branch
     # protection requires a check to appear (pass or skip) on each commit — if
@@ -35,6 +35,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
         id: filter
@@ -48,7 +49,7 @@ jobs:
   forge-test:
     name: Forge build, fmt, test (${{ matrix.project.path }})
     needs: [changes]
-    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -72,6 +73,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           submodules: false
       - name: Checkout submodules (shallow, project-scoped)
@@ -99,7 +101,7 @@ jobs:
   forge-test-skip-execution:
     name: Forge build, fmt, test (crates/tycho-execution/contracts)
     needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
@@ -107,7 +109,7 @@ jobs:
   forge-test-skip-adapter:
     name: Forge build, fmt, test (protocols/adapter-integration/evm)
     needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
@@ -115,7 +117,7 @@ jobs:
   forge-test-skip-token-proxy:
     name: Forge build, fmt, test (crates/tycho-simulation/token-proxy-contracts)
     needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
@@ -123,13 +125,14 @@ jobs:
   slither:
     name: Slither static analysis
     needs: [changes]
-    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request'
+    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           submodules: false
       - name: Checkout submodules (shallow)
@@ -147,7 +150,7 @@ jobs:
   slither-skip:
     name: Slither static analysis
     needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping Slither"
