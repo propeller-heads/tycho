@@ -1,0 +1,657 @@
+{
+  "fetch_block": 25250881,
+  "rpc_chain": "ethereum",
+  "pools": [
+    {
+      "file": "USDC_WETH_500.json",
+      "pool_address": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+      "pair": "USDC/WETH",
+      "fee_tier": 500,
+      "tick_count": 500
+    },
+    {
+      "file": "USDC_WETH_100.json",
+      "pool_address": "0xe0554a476a092703abdb3ef35c80e0d76d32939f",
+      "pair": "USDC/WETH",
+      "fee_tier": 100,
+      "tick_count": 264
+    },
+    {
+      "file": "WETH_USDT_100.json",
+      "pool_address": "0xc7bbec68d12a0d1830360f8ec58fa599ba1b0e9b",
+      "pair": "WETH/USDT",
+      "fee_tier": 100,
+      "tick_count": 118
+    },
+    {
+      "file": "WBTC_WETH_500.json",
+      "pool_address": "0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+      "pair": "WBTC/WETH",
+      "fee_tier": 500,
+      "tick_count": 378
+    },
+    {
+      "file": "WETH_USDT_3000.json",
+      "pool_address": "0x4e68ccd3e89f51c3074ca5072bbac773960dfa36",
+      "pair": "WETH/USDT",
+      "fee_tier": 3000,
+      "tick_count": 452
+    },
+    {
+      "file": "WBTC_USDT_500.json",
+      "pool_address": "0x56534741cd8b152df6d48adf7ac51f75169a83b2",
+      "pair": "WBTC/USDT",
+      "fee_tier": 500,
+      "tick_count": 342
+    },
+    {
+      "file": "WETH_USDT_500.json",
+      "pool_address": "0x11b815efb8f581194ae79006d24e0d814b7697f6",
+      "pair": "WETH/USDT",
+      "fee_tier": 500,
+      "tick_count": 339
+    },
+    {
+      "file": "USDC_USDT_100.json",
+      "pool_address": "0x3416cf6c708da44db2624d63ea0aaef7113527c6",
+      "pair": "USDC/USDT",
+      "fee_tier": 100,
+      "tick_count": 131
+    },
+    {
+      "file": "XAUt_USDT_500.json",
+      "pool_address": "0x6546055f46e866a4b9a4a13e81273e3152bae5da",
+      "pair": "XAUt/USDT",
+      "fee_tier": 500,
+      "tick_count": 408
+    },
+    {
+      "file": "RLUSD_USDC_100.json",
+      "pool_address": "0xcc6d2f26d363836f85a42d249e145ec0320d3e55",
+      "pair": "RLUSD/USDC",
+      "fee_tier": 100,
+      "tick_count": 21
+    },
+    {
+      "file": "wM_USDC_100.json",
+      "pool_address": "0x970a7749ecaa4394c8b2bf5f2471f41fd6b79288",
+      "pair": "wM/USDC",
+      "fee_tier": 100,
+      "tick_count": 5
+    },
+    {
+      "file": "WBTC_cbBTC_100.json",
+      "pool_address": "0xe8f7c89c5efa061e340f2d2f206ec78fd8f7e124",
+      "pair": "WBTC/cbBTC",
+      "fee_tier": 100,
+      "tick_count": 76
+    },
+    {
+      "file": "AUSD_USDC_100.json",
+      "pool_address": "0xbafead7c60ea473758ed6c6021505e8bbd7e8e5d",
+      "pair": "AUSD/USDC",
+      "fee_tier": 100,
+      "tick_count": 6
+    },
+    {
+      "file": "wstETH_WETH_100.json",
+      "pool_address": "0x109830a1aaad605bbf02a9dfa7b0b92ec2fb7daa",
+      "pair": "wstETH/WETH",
+      "fee_tier": 100,
+      "tick_count": 108
+    },
+    {
+      "file": "WETH_weETH_100.json",
+      "pool_address": "0x202a6012894ae5c288ea824cbc8a9bfb26a49b93",
+      "pair": "WETH/weETH",
+      "fee_tier": 100,
+      "tick_count": 19
+    },
+    {
+      "file": "PAXG_XAUt_100.json",
+      "pool_address": "0xc756bba710d45647715079ce50aa16aab36ded42",
+      "pair": "PAXG/XAUt",
+      "fee_tier": 100,
+      "tick_count": 137
+    },
+    {
+      "file": "PAXG_USDC_500.json",
+      "pool_address": "0x5ae13baaef0620fdae1d355495dc51a17adb4082",
+      "pair": "PAXG/USDC",
+      "fee_tier": 500,
+      "tick_count": 332
+    },
+    {
+      "file": "USDe_USDC_100.json",
+      "pool_address": "0xe6d7ebb9f1a9519dc06d557e03c522d53520e76a",
+      "pair": "USDe/USDC",
+      "fee_tier": 100,
+      "tick_count": 47
+    },
+    {
+      "file": "tBTC_WBTC_100.json",
+      "pool_address": "0x73a38006d23517a1d383c88929b2014f8835b38b",
+      "pair": "tBTC/WBTC",
+      "fee_tier": 100,
+      "tick_count": 44
+    },
+    {
+      "file": "DAI_USDT_100.json",
+      "pool_address": "0x48da0965ab2d2cbf1c17c09cfb5cbe67ad5b1406",
+      "pair": "DAI/USDT",
+      "fee_tier": 100,
+      "tick_count": 48
+    },
+    {
+      "file": "LINK_WETH_3000.json",
+      "pool_address": "0xa6cc3c2531fdaa6ae1a3ca84c2855806728693e8",
+      "pair": "LINK/WETH",
+      "fee_tier": 3000,
+      "tick_count": 395
+    },
+    {
+      "file": "PRIME_USDC_100.json",
+      "pool_address": "0x5b70a1582135bd04e39ca94a6a56fc3a828e3115",
+      "pair": "PRIME/USDC",
+      "fee_tier": 100,
+      "tick_count": 6
+    },
+    {
+      "file": "USDC_WETH_3000.json",
+      "pool_address": "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8",
+      "pair": "USDC/WETH",
+      "fee_tier": 3000,
+      "tick_count": 500
+    },
+    {
+      "file": "USDC_ASTEROID_3000.json",
+      "pool_address": "0x168e9b3c9ddfb013a4130276f9c500a3ce50fde7",
+      "pair": "USDC/ASTEROID",
+      "fee_tier": 3000,
+      "tick_count": 58
+    },
+    {
+      "file": "WBTC_USDC_3000.json",
+      "pool_address": "0x99ac8ca7087fa4a2a1fb6357269965a2014abc35",
+      "pair": "WBTC/USDC",
+      "fee_tier": 3000,
+      "tick_count": 313
+    },
+    {
+      "file": "EURC_USDC_500.json",
+      "pool_address": "0x95dbb3c7546f22bce375900abfdd64a4e5bd73d6",
+      "pair": "EURC/USDC",
+      "fee_tier": 500,
+      "tick_count": 124
+    },
+    {
+      "file": "WBTC_USDT_3000.json",
+      "pool_address": "0x9db9e0e53058c89e5b94e29621a205198648425b",
+      "pair": "WBTC/USDT",
+      "fee_tier": 3000,
+      "tick_count": 243
+    },
+    {
+      "file": "DAI_USDC_100.json",
+      "pool_address": "0x5777d92f208679db4b9778590fa3cab3ac9e2168",
+      "pair": "DAI/USDC",
+      "fee_tier": 100,
+      "tick_count": 46
+    },
+    {
+      "file": "USDC_SEI_3000.json",
+      "pool_address": "0xf8e349d1d827a6edf17ee673664cfad4ca78c533",
+      "pair": "USDC/SEI",
+      "fee_tier": 3000,
+      "tick_count": 51
+    },
+    {
+      "file": "LDO_WETH_500.json",
+      "pool_address": "0xcfecc1c9f3cb6190cb1ff7f65a130bfbe5107d38",
+      "pair": "LDO/WETH",
+      "fee_tier": 500,
+      "tick_count": 11
+    },
+    {
+      "file": "WETH_ASTEROID_10000.json",
+      "pool_address": "0x53e3d506f468c4bc30cc8caa21eb7e56c2fa2d55",
+      "pair": "WETH/ASTEROID",
+      "fee_tier": 10000,
+      "tick_count": 38
+    },
+    {
+      "file": "USDC_VUE_100.json",
+      "pool_address": "0x158191be4aeb82fd6b9ee9f99fc37417280a9b33",
+      "pair": "USDC/VUE",
+      "fee_tier": 100,
+      "tick_count": 2
+    },
+    {
+      "file": "WBTC_LBTC_100.json",
+      "pool_address": "0x0b599ebf4e05af48b56d38e2dde520570c366460",
+      "pair": "WBTC/LBTC",
+      "fee_tier": 100,
+      "tick_count": 38
+    },
+    {
+      "file": "WBTC_WETH_100.json",
+      "pool_address": "0xe6ff8b9a37b0fab776134636d9981aa778c4e718",
+      "pair": "WBTC/WETH",
+      "fee_tier": 100,
+      "tick_count": 46
+    },
+    {
+      "file": "GLO_USDT_10000.json",
+      "pool_address": "0xa2bd1a142ff49131b8cc70a332bda0125018c324",
+      "pair": "GLO/USDT",
+      "fee_tier": 10000,
+      "tick_count": 2
+    },
+    {
+      "file": "WBTC_kBTC_100.json",
+      "pool_address": "0x64869c8d4b7c5a6a2f102c9fceea7f7de846b672",
+      "pair": "WBTC/kBTC",
+      "fee_tier": 100,
+      "tick_count": 10
+    },
+    {
+      "file": "WETH_weETH_500.json",
+      "pool_address": "0x7a415b19932c0105c82fdb6b720bb01b0cc2cae3",
+      "pair": "WETH/weETH",
+      "fee_tier": 500,
+      "tick_count": 15
+    },
+    {
+      "file": "GLO_USDC_10000.json",
+      "pool_address": "0xb89f65d6c7d33a35da7c01934e310a6f40e18a1f",
+      "pair": "GLO/USDC",
+      "fee_tier": 10000,
+      "tick_count": 2
+    },
+    {
+      "file": "WBTC_USDC_500.json",
+      "pool_address": "0x9a772018fbd77fcd2d25657e5c547baff3fd7d16",
+      "pair": "WBTC/USDC",
+      "fee_tier": 500,
+      "tick_count": 123
+    },
+    {
+      "file": "DAI_WETH_500.json",
+      "pool_address": "0x60594a405d53811d3bc4766596efd80fd545a270",
+      "pair": "DAI/WETH",
+      "fee_tier": 500,
+      "tick_count": 130
+    },
+    {
+      "file": "CRD_USDT_100.json",
+      "pool_address": "0x19e129c09646e22a87fe24c243a15ab893f97859",
+      "pair": "CRD/USDT",
+      "fee_tier": 100,
+      "tick_count": 2
+    },
+    {
+      "file": "ZAMA_USDT_500.json",
+      "pool_address": "0x4d68b530920d26c3b01c99fecc19e21011b72bbd",
+      "pair": "ZAMA/USDT",
+      "fee_tier": 500,
+      "tick_count": 8
+    },
+    {
+      "file": "USDC_cbBTC_3000.json",
+      "pool_address": "0x4548280ac92507c9092a511c7396cbea78fa9e49",
+      "pair": "USDC/cbBTC",
+      "fee_tier": 3000,
+      "tick_count": 59
+    },
+    {
+      "file": "UNI_WETH_3000.json",
+      "pool_address": "0x1d42064fc4beb5f8aaf85f4617ae8b3b5b8bd801",
+      "pair": "UNI/WETH",
+      "fee_tier": 3000,
+      "tick_count": 331
+    },
+    {
+      "file": "SERV_WETH_10000.json",
+      "pool_address": "0x9c7ed68b00dc4f45243b07ce71a54a86e8f8fcbb",
+      "pair": "SERV/WETH",
+      "fee_tier": 10000,
+      "tick_count": 16
+    },
+    {
+      "file": "sato_WETH_10000.json",
+      "pool_address": "0xe21a3956a7e73c607bf1519cfc6154f46e622cf6",
+      "pair": "sato/WETH",
+      "fee_tier": 10000,
+      "tick_count": 85
+    },
+    {
+      "file": "wTAO_WETH_10000.json",
+      "pool_address": "0x433a00819c771b33fa7223a5b3499b24fbcd1bbc",
+      "pair": "wTAO/WETH",
+      "fee_tier": 10000,
+      "tick_count": 95
+    },
+    {
+      "file": "WETH_ONDO_3000.json",
+      "pool_address": "0x7b1e5d984a43ee732de195628d20d05cfabc3cc7",
+      "pair": "WETH/ONDO",
+      "fee_tier": 3000,
+      "tick_count": 286
+    },
+    {
+      "file": "USDM_USDT_500.json",
+      "pool_address": "0x4a25dbdf9629b1782c3e2c7de3bdce41f1c7f801",
+      "pair": "USDM/USDT",
+      "fee_tier": 500,
+      "tick_count": 2
+    },
+    {
+      "file": "WETH_ASTEROID_3000.json",
+      "pool_address": "0x0e55db2d5e07cc6b067f352ba35a6beafb33c282",
+      "pair": "WETH/ASTEROID",
+      "fee_tier": 3000,
+      "tick_count": 33
+    },
+    {
+      "file": "LINK_WETH_500.json",
+      "pool_address": "0x5d4f3c6fa16908609bac31ff148bd002aa6b8c83",
+      "pair": "LINK/WETH",
+      "fee_tier": 500,
+      "tick_count": 95
+    },
+    {
+      "file": "msUSD_USDC_100.json",
+      "pool_address": "0x536a65800167b07b9e5cabb9088b17df3f827fb2",
+      "pair": "msUSD/USDC",
+      "fee_tier": 100,
+      "tick_count": 37
+    },
+    {
+      "file": "WBTC_WETH_3000.json",
+      "pool_address": "0xcbcdf9626bc03e24f779434178a73a0b4bad62ed",
+      "pair": "WBTC/WETH",
+      "fee_tier": 3000,
+      "tick_count": 355
+    },
+    {
+      "file": "AAVE_WETH_3000.json",
+      "pool_address": "0x5ab53ee1d50eef2c1dd3d5402789cd27bb52c1bb",
+      "pair": "AAVE/WETH",
+      "fee_tier": 3000,
+      "tick_count": 367
+    },
+    {
+      "file": "WETH_RAIL_10000.json",
+      "pool_address": "0x2837809fd68e4a4104af76bbec5b622b6146b2cb",
+      "pair": "WETH/RAIL",
+      "fee_tier": 10000,
+      "tick_count": 43
+    },
+    {
+      "file": "UNI_WBTC_3000.json",
+      "pool_address": "0x8f0cb37cdff37e004e0088f563e5fe39e05ccc5b",
+      "pair": "UNI/WBTC",
+      "fee_tier": 3000,
+      "tick_count": 56
+    },
+    {
+      "file": "TRAC_WETH_3000.json",
+      "pool_address": "0xb1914469141ebb6e244e75cee3f35d43bf6b85e5",
+      "pair": "TRAC/WETH",
+      "fee_tier": 3000,
+      "tick_count": 28
+    },
+    {
+      "file": "EURC_EURCV_100.json",
+      "pool_address": "0x6d074d42d50399581cc3d303b8024000a7897290",
+      "pair": "EURC/EURCV",
+      "fee_tier": 100,
+      "tick_count": 4
+    },
+    {
+      "file": "ADI_USDC_500.json",
+      "pool_address": "0x41a561b972039a9ccb975a4c17b84c9f95099e15",
+      "pair": "ADI/USDC",
+      "fee_tier": 500,
+      "tick_count": 5
+    },
+    {
+      "file": "tBTC_cbBTC_100.json",
+      "pool_address": "0x17156ad656a9bf1ce4c917b702ae366d48c37428",
+      "pair": "tBTC/cbBTC",
+      "fee_tier": 100,
+      "tick_count": 4
+    },
+    {
+      "file": "USD1_USDT_100.json",
+      "pool_address": "0x185a1ff695d30a22c19f44c6b41e2d6d1c8c1f11",
+      "pair": "USD1/USDT",
+      "fee_tier": 100,
+      "tick_count": 11
+    },
+    {
+      "file": "USD1_USDC_100.json",
+      "pool_address": "0x1e1dfff79d95725aaafd6b47af4fbc28d859ce28",
+      "pair": "USD1/USDC",
+      "fee_tier": 100,
+      "tick_count": 23
+    },
+    {
+      "file": "rETH_WETH_100.json",
+      "pool_address": "0x553e9c493678d8606d6a5ba284643db2110df823",
+      "pair": "rETH/WETH",
+      "fee_tier": 100,
+      "tick_count": 21
+    },
+    {
+      "file": "PYUSD_USDC_100.json",
+      "pool_address": "0x13394005c1012e708fce1eb974f1130fdc73a5ce",
+      "pair": "PYUSD/USDC",
+      "fee_tier": 100,
+      "tick_count": 16
+    },
+    {
+      "file": "USD0_USDC_100.json",
+      "pool_address": "0x4e665157291dbcb25152ebb01061e4012f58add2",
+      "pair": "USD0/USDC",
+      "fee_tier": 100,
+      "tick_count": 4
+    },
+    {
+      "file": "ICP_WETH_500.json",
+      "pool_address": "0x4068038ab5490063a3ead93b3712ed082e62bd59",
+      "pair": "ICP/WETH",
+      "fee_tier": 500,
+      "tick_count": 7
+    },
+    {
+      "file": "wTAO_USDC_10000.json",
+      "pool_address": "0xf763bb342eb3d23c02ccb86312422fe0c1c17e94",
+      "pair": "wTAO/USDC",
+      "fee_tier": 10000,
+      "tick_count": 85
+    },
+    {
+      "file": "AAVE_WETH_500.json",
+      "pool_address": "0x4674abc5796e1334b5075326b39b748bee9eaa34",
+      "pair": "AAVE/WETH",
+      "fee_tier": 500,
+      "tick_count": 18
+    },
+    {
+      "file": "ENA_WETH_3000.json",
+      "pool_address": "0xc3db44adc1fcdfd5671f555236eae49f4a8eea18",
+      "pair": "ENA/WETH",
+      "fee_tier": 3000,
+      "tick_count": 206
+    },
+    {
+      "file": "AAVE_USDT_3000.json",
+      "pool_address": "0x4d1ad4a9e61bc0e5529d64f38199ccfca56f5a42",
+      "pair": "AAVE/USDT",
+      "fee_tier": 3000,
+      "tick_count": 40
+    },
+    {
+      "file": "EURCV_USDC_500.json",
+      "pool_address": "0x1f195908f2ee7a6fc15d33b30c82298f568e805c",
+      "pair": "EURCV/USDC",
+      "fee_tier": 500,
+      "tick_count": 2
+    },
+    {
+      "file": "SHFL_USDC_3000.json",
+      "pool_address": "0xd0a4c8a1a14530c7c9efdad0ba37e8cf4204d230",
+      "pair": "SHFL/USDC",
+      "fee_tier": 3000,
+      "tick_count": 4
+    },
+    {
+      "file": "MNT_USDe_3000.json",
+      "pool_address": "0x9aac67deef711d438ad711ae495b8cb43a6ee1a8",
+      "pair": "MNT/USDe",
+      "fee_tier": 3000,
+      "tick_count": 6
+    },
+    {
+      "file": "LIT_WETH_10000.json",
+      "pool_address": "0xcd4abaf39691dcbb877165b7ba6d04ec6436c22a",
+      "pair": "LIT/WETH",
+      "fee_tier": 10000,
+      "tick_count": 29
+    },
+    {
+      "file": "PYUSD_USDT_100.json",
+      "pool_address": "0xc30c8b862f7de6ba5d7eaeb113c78ec6b5ded04b",
+      "pair": "PYUSD/USDT",
+      "fee_tier": 100,
+      "tick_count": 6
+    },
+    {
+      "file": "USDC_USDG_100.json",
+      "pool_address": "0x817097ff6bfbf3e76097fc481e17be155cfd9bd4",
+      "pair": "USDC/USDG",
+      "fee_tier": 100,
+      "tick_count": 5
+    },
+    {
+      "file": "SKY_WETH_3000.json",
+      "pool_address": "0x764510ab1d39cf300e7abe8f5b8977d18f290628",
+      "pair": "SKY/WETH",
+      "fee_tier": 3000,
+      "tick_count": 49
+    },
+    {
+      "file": "wTAO_WETH_3000.json",
+      "pool_address": "0x2982d3295a0e1a99e6e88ece0e93ffdfc5c761ae",
+      "pair": "wTAO/WETH",
+      "fee_tier": 3000,
+      "tick_count": 117
+    },
+    {
+      "file": "USDC_SWEAT_3000.json",
+      "pool_address": "0xaae63df9a86f9a682507c922db38fae5e777a606",
+      "pair": "USDC/SWEAT",
+      "fee_tier": 3000,
+      "tick_count": 4
+    },
+    {
+      "file": "RNDR_WETH_3000.json",
+      "pool_address": "0x4628a0a564debfc8798eb55db5c91f2200486c24",
+      "pair": "RNDR/WETH",
+      "fee_tier": 3000,
+      "tick_count": 96
+    },
+    {
+      "file": "LCAI_WETH_3000.json",
+      "pool_address": "0x0d047a370611437a1b8e6c2a95ea36f69fdda3be",
+      "pair": "LCAI/WETH",
+      "fee_tier": 3000,
+      "tick_count": 6
+    },
+    {
+      "file": "USDT_USDf_100.json",
+      "pool_address": "0xc275a7390966e4bcbf331b837cd7316c4a3efa83",
+      "pair": "USDT/USDf",
+      "fee_tier": 100,
+      "tick_count": 40
+    },
+    {
+      "file": "WETH_mETH_500.json",
+      "pool_address": "0x04708077eca6bb527a5bbbd6358ffb043a9c1c14",
+      "pair": "WETH/mETH",
+      "fee_tier": 500,
+      "tick_count": 5
+    },
+    {
+      "file": "sUSDe_USDT_100.json",
+      "pool_address": "0x7eb59373d63627be64b42406b108b602174b4ccc",
+      "pair": "sUSDe/USDT",
+      "fee_tier": 100,
+      "tick_count": 14
+    },
+    {
+      "file": "TONCOIN_WETH_10000.json",
+      "pool_address": "0x4b62fa30fea125e43780dc425c2be5acb4ba743b",
+      "pair": "TONCOIN/WETH",
+      "fee_tier": 10000,
+      "tick_count": 56
+    },
+    {
+      "file": "ENA_sENA_500.json",
+      "pool_address": "0x6bbb0289dfda178555dd1ce4aaa8f1bdbfb1bcde",
+      "pair": "ENA/sENA",
+      "fee_tier": 500,
+      "tick_count": 17
+    },
+    {
+      "file": "PAXG_XAUt_500.json",
+      "pool_address": "0xed7ef9a9a05a48858a507c080def0405ad1eaa3e",
+      "pair": "PAXG/XAUt",
+      "fee_tier": 500,
+      "tick_count": 47
+    },
+    {
+      "file": "NEAR_USDC_3000.json",
+      "pool_address": "0xee8aaa362a75fbf8e0a38a50ddc27f38551e16ea",
+      "pair": "NEAR/USDC",
+      "fee_tier": 3000,
+      "tick_count": 19
+    },
+    {
+      "file": "TEL_WETH_3000.json",
+      "pool_address": "0xf359492d26764481002ed88bd2acae83ca50b5c9",
+      "pair": "TEL/WETH",
+      "fee_tier": 3000,
+      "tick_count": 87
+    },
+    {
+      "file": "QNT_WETH_3000.json",
+      "pool_address": "0x24ee2c6b9597f035088cda8575e9d5e15a84b9df",
+      "pair": "QNT/WETH",
+      "fee_tier": 3000,
+      "tick_count": 92
+    },
+    {
+      "file": "ZCHF_USDT_100.json",
+      "pool_address": "0x8e4318e2cb1ae291254b187001a59a1f8ac78cef",
+      "pair": "ZCHF/USDT",
+      "fee_tier": 100,
+      "tick_count": 8
+    },
+    {
+      "file": "ACN_USDT_100.json",
+      "pool_address": "0x51840edc34be8f0a391cbb180a213facf22ccd74",
+      "pair": "ACN/USDT",
+      "fee_tier": 100,
+      "tick_count": 6
+    },
+    {
+      "file": "WBTC_LBTC_500.json",
+      "pool_address": "0x87428a53e14d24ab19c6ca4939b4df93b8996ca9",
+      "pair": "WBTC/LBTC",
+      "fee_tier": 500,
+      "tick_count": 14
+    }
+  ]
+}

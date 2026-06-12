@@ -102,6 +102,14 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+rand = { workspace = true }
+rand_chacha = "0.3.1"
+
+[[bench]]
+name = "clmm_swap"
+harness = false
+required-features = ["evm"]
 
 [features]
 default = ["evm", "rfq"]
