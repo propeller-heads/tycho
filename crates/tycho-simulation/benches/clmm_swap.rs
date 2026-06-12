@@ -32,7 +32,7 @@ use std::{hint::black_box, time::Duration};
 
 use common::{
     load_pools, representative_subset, stratified_amounts, validate_pool_direction, BenchQuoter,
-    Direction, LoadedPool, ReferenceQuoter, SEED, STRATA,
+    Direction, LoadedPool, QuoteOnlyQuoter, ReferenceQuoter, SEED, STRATA,
 };
 use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BatchSize, BenchmarkGroup, BenchmarkId,
@@ -272,6 +272,7 @@ fn primary(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(1500));
     group.throughput(Throughput::Elements(N_CALLS));
     bench_swap_1k::<ReferenceQuoter>(&mut group, &pools);
+    bench_swap_1k::<QuoteOnlyQuoter>(&mut group, &pools);
     group.finish();
 }
 
@@ -344,6 +345,7 @@ fn size_grid(c: &mut Criterion) {
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_millis(1000));
     bench_size_grid::<ReferenceQuoter>(&mut group, &pools, &subset);
+    bench_size_grid::<QuoteOnlyQuoter>(&mut group, &pools, &subset);
     group.finish();
 }
 

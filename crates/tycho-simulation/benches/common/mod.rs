@@ -62,8 +62,9 @@ impl Direction {
 pub enum QuoteOutput {
     /// Full or partial swap. `new_state` is the post-swap pool state; partial
     /// fills (the `Ticks exceeded` path) also land here, carrying their partial
-    /// result and resulting state.
-    Filled { amount: BigUint, gas: BigUint, new_state: Box<dyn ProtocolSim>, partial: bool },
+    /// result and resulting state. Quote-only engines that never build a
+    /// post-swap state fill `None`.
+    Filled { amount: BigUint, gas: BigUint, new_state: Option<Box<dyn ProtocolSim>>, partial: bool },
     /// An early bail-out that did almost no work (no-liquidity, fatal, overflow,
     /// price-limit). Carries a classification string for equality diffing.
     Bailed { class: String },
@@ -87,7 +88,14 @@ impl QuoteOutput {
             (
                 QuoteOutput::Filled { amount: a1, gas: g1, new_state: s1, partial: p1 },
                 QuoteOutput::Filled { amount: a2, gas: g2, new_state: s2, partial: p2 },
-            ) => a1 == a2 && g1 == g2 && p1 == p2 && s1.eq(s2.as_ref()),
+            ) => {
+                let states_match = match (s1, s2) {
+                    (Some(s1), Some(s2)) => s1.eq(s2.as_ref()),
+                    (None, None) => true,
+                    _ => false,
+                };
+                a1 == a2 && g1 == g2 && p1 == p2 && states_match
+            }
             (QuoteOutput::Bailed { class: c1 }, QuoteOutput::Bailed { class: c2 }) => c1 == c2,
             _ => false,
         }
@@ -105,13 +113,13 @@ fn classify(
         Ok(out) => QuoteOutput::Filled {
             amount: out.amount,
             gas: out.gas,
-            new_state: out.new_state,
+            new_state: Some(out.new_state),
             partial: false,
         },
         Err(SimulationError::InvalidInput(_, Some(partial))) => QuoteOutput::Filled {
             amount: partial.amount,
             gas: partial.gas,
-            new_state: partial.new_state,
+            new_state: Some(partial.new_state),
             partial: true,
         },
         Err(SimulationError::InvalidInput(msg, None)) => {
@@ -176,6 +184,61 @@ impl BenchQuoter for ReferenceQuoter {
             self.state
                 .get_amount_out(amount.clone(), token_in, token_out),
         )
+    }
+}
+
+/// Zero-alloc quote path: wraps `UniswapV3State::get_amount_out_quote`, which returns
+/// `(amount, gas)` without constructing a post-swap state. Fills carry no `new_state`,
+/// so this quoter is for performance groups only, not replay-equality.
+pub struct QuoteOnlyQuoter {
+    state: UniswapV3State,
+    token0: Token,
+    token1: Token,
+}
+
+impl BenchQuoter for QuoteOnlyQuoter {
+    fn name() -> &'static str {
+        "quote_only"
+    }
+
+    fn prepare(pool: &LoadedPool) -> Self {
+        QuoteOnlyQuoter {
+            state: pool.state.clone(),
+            token0: pool.token0.clone(),
+            token1: pool.token1.clone(),
+        }
+    }
+
+    fn warm(&mut self, _direction: Direction) {}
+
+    fn quote(&self, amount: &BigUint, direction: Direction) -> QuoteOutput {
+        let (token_in, token_out) = match direction {
+            Direction::ZeroForOne => (&self.token0, &self.token1),
+            Direction::OneForZero => (&self.token1, &self.token0),
+        };
+        match self
+            .state
+            .get_amount_out_quote(amount.clone(), token_in, token_out)
+        {
+            Ok((amount, gas)) => {
+                QuoteOutput::Filled { amount, gas, new_state: None, partial: false }
+            }
+            Err(SimulationError::InvalidInput(_, Some(partial))) => QuoteOutput::Filled {
+                amount: partial.amount,
+                gas: partial.gas,
+                new_state: Some(partial.new_state),
+                partial: true,
+            },
+            Err(SimulationError::InvalidInput(msg, None)) => {
+                QuoteOutput::Bailed { class: format!("invalid:{msg}") }
+            }
+            Err(SimulationError::RecoverableError(msg)) => {
+                QuoteOutput::Bailed { class: format!("recoverable:{msg}") }
+            }
+            Err(SimulationError::FatalError(msg)) => {
+                QuoteOutput::Bailed { class: format!("fatal:{msg}") }
+            }
+        }
     }
 }
 
