@@ -33,7 +33,8 @@ use super::{
 use crate::{
     evm::protocol::ekubo_v3::{
         addresses::{
-            BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS, TWAMM_ADDRESS,
+            BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
+            TWAMM_ADDRESS_NEW, TWAMM_ADDRESS_OLD,
         },
         pool::{
             boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
@@ -288,7 +289,7 @@ pub fn extension_type(extension: Address) -> Option<ExtensionType> {
         ExtensionType::NoSwapCallPoints
     } else if extension == ORACLE_ADDRESS {
         ExtensionType::Oracle
-    } else if extension == TWAMM_ADDRESS {
+    } else if [TWAMM_ADDRESS_NEW, TWAMM_ADDRESS_OLD].contains(&extension) {
         ExtensionType::Twamm
     } else if extension == MEV_CAPTURE_ADDRESS {
         ExtensionType::MevCapture

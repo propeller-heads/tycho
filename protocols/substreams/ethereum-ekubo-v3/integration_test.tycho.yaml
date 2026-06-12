@@ -36,7 +36,7 @@ tests:
           pool_type_config: "0x00000000"
         creation_tx: "0x8b60940efaf9fa8580a7b20b05682b5530634451becb465091c77093eb8a75e3"
 
-  - name: twamm
+  - name: twamm_old
     start_block: 24169200
     stop_block: 24169235
     expected_components:
@@ -100,3 +100,19 @@ tests:
           fee: "0x028f5c28f5c28f5c"
           pool_type_config: "0x80004d5a"
         creation_tx: "0xf394db915b31b99b2f8683e2d888e9406ea98211b8f87e4fb22079dbc0110afd"
+
+  - name: twamm_new
+    start_block: 24995117
+    stop_block: 24995117
+    expected_components:
+      - id: "0xedeaae143f233a3a5d4fabd3166afa0e2108fe7741489237274b939ca17fcff8"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x4c46e830bb56ce22735d5d8fc9cb90309317d0f"
+        static_attributes:
+          token0: "0x0000000000000000000000000000000000000000"
+          token1: "0x4c46e830bb56ce22735d5d8fc9cb90309317d0f"
+          extension: "0xd47f1B1eDCfEaBb08F6eBd8FC337c27E636C75BA"
+          fee: "0x00c49ba5e353f7ce"
+          pool_type_config: "0x00000000"
+        creation_tx: "0x79c97f33b095982d051667b3335533cacb7915a491308907bd2205a5f4dc1216"
