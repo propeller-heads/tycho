@@ -1,0 +1,25 @@
+[package]
+name = "base-lunarbase"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "base_lunarbase"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+hex = "0.4.3"
+num-bigint = "0.4.6"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = { path = "../crates/tycho-substreams" }
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+
+[build-dependencies]
+anyhow = "1.0.95"
+serde_json = "1.0.138"
+substreams-ethereum = "0.9.9"

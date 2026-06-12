@@ -40,6 +40,7 @@ tracing = { workspace = true }
 dotenv = { workspace = true }
 enum_delegate = "0.2.0"
 itertools = { workspace = true }
+lunarbase-pmm-math = "0.2.4"
 num-traits = { workspace = true }
 
 # Enum utilities

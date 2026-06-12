@@ -1,0 +1,53 @@
+specVersion: v0.1.0
+package:
+  name: "base_lunarbase"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/base-lunarbase"
+  description: "LunarBase Prop AMM indexing on Base with Flashblocks-compatible block changes"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_lunarbase.wasm
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 46240924
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_protocol_components
+    kind: store
+    initialBlock: 46240924
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 46240924
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_protocol_components: "pool=0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&bootstrap_block=46240924"
+  map_protocol_changes: "pool=0x0000eFC4ec03a7c47D3a38A9Be7Ff1d52dD01b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&bootstrap_block=46240924"
+
+network: base

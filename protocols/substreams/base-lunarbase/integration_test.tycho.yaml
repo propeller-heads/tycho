@@ -1,0 +1,19 @@
+substreams_yaml_path: ./base-lunarbase.yaml
+protocol_system: "lunarbase"
+protocol_type_names:
+  - "lunarbase_pool"
+module_name: "map_protocol_changes"
+# LunarBase component balances are tradable reserves emitted by Sync.
+# The pool contract can also hold pending deposits and fee buckets, so raw
+# on-chain token balances intentionally do not always equal reserves.
+skip_balance_check: true
+tests:
+  - name: test_latest_implementation_live_state
+    start_block: 46240924
+    stop_block: 46242605
+    expected_components:
+      - id: "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        creation_tx: "0x9cde54a572dba097f5660b51436e0fa96c6e8bf80e5a5865cc9af56edfdb51ef"
