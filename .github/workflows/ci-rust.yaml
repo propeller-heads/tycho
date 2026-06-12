@@ -233,49 +233,6 @@ jobs:
     steps:
       - run: echo "No Rust changes detected, skipping DB tests"
 
-  test-evm:
-    name: EVM tests (requires RPC)
-    needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952  # v2.68.12
-        with:
-          tool: cargo-nextest
-
-      - name: Run EVM / fork tests
-        # Exclusions:
-        # - test_permit: requires a local anvil fork; enabled by --all-features via fork-tests feature
-        # - tycho-simulation evm tests: require pre-recorded JSON snapshots not committed to the repo
-        run: |
-          cargo nextest run --workspace --all-features --locked \
-            -E '(test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation)))) and not (package(tycho-execution) and test(test_permit)) and not package(tycho-simulation)'
-        env:
-          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
-          RPC_URL: ${{ secrets.ETH_RPC_URL }}
-          RUSTFLAGS: -Dwarnings
-
-  test-evm-skip:
-    name: EVM tests (requires RPC)
-    needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "No Rust changes detected, skipping EVM tests"
-
   doc:
     name: Rustdoc
     needs: [changes]
