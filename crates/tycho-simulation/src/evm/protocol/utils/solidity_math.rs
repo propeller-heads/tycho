@@ -2,17 +2,23 @@ use alloy::primitives::{U256, U512};
 use ruint::aliases::U384;
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::protocol::safe_math::{div_mod_u512, safe_div_u512, safe_mul_u512};
+use crate::evm::protocol::safe_math::{div_mod_u512, safe_div_u512};
 
 pub(crate) fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
     let a_big = U512::from(a);
     let b_big = U512::from(b);
-    let product = safe_mul_u512(a_big, b_big)?;
+    // SAFETY: a, b < 2^256, so a*b <= (2^256 - 1)^2 < 2^512 -- the widened product cannot wrap.
+    let product = a_big.wrapping_mul(b_big);
+    debug_assert!(
+        b_big.is_zero() || product / b_big == a_big,
+        "U256 x U256 product wrapped past 2^512"
+    );
     let (mut result, rest) = div_mod_u512(product, U512::from(denom))?;
     if !rest.is_zero() {
-        result = result
-            .checked_add(U512::from(1u64))
-            .ok_or_else(|| SimulationError::FatalError("Overflow when rounding up".to_string()))?;
+        // SAFETY: rest > 0 implies result * denom = product - rest, so result < product <
+        // U512::MAX and the rounding increment cannot wrap.
+        debug_assert!(result < U512::MAX, "rounding increment would wrap");
+        result = result.wrapping_add(U512::from(1u64));
     }
     truncate_to_u256(result)
 }
@@ -20,22 +26,32 @@ pub(crate) fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256,
 pub(crate) fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
     let a_big = U512::from(a);
     let b_big = U512::from(b);
-    let product = safe_mul_u512(a_big, b_big)?;
+    // SAFETY: a, b < 2^256, so a*b <= (2^256 - 1)^2 < 2^512 -- the widened product cannot wrap.
+    let product = a_big.wrapping_mul(b_big);
+    debug_assert!(
+        b_big.is_zero() || product / b_big == a_big,
+        "U256 x U256 product wrapped past 2^512"
+    );
     let result = safe_div_u512(product, U512::from(denom))?;
     truncate_to_u256(result)
 }
 
 /// `floor(a*b/denom)`, bit-exact with [`mul_div`], on a 384-bit (6-limb) intermediate rather
-/// than the 512-bit (8-limb) path. Every Uniswap swap-math product is provably < 2^384 (the
-/// tightest site, `(liquidity << 96) * delta_sqrt`, is 2^224 * 2^160 = 2^384, strictly less), so
-/// `checked_mul` on `U384` succeeds for in-domain inputs and divides ~25% fewer limbs. Any product
-/// outside that domain makes `checked_mul` return `None`, and we defer to the exact [`mul_div`] —
-/// so the result is always exact and never silently wraps (the fallback is never taken in
-/// practice but is free insurance that survives release builds, unlike a `debug_assert`).
+/// than the 512-bit (8-limb) path.
+///
+/// SAFETY: every caller is in the Uniswap swap-math domain, where the product is provably
+/// < 2^384: the tightest site multiplies `(liquidity << 96) <= (2^128 - 1) * 2^96 < 2^224` by a
+/// sqrt-price delta `< MAX_SQRT_RATIO < 2^160`, and `2^224 * 2^160 = 2^384` with strict
+/// inequality on the first factor (research/clmm-perf REPORT §5: proven per call site and
+/// panic-instrumented across a 100-pool mainnet corpus with zero overflow hits). `wrapping_mul`
+/// therefore never wraps in-domain, and skips `checked_mul`'s double-width overflow detection.
 pub(crate) fn mul_div_384(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
-    let Some(product) = U384::from(a).checked_mul(U384::from(b)) else {
-        return mul_div(a, b, denom);
-    };
+    let (a_wide, b_wide) = (U384::from(a), U384::from(b));
+    let product = a_wide.wrapping_mul(b_wide);
+    debug_assert!(
+        b_wide.is_zero() || product / b_wide == a_wide,
+        "mul_div_384 called outside the proven < 2^384 product domain"
+    );
     let denom = U384::from(denom);
     if denom.is_zero() {
         return Err(SimulationError::FatalError("Division by zero".to_string()));
@@ -44,15 +60,19 @@ pub(crate) fn mul_div_384(a: U256, b: U256, denom: U256) -> Result<U256, Simulat
 }
 
 /// `ceil(a*b/denom)`, bit-exact with [`mul_div_rounding_up`], on a 384-bit intermediate. See
-/// [`mul_div_384`] for the width bound and the exact-`U512` fallback.
+/// [`mul_div_384`] for the in-domain width bound.
 pub(crate) fn mul_div_rounding_up_384(
     a: U256,
     b: U256,
     denom: U256,
 ) -> Result<U256, SimulationError> {
-    let Some(product) = U384::from(a).checked_mul(U384::from(b)) else {
-        return mul_div_rounding_up(a, b, denom);
-    };
+    let (a_wide, b_wide) = (U384::from(a), U384::from(b));
+    // SAFETY: same < 2^384 product bound as `mul_div_384`.
+    let product = a_wide.wrapping_mul(b_wide);
+    debug_assert!(
+        b_wide.is_zero() || product / b_wide == a_wide,
+        "mul_div_rounding_up_384 called outside the proven < 2^384 product domain"
+    );
     let denom = U384::from(denom);
     if denom.is_zero() {
         return Err(SimulationError::FatalError("Division by zero".to_string()));
