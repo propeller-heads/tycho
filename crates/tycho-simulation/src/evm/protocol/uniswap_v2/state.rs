@@ -20,7 +20,7 @@ use tycho_common::{
 use crate::evm::protocol::{
     cpmm::protocol::{
         cpmm_delta_transition, cpmm_fee, cpmm_get_amount_out, cpmm_get_limits, cpmm_spot_price,
-        cpmm_swap_to_price, ProtocolFee,
+        cpmm_swap_to_price, cpmm_swap_to_trade_price, ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::{biguint_to_u256, u256_to_biguint},
@@ -137,11 +137,34 @@ impl ProtocolSim for UniswapV2State {
                     self.get_amount_out(amount_in.clone(), params.token_in(), params.token_out())?;
                 Ok(PoolSwap::new(amount_in, res.amount, res.new_state, None))
             }
-            SwapConstraint::TradeLimitPrice { .. } => Err(SimulationError::InvalidInput(
-                "UniswapV2State does not support TradeLimitPrice constraint in query_pool_swap"
-                    .to_string(),
-                None,
-            )),
+            SwapConstraint::TradeLimitPrice {
+                limit,
+                tolerance: _,
+                min_amount_in: _,
+                max_amount_in: _,
+            } => {
+                let zero2one = params.token_in().address < params.token_out().address;
+                let (reserve_in, reserve_out) = if zero2one {
+                    (self.reserve0, self.reserve1)
+                } else {
+                    (self.reserve1, self.reserve0)
+                };
+
+                let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
+                let amount_in = cpmm_swap_to_trade_price(reserve_in, reserve_out, limit, fee)?;
+                if amount_in.is_zero() {
+                    return Ok(PoolSwap::new(
+                        BigUint::ZERO,
+                        BigUint::ZERO,
+                        Box::new(self.clone()),
+                        None,
+                    ));
+                }
+
+                let res =
+                    self.get_amount_out(amount_in.clone(), params.token_in(), params.token_out())?;
+                Ok(PoolSwap::new(amount_in, res.amount, res.new_state, None))
+            }
         }
     }
 
@@ -803,6 +826,304 @@ mod tests {
         assert!(
             actual_result.amount >= swap_below_limit.amount_out().clone(),
             "Actual swap should give at least predicted amount"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_basic() {
+        let state = UniswapV2State::new(
+            U256::from_str("6770398782322527849696614").unwrap(),
+            U256::from_str("5124813135806900540214").unwrap(),
+        );
+        let token_in = token_0();
+        let token_out = token_1();
+
+        // Limit 1% below the effective spot price (FEE_NUMERATOR·reserve1)/(FEE_PRECISION·reserve0)
+        let limit_num = u256_to_biguint(state.reserve1 * FEE_NUMERATOR) * BigUint::from(99u32);
+        let limit_den = u256_to_biguint(state.reserve0 * FEE_PRECISION) * BigUint::from(100u32);
+
+        let pool_swap = state
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                token_in.clone(),
+                token_out.clone(),
+                SwapConstraint::TradeLimitPrice {
+                    limit: Price::new(limit_num.clone(), limit_den.clone()),
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .unwrap();
+
+        let amount_in = pool_swap.amount_in().clone();
+        let amount_out = pool_swap.amount_out().clone();
+        assert!(amount_in > BigUint::ZERO, "Amount in should be non-zero");
+        assert!(amount_out > BigUint::ZERO, "Amount out should be non-zero");
+
+        // Achieved trade price >= limit, allowing 1 wei of output rounding:
+        // (amount_out + 1)·limit_den >= amount_in·limit_num
+        assert!(
+            (&amount_out + BigUint::one()) * &limit_den >= &amount_in * &limit_num,
+            "Achieved trade price is below the limit"
+        );
+
+        // Maximality: 1% more input must violate the limit
+        let larger_in = &amount_in * BigUint::from(101u32) / BigUint::from(100u32);
+        let larger_out = state
+            .get_amount_out(larger_in.clone(), &token_in, &token_out)
+            .unwrap()
+            .amount;
+        assert!(
+            larger_out * &limit_den < larger_in * &limit_num,
+            "A larger trade should violate the limit"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_one_for_zero() {
+        let state = UniswapV2State::new(
+            U256::from_str("6770398782322527849696614").unwrap(),
+            U256::from_str("5124813135806900540214").unwrap(),
+        );
+        let token_in = token_1();
+        let token_out = token_0();
+
+        // Direction token_1 -> token_0 sells against (reserve1, reserve0)
+        let limit_num = u256_to_biguint(state.reserve0 * FEE_NUMERATOR) * BigUint::from(99u32);
+        let limit_den = u256_to_biguint(state.reserve1 * FEE_PRECISION) * BigUint::from(100u32);
+
+        let pool_swap = state
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                token_in,
+                token_out,
+                SwapConstraint::TradeLimitPrice {
+                    limit: Price::new(limit_num.clone(), limit_den.clone()),
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .unwrap();
+
+        let amount_in = pool_swap.amount_in().clone();
+        let amount_out = pool_swap.amount_out().clone();
+        assert!(amount_in > BigUint::ZERO, "Amount in should be non-zero");
+        assert!(
+            (&amount_out + BigUint::one()) * &limit_den >= &amount_in * &limit_num,
+            "Achieved trade price is below the limit"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_unreachable() {
+        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+
+        // Limit 1% above the effective spot price is unreachable
+        let limit_num = u256_to_biguint(state.reserve1 * FEE_NUMERATOR) * BigUint::from(101u32);
+        let limit_den = u256_to_biguint(state.reserve0 * FEE_PRECISION) * BigUint::from(100u32);
+
+        let result = state.query_pool_swap(&QueryPoolSwapParams::new(
+            token_0(),
+            token_1(),
+            SwapConstraint::TradeLimitPrice {
+                limit: Price::new(limit_num, limit_den),
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        ));
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, _))));
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_at_effective_spot() {
+        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+
+        let limit_num = u256_to_biguint(state.reserve1 * FEE_NUMERATOR);
+        let limit_den = u256_to_biguint(state.reserve0 * FEE_PRECISION);
+
+        let pool_swap = state
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                token_0(),
+                token_1(),
+                SwapConstraint::TradeLimitPrice {
+                    limit: Price::new(limit_num, limit_den),
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(*pool_swap.amount_in(), BigUint::ZERO);
+        assert_eq!(*pool_swap.amount_out(), BigUint::ZERO);
+    }
+    // ── Tests ported from tycho-simulation PR 494 ────────────────────────────────────────
+    fn pr494_token_0() -> Token {
+        Token::new(
+            &Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+            "T0",
+            18,
+            0,
+            &[Some(1000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn pr494_token_1() -> Token {
+        Token::new(
+            &Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap(),
+            "T1",
+            18,
+            0,
+            &[Some(1000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn pr494_trade_limit_params(
+        token_in: Token,
+        token_out: Token,
+        limit: Price,
+    ) -> QueryPoolSwapParams {
+        QueryPoolSwapParams::new(
+            token_in,
+            token_out,
+            SwapConstraint::TradeLimitPrice {
+                limit,
+                tolerance: 0.01,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        )
+    }
+
+    #[test]
+    fn pr494_swap_to_trade_price_basic() {
+        let state = UniswapV2State::new(U256::from(1_000_000_000u64), U256::from(1_000_000_000u64));
+        let (token0, token1) = (pr494_token_0(), pr494_token_1());
+
+        // Limit 2/3 is worse than the spot (~1.0): reachable
+        let limit_price = Price::new(BigUint::from(2u32), BigUint::from(3u32));
+
+        let swap = state
+            .query_pool_swap(&pr494_trade_limit_params(token0.clone(), token1.clone(), limit_price))
+            .expect("Trade limit price swap should succeed");
+
+        assert!(swap.amount_in() > &BigUint::ZERO, "Should swap non-zero amount");
+        assert!(swap.amount_out() > &BigUint::ZERO, "Should receive non-zero amount");
+
+        let actual_out = state
+            .get_amount_out(swap.amount_in().clone(), &token0, &token1)
+            .expect("get_amount_out failed");
+        let amount_in_f64 = swap
+            .amount_in()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_out_f64 = actual_out
+            .amount
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_trade_price = actual_out_f64 / amount_in_f64;
+        let limit_f64 = 2.0 / 3.0;
+        let relative_diff = (actual_trade_price - limit_f64).abs() / limit_f64;
+        assert!(
+            relative_diff <= 0.01,
+            "Trade price {actual_trade_price} should be within 1% of limit {limit_f64}, \
+             diff: {relative_diff}"
+        );
+    }
+
+    #[test]
+    fn pr494_swap_to_trade_price_unreachable() {
+        let state = UniswapV2State::new(U256::from(1_000_000_000u64), U256::from(1_000_000_000u64));
+
+        // Limit 1.5 is better than the spot (~1.0): unreachable
+        let limit_price = Price::new(BigUint::from(3u32), BigUint::from(2u32));
+
+        let result = state.query_pool_swap(&pr494_trade_limit_params(
+            pr494_token_0(),
+            pr494_token_1(),
+            limit_price,
+        ));
+        assert!(result.is_err(), "Should return error when limit is better than spot");
+    }
+
+    #[test]
+    fn pr494_swap_to_trade_price_verifies_trade_price() {
+        let state = UniswapV2State::new(U256::from(1_000_000_000u64), U256::from(1_000_000_000u64));
+        let (token0, token1) = (pr494_token_0(), pr494_token_1());
+
+        let limit_price = Price::new(BigUint::from(2u32), BigUint::from(3u32));
+
+        let swap = state
+            .query_pool_swap(&pr494_trade_limit_params(token0.clone(), token1.clone(), limit_price))
+            .expect("Swap should succeed");
+
+        let actual_amount_out = state
+            .get_amount_out(swap.amount_in().clone(), &token0, &token1)
+            .expect("get_amount_out failed");
+
+        let amount_in_f64 = swap
+            .amount_in()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_amount_out_f64 = actual_amount_out
+            .amount
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_trade_price = actual_amount_out_f64 / amount_in_f64;
+        let limit_f64 = 2.0 / 3.0;
+
+        let relative_diff = (actual_trade_price - limit_f64).abs() / limit_f64;
+        assert!(
+            relative_diff <= 0.00001,
+            "Actual trade price {actual_trade_price} should match limit {limit_f64} within \
+             0.001%, relative diff: {relative_diff}"
+        );
+    }
+
+    #[test]
+    fn pr494_query_pool_swap_trade_limit_price_one_for_zero() {
+        let state = UniswapV2State::new(U256::from(1_000_000_000u64), U256::from(1_000_000_000u64));
+        let (token0, token1) = (pr494_token_0(), pr494_token_1());
+
+        let limit_price = Price::new(BigUint::from(2u32), BigUint::from(3u32));
+
+        let swap = state
+            .query_pool_swap(&pr494_trade_limit_params(token1.clone(), token0.clone(), limit_price))
+            .expect("One_for_zero TradeLimitPrice swap should succeed");
+
+        assert!(swap.amount_in() > &BigUint::ZERO, "amount_in should be non-zero");
+        assert!(swap.amount_out() > &BigUint::ZERO, "amount_out should be non-zero");
+
+        let actual_out = state
+            .get_amount_out(swap.amount_in().clone(), &token1, &token0)
+            .expect("get_amount_out failed");
+        let amount_in_f64 = swap
+            .amount_in()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_out_f64 = actual_out
+            .amount
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_trade_price = actual_out_f64 / amount_in_f64;
+        let limit_f64 = 2.0 / 3.0;
+        let relative_diff = (actual_trade_price - limit_f64).abs() / limit_f64;
+        assert!(
+            relative_diff <= 0.01,
+            "Trade price {actual_trade_price} should be within 1% of limit {limit_f64}, \
+             diff: {relative_diff}"
         );
     }
 }

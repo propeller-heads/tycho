@@ -39,6 +39,19 @@ pub(crate) struct SwapResults {
     pub(crate) gas_used: U256,
 }
 
+/// Result of solving a swap for a target trade price on a CLMM pool.
+///
+/// Carries the swap amounts and the pool state fields needed to construct the post-swap
+/// state.
+#[derive(Debug)]
+pub(crate) struct SwapToTradePriceResult {
+    pub(crate) amount_in: U256,
+    pub(crate) amount_out: U256,
+    pub(crate) sqrt_price: U256,
+    pub(crate) liquidity: u128,
+    pub(crate) tick: i32,
+}
+
 /// Converts a slice of bytes representing a big-endian 24-bit signed integer
 /// to a 32-bit signed integer.
 ///

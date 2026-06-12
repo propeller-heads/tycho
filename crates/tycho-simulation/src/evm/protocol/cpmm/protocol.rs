@@ -277,3 +277,267 @@ pub fn cpmm_swap_to_price(
 
     Ok((u256_to_biguint(amount_in), u256_to_biguint(implied_amount_out)))
 }
+
+/// Calculates the maximum amount of token_in that can be swapped while keeping the trade
+/// price (`amount_out / amount_in`) at or above a limit price.
+///
+/// # Algorithm
+///
+/// The CPMM output formula with fees is:
+/// ```text,no_run
+/// amount_out = (amount_in × fee_num × reserve_out)
+///              / (reserve_in × fee_precision + amount_in × fee_num)
+/// ```
+///
+/// The trade price as a function of the input amount `x` is therefore:
+/// ```text,no_run
+/// P(x) = amount_out / x = fee_num × reserve_out / (fee_precision × reserve_in + x × fee_num)
+/// ```
+///
+/// `P` is strictly decreasing in `x`; its supremum `P(0) = fee_num × reserve_out /
+/// (fee_precision × reserve_in)` is the fee-adjusted spot price ("effective spot").
+///
+/// Both the trade price and the limit use the `token_out/token_in` convention with raw
+/// atomic-unit amounts, so no flip or decimal adjustment is needed. Setting
+/// `P(x) = limit_num / limit_den` and solving for `x`:
+/// ```text,no_run
+/// x = (limit_den × fee_num × reserve_out − limit_num × fee_precision × reserve_in)
+///     / (limit_num × fee_num)
+/// ```
+///
+/// The division rounds down, which keeps the achieved trade price at or above the limit.
+///
+/// # Arguments
+/// * `reserve_in` - Reserve of the token being sold into the pool.
+/// * `reserve_out` - Reserve of the token being bought from the pool.
+/// * `limit_price` - The minimum acceptable trade price as `token_out/token_in`.
+/// * `fee` - The protocol fee as numerator and precision.
+///
+/// # Returns
+/// * `Ok(amount_in)` - The maximum input amount; zero when the limit equals the effective spot.
+///
+/// # Errors
+/// * `SimulationError::InvalidInput` - The limit is above the effective spot (unreachable).
+/// * `SimulationError::FatalError` - Zero reserves or arithmetic overflow.
+pub fn cpmm_swap_to_trade_price(
+    reserve_in: U256,
+    reserve_out: U256,
+    limit_price: &Price,
+    fee: ProtocolFee,
+) -> Result<BigUint, SimulationError> {
+    if reserve_in == U256::ZERO || reserve_out == U256::ZERO {
+        return Err(SimulationError::FatalError("Reserves cannot be zero".to_string()));
+    }
+
+    let limit_num = biguint_to_u256(&limit_price.numerator);
+    let limit_den = biguint_to_u256(&limit_price.denominator);
+    if limit_num == U256::ZERO || limit_den == U256::ZERO {
+        return Err(SimulationError::InvalidInput(
+            "Limit price numerator and denominator must be non-zero".to_string(),
+            None,
+        ));
+    }
+
+    // Reachability: limit_num/limit_den <= fee_num·reserve_out / (fee_precision·reserve_in),
+    // cross-multiplied in U512. Note: unlike cpmm_swap_to_price, the limit is compared
+    // unflipped because both sides already use the token_out/token_in convention.
+    let limit_side = U512::from(limit_num)
+        .checked_mul(U512::from(fee.precision))
+        .and_then(|x| x.checked_mul(U512::from(reserve_in)))
+        .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
+    let spot_side = U512::from(limit_den)
+        .checked_mul(U512::from(fee.numerator))
+        .and_then(|x| x.checked_mul(U512::from(reserve_out)))
+        .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
+
+    if limit_side > spot_side {
+        return Err(SimulationError::InvalidInput(
+            "Limit trade price is unreachable (above effective spot price)".to_string(),
+            None,
+        ));
+    }
+
+    let amount_in_u512 =
+        (spot_side - limit_side) / (U512::from(limit_num) * U512::from(fee.numerator));
+
+    let limbs = amount_in_u512.as_limbs();
+    if limbs[4..].iter().any(|limb| *limb != 0) {
+        return Err(SimulationError::FatalError("Amount in overflows U256".to_string()));
+    }
+    let amount_in = U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]);
+
+    Ok(u256_to_biguint(amount_in))
+}
+
+// Tests ported from tycho-simulation PR 494 and adapted to this implementation's API
+// (cpmm_swap_to_trade_price returns amount_in only; equality at the effective spot yields
+// a zero swap instead of an error, matching cpmm_swap_to_price).
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use tycho_common::{
+        hex_bytes::Bytes,
+        models::{token::Token, Chain},
+    };
+
+    use super::*;
+    use crate::evm::protocol::safe_math::safe_sub_u256;
+
+    fn token_0() -> Token {
+        Token::new(
+            &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+            "T0",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn token_1() -> Token {
+        Token::new(
+            &Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
+            "T1",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn fee_30bps() -> ProtocolFee {
+        ProtocolFee::new(U256::from(9970u32), U256::from(10000u32))
+    }
+
+    #[test]
+    fn test_swap_to_price_verifies_spot_price() {
+        let reserve0 = U256::from(2_000_000u64);
+        let reserve1 = U256::from(1_000_000u64);
+
+        let target_price = Price::new(BigUint::from(2u32), BigUint::from(5u32));
+
+        let (amount_in, _implied_amount_out) =
+            cpmm_swap_to_price(reserve0, reserve1, &target_price, fee_30bps()).unwrap();
+
+        let amount_in_u256 = biguint_to_u256(&amount_in);
+        let actual_amount_out =
+            cpmm_get_amount_out(amount_in_u256, reserve0, reserve1, fee_30bps()).unwrap();
+
+        let new_reserve0 = safe_add_u256(reserve0, amount_in_u256).unwrap();
+        let new_reserve1 = safe_sub_u256(reserve1, actual_amount_out).unwrap();
+
+        let new_spot_price =
+            cpmm_spot_price(&token_0(), &token_1(), new_reserve0, new_reserve1).unwrap();
+
+        let target_price_f64 = 2.0 / 5.0;
+        let relative_diff = (new_spot_price - target_price_f64).abs() / target_price_f64;
+        assert!(
+            relative_diff < 0.01,
+            "New spot price {new_spot_price} should be close to target {target_price_f64}, \
+             relative diff: {relative_diff}"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_price_unreachable() {
+        let reserve0 = U256::from(2_000_000u64);
+        let reserve1 = U256::from(1_000_000u64);
+
+        // Target 3.0 is above the current spot (~0.5): unreachable
+        let target_price = Price::new(BigUint::from(3u32), BigUint::from(1u32));
+
+        let result = cpmm_swap_to_price(reserve0, reserve1, &target_price, fee_30bps());
+
+        assert!(
+            matches!(result, Err(SimulationError::InvalidInput(ref msg, _)) if msg.contains("unreachable")),
+            "Expected InvalidInput error about unreachable price, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_price_at_spot() {
+        let reserve0 = U256::from(2_000_000u64);
+        let reserve1 = U256::from(1_000_000u64);
+
+        // Target exactly at the fee-adjusted spot price: 997/2000
+        let target_price = Price::new(BigUint::from(997u32), BigUint::from(2000u32));
+
+        let (amount_in, implied_amount_out) =
+            cpmm_swap_to_price(reserve0, reserve1, &target_price, fee_30bps()).unwrap();
+
+        assert!(amount_in.is_zero(), "amount_in should be zero at the spot price: {amount_in}");
+        assert!(
+            implied_amount_out.is_zero(),
+            "implied_amount_out should be zero at the spot price: {implied_amount_out}"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_verifies_trade_price() {
+        let reserve0 = U256::from(2_000_000u64);
+        let reserve1 = U256::from(1_000_000u64);
+
+        // Target trade price 0.4 is worse than the current spot (~0.5): achievable
+        let target_price = Price::new(BigUint::from(2u32), BigUint::from(5u32));
+
+        let amount_in =
+            cpmm_swap_to_trade_price(reserve0, reserve1, &target_price, fee_30bps()).unwrap();
+
+        let amount_in_u256 = biguint_to_u256(&amount_in);
+        let actual_amount_out =
+            cpmm_get_amount_out(amount_in_u256, reserve0, reserve1, fee_30bps()).unwrap();
+
+        let amount_in_f64 = amount_in
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_amount_out_f64 = actual_amount_out
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let actual_trade_price = actual_amount_out_f64 / amount_in_f64;
+
+        let target_price_f64 = 2.0 / 5.0;
+        let relative_diff = (actual_trade_price - target_price_f64).abs() / target_price_f64;
+        assert!(
+            relative_diff < 0.001,
+            "Actual trade price {actual_trade_price} should be close to target \
+             {target_price_f64}, relative diff: {relative_diff}"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_unreachable() {
+        let reserve0 = U256::from(2_000_000u64);
+        let reserve1 = U256::from(1_000_000u64);
+
+        // Target trade price 0.6 is better than the spot (~0.5): unreachable
+        let target_price = Price::new(BigUint::from(3u32), BigUint::from(5u32));
+
+        let result = cpmm_swap_to_trade_price(reserve0, reserve1, &target_price, fee_30bps());
+
+        assert!(result.is_err(), "Should return error when the limit is better than the spot");
+    }
+
+    #[test]
+    fn test_swap_to_trade_price_at_spot() {
+        let reserve0 = U256::from(2_000_000u64);
+        let reserve1 = U256::from(1_000_000u64);
+
+        // Target exactly at the effective spot: 1_000_000·9970 / (2_000_000·10000)
+        let spot_price_num = U256::from(1_000_000u64) * U256::from(9970u32);
+        let spot_price_den = U256::from(2_000_000u64) * U256::from(10000u32);
+        let target_price =
+            Price::new(u256_to_biguint(spot_price_num), u256_to_biguint(spot_price_den));
+
+        // Divergence from PR 494 (which errors here): equality yields a zero swap, matching
+        // the cpmm_swap_to_price behavior at the spot price
+        let amount_in =
+            cpmm_swap_to_trade_price(reserve0, reserve1, &target_price, fee_30bps()).unwrap();
+
+        assert!(amount_in.is_zero(), "amount_in should be zero at the effective spot price");
+    }
+}
