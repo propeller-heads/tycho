@@ -19,6 +19,12 @@ The TychoRouter V3 supports a dual fee system:
 * **Client fees**: Construct a `ClientFeeParams` with your `client_fee_bps`, `client_fee_receiver`, and signature, and pass it when calling the router. Fees are credited to the receiver's vault balance.
 * **Router fees**: Configured on-chain by Propeller Heads. These are mandatory and cannot be bypassed through encoding. The router can charge a fee on the output amount and/or a percentage of the client fee. Currently set to 10 bps (0.1%) on the swap output and 20% share of the client fee (the integrator keeps 80%).
 
+#### Custom router fee rates
+
+Propeller Heads can configure a custom router fee rate for specific client addresses. If your address has a negotiated rate, the router applies it automatically — no extra configuration required on your end.
+
+When you call the router without a `clientFeeReceiver` (i.e., passing all-zero `ClientFeeParams`), the router looks up custom fee rates using `tx.origin`. This means your negotiated rate applies to any transaction you originate, even when no client signature is present. When a `clientFeeReceiver` is provided, the signed address takes precedence over `tx.origin` for the fee lookup.
+
 ### Client Contribution (Slippage Subsidy)
 
 If the swap output falls below `min_amount_out`, the router covers the shortfall from the client's vault balance, up to `max_client_contribution`. Beyond that, the transaction reverts. This lets clients absorb minor slippage without a separate transaction — but set `max_client_contribution` conservatively, as a high value can expose you to MEV attacks.

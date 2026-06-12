@@ -50,7 +50,9 @@ Entry (e.g. splitSwap)
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes amountIn, client, clientFeeBps], getEffectiveRouterFeeOnOutput).
+calculateFee [takes amountIn, client, clientFeeBps], getEffectiveRouterFeeOnOutput,
+getEffectiveRouterFeeOnOutputScaled [takes client → uint32],
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
 
 ### Vault (`Vault.sol`)
 
@@ -96,6 +98,17 @@ Three fee layers, deducted from swap output:
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
 removed to revert to defaults.
+
+**Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied), all fee
+read methods (`calculateFee`, `getEffectiveRouterFeeOnOutput`, `getEffectiveRouterFeeOnOutputScaled`) fall back to
+`tx.origin` for the custom fee lookup. This lets unsigned calls still benefit from a custom rate when the originating
+EOA is a registered client.
+
+**Fee scale**: Fees use 8-decimal-BPS units (1 unit = 0.0001 BPS; 100% = 100 000 000). Two public constants are
+queryable via RPC:
+- `MAX_FEE_BPS = 100_000_000` — 100% expressed in fee units
+- `MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_FEE_BPS²`; the combined denominator when both fees use the
+  sub-BPS scale
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.

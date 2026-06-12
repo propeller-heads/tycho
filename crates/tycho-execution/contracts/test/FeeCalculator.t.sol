@@ -291,6 +291,58 @@ contract FeeCalculatorTest is Constants {
         assertEq(feeCalculator.getEffectiveRouterFeeOnOutput(BOB), 1);
         assertEq(feeCalculator.getEffectiveRouterFeeOnOutputScaled(BOB), 5_000);
     }
+
+    function testCalculateFeeUsesOrigin() public {
+        // When client == address(0) (no signature), custom fees for tx.origin are applied.
+        vm.prank(FEE_SETTER);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, _1_PCT);
+
+        uint256 amountIn = 1 ether;
+
+        // Call with client=address(0) and tx.origin=ALICE
+        vm.prank(address(this), ALICE);
+        (uint256 amountOut, FeeRecipient[] memory fees) =
+            feeCalculator.calculateFee(amountIn, address(0), 0);
+
+        // ALICE's 1% custom fee should be applied
+        assertEq(fees[0].feeAmount, 0.01 ether);
+        assertEq(amountOut, 0.99 ether);
+    }
+
+    function testCalculateFeeWithClientAddress() public {
+        // When client != address(0), tx.origin fees are ignored — client address takes precedence.
+        // ALICE (tx.origin) has a custom 1% fee, BOB (client) uses the 5% default
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_5_PCT);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, _1_PCT);
+        vm.stopPrank();
+
+        uint256 amountIn = 1 ether;
+
+        // Call with client=BOB (no custom fee), tx.origin=ALICE
+        vm.prank(address(this), ALICE);
+        (uint256 amountOut, FeeRecipient[] memory fees) =
+            feeCalculator.calculateFee(amountIn, BOB, 0);
+
+        // Default 5% fee is applied for BOB — ALICE's 1% custom fee is ignored
+        // fee = 1 ether * 5_000_000 / 100_000_000 = 0.05 ether
+        assertEq(fees[0].feeAmount, 0.05 ether);
+        assertEq(amountOut, 0.95 ether);
+    }
+
+    function testGetEffectiveRouterFeeOnOutputUsesOrigin() public {
+        // getEffectiveRouterFeeOnOutput also uses tx.origin when client == address(0).
+        vm.prank(FEE_SETTER);
+        feeCalculator.setCustomRouterFeeOnOutput(ALICE, _1_PCT);
+
+        // With client=address(0) and tx.origin=ALICE, should return ALICE's custom fee
+        vm.prank(address(this), ALICE);
+        uint16 fee = feeCalculator.getEffectiveRouterFeeOnOutput(address(0));
+        assertEq(fee, 100); // 1% in legacy BPS (1_000_000 / 10_000)
+
+        // With a regular address that has no custom fee, returns default (0)
+        assertEq(feeCalculator.getEffectiveRouterFeeOnOutput(BOB), 0);
+    }
 }
 
 // Tests relating to setting the fee values themselves with proper access control,

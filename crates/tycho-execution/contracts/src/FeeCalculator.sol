@@ -78,7 +78,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      clientFeeBps uses the legacy BPS scale (10000 = 100%). Internally it is scaled to the
      *      same 8-decimal unit system used for router fees (100_000_000 = 100%).
      * @param amountIn The amount before fee deduction
-     * @param client The client address to look up custom router fees for and to receive fees
+     * @param client The client address to look up custom router fees for and to receive fees.
+     *               Pass address(0) to fall back to tx.origin for the custom fee lookup.
      * @param clientFeeBps Client fee in basis points (10000 = 100%)
      * @return amountOut The amount remaining after all fee deductions
      * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
@@ -89,7 +90,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         returns (uint256 amountOut, FeeRecipient[] memory feeRecipients)
     {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
-            _getFeeInfo(client);
+            _getFeeInfo(_resolveClient(client));
 
         // Scale clientFeeBps from legacy scale (10_000 = 100%) to internal scale
         // (100_000_000 = 100%) so both fee types can be compared and combined.
@@ -146,6 +147,16 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             FeeRecipient({recipient: client, feeAmount: clientPortion});
 
         return (amountOut, feeRecipients);
+    }
+
+    /**
+     * @dev When no client signature is present (client == address(0)), fall back to tx.origin
+     *      so unsigned swaps can still benefit from custom router fee rates negotiated with the
+     *      client that originated the transaction.
+     */
+    // slither-disable-next-line tx-origin
+    function _resolveClient(address client) internal view returns (address) {
+        return client == address(0) ? tx.origin : client;
     }
 
     /**
@@ -242,7 +253,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Returns the effective router fee on output for a specific client in legacy BPS scale
      *      (10_000 = 100%), for interface compatibility with TychoRouter and Dispatcher.
      * @dev For full-precision value use getEffectiveRouterFeeOnOutputScaled.
-     * @param client The client address to check
+     * @param client The client address to check. Pass address(0) to fall back to tx.origin.
      * @return Zero if no fee is set; otherwise the fee in legacy BPS (rounded down, minimum 1).
      */
     function getEffectiveRouterFeeOnOutput(address client)
@@ -250,7 +261,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         view
         returns (uint16)
     {
-        CustomFees memory customFees = _customRouterFees[client];
+        CustomFees memory customFees = _customRouterFees[_resolveClient(client)];
         uint32 fee = customFees.hasCustomFeeOnOutput
             ? customFees.feeBpsOnOutput
             : _routerFeeOnOutputBps;
@@ -264,7 +275,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Returns the effective router fee on output for a specific client in fee units
      *      (100_000_000 = 100%).
-     * @param client The client address to check
+     * @param client The client address to check. Pass address(0) to fall back to tx.origin.
      * @return The fee in fee units (custom if set, otherwise default)
      */
     function getEffectiveRouterFeeOnOutputScaled(address client)
@@ -272,7 +283,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         view
         returns (uint32)
     {
-        CustomFees memory customFees = _customRouterFees[client];
+        CustomFees memory customFees = _customRouterFees[_resolveClient(client)];
         return customFees.hasCustomFeeOnOutput
             ? customFees.feeBpsOnOutput
             : _routerFeeOnOutputBps;
