@@ -113,12 +113,21 @@ where
             ..Default::default()
         };
 
-        let block = self
-            .state
-            .get_current_block()
-            .ok_or(SimulationEngineError::StorageError(
-                "Current block not set in SimulationEngine.".into(),
-            ))?;
+        let mut block =
+            self.state
+                .get_current_block()
+                .ok_or(SimulationEngineError::StorageError(
+                    "Current block not set in SimulationEngine.".into(),
+                ))?;
+
+        if let Some(overrides) = &params.block_overrides {
+            if let Some(number) = overrides.number {
+                block.number = number;
+            }
+            if let Some(timestamp) = overrides.timestamp {
+                block.timestamp = timestamp;
+            }
+        }
 
         let block_env = BlockEnv {
             number: U256::from(block.number),
@@ -381,6 +390,14 @@ pub struct SimulationParameters {
     /// Map of the address whose transient storage will be overwritten, to a map of storage slot
     /// and value.
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+    /// Per-call block context overrides.
+    pub block_overrides: Option<BlockEnvOverrides>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockEnvOverrides {
+    pub number: Option<u64>,
+    pub timestamp: Option<u64>,
 }
 
 #[cfg(test)]
@@ -581,6 +598,53 @@ mod tests {
     }
 
     #[test]
+    fn test_simulate_applies_block_env_overrides() -> Result<(), Box<dyn Error>> {
+        let mut state = new_state();
+        let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
+        // Minimal runtime bytecode equivalent to the following Solidity contract:
+        //
+        // // SPDX-License-Identifier: UNLICENSED
+        // pragma solidity ^0.8.26;
+        //
+        // contract BlockNumberTest {
+        //     function test() external view returns (uint256) {
+        //         return block.number;
+        //     }
+        // }
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x43, // NUMBER
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]));
+        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
+        state.init_account(contract, account, None, true)?;
+        state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
+        state.set_block(Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }));
+
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            data: Vec::new(),
+            value: U256::ZERO,
+            overrides: None,
+            gas_limit: None,
+            transient_storage: None,
+            block_overrides: Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+        };
+
+        let engine = SimulationEngine::new(state, false);
+        let result = engine
+            .simulate(&sim_params)
+            .expect("simulation should apply block env overrides");
+
+        assert_eq!(U256::from_be_slice(result.result.as_ref()), U256::from(123));
+        Ok(())
+    }
+
+    #[test]
     fn test_integration_revm_v2_swap() -> Result<(), Box<dyn Error>> {
         let state = new_state();
 
@@ -625,6 +689,7 @@ mod tests {
             overrides: None,
             gas_limit: None,
             transient_storage: None,
+            block_overrides: None,
         };
         let mut eng = SimulationEngine::new(state, true);
 
@@ -766,6 +831,7 @@ mod tests {
             overrides: Some(overrides),
             gas_limit: None,
             transient_storage: None,
+            block_overrides: None,
         };
 
         let mut eng = SimulationEngine::new(state, false);

@@ -999,7 +999,7 @@ where
         Ok(Update::new(block_number_or_timestamp, updated_states, HashMap::new()))
     }
 
-    /// Add block information (number and timestamp) to a ProtocolStateDelta
+    /// Add current block information (number and timestamp) to a ProtocolStateDelta.
     fn add_block_info_to_delta(
         mut delta: ProtocolStateDelta,
         block_header_opt: Option<BlockHeader>,

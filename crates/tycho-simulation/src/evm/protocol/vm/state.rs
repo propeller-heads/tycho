@@ -33,6 +33,7 @@ use crate::evm::{
         u256_num::{u256_to_biguint, u256_to_f64},
         utils::bytes_to_address,
     },
+    simulation::BlockEnvOverrides,
 };
 
 #[derive(Clone)]
@@ -71,6 +72,8 @@ where
     adapter_contract: TychoSimulationContract<D>,
     /// Tokens for which balance overwrites should be disabled.
     disable_overwrite_tokens: HashSet<Address>,
+    /// Block context overrides applied to this pool's adapter simulations.
+    block_overrides: Option<BlockEnvOverrides>,
 }
 
 impl<D> Debug for EVMPoolState<D>
@@ -114,6 +117,7 @@ where
         manual_updates: bool,
         adapter_contract: TychoSimulationContract<D>,
         disable_overwrite_tokens: HashSet<Address>,
+        block_overrides: Option<BlockEnvOverrides>,
     ) -> Self {
         Self {
             id,
@@ -128,6 +132,7 @@ where
             manual_updates,
             adapter_contract,
             disable_overwrite_tokens,
+            block_overrides,
         }
     }
 
@@ -215,6 +220,7 @@ where
                         buy_token_address,
                         vec![sell_amount_limit / U256::from(100)],
                         overwrites,
+                        self.block_overrides.clone(),
                     )?;
 
                     let price = if self
@@ -267,7 +273,15 @@ where
                     // amount (y1).
                     let y1 = self
                         .adapter_contract
-                        .swap(&self.id, t0, t1, false, x1, overwrites.clone())?
+                        .swap(
+                            &self.id,
+                            t0,
+                            t1,
+                            false,
+                            x1,
+                            overwrites.clone(),
+                            self.block_overrides.clone(),
+                        )?
                         .0
                         .received_amount;
 
@@ -275,7 +289,15 @@ where
                     // amount (y2).
                     let y2 = self
                         .adapter_contract
-                        .swap(&self.id, t0, t1, false, x2, overwrites)?
+                        .swap(
+                            &self.id,
+                            t0,
+                            t1,
+                            false,
+                            x2,
+                            overwrites,
+                            self.block_overrides.clone(),
+                        )?
                         .0
                         .received_amount;
 
@@ -344,9 +366,13 @@ where
         tokens: Vec<Address>,
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<(U256, U256), SimulationError> {
-        let limits = self
-            .adapter_contract
-            .get_limits(&self.id, tokens[0], tokens[1], overwrites)?;
+        let limits = self.adapter_contract.get_limits(
+            &self.id,
+            tokens[0],
+            tokens[1],
+            overwrites,
+            self.block_overrides.clone(),
+        )?;
 
         Ok(limits)
     }
@@ -553,6 +579,11 @@ where
     pub fn get_balances(&self) -> &HashMap<Address, U256> {
         &self.balances
     }
+
+    #[cfg(test)]
+    pub fn get_block_overrides(&self) -> Option<BlockEnvOverrides> {
+        self.block_overrides.clone()
+    }
 }
 
 impl<D> Serialize for EVMPoolState<D>
@@ -643,6 +674,7 @@ where
             false,
             sell_amount_respecting_limit,
             Some(complete_overwrites),
+            self.block_overrides.clone(),
         )?;
 
         let mut new_state = self.clone();
@@ -711,6 +743,40 @@ where
         tokens: &HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError> {
+        if let Some(block_number) = delta
+            .updated_attributes
+            .get("override_block_number")
+        {
+            let number = <[u8; 8]>::try_from(block_number.as_ref())
+                .map(u64::from_be_bytes)
+                .map_err(|_| {
+                    TransitionError::DecodeError(
+                        "override_block_number attribute must be an 8-byte big-endian u64"
+                            .to_string(),
+                    )
+                })?;
+            self.block_overrides
+                .get_or_insert_with(BlockEnvOverrides::default)
+                .number = Some(number);
+        }
+
+        if let Some(block_timestamp) = delta
+            .updated_attributes
+            .get("override_block_timestamp")
+        {
+            let timestamp = <[u8; 8]>::try_from(block_timestamp.as_ref())
+                .map(u64::from_be_bytes)
+                .map_err(|_| {
+                    TransitionError::DecodeError(
+                        "override_block_timestamp attribute must be an 8-byte big-endian u64"
+                            .to_string(),
+                    )
+                })?;
+            self.block_overrides
+                .get_or_insert_with(BlockEnvOverrides::default)
+                .timestamp = Some(timestamp);
+        }
+
         if self.manual_updates {
             // Directly check for "update_marker" in `updated_attributes`
             if let Some(marker) = delta
@@ -1308,6 +1374,60 @@ mod tests {
             pool_state.balances[&new_token],
             U256::from(3000000000u64),
             "New token balance should be unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_updates_block_overrides() {
+        let mut pool_state = setup_pool_state().await;
+        pool_state.manual_updates = true;
+        pool_state.block_overrides = None;
+
+        let delta = ProtocolStateDelta {
+            component_id: pool_state.id.clone(),
+            updated_attributes: HashMap::from([
+                ("override_block_number".to_string(), Bytes::from(123_u64.to_be_bytes().to_vec())),
+                (
+                    "override_block_timestamp".to_string(),
+                    Bytes::from(456_u64.to_be_bytes().to_vec()),
+                ),
+            ]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        pool_state
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            pool_state.block_overrides,
+            Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_updates_partial_block_overrides() {
+        let mut pool_state = setup_pool_state().await;
+        pool_state.manual_updates = true;
+        pool_state.block_overrides =
+            Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) });
+
+        let delta = ProtocolStateDelta {
+            component_id: pool_state.id.clone(),
+            updated_attributes: HashMap::from([(
+                "override_block_number".to_string(),
+                Bytes::from(789_u64.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        pool_state
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            pool_state.block_overrides,
+            Some(BlockEnvOverrides { number: Some(789), timestamp: Some(456) })
         );
     }
 

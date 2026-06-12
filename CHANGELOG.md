@@ -1,3 +1,21 @@
+## [0.310.0](https://github.com/propeller-heads/tycho/compare/0.309.0...0.310.0) (2026-06-12)
+
+
+### Features
+
+* bump version ([c88c28a](https://github.com/propeller-heads/tycho/commit/c88c28af3431be89e2d0f8faeeb37a809ce5ff6b))
+* support block env overrides in VM simulation ([9f75b0c](https://github.com/propeller-heads/tycho/commit/9f75b0cf57bb7b13f5b2fb7d426d011d70595784))
+* support block env overrides in VM simulation ([#1074](https://github.com/propeller-heads/tycho/issues/1074)) ([9feb76a](https://github.com/propeller-heads/tycho/commit/9feb76a5410608be251a325b3c2c773c2e3e01e0))
+* support partial VM block env overrides ([cdf5c6c](https://github.com/propeller-heads/tycho/commit/cdf5c6c2249b9d5d692f7cb272cda6e1548c68ca))
+
+
+### Bug Fixes
+
+* add change type detection for storage slot updates ([7051939](https://github.com/propeller-heads/tycho/commit/7051939bbf80601fb7a4b0efe449854a25de1614))
+* address comments ([d4535ff](https://github.com/propeller-heads/tycho/commit/d4535ff444d786b3aacb6e275b428632ff46549e))
+* limit Slipstreams tick deletion handling ([ecb81d0](https://github.com/propeller-heads/tycho/commit/ecb81d0e17eb64d956020adeb486ee3f46b57d09))
+* Slipstreams tick deletion handling ([#1084](https://github.com/propeller-heads/tycho/issues/1084)) ([654ab4e](https://github.com/propeller-heads/tycho/commit/654ab4e123f13d0f8e416b8bb13f3d8afd383626))
+
 ## [0.309.0](https://github.com/propeller-heads/tycho/compare/0.308.0...0.309.0) (2026-06-11)
 
 
