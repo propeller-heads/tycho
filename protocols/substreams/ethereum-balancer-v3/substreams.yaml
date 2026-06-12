@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_balancer_v3"
-  version: v0.4.0
+  version: v0.4.1
 
 protobuf:
   files:
@@ -41,12 +41,38 @@ modules:
     inputs:
       - map: map_components
 
+  - name: store_token_mapping
+    kind: store
+    initialBlock: 21332121
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_pool_balance_seed_events
+    kind: map
+    initialBlock: 21332121
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_components
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_seeded_pool_balances
+    kind: store
+    initialBlock: 21332121
+    updatePolicy: set_if_not_exists
+    valueType: int64
+    inputs:
+      - map: map_pool_balance_seed_events
+
   - name: map_relative_balances
     kind: map
     initialBlock: 21332121
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_components
+      - store: store_seeded_pool_balances
     output:
       type: proto:tycho.evm.v1.BlockBalanceDeltas
 
@@ -67,6 +93,7 @@ modules:
       - map: map_relative_balances
       - store: store_components
       - store: store_token_set
+      - store: store_token_mapping
       - store: store_balances
         mode: deltas # This is the key property that simplifies `BalanceChange` handling
     output:

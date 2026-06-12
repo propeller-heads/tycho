@@ -10,6 +10,7 @@ fn main() -> Result<(), anyhow::Error> {
         "abi/vault_contract.abi.json",
         "abi/stable_pool_factory_contract.abi.json",
         "abi/weighted_pool_factory_contract.abi.json",
+        "abi/reclamm_pool_factory_contract.abi.json",
         "abi/stable_pool_contract.abi.json",
         "abi/weighted_pool_contract.abi.json",
     ];
@@ -17,6 +18,7 @@ fn main() -> Result<(), anyhow::Error> {
         "src/abi/vault_contract.rs",
         "src/abi/stable_pool_factory_contract.rs",
         "src/abi/weighted_pool_factory_contract.rs",
+        "src/abi/reclamm_pool_factory_contract.rs",
         "src/abi/stable_pool_contract.rs",
         "src/abi/weighted_pool_contract.rs",
     ];

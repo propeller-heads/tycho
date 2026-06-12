@@ -76,3 +76,26 @@ tests:
           fee: "0x038d7ea4c68000"
         skip_simulation: false
         creation_tx: "0x214064cfcf41f7b94b4f9cdd35644b851e19ba246822b7d8f2bdcc3d6c06074e"
+
+  - name: test_reclamm_swap_usdc_weth
+    start_block: 25129750
+    stop_block: 25129787
+    expected_components:
+      - id: "0xda66e8ddf9959e4db759bfd06256730d8a8b2d13"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          pool_type: "0x5265436c616d6d506f6f6c466163746f7279"
+          manual_updates: "0x01"
+          fee: "0x01c6bf52634000"
+          initial_min_price: "0x01a7055297dc47"
+          initial_max_price: "0x01b32a38cac3fb"
+          initial_target_price: "0x01ad0cf88e9c4c"
+          daily_price_shift_exponent: "0x06f05b59d3b20000"
+          centeredness_margin: "0x06f05b59d3b20000"
+          token_a_price_includes_rate: "0x00"
+          token_b_price_includes_rate: "0x00"
+        skip_simulation: false
+        skip_execution: true
+        creation_tx: "0xb5aa9e7019fa807d8e41b00634a18d02d38a185a40ba3d09dc28c771488163c6"
