@@ -44,3 +44,6 @@ When spawning subagents, pass the relevant knowledge document contents to them.
   test files. Use after adding, removing, or renaming tests. Trigger words: "update test metadata", "sync test metadata".
 - `migrate-pr`: Migrate an open PR from a related repository (tycho-protocol-sdk, tycho-simulation, tycho-execution)
   into this monorepo. Rewrites paths, strips unmapped diffs, handles conflicts. Trigger words: "migrate PR", "port PR".
+- `migrate-substreams-to-native`: Migrate a substreams package into a native processor crate
+  (`protocols/crates/<protocol>`) implementing `TxDeltaIndexer`, with a parity integration test against the spkg built
+  from main. Trigger words: "migrate to native", "native processor", "port substreams to core crate".
