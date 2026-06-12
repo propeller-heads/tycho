@@ -30,10 +30,7 @@ use crate::evm::protocol::{
             sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
             swap_math,
             tick_list::{TickInfo, TickList, TickListErrorKind},
-            tick_math::{
-                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                MIN_SQRT_RATIO, MIN_TICK,
-            },
+            tick_math::{get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MIN_SQRT_RATIO},
             StepComputation, SwapResults, SwapState,
         },
     },
@@ -139,13 +136,13 @@ impl UniswapV3State {
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
-            let (mut next_tick, initialized) = match self
+            let tick_step = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_swap_step(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => {
+                Ok(step) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
-                    (tick, init)
+                    step
                 }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
@@ -166,10 +163,11 @@ impl UniswapV3State {
                 },
             };
 
-            next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
+            let next_tick = tick_step.next_tick;
+            let initialized = tick_step.initialized;
 
             let sqrt_price_start = state.sqrt_price;
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = tick_step.sqrt_price_next()?;
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
@@ -210,11 +208,15 @@ impl UniswapV3State {
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if step.initialized {
-                    let liquidity_raw = self
-                        .ticks
-                        .get_tick(step.tick_next)
-                        .unwrap()
-                        .net_liquidity;
+                    let liquidity_raw = match &tick_step.info {
+                        Some(info) => info.net_liquidity,
+                        None => {
+                            self.ticks
+                                .get_tick(step.tick_next)
+                                .unwrap()
+                                .net_liquidity
+                        }
+                    };
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
@@ -325,9 +327,9 @@ impl ProtocolSim for UniswapV3State {
 
         // Iterate through ticks in the direction of the swap
         // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
-        while let Ok((tick, initialized)) = self
+        while let Ok(tick_step) = self
             .ticks
-            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
+            .next_swap_step(current_tick, zero_for_one)
         {
             // Cap iteration to prevent exceeding Ethereum's gas limit
             if ticks_crossed >= MAX_TICKS_CROSSED {
@@ -335,11 +337,10 @@ impl ProtocolSim for UniswapV3State {
             }
             ticks_crossed += 1;
 
-            // Clamp the tick value to ensure it's within valid range
-            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
+            let next_tick = tick_step.next_tick;
 
             // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = tick_step.sqrt_price_next()?;
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
             // sqrt_price_next. Direction determines which token is being swapped in vs out
@@ -381,12 +382,16 @@ impl ProtocolSim for UniswapV3State {
             // liquidity when crossing it
             // For zero_for_one, liquidity is removed when crossing a tick
             // For one_for_zero, liquidity is added when crossing a tick
-            if initialized {
-                let liquidity_raw = self
-                    .ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
+            if tick_step.initialized {
+                let liquidity_raw = match &tick_step.info {
+                    Some(info) => info.net_liquidity,
+                    None => {
+                        self.ticks
+                            .get_tick(next_tick)
+                            .unwrap()
+                            .net_liquidity
+                    }
+                };
                 let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
 
                 // Check if applying this liquidity delta would cause underflow
@@ -586,7 +591,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        evm::protocol::utils::uniswap::sqrt_price_math::get_sqrt_price_q96,
+        evm::protocol::utils::uniswap::{
+            sqrt_price_math::get_sqrt_price_q96,
+            tick_math::{get_sqrt_ratio_at_tick, MIN_TICK},
+        },
         protocol::models::{DecoderContext, TryFromWithBlock},
     };
 

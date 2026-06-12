@@ -6,11 +6,37 @@ use tycho_common::simulation::errors::SimulationError;
 
 use super::tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TickInfo {
     pub(crate) index: i32,
     pub(crate) net_liquidity: i128,
+    /// Invariant: equals `get_sqrt_ratio_at_tick(index)` for every in-range index. All
+    /// construction paths (`new`, deserialization) recompute it from `index`; consumers may
+    /// rely on it whenever `index` is within `[MIN_TICK, MAX_TICK]`.
     pub(crate) sqrt_price: U256,
+}
+
+impl<'de> Deserialize<'de> for TickInfo {
+    /// Recomputes `sqrt_price` from `index` instead of trusting the serialized value, so the
+    /// struct invariant holds for states restored from persisted snapshots. Out-of-range
+    /// indices deserialize with a zeroed `sqrt_price`; the swap walk never reads it for them.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TickInfoRaw {
+            index: i32,
+            net_liquidity: i128,
+            #[serde(default)]
+            #[allow(dead_code)]
+            sqrt_price: U256,
+        }
+
+        let raw = TickInfoRaw::deserialize(deserializer)?;
+        let sqrt_price = get_sqrt_ratio_at_tick(raw.index).unwrap_or(U256::ZERO);
+        Ok(TickInfo { index: raw.index, net_liquidity: raw.net_liquidity, sqrt_price })
+    }
 }
 
 impl TickInfo {
@@ -228,7 +254,7 @@ impl TickList {
         &self,
         tick: i32,
         lte: bool,
-    ) -> Result<(i32, bool), TickListError> {
+    ) -> Result<(i32, Option<&TickInfo>), TickListError> {
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -242,14 +268,12 @@ impl TickList {
 
             if self.is_below_smallest(tick) {
                 let minimum = cmp::max(self.ticks[0].index - spacing, min_in_word);
-                return Ok((minimum, false));
+                return Ok((minimum, None));
             }
 
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::max(idx, min_in_word);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let info = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::max(info.index, min_in_word);
+            Ok((next_tick_idx, (next_tick_idx == info.index).then_some(info)))
         } else {
             let word_pos = (compressed + 1) >> 8;
             let max_in_word = (((word_pos + 1) << 8) - 1) * spacing;
@@ -261,13 +285,47 @@ impl TickList {
             if self.is_at_or_above_largest(tick) {
                 let maximum =
                     cmp::min(self.ticks[self.ticks.len() - 1].index + spacing, max_in_word);
-                return Ok((maximum, false));
+                return Ok((maximum, None));
             }
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::min(max_in_word, idx);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let info = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::min(max_in_word, info.index);
+            Ok((next_tick_idx, (next_tick_idx == info.index).then_some(info)))
+        }
+    }
+
+    /// Resolves one step of a swap walk: the word-clamped stop tick plus the located
+    /// `TickInfo` when the stop is an initialized tick whose index survived clamping to
+    /// `[MIN_TICK, MAX_TICK]`. When `info` is present its `sqrt_price` and `net_liquidity`
+    /// are valid for this step, sparing the caller a ratio recomputation and a second
+    /// binary search on crossing.
+    pub(crate) fn next_swap_step(&self, tick: i32, lte: bool) -> Result<TickStep, TickListError> {
+        let (raw_tick, info) = self.next_initialized_tick_within_one_word(tick, lte)?;
+        let initialized = info.is_some();
+        let next_tick = raw_tick.clamp(MIN_TICK, MAX_TICK);
+        let info = info
+            .filter(|located| located.index == next_tick)
+            .copied();
+        Ok(TickStep { next_tick, initialized, info })
+    }
+}
+
+/// One resolved step of a swap walk over a [`TickList`].
+pub(crate) struct TickStep {
+    /// The stop tick for this step, clamped to `[MIN_TICK, MAX_TICK]`.
+    pub(crate) next_tick: i32,
+    /// Whether the stop is an initialized tick (as opposed to a word boundary).
+    pub(crate) initialized: bool,
+    /// The located tick when `initialized` and its index equals `next_tick` post-clamp.
+    pub(crate) info: Option<TickInfo>,
+}
+
+impl TickStep {
+    /// The sqrt price at `next_tick`: read from the located tick when available, computed
+    /// otherwise (word boundaries and the clamped out-of-range case).
+    pub(crate) fn sqrt_price_next(&self) -> Result<U256, SimulationError> {
+        match &self.info {
+            Some(info) => Ok(info.sqrt_price),
+            None => get_sqrt_ratio_at_tick(self.next_tick),
         }
     }
 }
@@ -296,7 +354,7 @@ mod tests {
     }
 
     fn create_tick_info(idx: i32, liq: i128) -> TickInfo {
-        TickInfo { index: idx, net_liquidity: liq, sqrt_price: U256::from(0u64) }
+        TickInfo::new(idx, liq).unwrap()
     }
 
     #[test]
@@ -523,14 +581,10 @@ mod tests {
         ];
 
         for case in cases {
-            assert_eq!(
-                tick_list
-                    .next_initialized_tick_within_one_word(case.args.0, case.args.1)
-                    .unwrap(),
-                case.exp,
-                "{}",
-                case.id,
-            );
+            let (tick, info) = tick_list
+                .next_initialized_tick_within_one_word(case.args.0, case.args.1)
+                .unwrap();
+            assert_eq!((tick, info.is_some()), case.exp, "{}", case.id);
         }
     }
 
@@ -540,18 +594,14 @@ mod tests {
         let tick_list1 = TickList::from(1, tick_infos.clone()).unwrap();
         let tick_list2 = TickList::from(2, tick_infos).unwrap();
 
-        assert_eq!(
-            tick_list1
-                .next_initialized_tick_within_one_word(0, false)
-                .unwrap(),
-            (255, false)
-        );
-        assert_eq!(
-            tick_list2
-                .next_initialized_tick_within_one_word(0, false)
-                .unwrap(),
-            (510, false)
-        );
+        let (tick1, info1) = tick_list1
+            .next_initialized_tick_within_one_word(0, false)
+            .unwrap();
+        assert_eq!((tick1, info1.is_some()), (255, false));
+        let (tick2, info2) = tick_list2
+            .next_initialized_tick_within_one_word(0, false)
+            .unwrap();
+        assert_eq!((tick2, info2.is_some()), (510, false));
     }
 
     struct TestCaseNextTickError {
@@ -637,8 +687,8 @@ mod tests {
                     assert_eq!(err.kind, kind, "{}", case.id);
                 }
                 None => {
-                    let tup = res.unwrap();
-                    assert_eq!(tup, case.exp.unwrap(), "{}", case.id);
+                    let (tick, info) = res.unwrap();
+                    assert_eq!((tick, info.is_some()), case.exp.unwrap(), "{}", case.id);
                 }
             }
         }
