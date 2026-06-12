@@ -9,6 +9,7 @@ use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dto,
     models::{
         token::Token, Address, AttrStoreKey, Balance, Chain, ChangeType, ComponentId, MergeError,
         StoreVal, TxHash,
@@ -158,11 +159,16 @@ impl ProtocolComponentState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, DeepSizeOf)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, DeepSizeOf)]
 pub struct ProtocolComponentStateDelta {
     pub component_id: ComponentId,
     pub updated_attributes: HashMap<AttrStoreKey, StoreVal>,
     pub deleted_attributes: HashSet<AttrStoreKey>,
+    /// Attribute names first introduced with `ChangeType::Creation` in this delta.
+    /// Skipped during serialization — this is an indexer-internal hint, not part of the public
+    /// delta format.
+    #[serde(skip)]
+    pub created_attributes: HashSet<AttrStoreKey>,
 }
 
 impl ProtocolComponentStateDelta {
@@ -171,7 +177,12 @@ impl ProtocolComponentStateDelta {
         updated_attributes: HashMap<AttrStoreKey, StoreVal>,
         deleted_attributes: HashSet<AttrStoreKey>,
     ) -> Self {
-        Self { component_id: component_id.to_string(), updated_attributes, deleted_attributes }
+        Self {
+            component_id: component_id.to_string(),
+            updated_attributes,
+            deleted_attributes,
+            created_attributes: HashSet::new(),
+        }
     }
 
     /// Merges this update with another one.
@@ -195,6 +206,7 @@ impl ProtocolComponentStateDelta {
         }
         for attr in &other.deleted_attributes {
             self.updated_attributes.remove(attr);
+            self.created_attributes.remove(attr);
         }
         for attr in other.updated_attributes.keys() {
             self.deleted_attributes.remove(attr);
@@ -203,6 +215,8 @@ impl ProtocolComponentStateDelta {
             .extend(other.updated_attributes);
         self.deleted_attributes
             .extend(other.deleted_attributes);
+        self.created_attributes
+            .extend(other.created_attributes);
         Ok(())
     }
 }
@@ -266,6 +280,56 @@ pub struct GetAmountOutParams {
     pub receiver: Bytes,
 }
 
+impl From<dto::ProtocolStateDelta> for ProtocolComponentStateDelta {
+    fn from(value: dto::ProtocolStateDelta) -> Self {
+        Self {
+            component_id: value.component_id,
+            updated_attributes: value.updated_attributes,
+            deleted_attributes: value.deleted_attributes,
+            created_attributes: HashSet::new(),
+        }
+    }
+}
+
+impl From<dto::ComponentBalance> for ComponentBalance {
+    fn from(value: dto::ComponentBalance) -> Self {
+        Self {
+            token: value.token,
+            balance: value.balance,
+            balance_float: value.balance_float,
+            modify_tx: value.modify_tx,
+            component_id: value.component_id,
+        }
+    }
+}
+
+impl From<dto::ProtocolComponent> for ProtocolComponent {
+    fn from(value: dto::ProtocolComponent) -> Self {
+        Self {
+            id: value.id,
+            protocol_system: value.protocol_system,
+            protocol_type_name: value.protocol_type_name,
+            chain: value.chain.into(),
+            tokens: value.tokens,
+            contract_addresses: value.contract_ids,
+            static_attributes: value.static_attributes,
+            change: value.change.into(),
+            creation_tx: value.creation_tx,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<dto::ResponseProtocolState> for ProtocolComponentState {
+    fn from(value: dto::ResponseProtocolState) -> Self {
+        Self {
+            component_id: value.component_id,
+            attributes: value.attributes,
+            balances: value.balances,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -282,6 +346,7 @@ mod test {
             component_id: id,
             updated_attributes: attributes1,
             deleted_attributes: HashSet::new(),
+            ..Default::default()
         }
     }
 

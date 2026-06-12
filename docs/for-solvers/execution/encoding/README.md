@@ -16,13 +16,13 @@ These are the models used as input and output of the encoding crate.
 {% tab title="Solution" %}
 The `Solution` struct defines your order and how it should be filled. This is the input to the encoding module.
 
-<table><thead><tr><th width="210" align="center">Attribute</th><th width="210" align="center">Type</th><th width="280">Description</th></tr></thead><tbody><tr><td align="center"><strong>sender</strong></td><td align="center"><code>Bytes</code></td><td>Address of the sender of the token in</td></tr><tr><td align="center"><strong>receiver</strong></td><td align="center"><code>Bytes</code></td><td>Address that receives the output token. If set to the TychoRouter address, the output is credited to the <strong>sender's</strong> <a href="../vault.md#crediting-output-to-the-vault">vault balance</a> instead of being transferred out.</td></tr><tr><td align="center"><strong>token_in</strong></td><td align="center"><code>Bytes</code></td><td>The input token</td></tr><tr><td align="center"><strong>amount_in</strong></td><td align="center"><code>BigUint</code></td><td>Amount of the input token</td></tr><tr><td align="center"><strong>token_out</strong></td><td align="center"><code>Bytes</code></td><td>The output token</td></tr><tr><td align="center"><strong>min_amount_out</strong></td><td align="center"><code>BigUint</code></td><td>Minimum amount the receiver must receive at the end of the transaction</td></tr><tr><td align="center"><strong>swaps</strong></td><td align="center"><code>Vec&#x3C;Swap></code></td><td>List of swaps to fulfil the solution</td></tr><tr><td align="center"><strong>user_transfer_type</strong></td><td align="center"><code>UserTransferType</code></td><td>How the input token enters the router — see the <strong>UserTransferType</strong> tab</td></tr></tbody></table>
+<table><thead><tr><th width="210" align="center">Attribute</th><th width="210" align="center">Type</th><th width="280">Description</th></tr></thead><tbody><tr><td align="center"><strong>sender</strong></td><td align="center"><code>Bytes</code></td><td>Address of the sender of the token in</td></tr><tr><td align="center"><strong>receiver</strong></td><td align="center"><code>Bytes</code></td><td>Address that receives the output token. If set to the TychoRouter address, the output is credited to the <strong>sender's</strong> <a href="../vault.md#crediting-output-to-the-vault">vault balance</a> instead of being transferred out.</td></tr><tr><td align="center"><strong>token_in</strong></td><td align="center"><code>Bytes</code></td><td>The input token</td></tr><tr><td align="center"><strong>amount_in</strong></td><td align="center"><code>BigUint</code></td><td>Amount of the input token</td></tr><tr><td align="center"><strong>token_out</strong></td><td align="center"><code>Bytes</code></td><td>The output token</td></tr><tr><td align="center"><strong>min_amount_out</strong></td><td align="center"><code>BigUint</code></td><td>Minimum amount the receiver must receive at the end of the transaction, after fees are deducted</td></tr><tr><td align="center"><strong>swaps</strong></td><td align="center"><code>Vec&#x3C;Swap></code></td><td>List of swaps to fulfil the solution</td></tr><tr><td align="center"><strong>user_transfer_type</strong></td><td align="center"><code>UserTransferType</code></td><td>How the input token enters the router — see the <strong>UserTransferType</strong> tab</td></tr></tbody></table>
 {% endtab %}
 
 {% tab title="UserTransferType" %}
 Specifies how user funds (the input token) enter the router:
 
-<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouter to spend your tokens.</td></tr><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>UseVaultsFunds</strong></td><td>No transfer is performed. Uses tokens already deposited in the TychoRouter vault.</td></tr></tbody></table>
+<table><thead><tr><th width="210.01953125" align="center">Variant</th><th>Description</th></tr></thead><tbody><tr><td align="center"><strong>TransferFromPermit2</strong></td><td>Use Permit2 for token transfer. You must approve the Permit2 contract and sign the permit externally.</td></tr><tr><td align="center"><strong>TransferFrom</strong> <em>(default)</em></td><td>Use standard ERC-20 approve + transferFrom. You must approve the TychoRouter to spend your tokens.</td></tr><tr><td align="center"><strong>UseVaultsFunds</strong></td><td>No transfer is performed. Uses tokens already deposited in the TychoRouter vault.</td></tr></tbody></table>
 {% endtab %}
 
 {% tab title="Swap" %}
@@ -49,6 +49,14 @@ We validate split swaps. A split swap is valid if:
 4. For each set of splits, set the split for the last swap to 0. This tells the router to send all tokens not assigned
    to the previous splits in the set (i.e., the remainder) to this pool.
 5. The sum of all non-remainder splits for each token is smaller than 1 (100%)
+
+{% hint style="info" %}
+**Split fractions are applied to the balance seen so far.** The router processes swaps
+sequentially. A non-zero `split` takes a fraction of the total amount produced for that token
+*up to that point in the swap array* — not the final total. A `split` of 0 consumes whatever
+remains. If more of the same token is produced by a later swap, it will not be included in
+any earlier split's calculation.
+{% endhint %}
 
 <details>
 
@@ -127,16 +135,15 @@ split swaps.
 
 Builder options:
 
-* `swap_encoder_registry` — Registry of protocol-specific `SwapEncoder` s used during encoding.
-  Use `add_default_encoders` for built-in support, or add custom encoders for protocols you've implemented locally.
+* `swap_encoder_registry` — Registry of protocol-specific `SwapEncoder`s used during encoding.
+  Use `new_with_defaults` for built-in support, or add custom encoders for protocols you've implemented locally.
 * `router_address` — Router address for execution. Defaults to the deployed address for the given chain (
   see [Tycho addresses](../contract-addresses.md)).
 
 #### **Builder Example Usage**
 
 ```rust
-let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
-.add_default_encoders(None)
+let swap_encoder_registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)
 .expect("Failed to get default SwapEncoderRegistry");
 
 let encoder = TychoRouterEncoderBuilder::new()
@@ -150,9 +157,7 @@ let encoder = TychoRouterEncoderBuilder::new()
 
 Each protocol needs its own `SwapEncoder` to define how the protocol encodes swaps into calldata.
 
-The `SwapEncoderRegistry` manages these encoders. Call `add_default_encoders()` to use the built-in implementations.
-This method accepts an optional `executors_addresses` JSON string with executor addresses for encoding. Pass `None` to
-default to `config/executor_addresses.json`.
+The `SwapEncoderRegistry` manages these encoders. Use `SwapEncoderRegistry::new_with_defaults(chain)` to get a registry pre-populated with all built-in encoders. If you need to supply custom executor addresses, use `SwapEncoderRegistry::new(chain).add_default_encoders(Some(addresses_json))` instead.
 
 If you need to add custom protocol support, register your own encoder implementation:
 
@@ -174,14 +179,28 @@ creation and signing yourself using the public `Permit2` utility (see [Token tra
 The full method call includes the following parameters, which act as **execution guardrails:**
 
 * `amountIn` and `tokenIn` — the amount and token to be transferred into the TychoRouter from you. For native ETH, use `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` — the router reverts on `address(0)`.
-* `minAmountOut` and `tokenOut` — the minimum amount you want to receive. Same ETH address rule applies. For maximum security, determine this from a **third-party source**.
+* `minAmountOut` and `tokenOut` — the minimum amount you want to receive, after fees are deducted. Same ETH address rule applies. For maximum security, determine this from a **third-party source**.
 * `receiver` — who receives the final output. Set this to the TychoRouter address to credit output tokens to the vault.
 * `nTokens` — _(split swaps only)_ the number of distinct tokens in the split routing graph.
 * `clientFeeParams` — controls fee-taking and client contribution (see [Client Fee Signature](#client-fee-signature)). Pass all-zero values if you don't need fees.
 
 The `ClientFeeParams` struct is defined as:
 
-<table><thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead><tbody><tr><td><code>clientFeeBps</code></td><td>Fee percentage in basis points. <code>100</code> = 1%. Set to <code>0</code> to disable</td></tr><tr><td><code>clientFeeReceiver</code></td><td>Address that receives the client's portion of the fee (credited to their vault balance)</td></tr><tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr><tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr><tr><td><code>clientSignature</code></td><td>EIP-712 signature over all other fields, signed by <code>clientFeeReceiver</code></td></tr></tbody></table>
+<table><thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead><tbody><tr><td><code>clientFeeBps</code></td><td>Fee percentage in basis points. <code>100</code> = 1%. Set to <code>0</code> to take no fee</td></tr><tr><td><code>clientFeeReceiver</code></td><td>Address that receives the client fee (credited to their vault balance)</td></tr><tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr><tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr><tr><td><code>clientSignature</code></td><td>EIP-712 signature over all other fields, signed by <code>clientFeeReceiver</code></td></tr></tbody></table>
+
+The `tycho-execution` crate provides a `ClientFeeParams` Rust struct that mirrors this. Callers are responsible for
+constructing and signing it — the encoder does not use it internally. Call `.into_abi_params()` to convert it to the
+ABI-encodable tuple for calldata construction.
+
+```rust
+// No fee
+let params = ClientFeeParams::default().into_abi_params();
+
+// With a fee
+let params = ClientFeeParams::new(receiver, signature, deadline, fee_bps)
+    .with_max_client_contribution(max_contribution)
+    .into_abi_params();
+```
 
 These **execution guardrails** protect against MEV exploits. Setting them correctly gives you full control over swap
 security.
@@ -195,12 +214,8 @@ The encoder automatically bridges ETH↔WETH gaps anywhere in the swap path — 
 
 #### Client Fee Signature
 
-If you don't want fees, pass all-zero
-values: `clientFeeBps: 0`, `clientFeeReceiver: address(0)`, `maxClientContribution: 0`, `deadline: 0`, and an
-empty `clientSignature`.
-
-If you do want fees, the `clientFeeReceiver` must sign the fee parameters using EIP-712. This prevents third parties
-from spoofing fee configurations. The signature covers the following typed struct:
+Only required when charging a fee. The `clientFeeReceiver` must sign the fee parameters using EIP-712 — this prevents
+third parties from spoofing fee configurations. The signature covers the following typed struct:
 
 ```solidity
 ClientFee(uint16 clientFeeBps, address clientFeeReceiver, uint256 maxClientContribution, uint256 deadline)
@@ -213,6 +228,14 @@ EIP712Domain(string name, string version, uint256 chainId, address verifyingCont
 ```
 
 with `name = "TychoRouter"`, `version = "1"`, and `verifyingContract` set to the TychoRouter contract address.
+
+{% hint style="warning" %}
+**Replay attack risk.** The signature contains no nonce. Once a signed `ClientFeeParams` appears on-chain, anyone who sees it can reuse it for the same swap and input parameters until `deadline` expires. If `maxClientContribution > 0`, the swap's `receiver` can repeatedly replay the transaction — each replay debits the client's vault balance by up to `maxClientContribution` — until the balance is exhausted or the deadline passes.
+
+To minimise exposure:
+* Set `deadline` as close to the current block timestamp as practical (e.g., a few minutes ahead).
+* Set `maxClientContribution` as low as the intended use case allows.
+{% endhint %}
 
 <details>
 

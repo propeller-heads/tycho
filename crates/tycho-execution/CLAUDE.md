@@ -220,10 +220,6 @@ from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`).
 
-There is no `ClientFeeParams` struct on the Rust side. The Solidity struct is encoded as a raw ABI
-tuple `(uint16,address,uint256,uint256,bytes)` embedded in the function signature strings within each strategy encoder.
-The caller provides the pre-signed bytes; the Rust encoder just passes them through.
-
 ### Gas estimation
 
 `Swap::new(component, token_in: Token, token_out: Token, estimated_gas: BigUint)` carries a per-swap simulation gas
@@ -280,6 +276,28 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 5. Add Rust encoder in `src/encoding/evm/swap_encoder/` and register in `swap_encoder_registry.rs`
 6. Add integration tests in both `contracts/test/protocols/` and `tests/`
 7. Add test setup in `contracts/test/TychoRouterTestSetup.sol`
+
+## Security
+
+### Using TychoRouter (caller checklist)
+
+When writing code that calls TychoRouter swap functions:
+
+- **Always set `minAmountOut`** to the minimum acceptable output. Example: 1000 USDC at 5% slippage → `950 * 10**6`. Setting it to `1` may result in receiving just `1` due to faulty swap sequences, slippage, or an attack.
+- **Verify price data** for `minAmountOut` against at least one independent source. Incorrect price data may set `minAmountOut` too low.
+- **Never approve infinite allowances**, including Permit2. Set Permit2 allowance and deadline as low as practical.
+
+### Building Executors (executor checklist)
+
+Executors run via `delegatecall` inside TychoRouter — they have full access to the router's assets and storage.
+
+- **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Return transfer intent through `getTransferData`/`getCallbackTransferData`; TychoRouter performs the actual transfers.
+- **Never write to state variables.** Any storage write in an executor writes to TychoRouter's storage.
+- **Do not execute `delegatecall`.** If unavoidable, ensure the caller cannot control the target address.
+- **Verify callback origin.** Call `verifyCallback` inside `handleCallback` to confirm `msg.sender` is a valid pool.
+- **Allowlist selectors when the caller controls calldata.** If `swap()` forwards caller-supplied calldata to an external contract (e.g. RFQ settlement), validate the first 4 bytes against an explicit allowlist of safe function selectors before making the call. An unrestricted selector lets an attacker invoke arbitrary functions on that contract — including ones that could drain TychoRouter's balance at the settlement contract. See `LiquoriceExecutor` for the pattern.
+- `handleCallback`'s `data` argument is raw ABI-encoded calldata the executor must decode manually.
+- `handleCallback`'s return value must be raw ABI-encoded data the executor encodes manually.
 
 ## Conventions
 

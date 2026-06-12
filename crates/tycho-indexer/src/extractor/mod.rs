@@ -93,7 +93,10 @@ pub trait Extractor: Send + Sync {
 
     /// Ensures all protocol types this extractor needs are registered in
     /// storage. Safe to call multiple times.
-    async fn ensure_protocol_types(&self);
+    ///
+    /// # Errors
+    /// Returns an [`ExtractionError`] if the protocol types could not be persisted.
+    async fn ensure_protocol_types(&self) -> Result<(), ExtractionError>;
 
     /// Returns the current stream cursor, or an empty string if no block has
     /// been processed yet. At startup this reflects the last persisted cursor;

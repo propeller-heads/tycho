@@ -24,7 +24,6 @@ chrono.workspace = true
 serde_json.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-uuid.workspace = true
 utoipa.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
@@ -35,8 +34,9 @@ tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 bytes = "1.5.0"
 mockall = { workspace = true, optional = true }
 num-bigint = "0.4"
-deepsize.workspace = true# perf: make optional, as used only by the indexer for memory profiling
+deepsize.workspace = true # perf: make optional, as used only by the indexer for memory profiling
 itertools = "0.10.5"
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
@@ -45,6 +45,7 @@ diesel-async.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
 maplit = "1.0.2"
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [features]
 diesel = ["dep:diesel"]

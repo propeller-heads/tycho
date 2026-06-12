@@ -50,7 +50,8 @@ pub fn initialize_metrics() {
     );
     describe_gauge!(
         "tycho_integration_protocol_sync_state",
-        "Current synchronization state per protocol (1=Started, 2=Ready, 3=Delayed, 4=Stale, 5=Advanced, 6=Ended)"
+        "Current synchronization state per protocol (1=Started, 2=Ready, 3=Delayed, 4=Stale, \
+         5=Advanced, 6=Ended, 7=Skipped — Tycho reported Ready but RPC block was ahead)"
     );
     describe_counter!(
         "tycho_integration_protocol_updates_skipped_total",
@@ -67,6 +68,11 @@ pub fn initialize_metrics() {
     describe_histogram!(
         "tycho_integration_simulation_gas_signed_error_ratio",
         "Signed gas estimation error as a fraction of actual gas: (estimated - actual) / actual. \
+         Positive = overestimate, negative = underestimate"
+    );
+    describe_histogram!(
+        "tycho_integration_simulation_gas_signed_error_absolute",
+        "Signed gas estimation error in absolute gas units: estimated - actual. \
          Positive = overestimate, negative = underestimate"
     );
 }
@@ -181,6 +187,18 @@ pub fn record_protocol_sync_state(protocol: &str, sync_state: &SynchronizerState
     .set(state_value);
 }
 
+/// Record that an update was skipped because the RPC block was ahead of the update block.
+///
+/// The protocol's `SynchronizerState` may report Ready in this case — the lag is only
+/// observable by comparing the update block against the RPC's latest block.
+pub fn record_protocol_sync_state_skipped(protocol: &str) {
+    gauge!(
+        "tycho_integration_protocol_sync_state",
+        "protocol" => protocol.to_string()
+    )
+    .set(7.0);
+}
+
 /// Explicitly mark a protocol as stale when no update has been received within the expected window.
 ///
 /// Unlike `record_protocol_sync_state`, this is called by the staleness watchdog when the stream
@@ -212,6 +230,18 @@ pub fn record_gas_signed_error_ratio(protocol: &str, estimated_gas: f64, actual_
             "protocol" => protocol.to_string(),
         )
         .record(deviation);
+    }
+}
+
+/// Record signed gas estimation deviation in absolute gas units: estimated - actual
+pub fn record_gas_signed_error_absolute(protocol: &str, estimated_gas: f64, actual_gas: f64) {
+    if actual_gas > 0.0 {
+        let diff = estimated_gas - actual_gas;
+        histogram!(
+            "tycho_integration_simulation_gas_signed_error_absolute",
+            "protocol" => protocol.to_string(),
+        )
+        .record(diff);
     }
 }
 
@@ -264,6 +294,7 @@ pub async fn create_metrics_exporter(port: u16) -> Result<tokio::task::JoinHandl
             ],
         )
         .map_err(|e| miette::miette!("Failed to set buckets: {}", e))?;
+
     let handle = exporter_builder
         .install_recorder()
         .into_diagnostic()

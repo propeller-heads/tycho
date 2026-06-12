@@ -118,6 +118,52 @@ impl TryFrom<tycho_common::dto::ResponseAccount> for ResponseAccount {
     }
 }
 
+impl From<tycho_common::models::contract::Account> for ResponseAccount {
+    fn from(value: tycho_common::models::contract::Account) -> Self {
+        Self {
+            chain: value.chain,
+            address: Address::from_slice(&value.address[..20]),
+            title: value.title,
+            slots: u256_num::map_slots_to_u256(value.slots),
+            native_balance: u256_num::bytes_to_u256(value.native_balance.into()),
+            token_balances: value
+                .token_balances
+                .into_iter()
+                .map(|(addr, ab)| {
+                    (Address::from_slice(&addr[..20]), u256_num::bytes_to_u256(ab.balance.into()))
+                })
+                .collect(),
+            code: value.code.to_vec(),
+        }
+    }
+}
+
+impl From<tycho_common::models::contract::AccountDelta> for AccountUpdate {
+    fn from(value: tycho_common::models::contract::AccountDelta) -> Self {
+        let code = value.code().clone().map(|c| c.to_vec());
+        let change = value.change_type().into();
+        Self {
+            chain: value.chain,
+            address: Address::from_slice(&value.address[..20]),
+            slots: value
+                .slots
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        u256_num::bytes_to_u256(k.into()),
+                        u256_num::bytes_to_u256(v.unwrap_or_default().into()),
+                    )
+                })
+                .collect(),
+            balance: value
+                .balance
+                .map(|b| u256_num::bytes_to_u256(b.into())),
+            code,
+            change,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tycho_common::Bytes;

@@ -13,11 +13,13 @@ import {
 
 interface ILiquoriceSettlement {
     function BALANCE_MANAGER() external view returns (address);
+
     function AUTHENTICATOR() external view returns (address);
 }
 
 interface IAllowListAuthentication {
     function addSolver(address _solver) external;
+
     function addMaker(address _maker) external;
 }
 
@@ -304,6 +306,39 @@ contract LiquoriceExecutorTest is Constants, Permit2TestHelper, TestUtils {
             LiquoriceExecutor.LiquoriceExecutor__InvalidDataLength.selector
         );
         liquoriceExecutor.decodeData(tooShort);
+    }
+
+    function testInvalidSelector() public {
+        bytes memory badCalldata = abi.encodePacked(
+            bytes4(0xdeadbeef),
+            hex"0000000000000000000000000000000000000000000000000000000000000000"
+        );
+
+        uint256 amountIn = 1000e6;
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR, WETH_ADDR, uint32(0), amountIn, amountIn, badCalldata
+        );
+
+        deal(USDC_ADDR, address(liquoriceExecutor), amountIn);
+
+        vm.expectRevert(
+            LiquoriceExecutor.LiquoriceExecutor__InvalidSelector.selector
+        );
+        liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
+    }
+
+    function testConstructor_NotAContract_Settlement() public {
+        vm.expectRevert(
+            LiquoriceExecutor.LiquoriceExecutor__NotAContract.selector
+        );
+        new LiquoriceExecutorExposed(address(0x1), LIQUORICE_BALANCE_MANAGER);
+    }
+
+    function testConstructor_NotAContract_BalanceManager() public {
+        vm.expectRevert(
+            LiquoriceExecutor.LiquoriceExecutor__NotAContract.selector
+        );
+        new LiquoriceExecutorExposed(LIQUORICE_SETTLEMENT, address(0x1));
     }
 
     function testClampAmount_WithinRange() public view {

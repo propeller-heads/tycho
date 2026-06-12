@@ -726,6 +726,7 @@ pub mod fixtures {
             .into_iter()
             .collect(),
             deleted_attributes: HashSet::new(),
+            ..Default::default()
         }
     }
 

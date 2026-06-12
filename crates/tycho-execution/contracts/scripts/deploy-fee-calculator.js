@@ -49,6 +49,7 @@ async function main() {
     const tx = await deployer.sendTransaction({
         to: create2FactoryAddress,
         data: deploymentData,
+        gasLimit: 3_000_000,
     });
     await tx.wait();
     console.log(`FeeCalculator deployed to: ${computedAddress}`);

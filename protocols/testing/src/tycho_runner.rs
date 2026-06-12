@@ -9,7 +9,7 @@ use std::{
 use miette::{IntoDiagnostic, WrapErr};
 use tempfile::NamedTempFile;
 use tracing::{debug, info};
-use tycho_simulation::tycho_common::dto::Chain;
+use tycho_simulation::tycho_common::models::Chain;
 pub struct TychoRunner {
     chain: Chain,
     db_url: String,

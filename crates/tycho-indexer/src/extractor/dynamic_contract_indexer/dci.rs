@@ -3582,6 +3582,7 @@ mod tests {
                         Bytes::from(1u64).lpad(32, 0),
                     )]),
                     deleted_attributes: HashSet::new(),
+                    ..Default::default()
                 },
             )]),
             ..Default::default()
@@ -3731,6 +3732,7 @@ mod tests {
                         Bytes::from(1u64).lpad(32, 0),
                     )]),
                     deleted_attributes: HashSet::new(),
+                    ..Default::default()
                 },
             )]),
             ..Default::default()
@@ -3854,6 +3856,7 @@ mod tests {
                             Bytes::from(version as u64).lpad(32, 0),
                         )]),
                         deleted_attributes: HashSet::new(),
+                        ..Default::default()
                     },
                 )]),
                 ..Default::default()

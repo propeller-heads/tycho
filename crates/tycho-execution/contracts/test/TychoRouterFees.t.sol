@@ -20,8 +20,8 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // Set up fees: 1% router fee on output, 2% client fee, 10% router fee on client fee
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
-        feeCalculator.setRouterFeeOnOutput(100); // 1%
-        feeCalculator.setRouterFeeOnClientFee(1000); // 10%
+        feeCalculator.setRouterFeeOnOutput(1_000_000); // 1%
+        feeCalculator.setRouterFeeOnClientFee(10_000_000); // 10%
         vm.stopPrank();
 
         // Trade 1 WETH for DAI with 1 swap on Uniswap V2
@@ -152,7 +152,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
-        feeCalculator.setRouterFeeOnOutput(100); // 1%
+        feeCalculator.setRouterFeeOnOutput(1_000_000); // 1%
         vm.stopPrank();
 
         deal(WETH_ADDR, ALICE, 1 ether);

@@ -4,6 +4,7 @@ use tycho_common::keccak256;
 pub mod account_storage;
 pub mod decoder;
 pub mod engine_db;
+pub mod pending;
 pub mod protocol;
 pub mod query_pool_swap;
 pub mod simulation;

@@ -35,6 +35,18 @@ impl TryFromMessage for AccountDelta {
     fn try_from_message(args: Self::Args<'_>) -> Result<Self, ExtractionError> {
         let (msg, chain) = args;
         let change = ChangeType::try_from_message(msg.change())?;
+        // For Creation deltas, code must always be Some — even for EOAs where code is empty
+        // bytes. None means "code unchanged" for Updates, but is incorrect for Creations.
+        let code = match change {
+            ChangeType::Creation => Some(msg.code.into()),
+            _ => {
+                if !msg.code.is_empty() {
+                    Some(msg.code.into())
+                } else {
+                    None
+                }
+            }
+        };
         let update = AccountDelta::new(
             chain,
             msg.address.into(),
@@ -43,7 +55,7 @@ impl TryFromMessage for AccountDelta {
                 .map(|cs| (cs.slot.into(), Some(cs.value.into())))
                 .collect(),
             if !msg.balance.is_empty() { Some(msg.balance.into()) } else { None },
-            if !msg.code.is_empty() { Some(msg.code.into()) } else { None },
+            code,
             change,
         );
         Ok(update)
@@ -204,11 +216,16 @@ impl TryFromMessage for ProtocolComponentStateDelta {
     fn try_from_message(args: Self::Args<'_>) -> Result<Self, ExtractionError> {
         let msg = args;
 
-        let (mut updates, mut deletions) = (HashMap::new(), HashSet::new());
+        let (mut updates, mut deletions, mut created) =
+            (HashMap::new(), HashSet::new(), HashSet::new());
 
         for attribute in msg.attributes.into_iter() {
             match ChangeType::try_from_message(attribute.change())? {
-                ChangeType::Update | ChangeType::Creation => {
+                ChangeType::Creation => {
+                    created.insert(attribute.name.clone());
+                    updates.insert(attribute.name, Bytes::from(attribute.value));
+                }
+                ChangeType::Update => {
                     updates.insert(attribute.name, Bytes::from(attribute.value));
                 }
                 ChangeType::Deletion => {
@@ -221,6 +238,7 @@ impl TryFromMessage for ProtocolComponentStateDelta {
             component_id: msg.component_id,
             updated_attributes: updates,
             deleted_attributes: deletions,
+            created_attributes: created,
         })
     }
 }

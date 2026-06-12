@@ -18,24 +18,16 @@ Tycho now provides early support for partial blocks on Base, enabling sub-second
 
 ## Installation
 
-The `tycho-simulation` package is available on <a href="https://github.com/propeller-heads/tycho-indexer" target="_blank" rel="noopener noreferrer">Github</a>.
+The `tycho-simulation` package is available on <a href="https://crates.io/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">crates.io</a>.
 
-To use the simulation tools with Ethereum Virtual Machine (EVM) chains, add the optional `evm` feature flag to your dependency configuration:
+Add it to your project's `Cargo.toml`:
 
 ```toml
-tycho-simulation = { 
-     git = "https://github.com/propeller-heads/tycho-indexer.git",
-     package = "tycho-simulation",
-     tag = "x.y.z", # Replace with latest version
-     features = ["evm"]
-}
-
+tycho-simulation = "x.y.z"
 ```
 
-Add this to your project's `Cargo.toml` file.
-
 {% hint style="info" %}
-**Note:** Replace `x.y.z` with the latest version number from our <a href="https://github.com/propeller-heads/tycho-indexer/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>. Using the latest release ensures you have the most up-to-date features and bug fixes.
+**Note:** Replace `x.y.z` with the latest version number from <a href="https://crates.io/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">crates.io</a>. Using the latest release ensures you have the most up-to-date features and bug fixes.
 {% endhint %}
 
 ## Main Interface

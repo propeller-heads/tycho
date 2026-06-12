@@ -6,18 +6,22 @@ description: Tycho Indexer's hosted endpoints
 
 ## Tycho Indexer
 
-<table><thead><tr><th width="244">Chain</th><th>URL</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td>tycho-beta.propellerheads.xyz</td></tr><tr><td>Base Mainnet</td><td>tycho-base-beta.propellerheads.xyz</td></tr><tr><td>Unichain Mainnet</td><td>tycho-unichain-beta.propellerheads.xyz</td></tr></tbody></table>
+<table><thead><tr><th width="244">Chain</th><th>URL</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td>tycho-beta.propellerheads.xyz</td></tr><tr><td>Base Mainnet</td><td>tycho-base-beta.propellerheads.xyz</td></tr><tr><td>Unichain Mainnet</td><td>tycho-unichain-beta.propellerheads.xyz</td></tr><tr><td>Arbitrum Mainnet</td><td>tycho-arbitrum-beta.propellerheads.xyz</td></tr><tr><td>Polygon Mainnet</td><td>tycho-polygon-beta.propellerheads.xyz</td></tr></tbody></table>
 
 ### Tycho Fynd
 
 Tycho Fynd endpoints are dedicated instances for Fynd users. They enforce stricter data filtering restrictions to support higher load.
 
-<table><thead><tr><th width="244">Chain</th><th>URL</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td>tycho-fynd-ethereum.propellerheads.xyz</td></tr><tr><td>Base Mainnet</td><td>tycho-fynd-base.propellerheads.xyz</td></tr><tr><td>Unichain Mainnet</td><td>tycho-fynd-unichain.propellerheads.xyz</td></tr></tbody></table>
+<table><thead><tr><th width="244">Chain</th><th>URL</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td>tycho-fynd-ethereum.propellerheads.xyz</td></tr><tr><td>Base Mainnet</td><td>tycho-fynd-base.propellerheads.xyz</td></tr><tr><td>Unichain Mainnet</td><td>tycho-fynd-unichain.propellerheads.xyz</td></tr><tr><td>Arbitrum Mainnet</td><td>tycho-fynd-arbitrum.propellerheads.xyz</td></tr><tr><td>Polygon Mainnet</td><td>tycho-fynd-polygon.propellerheads.xyz</td></tr></tbody></table>
 
 {% hint style="info" %}
 For API Documentation, Tycho Indexer includes Swagger docs, available at /docs/ path.
 
 Example, for Mainnet: <a href="https://tycho-beta.propellerheads.xyz/docs/" target="_blank" rel="noopener noreferrer">https://tycho-beta.propellerheads.xyz/docs/</a>
+{% endhint %}
+
+{% hint style="info" %}
+We're constantly adding new protocols. To see the current protocol systems for a specific endpoint, use the [Retrieve protocol systems](indexer/tycho-rpc.md#v1-protocol_systems) endpoint.
 {% endhint %}
 
 ## Plans
@@ -50,11 +54,7 @@ All Fynd endpoints share the same filtering restrictions:
 
 The available protocol systems vary by chain:
 
-<table><thead><tr><th width="244">Chain</th><th>Protocol Systems</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>sushiswap_v2</code>, <code>pancakeswap_v2</code>, <code>pancakeswap_v3</code>, <code>ekubo_v2</code>, <code>ekubo_v3</code>, <code>fluid_v1</code></td></tr><tr><td>Base Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code>, <code>aerodrome_slipstreams</code></td></tr><tr><td>Unichain Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>velodrome_slipstreams</code></td></tr></tbody></table>
-
-{% hint style="info" %}
-We're constantly adding new protocols. To see the current protocol systems for a specific endpoint, use the [Retrieve protocol systems](indexer/tycho-rpc.md#v1-protocol_systems) endpoint.
-{% endhint %}
+<table><thead><tr><th width="244">Chain</th><th>Protocol Systems</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>sushiswap_v2</code>, <code>pancakeswap_v2</code>, <code>pancakeswap_v3</code>, <code>ekubo_v2</code>, <code>ekubo_v3</code>, <code>fluid_v1</code></td></tr><tr><td>Base Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code>, <code>aerodrome_slipstreams</code></td></tr><tr><td>Unichain Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>velodrome_slipstreams</code>, <code>uniswap_v4_hooks</code></td></tr><tr><td>Arbitrum Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code></td></tr><tr><td>Polygon Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>quickswap_v2</code></td></tr></tbody></table>
 
 ## Metrics
 

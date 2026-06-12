@@ -281,6 +281,35 @@ contract TychoRouterForUniswapV3PolygonTest is TychoRouterTestSetup {
     }
 }
 
+contract TychoRouterForUniswapV3BscTest is TychoRouterTestSetup {
+    function getChain() public pure override returns (string memory) {
+        return "bsc";
+    }
+
+    function getForkBlock() public pure override returns (uint256) {
+        return 40000000;
+    }
+
+    function testSingleUniswapV3BscIntegration() public {
+        deal(BSC_WBNB, ALICE, 1 ether);
+        uint256 balanceBefore = IERC20(BSC_WETH).balanceOf(ALICE);
+
+        vm.startPrank(ALICE);
+        IERC20(BSC_WBNB).approve(tychoRouterAddr, type(uint256).max);
+
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_uniswap_v3_bsc"
+        );
+        (bool success,) = tychoRouterAddr.call(callData);
+
+        uint256 balanceAfter = IERC20(BSC_WETH).balanceOf(ALICE);
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(BSC_WBNB).balanceOf(tychoRouterAddr), 0);
+        assertEq(balanceAfter - balanceBefore, 167585949393846682);
+    }
+}
+
 contract TychoRouterForUniswapV3ArbitrumTest is TychoRouterTestSetup {
     function getChain() public pure override returns (string memory) {
         return "arbitrum";

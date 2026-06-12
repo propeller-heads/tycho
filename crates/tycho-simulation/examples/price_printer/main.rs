@@ -14,9 +14,10 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
-            filters::{balancer_v2_pool_filter, curve_pool_filter},
+            filters::balancer_v2_pool_filter,
             pancakeswap_v2::state::PancakeswapV2State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
@@ -58,22 +59,31 @@ fn register_exchanges(
                     tvl_filter.clone(),
                     Some(balancer_v2_pool_filter),
                 )
-                .exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    Some(curve_pool_filter),
-                )
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:curve", tvl_filter.clone(), None)
                 .exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None)
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3::filter_fn))
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
-                .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(), None);
-            // COMING SOON!
-            // .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None);
         }
         Chain::Base => {
             builder = builder
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>(
+                    "aerodrome_slipstreams",
+                    tvl_filter.clone(),
+                    None,
+                )
+        }
+        Chain::Bsc => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             builder = builder
@@ -127,7 +137,7 @@ async fn main() {
             .tvl_threshold
             .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
         let tvl_filter = ComponentFilter::with_tvl_range(tvl_threshold, tvl_threshold);
-        let mut protocol_stream =
+        let protocol_stream =
             register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter)
                 .auth_key(Some(tycho_api_key.clone()))
                 .skip_state_decode_failures(true)
@@ -136,6 +146,7 @@ async fn main() {
                 .build()
                 .await
                 .expect("Failed building protocol stream");
+        tokio::pin!(protocol_stream);
 
         // Loop through block updates
         while let Some(msg) = protocol_stream.next().await {

@@ -1,14 +1,13 @@
-[schema]
-path = "https://json.schemastore.org/cargo.json"
-enabled = true
-
-
 [formatting]
 reorder_keys = false
 
 [[rule]]
 include = ["**/Cargo.toml"]
 keys = ["dependencies"]
+
+[rule.schema]
+path = "https://json.schemastore.org/cargo.json"
+enabled = true
 
 [rule.formatting]
 reorder_keys = true

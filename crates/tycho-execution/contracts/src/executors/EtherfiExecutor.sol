@@ -11,6 +11,8 @@ import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 error EtherfiExecutor__InvalidDataLength();
 error EtherfiExecutor__InvalidDirection();
+error EtherfiExecutor__ZeroAddress();
+error EtherfiExecutor__NotAContract();
 
 interface IEtherfiRedemptionManager {
     function redeemEEth(
@@ -26,6 +28,7 @@ interface IEtherfiLiquidityPool {
 
 interface IWeETH {
     function wrap(uint256 _eETHAmount) external returns (uint256);
+
     function unwrap(uint256 _weETHAmount) external returns (uint256);
 }
 
@@ -52,23 +55,20 @@ contract EtherfiExecutor is IExecutor {
         address _weethAddress,
         address _redemptionManagerAddress
     ) {
-        require(
-            _ethAddress != address(0), "EtherfiExecutor: ethAddress is zero"
-        );
-        require(
-            _eethAddress != address(0), "EtherfiExecutor: eethAddress is zero"
-        );
-        require(
-            _liquidityPoolAddress != address(0),
-            "EtherfiExecutor: liquidityPoolAddress is zero"
-        );
-        require(
-            _weethAddress != address(0), "EtherfiExecutor: weethAddress is zero"
-        );
-        require(
-            _redemptionManagerAddress != address(0),
-            "EtherfiExecutor: redemptionManagerAddress is zero"
-        );
+        if (_ethAddress == address(0)) {
+            revert EtherfiExecutor__ZeroAddress();
+        }
+        if (
+            _eethAddress == address(0) || _liquidityPoolAddress == address(0)
+                || _weethAddress == address(0)
+                || _redemptionManagerAddress == address(0)
+        ) revert EtherfiExecutor__ZeroAddress();
+        if (
+            _eethAddress.code.length == 0
+                || _liquidityPoolAddress.code.length == 0
+                || _weethAddress.code.length == 0
+                || _redemptionManagerAddress.code.length == 0
+        ) revert EtherfiExecutor__NotAContract();
 
         ethAddress = _ethAddress;
         eethAddress = _eethAddress;
@@ -86,14 +86,8 @@ contract EtherfiExecutor is IExecutor {
         direction = _decodeData(data);
 
         if (direction == EtherfiDirection.EethToEth) {
-            // eETH is share-based and rounds down on amount conversions;
-            // cap redeem amount to current balance to avoid 1-wei dust reverts.
-            uint256 redeemAmount = IERC20(eethAddress).balanceOf(address(this));
-            if (redeemAmount > amountIn) {
-                redeemAmount = amountIn;
-            }
             IEtherfiRedemptionManager(redemptionManagerAddress)
-                .redeemEEth(redeemAmount, receiver, ethAddress);
+                .redeemEEth(amountIn, receiver, ethAddress);
         } else if (direction == EtherfiDirection.EthToEeth) {
             // slither-disable-next-line arbitrary-send-eth,unused-return
             IEtherfiLiquidityPool(liquidityPoolAddress)

@@ -8,8 +8,9 @@ use std::{
 use thiserror::Error;
 use tokio::{sync::mpsc::Receiver, task::JoinHandle};
 use tracing::{info, warn};
-use tycho_common::dto::{
-    Chain, ExtractorIdentity, PaginationLimits, PaginationParams, ProtocolSystemsRequestBody,
+use tycho_common::{
+    dto::{PaginationLimits, ProtocolSystemsRequestBody},
+    models::{Chain, ExtractorIdentity},
 };
 
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
         component_tracker::ComponentFilter, synchronizer::ProtocolStateSynchronizer, BlockHeader,
         BlockSynchronizer, BlockSynchronizerError, FeedMessage,
     },
-    rpc::{HttpRPCClientOptions, RPCClient},
+    rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     HttpRPCClient, WsDeltasClient,
 };
 
@@ -391,11 +392,9 @@ impl ProtocolSystemsInfo {
     ) -> Self {
         let page_size =
             ProtocolSystemsRequestBody::effective_max_page_size(rpc_client.compression());
+        let params = ProtocolSystemsParams::new(chain).with_pagination(0, page_size);
         let response = rpc_client
-            .get_protocol_systems(&ProtocolSystemsRequestBody {
-                chain,
-                pagination: PaginationParams { page: 0, page_size },
-            })
+            .get_protocol_systems(params)
             .await
             .map_err(|e| {
                 warn!(
@@ -409,26 +408,30 @@ impl ProtocolSystemsInfo {
             return Self { dci_protocols: HashSet::new(), other_available: HashSet::new() };
         };
 
-        if response.pagination.total > page_size {
+        if response.total() > page_size {
             warn!(
                 "Server has {} protocol systems but only {} were fetched (page_size={page_size}). \
                  Availability info may be incomplete.",
-                response.pagination.total,
-                response.protocol_systems.len(),
+                response.total(),
+                response.data().protocol_systems().len(),
             );
         }
 
         let available: HashSet<_> = response
-            .protocol_systems
-            .into_iter()
+            .data()
+            .protocol_systems()
+            .iter()
+            .cloned()
             .collect();
         let other_available = available
             .difference(requested_exchanges)
             .cloned()
             .collect();
         let mut dci_protocols: HashSet<String> = response
-            .dci_protocols
-            .into_iter()
+            .data()
+            .dci_protocols()
+            .iter()
+            .cloned()
             .collect();
 
         // TODO(ENG-5302): Remove this fallback once all environments serve

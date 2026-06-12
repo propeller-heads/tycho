@@ -12,6 +12,11 @@ contract ArbitrumConstants {
     address constant ARBITRUM_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
 }
 
+contract BscConstants {
+    address constant BSC_WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address constant BSC_WETH = 0x2170Ed0880ac9A755fd29B2688956BD959F933F8;
+}
+
 contract BaseConstants {
     address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant BASE_MAG7 = 0x9E6A46f294bB67c20F1D1E7AfB0bBEf614403B55;
@@ -42,7 +47,13 @@ contract BaseConstants {
         0x1b7088833548A8C4Ab12a900a2f4bdFA49221081;
 }
 
-contract Constants is Test, PolygonConstants, ArbitrumConstants, BaseConstants {
+contract Constants is
+    Test,
+    PolygonConstants,
+    ArbitrumConstants,
+    BaseConstants,
+    BscConstants
+{
     address ADMIN = makeAddr("unique-admin"); //admin=us
     // Changed this since someone deployed a drainer contract to makeAddr("bob")
     address BOB = makeAddr("bob*"); //bob=someone!=us

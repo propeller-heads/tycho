@@ -35,7 +35,7 @@ use tycho_simulation::{
         hashflow::{client::HashflowClient, state::HashflowState},
         liquorice::{client::LiquoriceClient, state::LiquoriceState},
     },
-    tycho_common::models::Chain,
+    tycho_common::models::{Chain, TvlThresholdTier},
     utils::load_all_tokens,
 };
 use tycho_test::{
@@ -57,9 +57,10 @@ use crate::{
 
 #[derive(Parser, Clone)]
 struct Cli {
-    /// The tvl threshold in ETH/native token units to filter the graph by
-    #[arg(long, default_value_t = 100.0)]
-    tvl_threshold: f64,
+    /// The TVL threshold in native token units to filter the graph by.
+    /// Defaults to a chain-appropriate value targeting ~$200K USD equivalent (Medium tier).
+    #[arg(long)]
+    tvl_threshold: Option<f64>,
 
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
@@ -161,6 +162,15 @@ struct Cli {
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     #[arg(long, default_value_t = 30)]
     stale_threshold_secs: u64,
+
+    /// Router fee on output in bps (defaults to 10 bps)
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..))]
+    router_fee: u16,
+
+    /// Disable on-chain swap execution validation (RPC simulation only, no swap encoding or
+    /// execution). Useful for diagnosing stream latency without execution overhead.
+    #[arg(long, default_value_t = false)]
+    disable_execution: bool,
 }
 
 impl Debug for Cli {
@@ -255,8 +265,11 @@ async fn main() -> miette::Result<()> {
 async fn run(cli: Cli) -> miette::Result<()> {
     info!("Starting integration test");
 
-    let cli = Arc::new(cli);
     let chain = cli.chain;
+    let tvl_threshold = cli
+        .tvl_threshold
+        .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
+    let cli = Arc::new(cli);
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
 
@@ -288,7 +301,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             chain,
             cli.tycho_url.clone(),
             cli.tycho_api_key.clone(),
-            cli.tvl_threshold,
+            tvl_threshold,
             cli.tvl_buffer_ratio,
             cli.protocols.clone(),
             cli.partial_blocks,
@@ -303,7 +316,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     if !cli.disable_rfq {
         if let Ok(rfq_stream_processor) = RFQStreamProcessor::new(
             chain,
-            cli.tvl_threshold,
+            tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
         ) {
@@ -664,8 +677,11 @@ async fn process_update(
 
         // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
         // standard endpoints use `latest` (confirmed blocks only).
-        let block_tag =
-            if cli.partial_blocks { BlockNumberOrTag::Pending } else { BlockNumberOrTag::Latest };
+        let block_tag = if cli.partial_blocks && update.update.is_partial {
+            BlockNumberOrTag::Pending
+        } else {
+            BlockNumberOrTag::Latest
+        };
         let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
         let poll_result = poll_rpc_for_block(
@@ -690,6 +706,9 @@ async fn process_update(
                     metrics::record_block_processing_duration(latency_seconds, block_type);
                 }
                 metrics::record_protocol_update_skipped();
+                for protocol in update.update.sync_states.keys() {
+                    metrics::record_protocol_sync_state_skipped(protocol);
+                }
                 return Ok(());
             }
             BlockPollResult::Timeout => {
@@ -761,7 +780,7 @@ async fn process_update(
             .map(|(validator, id, _protocol)| (*validator, id.clone()))
             .collect();
 
-        let validation_block_id = if cli.partial_blocks {
+        let validation_block_id = if update.update.is_partial {
             BlockId::pending()
         } else {
             BlockId::from(block.header.number)
@@ -860,6 +879,10 @@ async fn process_update(
         return Ok(());
     }
 
+    if cli.disable_execution {
+        return Ok(());
+    }
+
     let results =
         match simulate_swap_transaction(&rpc_tools, block_execution_info.clone(), &block, None)
             .await
@@ -912,6 +935,7 @@ async fn process_update(
             &mut n_reverts,
             &mut n_failures,
             statistics.clone(),
+            cli.router_fee,
         );
 
         // Record statistics
@@ -1317,6 +1341,7 @@ fn process_execution_result(
     n_reverts: &mut i32,
     n_failures: &mut i32,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
+    router_fee: u16,
 ) {
     match result {
         TychoExecutionResult::Success {
@@ -1334,17 +1359,24 @@ fn process_execution_result(
 
             metrics::record_simulation_execution_success(&execution_info.protocol_system);
 
+            // Remove the router fee from the expected simulated amount out.
+            let simulated_amount_out_without_fee = execution_info
+                .expected_amount_out
+                .clone() -
+                (execution_info.expected_amount_out * BigUint::from(router_fee)) /
+                    BigUint::from(10000u64);
+
             // Calculate slippage: positive = simulated > expected, negative = simulated <
             // expected
-            let slippage = if amount_out >= &execution_info.expected_amount_out {
-                let diff = amount_out - &execution_info.expected_amount_out;
-                ((diff.clone() * BigUint::from(10000u32)) / &execution_info.expected_amount_out)
+            let slippage = if amount_out >= &simulated_amount_out_without_fee {
+                let diff = amount_out - &simulated_amount_out_without_fee;
+                ((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
             } else {
-                let diff = &execution_info.expected_amount_out - amount_out;
-                -((diff.clone() * BigUint::from(10000u32)) / &execution_info.expected_amount_out)
+                let diff = &simulated_amount_out_without_fee - amount_out;
+                -((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
@@ -1372,8 +1404,8 @@ fn process_execution_result(
                     token_in = %execution_info.token_in,
                     token_out = %execution_info.token_out,
                     amount_in = %execution_info.solution.amount_in(),
-                    simulated_amount  = %amount_out,
-                    executed_amount = %execution_info.expected_amount_out,
+                    executed_amount  = %amount_out,
+                    simulated_amount = %simulated_amount_out_without_fee,
                     slippage_ratio = slippage,
                     tenderly = tenderly_url,
                     overwrites = %overwrites_string,
@@ -1386,8 +1418,8 @@ fn process_execution_result(
                     event_type = "execution_slippage",
                     token_in = %execution_info.token_in,
                     token_out = %execution_info.token_out,
-                    simulated_amount  = %amount_out,
-                    executed_amount = %execution_info.expected_amount_out,
+                    executed_amount  = %amount_out,
+                    simulated_amount = %simulated_amount_out_without_fee,
                     slippage_ratio = slippage,
                     tenderly = tenderly_url,
                     overwrites = %overwrites_string,
@@ -1402,6 +1434,11 @@ fn process_execution_result(
 
             if let Some(estimated) = estimated_gas.to_f64() {
                 metrics::record_gas_signed_error_ratio(
+                    &execution_info.protocol_system,
+                    estimated,
+                    *gas_used as f64,
+                );
+                metrics::record_gas_signed_error_absolute(
                     &execution_info.protocol_system,
                     estimated,
                     *gas_used as f64,

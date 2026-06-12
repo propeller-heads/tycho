@@ -1,16 +1,16 @@
 require('dotenv').config();
-const { ethers } = require("hardhat");
+const {ethers} = require("hardhat");
 const hre = require("hardhat");
 
 // Comment out the executors you don't want to deploy
 const executors_to_deploy = {
     "ethereum": [
         // USV2 - Args: Fee BPS
-        { exchange: "UniswapV2Executor", args: [30] },
+        {exchange: "UniswapV2Executor", args: [30]},
         // PANCAKESWAP V2 - Args: Fee BPS
-        { exchange: "UniswapV2Executor", args: [25] },
-        // PANCAKESWAP V3 - Args: (none)
-        { exchange: "UniswapV3Executor", args: [] },
+        {exchange: "UniswapV2Executor", args: [25]},
+        // USV3 & PANCAKESWAP V3 - Args: (none)
+        {exchange: "UniswapV3Executor", args: []},
         // Args: Pool manager, Angstrom hook
         {
             exchange: "UniswapV4Executor", args: [
@@ -19,7 +19,7 @@ const executors_to_deploy = {
             ]
         },
         // Args: (none)
-        { exchange: "BalancerV2Executor", args: [] },
+        {exchange: "BalancerV2Executor", args: []},
         // Args: Ekubo core contract, mev resist
         {
             exchange: "EkuboExecutor", args: [
@@ -35,9 +35,9 @@ const executors_to_deploy = {
             ]
         },
         // Args: (none)
-        { exchange: "MaverickV2Executor", args: [] },
+        {exchange: "MaverickV2Executor", args: []},
         // Args: (none)
-        { exchange: "BalancerV3Executor", args: [] },
+        {exchange: "BalancerV3Executor", args: []},
         // Args: Bebop Settlement contract
         {
             exchange: "BebopExecutor",
@@ -68,11 +68,10 @@ const executors_to_deploy = {
         {
             exchange: "EkuboV3Executor", args: []
         },
-        // Args: WETH address
+        // Args: Wrapped native token address
         {
-            exchange: "WethExecutor", args: ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
+            exchange: "NativeWrapExecutor", args: ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
         },
-
         // Args: Liquorice settlement, Liquorice balance manager
         {
             exchange: "LiquoriceExecutor", args: [
@@ -83,9 +82,9 @@ const executors_to_deploy = {
     ],
     "base": [
         // USV2 - Args: Fee BPS
-        { exchange: "UniswapV2Executor", args: [30] },
+        {exchange: "UniswapV2Executor", args: [30]},
         // USV3 - Args: (none)
-        { exchange: "UniswapV3Executor", args: [] },
+        {exchange: "UniswapV3Executor", args: []},
         // USV4 - Args: Pool manager, Angstrom hook
         {
             exchange: "UniswapV4Executor", args: [
@@ -99,17 +98,17 @@ const executors_to_deploy = {
             args: ["0xbbbbbBB520d69a9775E85b458C58c648259FAD5F"]
         },
         // Aerodrome Slipstreams - Args: (none)
-        { exchange: "SlipstreamsExecutor", args: [] },
-        // Args: WETH address
+        {exchange: "SlipstreamsExecutor", args: []},
+        // Args: Wrapped native token address
         {
-            exchange: "WethExecutor", args: ["0x4200000000000000000000000000000000000006"]
+            exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
         },
     ],
     "unichain": [
         // USV2 - Args: Fee BPS
-        { exchange: "UniswapV2Executor", args: [30] },
+        {exchange: "UniswapV2Executor", args: [30]},
         // USV3 - Args: (none)
-        { exchange: "UniswapV3Executor", args: [] },
+        {exchange: "UniswapV3Executor", args: []},
         // USV4 - Args: Pool manager, Angstrom hook
         {
             exchange: "UniswapV4Executor", args: [
@@ -126,10 +125,68 @@ const executors_to_deploy = {
             ]
         },
         // Aerodrome Slipstreams - Args: (none)
-        { exchange: "SlipstreamsExecutor", args: [] },
-        // Args: WETH address
+        {exchange: "SlipstreamsExecutor", args: []},
+        // Args: Wrapped native token address
         {
-            exchange: "WethExecutor", args: ["0x4200000000000000000000000000000000000006"]
+            exchange: "NativeWrapExecutor", args: ["0x4200000000000000000000000000000000000006"]
+        },
+    ],
+    "arbitrum": [
+        // USV2 - Args: Fee BPS
+        {exchange: "UniswapV2Executor", args: [30]},
+        // USV3 & PANCAKESWAP V3 - Args: (none)
+        {exchange: "UniswapV3Executor", args: []},
+        // USV4 - Args: Pool manager, Angstrom hook
+        {
+            exchange: "UniswapV4Executor", args: [
+                "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+                // This is the Angstrom address for ethereum. There isn't one for
+                // arbitrum
+                "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+            ]
+        },
+        // Args: Wrapped native token address (WETH)
+        {
+            exchange: "NativeWrapExecutor", args: ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
+        },
+    ],
+    "polygon": [
+        // USV2 & QUICKSWAP V2 - Args: Fee BPS
+        {exchange: "UniswapV2Executor", args: [30]},
+        // USV3 - Args: (none)
+        {exchange: "UniswapV3Executor", args: []},
+        // USV4 - Args: Pool manager, Angstrom hook
+        {
+            exchange: "UniswapV4Executor", args: [
+                "0x67366782805870060151383f4bbff9dab53e5cd6",
+                // This is the Angstrom address for ethereum. There isn't one for
+                // polygon
+                "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+            ]
+        },
+        // Args: Wrapped native token address (WPOL)
+        {
+            exchange: "NativeWrapExecutor", args: ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
+        },
+    ],
+    "bsc": [
+        // USV2 - Args: Fee BPS
+        {exchange: "UniswapV2Executor", args: [30]},
+        // PANCAKESWAP V2 - Args: Fee BPS
+        {exchange: "UniswapV2Executor", args: [25]},
+        // USV3 & PANCAKESWAP V3 - Args: (none)
+        {exchange: "UniswapV3Executor", args: []},
+        // USV4 - Args: Pool manager, Angstrom hook
+        {
+            exchange: "UniswapV4Executor", args: [
+                "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df",
+                // This is the Angstrom address for ethereum. There isn't one for BSC
+                "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+            ]
+        },
+        // Args: Wrapped native token address (WBNB)
+        {
+            exchange: "NativeWrapExecutor", args: ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
         },
     ],
 }
@@ -148,7 +205,7 @@ async function main() {
     console.log(`Using CREATE2 factory at: ${create2FactoryAddress}`);
 
     for (const executor of executors_to_deploy[network]) {
-        const { exchange, args } = executor;
+        const {exchange, args} = executor;
         const Executor = await ethers.getContractFactory(exchange);
 
         // Get bytecode with constructor arguments

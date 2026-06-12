@@ -729,8 +729,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             clientFeeParams.clientFeeReceiver
         );
 
-        amountOut =
-            _settleOutput(amountOut, amountIn, tokenIn, tokenOut, receiver);
+        amountOut = _settleOutput(
+            amountOut, minAmountOut, amountIn, tokenIn, tokenOut, receiver
+        );
     }
 
     /**
@@ -801,8 +802,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             client
         );
 
-        amountOut =
-            _settleOutput(amountOut, amountIn, tokenIn, tokenOut, receiver);
+        amountOut = _settleOutput(
+            amountOut, minAmountOut, amountIn, tokenIn, tokenOut, receiver
+        );
     }
 
     /**
@@ -872,16 +874,18 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             client
         );
 
-        amountOut =
-            _settleOutput(amountOut, amountIn, tokenIn, tokenOut, receiver);
+        amountOut = _settleOutput(
+            amountOut, minAmountOut, amountIn, tokenIn, tokenOut, receiver
+        );
     }
 
     /**
      * @dev Transfers output tokens to receiver (or credits vault),
-     *      and finalizes transient deltas.
+     *      finalizes transient deltas, and checks slippage.
      */
     function _settleOutput(
         uint256 amountOut,
+        uint256 minAmountOut,
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
@@ -901,6 +905,11 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         }
 
         _finalizeBalances(msg.sender, tokenIn, amountIn);
+
+        // Check final amount to account for fee tokens or rebasing tokens
+        if (amountOut < minAmountOut) {
+            revert TychoRouter__NegativeSlippage(amountOut, minAmountOut);
+        }
 
         return amountOut;
     }
@@ -1244,7 +1253,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             int256 outputDelta = _getDelta(tokenOut);
             if (outputDelta > 0) {
                 // Output tokens are still in the Router. This could be because no
-                // output swap has been performed, or the user has specified the
+                // output transfer has been performed yet, or the user has specified the
                 // receiver to be the router in order to rebalance their vault.
                 _updateDeltaAccounting(tokenOut, int256(requiredContribution));
             } else if (outputDelta == 0) {
@@ -1253,8 +1262,14 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 } else if (tokenOut == ETH_ADDRESS) {
                     Address.sendValue(payable(receiver), requiredContribution);
                 } else {
+                    // Measure user balance before and after required contribution to
+                    // account for fee tokens
+                    uint256 balanceBefore = IERC20(tokenOut).balanceOf(receiver);
                     IERC20(tokenOut)
                         .safeTransfer(receiver, requiredContribution);
+                    uint256 actualContribution =
+                        IERC20(tokenOut).balanceOf(receiver) - balanceBefore;
+                    return amountOut + actualContribution;
                 }
             } else {
                 // Negative output delta indicates unprofitable arbitrage.

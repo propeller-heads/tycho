@@ -27,8 +27,7 @@ use revm::primitives::{address, Address};
 use rstest::*;
 use rstest_reuse::template;
 use tycho_common::{
-    dto::ProtocolComponent,
-    models::{token::Token, Chain},
+    models::{protocol::ProtocolComponent, token::Token, Chain},
     Bytes,
 };
 

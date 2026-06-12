@@ -51,14 +51,16 @@ use crate::{
     impl_non_serializable_protocol,
 };
 
-// Gas limit constants for capping get_limits calculations
-// These prevent simulations from exceeding Ethereum's block gas limit
-// The names of the constants reflect the exact method from the tenderly log.
-const SWAP_BASE_GAS: u64 = 130_000;
+// Fixed overhead per swap: covers router overhead, executor preamble (decode, sync,
+// unlock/callback pattern), and token transfer-in.
+const SWAP_BASE_GAS: u64 = 185_000;
+// Per loop: PoolManager.swap bitmap lookup + sqrt math + computeSwapStep.
+// V4's singleton PoolManager hits warmer storage than V3 standalone pools: ~3,500/loop.
+const GAS_PER_BITMAP_LOOKUP: u64 = 3_500;
+// Initialized tick crossing: _updateTick() updates feeGrowthOutside0/1 (2 SSTOREs).
+// Warm ≈ 10–17k, cold ≈ 40–52k. 17,540 reflects warm scenario.
 const GAS_PER_TICK: u64 = 17_540;
-const GAS_PER_BITMAP_LOOKUP: u64 = 4_000;
-// Cost of taking the output amount from the Uniswap V4 PoolManager, corresponds to
-// PoolManager.take()
+// Settlement overhead within swapExactInputSingle: _settle() + _getFullCredit() + misc.
 const V4_CALLBACK_SETTLEMENT_GAS: u64 = 30_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
@@ -213,7 +215,7 @@ impl UniswapV4State {
             tick: self.tick,
             liquidity: self.liquidity,
         };
-        let mut gas_used = U256::from(0);
+        let mut gas_used = U256::from(SWAP_BASE_GAS);
 
         while state.amount_remaining != I256::ZERO && state.sqrt_price != price_limit {
             let (mut next_tick, initialized) = match self
@@ -1122,18 +1124,17 @@ mod tests {
     }
 
     #[tokio::test]
-    /// Compares a quote that we got from the UniswapV4 Quoter contract on Sepolia with a simulation
-    /// using Tycho-simulation and a state extracted with Tycho-indexer
+    /// Compares a quote from the UniswapV4 Quoter contract on Sepolia with a simulation.
     async fn test_swap_sim() {
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
-
         let asset_path = Path::new(project_root)
             .join("tests/assets/decoder/uniswap_v4_snapshot_sepolia_block_7239119.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let block = BlockHeader {
             number: 7239119,
@@ -1156,7 +1157,7 @@ mod tests {
         );
         let t1 = Token::new(
             &Bytes::from_str("0xe390a1c311b26f14ed0d55d3b0261c2320d15ca5").unwrap(),
-            "T0",
+            "T1",
             18,
             0,
             &[Some(10_000)],
@@ -1183,35 +1184,13 @@ mod tests {
             .get_amount_out(BigUint::from_u64(1000000000000000000).unwrap(), &t0, &t1)
             .unwrap();
 
-        // This amount comes from a call to the `quoteExactInputSingle` on the quoter contract on a
-        // sepolia node with these arguments
-        // ```
-        // {"poolKey":{"currency0":"0x647e32181a64f4ffd4f0b0b4b052ec05b277729c","currency1":"0xe390a1c311b26f14ed0d55d3b0261c2320d15ca5","fee":"3000","tickSpacing":"60","hooks":"0x0000000000000000000000000000000000000000"},"zeroForOne":true,"exactAmount":"1000000000000000000","hookData":"0x"}
-        // ```
-        // Here is the curl for it:
-        //
-        // ```
-        // curl -X POST https://eth-sepolia.api.onfinality.io/public \
-        // -H "Content-Type: application/json" \
-        // -d '{
-        //   "jsonrpc": "2.0",
-        //   "method": "eth_call",
-        //   "params": [
-        //     {
-        //       "to": "0xCd8716395D55aD17496448a4b2C42557001e9743",
-        //       "data": "0xaa9d21cb0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000647e32181a64f4ffd4f0b0b4b052ec05b277729c000000000000000000000000e390a1c311b26f14ed0d55d3b0261c2320d15ca50000000000000000000000000000000000000000000000000000000000000bb8000000000000000000000000000000000000000000000000000000000000003c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000"
-        //     },
-        //     "0x6e75cf"
-        //   ],
-        //   "id": 1
-        //   }'
-        // ```
         let expected_amount = BigUint::from(9999909699895_u64);
         assert_eq!(res.amount, expected_amount);
     }
 
     #[tokio::test]
     async fn test_get_limits() {
+        use tycho_client::feed::dto;
         let block = BlockHeader {
             number: 22689129,
             hash: Bytes::from_str(
@@ -1227,9 +1206,9 @@ mod tests {
             Path::new(project_root).join("tests/assets/decoder/uniswap_v4_snapshot.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let t0 = Token::new(
             &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
@@ -1269,7 +1248,7 @@ mod tests {
             .get_limits(t0.address.clone(), t1.address.clone())
             .unwrap();
 
-        assert_eq!(&res.0, &BigUint::from_u128(71698353688830259750744466706).unwrap()); // Crazy amount because of this tick: "ticks/-887220/net-liquidity": "0x00e8481d98"
+        assert_eq!(&res.0, &BigUint::from_u128(71698353688830259750744466706).unwrap());
 
         let out = usv4_state
             .get_amount_out(res.0, &t0, &t1)

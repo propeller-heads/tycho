@@ -78,8 +78,7 @@ mod tests {
     use rstest::rstest;
     use tycho_client::feed::synchronizer::ComponentWithState;
     use tycho_common::{
-        dto::ResponseProtocolState,
-        models::{token::Token, Chain},
+        models::{protocol::ProtocolComponentState, token::Token, Chain},
         simulation::protocol_sim::ProtocolSim,
         Bytes,
     };
@@ -106,7 +105,7 @@ mod tests {
     async fn test_aerodrome_v1_try_from() {
         let (token0, token1) = token_keys();
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes: HashMap::from([
                     ("reserve0".to_string(), Bytes::from(vec![0; 32])),
@@ -114,7 +113,7 @@ mod tests {
                 ]),
                 balances: HashMap::new(),
             },
-            component: tycho_common::dto::ProtocolComponent {
+            component: tycho_common::models::protocol::ProtocolComponent {
                 tokens: vec![token0, token1],
                 static_attributes: HashMap::from([("is_stable".to_string(), Bytes::from(vec![0]))]),
                 ..Default::default()
@@ -163,12 +162,12 @@ mod tests {
         }
 
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes,
                 balances: HashMap::new(),
             },
-            component: tycho_common::dto::ProtocolComponent {
+            component: tycho_common::models::protocol::ProtocolComponent {
                 tokens: vec![token0, token1],
                 static_attributes,
                 ..Default::default()
@@ -197,7 +196,7 @@ mod tests {
     async fn test_aerodrome_v1_try_from_invalid_fee() {
         let (token0, token1) = token_keys();
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes: HashMap::from([
                     ("reserve0".to_string(), Bytes::from(vec![0; 32])),
@@ -206,7 +205,7 @@ mod tests {
                 ]),
                 balances: HashMap::new(),
             },
-            component: tycho_common::dto::ProtocolComponent {
+            component: tycho_common::models::protocol::ProtocolComponent {
                 tokens: vec![token0, token1],
                 static_attributes: HashMap::from([("is_stable".to_string(), Bytes::from(vec![0]))]),
                 ..Default::default()
@@ -230,7 +229,7 @@ mod tests {
     async fn test_aerodrome_v1_try_from_zero_fee_indicator() {
         let (token0, token1) = token_keys();
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes: HashMap::from([
                     ("reserve0".to_string(), Bytes::from(vec![0; 32])),
@@ -239,7 +238,7 @@ mod tests {
                 ]),
                 balances: HashMap::new(),
             },
-            component: tycho_common::dto::ProtocolComponent {
+            component: tycho_common::models::protocol::ProtocolComponent {
                 tokens: vec![token0, token1],
                 static_attributes: HashMap::from([("is_stable".to_string(), Bytes::from(vec![1]))]),
                 ..Default::default()

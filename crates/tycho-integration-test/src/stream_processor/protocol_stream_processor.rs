@@ -4,7 +4,7 @@ use futures::{Stream, StreamExt};
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tokio::{sync::mpsc::Sender, task::JoinHandle};
 use tracing::{info, warn};
-use tycho_client::feed::component_tracker::ComponentFilter;
+use tycho_client::{feed::component_tracker::ComponentFilter, stream::RetryConfiguration};
 use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
@@ -15,6 +15,7 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            aerodrome_v1::state::AerodromeV1State,
             cowamm::state::CowAMMState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
@@ -76,9 +77,10 @@ impl ProtocolStreamProcessor {
         tx: Sender<miette::Result<StreamUpdate>>,
     ) -> miette::Result<JoinHandle<()>> {
         info!("Starting protocol stream processor for chain {:?}", self.chain);
-        let mut stream = self.build_stream(all_tokens).await?;
+        let stream = self.build_stream(all_tokens).await?;
         let handle = tokio::spawn(async move {
             info!("Protocol stream processor started");
+            tokio::pin!(stream);
             let mut is_first_update = true;
             while let Some(res) = stream.next().await {
                 let update = match res {
@@ -153,10 +155,16 @@ impl ProtocolStreamProcessor {
         if self.partial_blocks {
             protocol_stream = protocol_stream.enable_partial_blocks();
         }
+        // 1 s cooldown: must stay below the state-sync cooldown (≥ 2 s on every chain)
+        // so synchronizers don't exhaust their retries while the WS is reconnecting.
+        let infinite_ws_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(1));
+        let infinite_sync_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(3));
         protocol_stream
             .auth_key(Some(self.tycho_api_key.clone()))
             .skip_state_decode_failures(true)
-            .startup_timeout(Duration::from_secs(500))
+            .startup_timeout(Duration::from_secs(1000))
+            .websocket_retry_config(&infinite_ws_retries)
+            .state_synchronizer_retry_config(&infinite_sync_retries)
             .set_tokens(all_tokens.clone())
             .await
             .build()
@@ -192,6 +200,14 @@ impl ProtocolStreamProcessor {
                 "uniswap_v4".to_string(),
                 "pancakeswap_v3".to_string(),
                 "aerodrome_slipstreams".to_string(),
+                "aerodrome_v1".to_string(),
+            ],
+            Chain::Bsc => vec![
+                "uniswap_v2".to_string(),
+                "uniswap_v3".to_string(),
+                "uniswap_v4".to_string(),
+                "pancakeswap_v2".to_string(),
+                "pancakeswap_v3".to_string(),
             ],
             Chain::Unichain => {
                 vec![
@@ -201,6 +217,22 @@ impl ProtocolStreamProcessor {
                     "uniswap_v4_hooks".to_string(),
                     "velodrome_slipstreams".to_string(),
                     // "vm:curve".to_string(), // Temporarily disabled due to indexing issues
+                ]
+            }
+            Chain::Polygon => {
+                vec![
+                    "uniswap_v2".to_string(),
+                    "uniswap_v3".to_string(),
+                    "uniswap_v4".to_string(),
+                    "quickswap_v2".to_string(),
+                ]
+            }
+            Chain::Arbitrum => {
+                vec![
+                    "uniswap_v2".to_string(),
+                    "uniswap_v3".to_string(),
+                    "uniswap_v4".to_string(),
+                    "pancakeswap_v3".to_string(),
                 ]
             }
             _ => vec![],
@@ -314,6 +346,14 @@ impl ProtocolStreamProcessor {
                     tvl_filter.clone(),
                     Some(liquidityparty_killed_pools_filter),
                 );
+            }
+            "quickswap_v2" => {
+                stream =
+                    stream.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None);
+            }
+            "aerodrome_v1" => {
+                stream =
+                    stream.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None);
             }
             _ => {
                 return Err(miette::miette!("Unknown protocol: {}", protocol));

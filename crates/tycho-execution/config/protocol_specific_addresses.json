@@ -14,5 +14,6 @@
   "base": {},
   "arbitrum": {},
   "polygon": {},
-  "unichain": {}
+  "unichain": {},
+  "bsc": {}
 }

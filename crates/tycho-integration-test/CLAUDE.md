@@ -21,8 +21,9 @@ cargo run -p tycho-integration-test -- \
   --tvl-threshold 100
 ```
 
-Key optional flags: `--disable-onchain`, `--disable-rfq`, `--protocols uniswap_v2,curve`,
-`--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`.
+Key optional flags: `--disable-onchain`, `--disable-rfq`, `--disable-execution`,
+`--protocols uniswap_v2,curve`, `--max-blocks 100`, `--parallel-simulations 5`,
+`--always-test-components <id,...>`.
 
 ## Module Structure
 
@@ -30,7 +31,7 @@ Key optional flags: `--disable-onchain`, `--disable-rfq`, `--protocols uniswap_v
   dispatches blocks to stream processors, calls `poll_rpc_for_block` for on-chain comparison
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
-    `ProtocolSim` instances, runs `get_amount_out` simulations, validates via Tenderly execution
+    `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
   - `rfq_stream_processor.rs`: Handles RFQ protocol updates — fetches live quotes, compares
     against simulation
 - **`statistics.rs`**: `TestStatistics` + `ProtocolStatistics` — per-protocol counters for
@@ -42,5 +43,5 @@ Key optional flags: `--disable-onchain`, `--disable-rfq`, `--protocols uniswap_v
 For each block update, for a random sample of components (up to `--max-simulations`):
 1. `ProtocolSim::get_amount_out` — checks the simulation returns a non-zero output
 2. `ProtocolSim::get_limits` — checks token limits are non-zero
-3. Encodes a swap via `tycho-execution` and simulates it via Tenderly — checks it doesn't revert
-   and that on-chain output is within slippage tolerance of simulated output
+3. Encodes a swap via `tycho-execution` and simulates it via RPC (`eth_call`) — checks it doesn't
+   revert and that on-chain output is within slippage tolerance of simulated output

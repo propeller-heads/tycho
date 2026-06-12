@@ -153,7 +153,7 @@ contract UniswapV4AngstromExecutorTest is Constants, TestUtils {
 
         // Encode data with attestations
         bytes memory data =
-            abi.encodePacked(USDC_ADDR, WETH_ADDR, true, firstPool);
+            abi.encodePacked(USDC_ADDR, WETH_ADDR, true, false, firstPool);
 
         angstromExecutor.swap(amountIn, data, ALICE);
 
@@ -185,7 +185,7 @@ contract UniswapV4AngstromExecutorTest is Constants, TestUtils {
         );
 
         bytes memory data =
-            abi.encodePacked(USDC_ADDR, WETH_ADDR, true, firstPool);
+            abi.encodePacked(USDC_ADDR, WETH_ADDR, true, false, firstPool);
 
         angstromExecutor.swap(amountIn, data, BOB);
         assertGt(WETH.balanceOf(BOB), 0);

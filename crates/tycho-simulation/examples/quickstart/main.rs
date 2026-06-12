@@ -34,18 +34,20 @@ use tycho_execution::encoding::{
         approvals::permit2::{Permit2, PermitSingle},
         encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-        utils::biguint_to_u256,
+        utils::{biguint_to_u256, convert_to_router_token},
+        ROUTER_ETH_ADDRESS,
     },
     models,
-    models::{EncodedSolution, Solution, Swap, UserTransferType},
+    models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
-            filters::{balancer_v2_pool_filter, curve_pool_filter},
+            filters::balancer_v2_pool_filter,
             pancakeswap_v2::state::PancakeswapV2State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
@@ -96,6 +98,7 @@ impl Cli {
                 "ethereum" => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
                 "base" => "0x4200000000000000000000000000000000000006".to_string(),
                 "unichain" => "0x4200000000000000000000000000000000000006".to_string(),
+                "arbitrum" => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -105,6 +108,7 @@ impl Cli {
                 "ethereum" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                 "base" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
                 "unichain" => "0x078d782b760474a361dda0af3839290b0ef57ad6".to_string(),
+                "arbitrum" => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -205,25 +209,40 @@ async fn main() {
                 // Some(uniswap_v4_angstrom_hook_pool_filter))
                 .exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None)
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3::filter_fn))
-                .exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    Some(curve_pool_filter),
-                );
-            // COMING SOON!
-            // .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(),
-            // Some(uniswap_v4_pool_with_euler_hook_filter));
-            // .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None);
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:curve", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
         }
         Chain::Base => {
             protocol_stream = protocol_stream
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>(
+                    "aerodrome_slipstreams",
+                    tvl_filter.clone(),
+                    None,
+                )
+        }
+        Chain::Bsc => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             protocol_stream = protocol_stream
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Arbitrum => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
         _ => {}
@@ -233,7 +252,7 @@ async fn main() {
         load_blocklist(cli.blocklist_file.as_deref()).expect("Failed to load blocklist");
     protocol_stream = protocol_stream.blocklist_components(blocklist);
 
-    let mut protocol_stream = protocol_stream
+    let protocol_stream = protocol_stream
         .auth_key(Some(tycho_api_key.clone()))
         .skip_state_decode_failures(true)
         .set_tokens(all_tokens.clone())
@@ -241,6 +260,7 @@ async fn main() {
         .build()
         .await
         .expect("Failed building protocol stream");
+    tokio::pin!(protocol_stream);
 
     // Initialize the encoder
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
@@ -652,6 +672,15 @@ fn create_solution(
     let multiplier = &bps - slippage_percent;
     let min_amount_out = (expected_amount * &multiplier) / &bps;
 
+    // For native ETH we use TransferFrom (payable singleSwap);
+    // for ERC20s we use Permit2.
+    let is_native = sell_token.address == *ROUTER_ETH_ADDRESS || sell_token.address.is_zero();
+    let transfer_type = if is_native {
+        UserTransferType::TransferFrom
+    } else {
+        UserTransferType::TransferFromPermit2
+    };
+
     // Then we create a solution object with the previous swap
     Solution::new(
         user_address.clone(),
@@ -662,15 +691,19 @@ fn create_solution(
         min_amount_out,
         vec![simple_swap],
     )
-    .with_user_transfer_type(UserTransferType::TransferFromPermit2)
+    .with_user_transfer_type(transfer_type)
 }
 
-/// Encodes a transaction for the Tycho Router using the `singleSwapPermit2` method.
+/// Encodes a transaction for the Tycho Router.
+///
+/// Uses `singleSwapPermit2` for ERC-20 inputs and `singleSwap` (payable)
+/// for native ETH. Translates `Address::ZERO` to the router's
+/// `ETH_ADDRESS` (`0xEeee…`).
 ///
 /// # ⚠️ Important Responsibility Note
 ///
-/// This function is intended as **an illustrative example only** and supports only the method of
-/// interest of this quickstart. **Users must implement their own encoding logic** to ensure:
+/// This function is intended as **an illustrative example only**.
+/// **Users must implement their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
 /// - Proper validation and setting of critical inputs such as `minAmountOut`.
 fn encode_tycho_router_call(
@@ -682,39 +715,56 @@ fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
-    let given_token = Address::from_slice(solution.token_in());
-    let checked_token = Address::from_slice(solution.token_out());
+    let given_token = convert_to_router_token(Address::from_slice(solution.token_in()));
+    let checked_token = convert_to_router_token(Address::from_slice(solution.token_out()));
     let receiver = Address::from_slice(solution.receiver());
 
-    let permit2 = Permit2::new()?;
-    let p = permit2.get_permit(
-        encoded_solution.interacting_with(),
-        solution.sender(),
-        solution.token_in(),
-        solution.amount_in(),
-    )?;
-    let permit = PermitSingle::try_from(&p)
-        .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
-    let signature = sign_permit(chain_id, &p, signer)?;
+    let is_native_in =
+        solution.token_in() == &native_address || *solution.token_in() == *ROUTER_ETH_ADDRESS;
 
-    let method_calldata = (
-        given_amount,
-        given_token,
-        checked_token,
-        min_amount_out,
-        receiver,
-        permit,
-        signature.as_bytes().to_vec(),
-        encoded_solution.swaps().to_vec(),
-    )
-        .abi_encode();
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
+
+    let method_calldata = if is_native_in {
+        // singleSwap (payable, no permit2)
+        (
+            given_amount,
+            given_token,
+            checked_token,
+            min_amount_out,
+            receiver,
+            client_fee_params,
+            encoded_solution.swaps().to_vec(),
+        )
+            .abi_encode()
+    } else {
+        // singleSwapPermit2
+        let permit2 = Permit2::new()?;
+        let p = permit2.get_permit(
+            encoded_solution.interacting_with(),
+            solution.sender(),
+            solution.token_in(),
+            solution.amount_in(),
+        )?;
+        let permit = PermitSingle::try_from(&p)
+            .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
+        let signature = sign_permit(chain_id, &p, signer)?;
+
+        (
+            given_amount,
+            given_token,
+            checked_token,
+            min_amount_out,
+            receiver,
+            client_fee_params,
+            permit,
+            signature.as_bytes().to_vec(),
+            encoded_solution.swaps().to_vec(),
+        )
+            .abi_encode()
+    };
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if solution.token_in() == &native_address {
-        solution.amount_in().clone()
-    } else {
-        BigUint::ZERO
-    };
+    let value = if is_native_in { solution.amount_in().clone() } else { BigUint::ZERO };
     Ok(Transaction {
         to: encoded_solution
             .interacting_with()

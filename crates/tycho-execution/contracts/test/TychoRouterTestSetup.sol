@@ -23,7 +23,7 @@ import {FluidV1Executor} from "../src/executors/FluidV1Executor.sol";
 import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
 import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
 import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
-import {WethExecutor} from "../src/executors/WethExecutor.sol";
+import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 // Test utilities and mocks
@@ -115,7 +115,7 @@ contract TychoRouterTestSetup is
     SlipstreamsExecutor public slipstreamsExecutor;
     RocketpoolExecutor public rocketpoolExecutor;
     ERC4626Executor public erc4626Executor;
-    WethExecutor public wethExecutor;
+    NativeWrapExecutor public nativeWrapExecutor;
     EkuboV3Executor public ekuboV3Executor;
     EtherfiExecutor public etherfiExecutor;
     LiquidityPartyExecutor public liquidityPartyExecutor;
@@ -206,8 +206,18 @@ contract TychoRouterTestSetup is
         slipstreamsExecutor = new SlipstreamsExecutor();
         rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
         erc4626Executor = new ERC4626Executor();
-        wethExecutor = new WethExecutor(WETH_ADDR);
+        nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
         ekuboV3Executor = new EkuboV3Executor();
+        // Etch placeholder bytecode if Etherfi contracts are not yet deployed
+        // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
+        if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
+        if (LIQUIDITY_POOL_ADDR.code.length == 0) {
+            vm.etch(LIQUIDITY_POOL_ADDR, bytes("1"));
+        }
+        if (WEETH_ADDR.code.length == 0) vm.etch(WEETH_ADDR, bytes("1"));
+        if (REDEMPTION_MANAGER_ADDR.code.length == 0) {
+            vm.etch(REDEMPTION_MANAGER_ADDR, bytes("1"));
+        }
         etherfiExecutor = new EtherfiExecutor(
             ETH_ADDR,
             EETH_ADDR,
@@ -215,6 +225,14 @@ contract TychoRouterTestSetup is
             WEETH_ADDR,
             REDEMPTION_MANAGER_ADDR
         );
+        // Etch placeholder bytecode if Liquorice contracts are not yet
+        // deployed at this fork block.
+        if (LIQUORICE_SETTLEMENT.code.length == 0) {
+            vm.etch(LIQUORICE_SETTLEMENT, bytes("1"));
+        }
+        if (LIQUORICE_BALANCE_MANAGER.code.length == 0) {
+            vm.etch(LIQUORICE_BALANCE_MANAGER, bytes("1"));
+        }
         liquoriceExecutor = new LiquoriceExecutor(
             LIQUORICE_SETTLEMENT, LIQUORICE_BALANCE_MANAGER
         );
@@ -237,7 +255,7 @@ contract TychoRouterTestSetup is
         executors[12] = address(slipstreamsExecutor);
         executors[13] = address(rocketpoolExecutor);
         executors[14] = address(erc4626Executor);
-        executors[15] = address(wethExecutor);
+        executors[15] = address(nativeWrapExecutor);
         executors[16] = address(ekuboV3Executor);
         executors[17] = address(etherfiExecutor);
         executors[18] = address(liquoriceExecutor);

@@ -10,25 +10,25 @@ import {TransferManager} from "../TransferManager.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
-interface IWETH is IERC20 {
+interface IWrapped is IERC20 {
     function deposit() external payable;
     function withdraw(uint256) external;
 }
 
-error WethExecutor__InvalidDataLength();
-error WethExecutor__ZeroAddres();
+error NativeWrapExecutor__InvalidDataLength();
+error NativeWrapExecutor__ZeroAddress();
 
-contract WethExecutor is IExecutor {
-    using SafeERC20 for IWETH;
+contract NativeWrapExecutor is IExecutor {
+    using SafeERC20 for IWrapped;
     using SafeERC20 for IERC20;
 
-    IWETH public immutable weth;
+    IWrapped public immutable wrapped;
 
-    constructor(address wethAddress) {
-        if (wethAddress == address(0)) {
-            revert WethExecutor__ZeroAddres();
+    constructor(address wrappedAddress) {
+        if (wrappedAddress == address(0)) {
+            revert NativeWrapExecutor__ZeroAddress();
         }
-        weth = IWETH(wethAddress);
+        wrapped = IWrapped(wrappedAddress);
     }
 
     function fundsExpectedAddress(
@@ -50,11 +50,11 @@ contract WethExecutor is IExecutor {
         isWrapping = _decodeData(data);
 
         if (isWrapping) {
-            // ETH -> WETH: Wrap
-            weth.deposit{value: amountIn}();
+            // Native -> Wrapped: Wrap
+            wrapped.deposit{value: amountIn}();
         } else {
-            // WETH -> ETH: Unwrap
-            weth.withdraw(amountIn);
+            // Wrapped -> Native: Unwrap
+            wrapped.withdraw(amountIn);
         }
     }
 
@@ -64,7 +64,7 @@ contract WethExecutor is IExecutor {
         returns (bool isWrapping)
     {
         if (data.length != 1) {
-            revert WethExecutor__InvalidDataLength();
+            revert NativeWrapExecutor__InvalidDataLength();
         }
 
         isWrapping = uint8(data[0]) == 1;
@@ -86,19 +86,19 @@ contract WethExecutor is IExecutor {
         )
     {
         if (data.length != 1) {
-            revert WethExecutor__InvalidDataLength();
+            revert NativeWrapExecutor__InvalidDataLength();
         }
 
         bool isWrapping = uint8(data[0]) == 1;
 
         if (isWrapping) {
-            // ETH -> WETH: Wrap
+            // Native -> Wrapped: Wrap
             tokenIn = ETH_ADDRESS;
-            tokenOut = address(weth);
+            tokenOut = address(wrapped);
             transferType = TransferManager.TransferType.TransferNativeInExecutor;
         } else {
-            // WETH -> ETH: Unwrap
-            tokenIn = address(weth);
+            // Wrapped -> Native: Unwrap
+            tokenIn = address(wrapped);
             tokenOut = ETH_ADDRESS;
             transferType = TransferManager.TransferType.ProtocolWillDebit;
         }

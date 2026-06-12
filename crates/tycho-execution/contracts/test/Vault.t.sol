@@ -394,4 +394,25 @@ contract VaultTest is Constants, TestUtils {
         assertEq(balanceStart - balanceEnd, inputAmount);
         assertEq(balanceEnd, 1_000_000);
     }
+
+    function testDepositFeeOnTransferToken() public {
+        // TWIF charges 6% on every transfer
+        address TWIF = 0x2Dd636C514Bb4705c756D161585Ff9ec665f18A2;
+
+        uint256 amount = 1_000_000;
+        uint256 expectedReceived = amount - (amount * 6) / 100;
+
+        deal(TWIF, ALICE, amount);
+        vm.startPrank(ALICE);
+        IERC20(TWIF).approve(address(vault), amount);
+        vault.deposit(TWIF, amount);
+        vm.stopPrank();
+
+        // Vault credits only the actual received amount
+        assertEq(
+            vault.balanceOf(ALICE, uint256(uint160(TWIF))), expectedReceived
+        );
+        // Router holds exactly the credited amount
+        assertEq(IERC20(TWIF).balanceOf(address(vault)), expectedReceived);
+    }
 }

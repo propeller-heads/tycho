@@ -170,8 +170,7 @@ After encoding, quotes are valid for only 1–3 seconds. Execution must follow i
 #### Encode solution
 
 ```rust
-let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
-    .add_default_encoders(None)
+let swap_encoder_registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)
     .expect("Failed to get default SwapEncoderRegistry");
     
 let encoder = TychoRouterEncoderBuilder::new()

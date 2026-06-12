@@ -23,7 +23,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 typetag = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 # Error handling
 thiserror = { workspace = true }
@@ -88,7 +88,6 @@ tokio-tungstenite = { version = "0.28.0", features = [
 
 [dev-dependencies]
 tycho-execution = { workspace = true }
-tycho-test = { workspace = true }
 tokio-test = "0.4.4"
 approx = "0.5.1"
 rstest = "0.23.0"

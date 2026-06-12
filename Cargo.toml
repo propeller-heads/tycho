@@ -17,7 +17,7 @@ members = [
 # protocols/substreams/ is intentionally excluded — separate WASM workspace, different toolchain
 
 [workspace.package]
-version = "0.291.1"
+version = "0.310.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/propeller-heads/tycho"
@@ -29,28 +29,23 @@ readme = "README.md"
 
 [workspace.dependencies]
 # --- Internal crates (path deps) ---
-tycho                  = { path = "crates/tycho",                  version = "0.291.1" }
-tycho-common           = { path = "crates/tycho-common",           version = "0.291.1" }
-tycho-client           = { path = "crates/tycho-client",           version = "0.291.1" }
-tycho-storage          = { path = "crates/tycho-storage",          version = "0.291.1" }
-tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.291.1" }
-tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.291.1" }
-tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.291.1" }
-tycho-test             = { path = "crates/tycho-test",             version = "0.291.1" }
-tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.291.1" }
-tycho-execution        = { path = "crates/tycho-execution",        version = "0.291.1" }
+tycho                  = { path = "crates/tycho",                  version = "0.310.0" }
+tycho-common           = { path = "crates/tycho-common",           version = "0.310.0" }
+tycho-client           = { path = "crates/tycho-client",           version = "0.310.0" }
+tycho-storage          = { path = "crates/tycho-storage",          version = "0.310.0" }
+tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.310.0" }
+tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.310.0" }
+tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.310.0" }
+tycho-test             = { path = "crates/tycho-test",             version = "0.310.0" }
+tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.310.0" }
+tycho-execution        = { path = "crates/tycho-execution",        version = "0.310.0" }
 
 # --- Serialization/Deserialization ---
 serde = { version = "1.0.204", features = ["rc", "derive"] }
 serde_json = "1.0.120"
 toml = "0.8"
 typetag = "0.2.21"
-uuid = { version = "1.4.1", features = [
-    "serde",
-    "v4",
-    "fast-rng",
-    "macro-diagnostics",
-] }
+uuid = { version = "1.4.1", features = ["serde", "macro-diagnostics"] }
 
 # --- Async & concurrency ---
 tokio = { version = "1.47.1", features = ["full"] }
@@ -77,7 +72,7 @@ alloy = { version = "1.1.0", default-features = false }
 ethabi = "18.0.0"
 
 # --- Utility ---
-chrono = { version = "0.4.26", features = ["serde"] }
+chrono = { version = "0.4.26", default-features = false, features = ["serde", "clock", "std"] }
 hex = "0.4.3"
 hex-literal = "0.4.1"
 rand = "0.8.5"

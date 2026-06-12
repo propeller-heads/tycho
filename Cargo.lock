@@ -2702,10 +2702,8 @@ checksum = "c469d952047f47f91b68d1cba3f10d63c11d73e4636f24f08daf0278abf01c4d"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link 0.1.3",
 ]
 
@@ -6834,7 +6832,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "alloy",
  "clap",
@@ -9734,7 +9732,7 @@ dependencies = [
 
 [[package]]
 name = "tycho"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -9745,7 +9743,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "async-trait",
  "backoff",
@@ -9779,7 +9777,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9811,7 +9809,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9835,7 +9833,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9858,7 +9856,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "actix",
  "actix-cors",
@@ -9927,7 +9925,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -9962,7 +9960,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -10012,7 +10010,6 @@ dependencies = [
  "tycho-common",
  "tycho-ethereum",
  "tycho-execution",
- "tycho-test",
  "typetag",
  "unicode-width 0.1.14",
  "uuid",
@@ -10020,7 +10017,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10061,7 +10058,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.291.1"
+version = "0.310.0"
 dependencies = [
  "alloy",
  "alloy-chains",

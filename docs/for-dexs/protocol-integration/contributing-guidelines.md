@@ -52,6 +52,7 @@ For security purposes, new Executors must have:
 * No ERC20 token transfers
 * No `delegatecall`s
 * Only perform native ETH transfers if this behaviour is safely reflected in `getTransferData` or `getCallbackTransferData`
+* **Selector allowlist for caller-controlled calldata**: If `swap()` forwards caller-supplied calldata to an external contract, validate the first 4 bytes against an explicit allowlist of permitted function selectors before making the call. Without this check, an attacker can supply a selector for an arbitrary function on the settlement contract — for example, one that withdraws the router's balance to an attacker-controlled address.
 
 #### Running tests <a href="#running-tests" id="running-tests"></a>
 

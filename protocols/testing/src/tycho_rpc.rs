@@ -5,16 +5,19 @@ use tracing::{debug, info, warn};
 use tycho_simulation::{
     tycho_client::{
         feed::synchronizer::Snapshot,
-        rpc::{HttpRPCClientOptions, RPCClient},
+        rpc::{
+            AllTokensParams, HttpRPCClientOptions, ProtocolComponentsPaginatedParams, RPCClient,
+            TracedEntryPointsParams,
+        },
         HttpRPCClient, SnapshotParameters,
     },
     tycho_common::{
-        dto::{
-            Chain, EntryPointWithTracingParams, PaginationParams, ProtocolComponent,
-            ProtocolComponentsRequestBody, ResponseToken, TracedEntryPointRequestBody,
-            TracingResult,
+        models::{
+            blockchain::{EntryPointWithTracingParams, TracingResult},
+            protocol::ProtocolComponent,
+            token::Token,
+            Chain, ComponentId,
         },
-        models::{token::Token, ComponentId},
         Bytes,
     },
 };
@@ -66,17 +69,16 @@ impl TychoClient {
         protocol_system: &str,
         chain: Chain,
     ) -> Result<Vec<ProtocolComponent>, RpcError> {
-        let request = ProtocolComponentsRequestBody::system_filtered(protocol_system, None, chain);
-
         let chunk_size = 100;
         let concurrency = 1;
 
-        let response = self
-            .http_client
-            .get_protocol_components_paginated(&request, Some(chunk_size), concurrency)
-            .await?;
-
-        Ok(response.protocol_components)
+        self.http_client
+            .get_protocol_components_paginated(
+                ProtocolComponentsPaginatedParams::new(chain, protocol_system, concurrency)
+                    .with_chunk_size(chunk_size),
+            )
+            .await
+            .map_err(RpcError::from)
     }
 
     pub async fn get_tokens(
@@ -90,24 +92,25 @@ impl TychoClient {
         let concurrency = 1;
 
         #[allow(clippy::mutable_key_type)]
+        let mut params = AllTokensParams::new(chain, concurrency).with_chunk_size(3_000);
+        if let Some(q) = min_quality {
+            params = params.with_min_quality(q);
+        }
+        if let Some(d) = max_days_since_last_trade {
+            params = params.with_traded_n_days_ago(d);
+        }
         let res = self
             .http_client
-            .get_all_tokens(chain, min_quality, max_days_since_last_trade, Some(3_000), concurrency)
+            .get_all_tokens(params)
             .await?
             .into_iter()
-            .map(|token| {
-                let mut token_clone: ResponseToken = token.clone();
+            .map(|mut token| {
                 // Set default gas if empty
                 // TODO: Check if this interferes with simulation logic
-                if token_clone.gas.is_empty() {
-                    token_clone.gas = vec![Some(44000_u64)];
+                if token.gas.is_empty() {
+                    token.gas = vec![Some(44000_u64)];
                 }
-                (
-                    token_clone.address.clone(),
-                    token_clone
-                        .try_into()
-                        .expect("Failed to convert token"),
-                )
+                (token.address.clone(), token)
             })
             .collect::<HashMap<_, Token>>();
 
@@ -121,19 +124,14 @@ impl TychoClient {
         component_ids: Vec<String>,
         chain: Chain,
     ) -> Result<HashMap<String, Vec<(EntryPointWithTracingParams, TracingResult)>>, RpcError> {
-        let request_body = TracedEntryPointRequestBody {
-            protocol_system: protocol_system.to_string(),
-            chain,
-            pagination: PaginationParams { page: 0, page_size: 100 },
-            component_ids: Some(component_ids),
-        };
-
-        let traced_entry_points = self
-            .http_client
-            .get_traced_entry_points(&request_body)
-            .await?;
-
-        Ok(traced_entry_points.traced_entry_points)
+        self.http_client
+            .get_traced_entry_points(
+                TracedEntryPointsParams::new(chain, protocol_system)
+                    .with_component_ids(component_ids),
+            )
+            .await
+            .map(|page| page.into_data())
+            .map_err(RpcError::from)
     }
 
     pub async fn get_snapshots(
@@ -152,12 +150,10 @@ impl TychoClient {
         let chunk_size = 100;
         let concurrency = 1;
 
-        let response = self
-            .http_client
+        self.http_client
             .get_snapshots(&params, Some(chunk_size), concurrency)
-            .await?;
-
-        Ok(response)
+            .await
+            .map_err(RpcError::from)
     }
 
     /// Waits for the protocol to be synced and have components available

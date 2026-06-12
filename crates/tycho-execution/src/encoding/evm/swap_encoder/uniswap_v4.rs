@@ -145,6 +145,8 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
+        let v4_user_data = UniswapV4UserData::from_swap_user_data(swap.user_data())?;
+
         let fee = get_static_attribute(swap, "key_lp_fee")?;
 
         let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee)
@@ -171,11 +173,7 @@ impl SwapEncoder for UniswapV4SwapEncoder {
             })?;
             Self::encode_angstrom_attestations(&attestations)?
         } else {
-            // Regular hook - use user_data as normal
-            swap.user_data()
-                .clone()
-                .unwrap_or_default()
-                .to_vec()
+            v4_user_data.hook_data.to_vec()
         };
 
         let hook_data_length = (hook_data.len() as u16).to_be_bytes();
@@ -219,7 +217,13 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         )
             .abi_encode_packed();
 
-        let args = (group_token_in_encoded, group_token_out_encoded, zero_to_one, pool_params);
+        let args = (
+            group_token_in_encoded,
+            group_token_out_encoded,
+            zero_to_one,
+            v4_user_data.skip_unlock,
+            pool_params,
+        );
 
         Ok(args.abi_encode_packed())
     }
@@ -230,6 +234,36 @@ impl SwapEncoder for UniswapV4SwapEncoder {
 
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
+    }
+}
+
+/// Per-swap V4 config, JSON-encoded into `Swap::user_data`. All fields
+/// optional; absent/empty `user_data` is equivalent to `default()`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(super) struct UniswapV4UserData {
+    /// When true, the V4 executor skips `poolManager.unlock()` and
+    /// assumes the caller has already unlocked the PM (used by
+    /// external-settler flows that take a PM loan around the swap).
+    /// Defaults to `false`; producers can omit the field entirely
+    /// and the field is skipped from the serialized JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) skip_unlock: bool,
+    /// Bytes forwarded as `hookData` to the V4 pool's hook on this
+    /// swap. Ignored for Angstrom hooks, where the attestation bytes
+    /// are fetched separately.
+    #[serde(default)]
+    pub(super) hook_data: Bytes,
+}
+
+impl UniswapV4UserData {
+    fn from_swap_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
+        match user_data.as_ref() {
+            Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
+                EncodingError::FatalError(format!("Invalid UniswapV4 user_data JSON: {}", e))
+            }),
+            _ => Ok(Self::default()),
+        }
     }
 }
 
@@ -265,6 +299,51 @@ mod tests {
         evm::utils::{ple_encode, write_calldata_to_file},
         models::{default_token, Swap},
     };
+
+    #[test]
+    fn test_user_data_defaults_when_absent_or_empty() {
+        let from_none = UniswapV4UserData::from_swap_user_data(&None).unwrap();
+        assert!(!from_none.skip_unlock);
+        assert!(from_none.hook_data.is_empty());
+
+        let from_empty = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(""))).unwrap();
+        assert!(!from_empty.skip_unlock);
+        assert!(from_empty.hook_data.is_empty());
+    }
+
+    #[test]
+    fn test_user_data_parses_both_fields() {
+        let raw = br#"{"skip_unlock":true,"hook_data":"0xdeadbeef"}"#;
+        let parsed =
+            UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(raw.as_slice()))).unwrap();
+        assert!(parsed.skip_unlock);
+        assert_eq!(parsed.hook_data, Bytes::from("0xdeadbeef"));
+    }
+
+    #[test]
+    fn test_user_data_partial_fields_use_defaults() {
+        let only_skip = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(
+            br#"{"skip_unlock":true}"#.as_slice(),
+        )))
+        .unwrap();
+        assert!(only_skip.skip_unlock);
+        assert!(only_skip.hook_data.is_empty());
+
+        let only_hook = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(
+            br#"{"hook_data":"0x1234"}"#.as_slice(),
+        )))
+        .unwrap();
+        assert!(!only_hook.skip_unlock);
+        assert_eq!(only_hook.hook_data, Bytes::from("0x1234"));
+    }
+
+    #[test]
+    fn test_user_data_invalid_json_errors() {
+        let err =
+            UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(b"not json".as_slice())))
+                .unwrap_err();
+        assert!(format!("{:?}", err).contains("Invalid UniswapV4 user_data JSON"));
+    }
 
     #[test]
     fn test_encode_uniswap_v4_simple_swap() {
@@ -316,6 +395,8 @@ mod tests {
                 "dac17f958d2ee523a2206206994597c13d831ec7",
                 // zero for one
                 "01",
+                // skip unlock
+                "00",
                 // pool params:
                 // - intermediary token
                 "dac17f958d2ee523a2206206994597c13d831ec7",
@@ -485,6 +566,8 @@ mod tests {
                 "2260fac5e5542a773aa44fbcfedf7c193bc2c599",
                 // zero for one
                 "01",
+                // skip unlock
+                "00",
                 // pool params:
                 // - intermediary token USDT
                 "dac17f958d2ee523a2206206994597c13d831ec7",

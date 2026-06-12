@@ -11,8 +11,7 @@ To solve orders on <a href="https://docs.cow.fi/cow-protocol/tutorials/solvers" 
 First, initialize the encoder:
 
 ```rust
-let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
-    .add_default_encoders(None)
+let swap_encoder_registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)
     .expect("Failed to get default SwapEncoderRegistry");
 
 let encoder = TychoRouterEncoderBuilder::new()
@@ -41,7 +40,6 @@ The example contract:
 * Approves the UniswapX Reactor contract to transfer tokens out after execution
 * Only supports solving one order at a time; you can extend it to support batching by implementing `executeBatch` and updating `reactorCallback`
 * Can safely hold tokens. The Uniswap X Reactor only transfers out the required amount. If your solution is more efficient, any surplus stays in the filler contract
-* Is not audited — use at your own risk
 
 See how to encode the `callbackData` for `TychoRouter` <a href="https://github.com/propeller-heads/tycho-execution/tree/main/examples/uniswapx-encoding-example" target="_blank" rel="noopener noreferrer">here</a>.
 

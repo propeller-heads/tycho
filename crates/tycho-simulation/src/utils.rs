@@ -6,7 +6,7 @@ use std::{
 
 use tracing::info;
 use tycho_client::{
-    rpc::{HttpRPCClientOptions, RPCClient, RPC_CLIENT_CONCURRENCY},
+    rpc::{AllTokensParams, HttpRPCClientOptions, RPCClient, RPC_CLIENT_CONCURRENCY},
     HttpRPCClient, RPCError,
 };
 use tycho_common::{
@@ -86,35 +86,26 @@ pub async fn load_all_tokens(
     let default_min_days = HashMap::from([(Chain::Base, 1_u64), (Chain::Unichain, 14_u64)]);
 
     #[allow(clippy::mutable_key_type)]
+    let min_q = min_quality.or(Some(100));
+    let traded = max_days_since_last_trade.or(default_min_days
+        .get(&chain)
+        .or(Some(&42))
+        .copied());
+    let mut token_params = AllTokensParams::new(chain, RPC_CLIENT_CONCURRENCY);
+    if let Some(q) = min_q {
+        token_params = token_params.with_min_quality(q);
+    }
+    if let Some(d) = traded {
+        token_params = token_params.with_traded_n_days_ago(d);
+    }
     let tokens = rpc_client
-        .get_all_tokens(
-            chain.into(),
-            min_quality.or(Some(100)),
-            max_days_since_last_trade.or(default_min_days
-                .get(&chain)
-                .or(Some(&42))
-                .copied()),
-            None,
-            RPC_CLIENT_CONCURRENCY,
-        )
+        .get_all_tokens(token_params)
         .await
         .map_err(|err| map_rpc_error(err, "Unable to load tokens"))?;
 
     tokens
         .into_iter()
-        .map(|token| {
-            let token_clone = token.clone();
-            Token::try_from(token)
-                .map(|converted| (converted.address.clone(), converted))
-                .map_err(|_| {
-                    SimulationError::FatalError(format!(
-                        "Unable to convert token `{symbol}` at {address} on chain {chain} into ERC20 token",
-                        symbol = token_clone.symbol,
-                        address = token_clone.address,
-                        chain = token_clone.chain,
-                    ))
-                })
-        })
+        .map(|token| Ok((token.address.clone(), token)))
         .collect()
 }
 
@@ -124,6 +115,8 @@ pub fn get_default_url(chain: &Chain) -> Option<String> {
         Chain::Ethereum => Some("tycho-beta.propellerheads.xyz".to_string()),
         Chain::Base => Some("tycho-base-beta.propellerheads.xyz".to_string()),
         Chain::Unichain => Some("tycho-unichain-beta.propellerheads.xyz".to_string()),
+        Chain::Bsc => Some("tycho-bsc-beta.propellerheads.xyz".to_string()),
+        Chain::Arbitrum => Some("tycho-arbitrum-beta.propellerheads.xyz".to_string()),
         _ => None,
     }
 }

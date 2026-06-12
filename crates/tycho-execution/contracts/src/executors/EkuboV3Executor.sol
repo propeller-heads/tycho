@@ -56,8 +56,6 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
     using SafeERC20 for IERC20;
 
-    constructor() {}
-
     modifier coreOnly() {
         if (msg.sender != CORE_ADDRESS) revert EkuboV3Executor__CoreOnly();
         _;

@@ -480,13 +480,14 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
 
     let expected_swaps = String::from(concat!(
         // length of ple encoded swaps without padding
-        "000000000000000000000000000000000000000000000000000000000000009f",
+        "00000000000000000000000000000000000000000000000000000000000000a0",
         // Swap data header
         "f62849f9a0b5bf2913b396098f7c7019b51a820a", // executor address
         // Protocol data
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // group token in
         "6982508145454ce325ddbe47a25d4ec3d2311933", // group token out
         "00",                                       // zero2one
+        "00",                                       // skip unlock
         // First pool params
         "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // intermediary token (ETH_ADDRESS)
         "000bb8",                                   // fee
@@ -501,7 +502,6 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
         "0001f4",                                   // tick spacing
         "0000000000000000000000000000000000000000", // hook address
         "0000",                                     // hook data length
-        "00",                                       // padding to 32-byte boundary
     ));
 
     let hex_calldata = encode(&calldata);
@@ -1838,12 +1838,12 @@ fn test_single_swap_with_univ4_angstrom() {
 
 #[test]
 fn test_single_encoding_strategy_weth_wrap() {
-    let weth_executor =
-        ProtocolComponent { protocol_system: String::from("weth"), ..Default::default() };
+    let wrap_executor =
+        ProtocolComponent { protocol_system: String::from("native_wrapper"), ..Default::default() };
     let token_in = eth();
     let token_out = weth();
     let swap = Swap::new(
-        weth_executor,
+        wrap_executor,
         default_token(token_in.clone()),
         default_token(token_out.clone()),
         BigUint::ZERO,
@@ -1879,17 +1879,17 @@ fn test_single_encoding_strategy_weth_wrap() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file("test_single_encoding_strategy_weth_wrapping", hex_calldata.as_str());
+    write_calldata_to_file("test_single_encoding_strategy_wrap_wrapping", hex_calldata.as_str());
 }
 
 #[test]
 fn test_single_encoding_strategy_weth_unwrap() {
-    let weth_executor =
-        ProtocolComponent { protocol_system: String::from("weth"), ..Default::default() };
+    let wrap_executor =
+        ProtocolComponent { protocol_system: String::from("native_wrapper"), ..Default::default() };
     let token_in = weth();
     let token_out = eth();
     let swap = Swap::new(
-        weth_executor,
+        wrap_executor,
         default_token(token_in.clone()),
         default_token(token_out.clone()),
         BigUint::ZERO,
@@ -1925,11 +1925,11 @@ fn test_single_encoding_strategy_weth_unwrap() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file("test_single_encoding_strategy_weth_unwrapping", hex_calldata.as_str());
+    write_calldata_to_file("test_single_encoding_strategy_wrap_unwrapping", hex_calldata.as_str());
 }
 
 #[test]
-fn test_sequential_encoding_strategy_weth_wrap_added() {
+fn test_sequential_encoding_strategy_wrap_added() {
     // The solution is initially a single swap. The wrapping step is inserted automatically.
     // Final execution flow:
     // ETH → (wrap to WETH) → WETH → (Uniswap V2 swap) → DAI
@@ -1974,10 +1974,7 @@ fn test_sequential_encoding_strategy_weth_wrap_added() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file(
-        "test_sequential_encoding_strategy_weth_wrap_added",
-        hex_calldata.as_str(),
-    );
+    write_calldata_to_file("test_sequential_encoding_strategy_wrap_added", hex_calldata.as_str());
 }
 
 #[test]
@@ -2862,4 +2859,58 @@ fn test_single_encoding_strategy_uniswap_v3_polygon() {
         "test_single_encoding_strategy_uniswap_v3_polygon",
         hex_calldata.as_str(),
     );
+}
+
+#[test]
+fn test_single_encoding_strategy_uniswap_v3_bsc() {
+    // WBNB -> (UniswapV3 0.05% WBNB/WETH) -> WETH on BNB Chain
+    let pool = ProtocolComponent {
+        id: String::from("0x0f338Ec12d3f7C3D77A4B9fcC1f95F3FB6AD0EA6"),
+        protocol_system: String::from("uniswap_v3"),
+        static_attributes: HashMap::from([(
+            "fee".to_string(),
+            Bytes::from(BigInt::from(500).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let token_in = Bytes::from("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"); // WBNB
+    let token_out = Bytes::from("0x2170Ed0880ac9A755fd29B2688956BD959F933F8"); // WETH
+    let swap = Swap::new(
+        pool,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Bsc);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        BigUint::from_str("1000").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_uniswap_v3_bsc", hex_calldata.as_str());
 }

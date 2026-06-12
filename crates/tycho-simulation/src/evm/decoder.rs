@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMessage, HeaderLike};
 use tycho_common::{
     dto::{ChangeType, ProtocolStateDelta},
-    models::{token::Token, Chain},
+    models::{blockchain::BlockAggregatedChanges, token::Token, Chain},
     simulation::protocol_sim::{Balances, ProtocolSim},
     Bytes,
 };
@@ -61,6 +61,8 @@ struct DecoderState {
     // again TODO: handle more gracefully inside tycho-client. We could fetch the snapshot and
     // try to decode it again.
     failed_components: HashSet<String>,
+    // The block number of the last confirmed block decoded via `decode()`.
+    current_block_number: u64,
 }
 
 type DecodeFut =
@@ -246,6 +248,10 @@ where
             .clone()
             .block_number_or_timestamp();
         let current_block = header.clone().block();
+        let is_partial = current_block
+            .as_ref()
+            .map(|h| h.partial_block_index.is_some())
+            .unwrap_or(false);
 
         for (protocol, protocol_msg) in msg.state_msgs.iter() {
             // Add any new tokens
@@ -259,16 +265,7 @@ where
                         t.quality >= self.min_token_quality &&
                             !state_guard.tokens.contains_key(*addr)
                     })
-                    .filter_map(|(addr, t)| {
-                        t.clone()
-                            .try_into()
-                            .map(|token| (addr.clone(), token))
-                            .inspect_err(|e| {
-                                warn!("Failed decoding token {e:?} {addr:#044x}");
-                                *e
-                            })
-                            .ok()
-                    })
+                    .map(|(addr, t)| (addr.clone(), t.clone()))
                     .collect::<HashMap<Bytes, Token>>();
 
                 if !new_tokens.is_empty() {
@@ -336,10 +333,7 @@ where
                     .get_vm_storage()
                     .iter()
                 {
-                    let account: ResponseAccount = value
-                        .clone()
-                        .try_into()
-                        .map_err(|e| StreamDecodeError::Fatal(format!("{e}")))?;
+                    let account: ResponseAccount = value.clone().into();
 
                     if state_guard.tokens.contains_key(key) {
                         let original_address = account.address;
@@ -364,7 +358,7 @@ where
                                 // tracked again.
                                 let proxy_state = AccountUpdate::new(
                                     original_address,
-                                    value.chain.into(),
+                                    value.chain,
                                     account.slots.clone(),
                                     Some(account.native_balance),
                                     None,
@@ -388,7 +382,7 @@ where
                                     original_address,
                                     Some(impl_addr),
                                     &account.slots,
-                                    value.chain.into(),
+                                    value.chain,
                                     Some(account.native_balance),
                                 );
 
@@ -453,10 +447,14 @@ where
                 .get_vm_storage()
                 .iter()
                 .filter_map(|(addr, acc)| {
-                    let balances = acc.token_balances.clone();
-                    if balances.is_empty() {
+                    if acc.token_balances.is_empty() {
                         return None;
                     }
+                    let balances = acc
+                        .token_balances
+                        .iter()
+                        .map(|(token_addr, ab)| (token_addr.clone(), ab.balance.clone()))
+                        .collect::<HashMap<Bytes, Bytes>>();
                     Some((addr.clone(), balances))
                 })
                 .collect::<AccountBalances>();
@@ -515,7 +513,7 @@ where
                                             token_address,
                                             None,
                                             &HashMap::new(),
-                                            snapshot.component.chain.into(),
+                                            snapshot.component.chain,
                                             None,
                                         ),
                                     );
@@ -640,23 +638,20 @@ where
                 let mut account_update_by_address: HashMap<Address, AccountUpdate> = HashMap::new();
                 // New proxy token accounts that must overwrite any existing placeholder.
                 let mut new_proxy_accounts: Vec<AccountUpdate> = Vec::new();
-                for (key, value) in deltas.account_updates.iter() {
-                    let mut update: AccountUpdate = value
-                        .clone()
-                        .try_into()
-                        .map_err(|e| StreamDecodeError::Fatal(format!("{e}")))?;
+                for (key, value) in deltas.account_deltas.iter() {
+                    let mut update: AccountUpdate = value.clone().into();
 
                     // TEMP PATCH (ENG-4993)
                     //
-                    // The indexer emits deltas without code marked as creations, which crashes
-                    // TychoDB. Until fixed, treat them as updates (since EVM code cannot be
-                    // deleted).
+                    // The indexer may emit Creation deltas with no code for EOA addresses.
+                    // Treat them as EOAs (empty code) rather than downgrading to Update, which
+                    // would skip init_account and cause "uninitialized account" warnings.
                     if update.code.is_none() && matches!(update.change, ChangeType::Creation) {
                         error!(
                             update = ?update,
                             "FaultyCreationDelta"
                         );
-                        update.change = ChangeType::Update;
+                        update.code = Some(vec![]);
                     }
 
                     if state_guard.tokens.contains_key(key) {
@@ -726,7 +721,7 @@ where
                 drop(state_guard);
 
                 let state_guard = self.state.read().await;
-                info!("Updating engine with {} contract deltas", deltas.account_updates.len());
+                info!("Updating engine with {} contract deltas", deltas.account_deltas.len());
                 update_engine(
                     SHARED_TYCHO_DB.clone(),
                     header.clone().block(),
@@ -746,7 +741,7 @@ where
 
                 // Collect all pools related to the updated accounts
                 let mut pools_to_update = HashSet::new();
-                for (account, _update) in deltas.account_updates {
+                for (account, _update) in deltas.account_deltas {
                     // get new pools related to the account updated
                     pools_to_update.extend(
                         contracts_map
@@ -771,7 +766,7 @@ where
                         .iter()
                         .map(|(pool_id, bals)| {
                             let mut balances = HashMap::new();
-                            for (t, b) in &bals.0 {
+                            for (t, b) in bals {
                                 balances.insert(t.clone(), b.balance.clone());
                             }
                             pools_to_update.insert(pool_id.clone());
@@ -798,10 +793,12 @@ where
                 };
 
                 // update states with protocol state deltas (attribute changes etc.)
-                for (id, update) in deltas.state_updates {
+                for (id, update) in deltas.state_deltas {
                     // TODO: is this needed?
-                    let update_with_block =
-                        Self::add_block_info_to_delta(update, current_block.clone());
+                    let update_with_block = Self::add_block_info_to_delta(
+                        ProtocolStateDelta::from(update),
+                        current_block.clone(),
+                    );
                     match Self::apply_update(
                         &id,
                         update_with_block,
@@ -906,6 +903,8 @@ where
             .states
             .extend(updated_states.clone());
 
+        state_guard.current_block_number = block_number_or_timestamp;
+
         // Add new components to persistent state
         for (id, component) in new_pairs.iter() {
             state_guard
@@ -928,11 +927,79 @@ where
 
         // Send the tick with all updated states
         Ok(Update::new(block_number_or_timestamp, updated_states, new_pairs)
+            .set_is_partial(is_partial)
             .set_removed_pairs(removed_pairs)
             .set_sync_states(msg.sync_states.clone()))
     }
 
-    /// Add block information (number and timestamp) to a ProtocolStateDelta
+    /// Applies pending deltas from one or more `TxDeltaIndexer`s against the current confirmed
+    /// state and returns an ephemeral `Update`.
+    ///
+    /// This is the read-only counterpart of `decode()`. It clones pool states, applies the
+    /// supplied `pending_deltas`, and returns the result — **without writing back** to
+    /// `DecoderState`. Calling this method twice with the same input produces identical results.
+    ///
+    /// Only native protocols are supported. VM protocols (extractor prefix `"vm:"`) are rejected
+    /// at registration time in
+    /// [`with_pending_indexer`](crate::evm::stream::ProtocolStreamBuilder::with_pending_indexer).
+    ///
+    /// # Parameters
+    /// * `pending_deltas` — map from extractor name to the `BlockAggregatedChanges` produced by the
+    ///   corresponding `TxDeltaIndexer::generate_deltas()` call.
+    /// * `header` — the target block header. Its `block_number_or_timestamp()` is stamped on the
+    ///   returned [`Update`]; its `block_number` and `block_timestamp` are injected into each state
+    ///   delta so that protocols relying on block context (e.g. aerodrome slipstreams, etherfi)
+    ///   receive correct values.
+    pub async fn apply_deltas_ephemeral(
+        &self,
+        pending_deltas: &HashMap<String, BlockAggregatedChanges>,
+        header: H,
+    ) -> Result<Update, StreamDecodeError> {
+        let block_number_or_timestamp = header
+            .clone()
+            .block_number_or_timestamp();
+        let current_block = header.block();
+        let state_guard = self.state.read().await;
+
+        let mut updated_states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        for deltas in pending_deltas.values() {
+            let all_balances = Balances {
+                component_balances: deltas
+                    .component_balances
+                    .iter()
+                    .map(|(pool_id, bals)| {
+                        let balances = bals
+                            .iter()
+                            .map(|(t, b)| (t.clone(), b.balance.clone()))
+                            .collect();
+                        (pool_id.clone(), balances)
+                    })
+                    .collect(),
+                account_balances: HashMap::new(),
+            };
+
+            for (id, state_delta) in &deltas.state_deltas {
+                let dto_delta = Self::add_block_info_to_delta(
+                    ProtocolStateDelta::from(state_delta.clone()),
+                    current_block.clone(),
+                );
+                if let Err(e) = Self::apply_update(
+                    id,
+                    dto_delta,
+                    &mut updated_states,
+                    &state_guard,
+                    &all_balances,
+                ) {
+                    warn!(pool = id, error = %e, "EphemeralDeltaTransitionError");
+                }
+            }
+        }
+
+        Ok(Update::new(block_number_or_timestamp, updated_states, HashMap::new()))
+    }
+
+    /// Add current block information (number and timestamp) to a ProtocolStateDelta.
     fn add_block_info_to_delta(
         mut delta: ProtocolStateDelta,
         block_header_opt: Option<BlockHeader>,
@@ -1133,7 +1200,7 @@ impl ProtocolSim for MockProtocolSim {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, str::FromStr};
+    use std::str::FromStr;
 
     use alloy::primitives::address;
     use mockall::predicate::*;
@@ -1167,10 +1234,15 @@ mod tests {
     }
 
     fn load_test_msg(name: &str) -> FeedMessage<BlockHeader> {
+        use std::{fs, path::Path};
+
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
         let asset_path = Path::new(project_root).join(format!("tests/assets/decoder/{name}.json"));
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
-        serde_json::from_str(&json_data).expect("Failed to deserialize FeedMsg json!")
+        let feed_msg: dto::FeedMessage<BlockHeader> =
+            serde_json::from_str(&json_data).expect("Failed to deserialize FeedMsg json!");
+        FeedMessage::from(feed_msg)
     }
 
     #[tokio::test]

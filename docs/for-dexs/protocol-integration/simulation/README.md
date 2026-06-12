@@ -106,3 +106,30 @@ Once you have the swap adapter implemented for the new protocol, you will need t
 ### Filtering
 
 If your implementation does not support all pools indexed for a protocol, you can create a filter function to handle this. This filter can then be used when registering an exchange in the `ProtocolStreamBuilder`. See <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/evm/protocol/filters.rs" target="_blank" rel="noopener noreferrer">here</a> for example implementations.
+
+## Gas Estimation
+
+The <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/gas_estimator.rs" target="_blank" rel="noopener noreferrer">gas estimator</a> builds total execution gas from two components: the simulation-reported swap gas and token-transfer overhead that simulation does not capture. Which overhead applies depends on your protocol's behavior.
+
+### Native Integrations
+
+Your `get_amount_out` implementation must return a gas estimate. Measure only what happens inside the protocol's `swap()` call, including any token transfers that occur during a callback.
+
+After implementing, add your protocol to the relevant constant slices in `gas_estimator.rs`:
+
+* **`PROTOCOLS_CALLBACK`**: The pool pulls tokens inside a callback fired during `swap()`. The simulation captures that transfer, so the estimator adds no separate input-transfer cost.
+* **`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`**: The router might send tokens directly to the pool, skipping the router-to-pool hop. The estimator adds no router-to-pool transfer cost for non-split strategies.
+* **`PROTOCOLS_NEEDING_APPROVAL`**: The pool pulls tokens from the router via `approve` + `transferFrom` (ProtocolWillDebit). The simulation includes the `transferFrom` gas, but not the `approve` (25,000 gas); the estimator adds it separately.
+* **`PROTOCOLS_OUTPUT_TO_ROUTER`**: The pool sends output to `msg.sender` (the router) instead of to an explicit receiver. The estimator adds an extra forward transfer from the router to the final receiver.
+
+A protocol can appear in more than one list.
+
+### VM Integrations
+
+In your adapter contract's `swap` function, measure gas with `gasleft()` and return it in the `Trade` struct. The measurement must cover only the pool call itself.
+
+Do not include gas for:
+* Token transfers (input or output): the Dispatcher handles these via `TransferManager`
+* `approve()` calls: also handled by the Dispatcher
+
+Including them would double-count with what the gas estimator adds based on your protocol's category.

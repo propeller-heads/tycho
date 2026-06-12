@@ -1,11 +1,14 @@
 use std::{path::Path, str::FromStr};
 
 use clap::Parser;
-use tracing::{error, info};
+use tracing::info;
 use tracing_appender::rolling;
-use tycho_common::dto::{Chain, TvlThresholdTier};
+use tycho_common::{dto::TvlThresholdTier, models::Chain};
 
-use crate::{feed::component_tracker::ComponentFilter, stream::TychoStreamBuilder};
+use crate::{
+    feed::{component_tracker::ComponentFilter, dto::FeedMessage as FeedMessageDto},
+    stream::TychoStreamBuilder,
+};
 
 /// Tycho Client CLI - A tool for indexing and tracking blockchain protocol data
 ///
@@ -282,12 +285,9 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
             let msg =
                 result.map_err(|e| format!("Message printer received synchronizer error: {e}"))?;
 
-            if let Ok(msg_json) = serde_json::to_string(&msg) {
-                println!("{msg_json}");
-            } else {
-                // Log the error but continue processing further messages.
-                error!("Failed to serialize FeedMessage");
-            };
+            let json = serde_json::to_string(&FeedMessageDto::from(msg))
+                .map_err(|e| format!("Message printer failed to serialize message: {e}"))?;
+            println!("{json}");
         }
 
         Ok::<(), String>(())
