@@ -19,7 +19,8 @@
     "native_wrapper": "0x96d3F6c20EEd2697647F543fE6C08bC2Fbf39758",
     "ekubo_v3": "0x13aa49bAc059d709dd0a18D6bb63290076a702D7",
     "etherfi": "0xDB25A7b768311dE128BBDa7B8426c3f9C74f3240",
-    "rfq:liquorice": "0x3381cD18e2Fb4dB236BF0525938AB6E43Db0440f"
+    "rfq:liquorice": "0x3381cD18e2Fb4dB236BF0525938AB6E43Db0440f",
+    "vm:fermiswap": "0xe8dc788818033232EF9772CB2e6622F1Ec8bc840"
   },
   "base": {
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",

@@ -28,6 +28,7 @@ members = [
     "ethereum-rocketpool",
     "unichain-velodrome",
     "ethereum-liquidityparty",
+    "ethereum-fermiswap",
 ]
 resolver = "2"
 

@@ -19,6 +19,7 @@ const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
 const BALANCER_V2_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV2.runtime.json");
 const BALANCER_V3_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV3.runtime.json");
 const CURVE_BYTECODE_JSON: &str = include_str!("../fixtures/Curve.runtime.json");
+const FERMISWAP_BYTECODE_JSON: &str = include_str!("../fixtures/FermiSwap.runtime.json");
 const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.runtime.json");
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
@@ -39,6 +40,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("vm:balancer_v2", BALANCER_V2_BYTECODE_JSON);
     map.insert("vm:balancer_v3", BALANCER_V3_BYTECODE_JSON);
     map.insert("vm:curve", CURVE_BYTECODE_JSON);
+    map.insert("vm:fermiswap", FERMISWAP_BYTECODE_JSON);
     map.insert("vm:maverick_v2", MAVERICK_V2_BYTECODE_JSON);
     map.insert("ekubo_v3", EKUBO_V3_BYTECODE_JSON);
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);

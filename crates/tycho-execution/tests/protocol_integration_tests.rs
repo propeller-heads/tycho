@@ -1422,6 +1422,58 @@ fn test_single_encoding_strategy_rocketpool_burn() {
 }
 
 #[test]
+fn test_single_encoding_strategy_fermiswap_weth_usdc() {
+    // WETH -> (FermiSwap) -> USDC
+    let token_in = weth();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0"),
+            protocol_system: String::from("vm:fermiswap"),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        BigUint::from(2_114_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_fermiswap_weth_usdc",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
 fn test_single_encoding_strategy_slipstreams() {
     // WETH -> (Slipstreams) -> USDC
     let static_attributes = HashMap::from([(

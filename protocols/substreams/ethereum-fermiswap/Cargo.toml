@@ -1,0 +1,33 @@
+[package]
+name = "ethereum-fermiswap"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ethereum_fermiswap"
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.13"
+substreams-helper = { path = "../crates/substreams-helper" }
+tycho-substreams = { path = "../crates/tycho-substreams" }
+prost = "0.11"
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+hex = { version = "0.4", features = ["serde"] }
+itertools = "0.10.5"
+num-bigint = "0.4.6"
+serde = "1.0.217"
+serde_qs = "0.13.0"
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+
+
+[build-dependencies]
+anyhow = "1"
+# Keep standalone `substreams build` compatible with the package's Rust 1.83 toolchain.
+getrandom = "=0.3.4"
+home = "=0.5.11"
+indexmap = "=2.7.1"
+proc-macro-crate = "=3.2.0"
+substreams-ethereum = "0.9.13"

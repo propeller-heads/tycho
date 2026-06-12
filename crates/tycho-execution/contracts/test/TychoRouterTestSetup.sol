@@ -8,6 +8,7 @@ import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
 import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
+import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
 import {
     LiquidityPartyExecutor
 } from "../src/executors/LiquidityPartyExecutor.sol";
@@ -121,6 +122,7 @@ contract TychoRouterTestSetup is
     LiquidityPartyExecutor public liquidityPartyExecutor;
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
+    FermiSwapExecutor public fermiSwapExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -238,8 +240,9 @@ contract TychoRouterTestSetup is
         );
         liquidityPartyExecutor = new LiquidityPartyExecutor();
         aerodromeV1Executor = new AerodromeV1Executor();
+        fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
 
-        address[] memory executors = new address[](21);
+        address[] memory executors = new address[](22);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -261,6 +264,7 @@ contract TychoRouterTestSetup is
         executors[18] = address(liquoriceExecutor);
         executors[19] = address(liquidityPartyExecutor);
         executors[20] = address(aerodromeV1Executor);
+        executors[21] = address(fermiSwapExecutor);
         return executors;
     }
 

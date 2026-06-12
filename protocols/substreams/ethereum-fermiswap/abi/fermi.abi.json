@@ -1,0 +1,311 @@
+[
+  {
+    "type": "event",
+    "name": "PairRegistered",
+    "anonymous": false,
+    "inputs": [
+      { "name": "baseAsset", "type": "address", "indexed": true },
+      { "name": "quoteAsset", "type": "address", "indexed": true }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "PairUnregistered",
+    "anonymous": false,
+    "inputs": [
+      { "name": "baseAsset", "type": "address", "indexed": true },
+      { "name": "quoteAsset", "type": "address", "indexed": true }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "PairActiveSet",
+    "anonymous": false,
+    "inputs": [
+      { "name": "baseAsset", "type": "address", "indexed": true },
+      { "name": "quoteAsset", "type": "address", "indexed": true },
+      { "name": "active", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "setFairPriceE8",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "k", "type": "bytes32" },
+      { "name": "p", "type": "uint256" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "setFairPricesE8",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "u",
+        "type": "tuple[]",
+        "components": [
+          { "name": "k", "type": "bytes32" },
+          { "name": "p", "type": "uint256" }
+        ]
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "registerPair",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" },
+      {
+        "name": "p",
+        "type": "tuple",
+        "components": [
+          { "name": "a", "type": "uint128" },
+          { "name": "b", "type": "uint16" },
+          { "name": "c", "type": "uint128" },
+          { "name": "d", "type": "uint128" },
+          {
+            "name": "c1",
+            "type": "tuple[]",
+            "components": [
+              { "name": "x", "type": "int128" },
+              { "name": "y", "type": "int128" },
+              { "name": "a", "type": "int128" },
+              { "name": "b", "type": "int128" },
+              { "name": "c", "type": "int128" },
+              { "name": "d", "type": "int128" }
+            ]
+          },
+          {
+            "name": "c2",
+            "type": "tuple[]",
+            "components": [
+              { "name": "x", "type": "int128" },
+              { "name": "y", "type": "int128" },
+              { "name": "a", "type": "int128" },
+              { "name": "b", "type": "int128" },
+              { "name": "c", "type": "int128" },
+              { "name": "d", "type": "int128" }
+            ]
+          }
+        ]
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "setPairParams",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" },
+      {
+        "name": "p",
+        "type": "tuple",
+        "components": [
+          { "name": "a", "type": "uint128" },
+          { "name": "b", "type": "uint16" },
+          { "name": "c", "type": "uint128" },
+          { "name": "d", "type": "uint128" },
+          {
+            "name": "c1",
+            "type": "tuple[]",
+            "components": [
+              { "name": "x", "type": "int128" },
+              { "name": "y", "type": "int128" },
+              { "name": "a", "type": "int128" },
+              { "name": "b", "type": "int128" },
+              { "name": "c", "type": "int128" },
+              { "name": "d", "type": "int128" }
+            ]
+          },
+          {
+            "name": "c2",
+            "type": "tuple[]",
+            "components": [
+              { "name": "x", "type": "int128" },
+              { "name": "y", "type": "int128" },
+              { "name": "a", "type": "int128" },
+              { "name": "b", "type": "int128" },
+              { "name": "c", "type": "int128" },
+              { "name": "d", "type": "int128" }
+            ]
+          }
+        ]
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "unregisterPair",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "setPairActive",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" },
+      { "name": "active", "type": "bool" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "addPricer",
+    "stateMutability": "nonpayable",
+    "inputs": [{ "name": "who", "type": "address" }],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "removePricer",
+    "stateMutability": "nonpayable",
+    "inputs": [{ "name": "who", "type": "address" }],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "getFairPriceE8",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" }
+    ],
+    "outputs": [
+      { "name": "priceE8", "type": "uint256" },
+      { "name": "updatedAtBlock", "type": "uint64" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "getPairParams",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "components": [
+          { "name": "a", "type": "uint128" },
+          { "name": "b", "type": "uint16" },
+          { "name": "c", "type": "uint128" },
+          { "name": "d", "type": "uint128" },
+          {
+            "name": "c1",
+            "type": "tuple[]",
+            "components": [
+              { "name": "x", "type": "int128" },
+              { "name": "y", "type": "int128" },
+              { "name": "a", "type": "int128" },
+              { "name": "b", "type": "int128" },
+              { "name": "c", "type": "int128" },
+              { "name": "d", "type": "int128" }
+            ]
+          },
+          {
+            "name": "c2",
+            "type": "tuple[]",
+            "components": [
+              { "name": "x", "type": "int128" },
+              { "name": "y", "type": "int128" },
+              { "name": "a", "type": "int128" },
+              { "name": "b", "type": "int128" },
+              { "name": "c", "type": "int128" },
+              { "name": "d", "type": "int128" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "traderVault",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  },
+  {
+    "type": "function",
+    "name": "isActive",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "baseAsset", "type": "address" },
+      { "name": "quoteAsset", "type": "address" }
+    ],
+    "outputs": [{ "name": "", "type": "bool" }]
+  },
+  {
+    "type": "function",
+    "name": "getPairs",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple[]",
+        "components": [
+          { "name": "baseAsset", "type": "address" },
+          { "name": "quoteAsset", "type": "address" },
+          { "name": "isActive", "type": "bool" }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "unlocked",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "tokenIn", "type": "address" },
+      { "name": "tokenOut", "type": "address" }
+    ],
+    "outputs": [{ "name": "", "type": "bool" }]
+  },
+  {
+    "type": "function",
+    "name": "swap",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "tokenIn", "type": "address" },
+      { "name": "tokenOut", "type": "address" },
+      { "name": "amountSpecified", "type": "int256" },
+      { "name": "sender", "type": "address" }
+    ],
+    "outputs": [
+      { "name": "amountIn", "type": "uint256" },
+      { "name": "amountOut", "type": "uint256" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "quote",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "tokenIn", "type": "address" },
+      { "name": "tokenOut", "type": "address" },
+      { "name": "amountSpecified", "type": "int256" },
+      { "name": "sender", "type": "address" }
+    ],
+    "outputs": [
+      { "name": "amountIn", "type": "uint256" },
+      { "name": "amountOut", "type": "uint256" }
+    ]
+  }
+]

@@ -79,6 +79,11 @@ const executors_to_deploy = {
                 "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
             ]
         },
+        // Args: FermiSwapper
+        {
+            exchange: "FermiSwapExecutor",
+            args: ["0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e"]
+        },
     ],
     "base": [
         // USV2 - Args: Fee BPS

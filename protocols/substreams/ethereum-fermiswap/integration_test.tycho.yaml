@@ -1,0 +1,62 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "vm:fermiswap"
+adapter_contract: "FermiSwapAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e"
+skip_balance_check: true
+
+initialized_accounts:
+  - "0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e" # FermiSwapper used by the adapter.
+  - "0xe514A3c48DA8B233f65b5d15BA1905d6d35BFE48" # Current Fermi engine.
+  - "0x585d44727129B9C69791B10238Ca605932938B4F" # Shared trader vault.
+  - "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f" # Registry address
+
+protocol_type_names:
+  - "fermiswap_pool"
+
+tests:
+  - name: test_weth_usdt_pair_creation
+    start_block: 25192975
+    stop_block: 25200962 # WETH/USDT oracle updateState lane in the registry.
+    expected_components:
+      - id: "0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+        static_attributes:
+          balance_owner: "0x585d44727129B9C69791B10238Ca605932938B4F"
+        creation_tx: "0x74bfa8b999532fe15fadd2c1ead24f881e2f375abe26c1b730f71de1d8e440e5"
+        skip_simulation: true # Fair price for this pair is stale at this test's stop block.
+        skip_execution: true
+      - id: "0x2b2f5776e38002e0c013d0d89828fdb06fee595ea2d5ed4b194e3883e823e350"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        static_attributes:
+          balance_owner: "0x585d44727129B9C69791B10238Ca605932938B4F"
+        creation_tx: "0x4fc82812010c571f17fbb75f4c5c68f6bf3bc25097c06cd324070071748325c4"
+        skip_simulation: false
+        skip_execution: true
+
+  - name: test_weth_usdc_pair_creation
+    start_block: 25192975
+    stop_block: 25200492 # WETH/USDC oracle updateState lane in the registry.
+    expected_components:
+      - id: "0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+        static_attributes:
+          balance_owner: "0x585d44727129B9C69791B10238Ca605932938B4F"
+        creation_tx: "0x74bfa8b999532fe15fadd2c1ead24f881e2f375abe26c1b730f71de1d8e440e5"
+        skip_simulation: false
+        skip_execution: true # No vm:fermiswap executor is registered yet.
+      - id: "0x2b2f5776e38002e0c013d0d89828fdb06fee595ea2d5ed4b194e3883e823e350"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        static_attributes:
+          balance_owner: "0x585d44727129B9C69791B10238Ca605932938B4F"
+        creation_tx: "0x4fc82812010c571f17fbb75f4c5c68f6bf3bc25097c06cd324070071748325c4"
+        skip_simulation: true # Fair price for this pair is stale at this test's stop block.
+        skip_execution: true # No vm:fermiswap executor is registered yet.

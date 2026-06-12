@@ -19,7 +19,8 @@
     "ekubo_v3": "0xc77A1a9B8ebecc6bFB386720E0A37Bc900860f5b",
     "native_wrapper": "0x8FD892DD5F8E153fe15cc3A7567E18ed6f7b1E0A",
     "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
-    "vm:liquidityparty": "0x1F8b52899DCf1Be69eaFc754cA3E099Ff15F03aE"
+    "vm:liquidityparty": "0x1F8b52899DCf1Be69eaFc754cA3E099Ff15F03aE",
+    "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",

@@ -1,0 +1,126 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_fermiswap"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/utils.proto
+    - fermiswap.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto
+  excludePaths:
+    - sf/substreams
+    - google
+    - tycho
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_fermiswap.wasm
+
+network: mainnet
+networks:
+  mainnet:
+    initialBlock:
+      map_protocol_components: 24936662 # trader_vault creation block
+      store_pairs: 24936662
+      store_lane_components: 24936662
+      store_token_pairs: 24936662
+      map_token_balance_deltas: 24936662
+      store_token_balances: 24936662
+      map_balance_deltas: 24936662
+      store_balances: 24936662
+      map_protocol_changes: 24936662
+    params:
+      map_protocol_components: "engine_address=e514A3c48DA8B233f65b5d15BA1905d6d35BFE48&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"
+      map_token_balance_deltas: "engine_address=e514A3c48DA8B233f65b5d15BA1905d6d35BFE48&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"
+      map_protocol_changes: "engine_address=e514A3c48DA8B233f65b5d15BA1905d6d35BFE48&trader_vault=585d44727129B9C69791B10238Ca605932938B4F&swapper_address=b1076fE3AB5e28005C7c323Bac5AC06a680d452e&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_pairs
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: proto:fermiswap.v1.Pair
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_lane_components
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_token_pairs
+    kind: store
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_token_balance_deltas
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_token_pairs
+        mode: deltas
+      - store: store_token_pairs
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_token_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_token_balance_deltas
+
+  - name: map_balance_deltas
+    kind: map
+    inputs:
+      - map: map_protocol_components
+      - map: map_token_balance_deltas
+      - store: store_token_balances
+        mode: get
+      - store: store_token_pairs
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_deltas
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_pairs
+        mode: get
+      - store: store_lane_components
+        mode: get
+      - map: map_balance_deltas
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

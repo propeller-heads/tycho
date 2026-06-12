@@ -1,0 +1,26 @@
+# information about the author helps us reach out in case of issues.
+author:
+  name: Zach
+  email: zachchou016@gmail.com
+
+# Protocol Constants
+constants:
+  # The expected average gas cost of a swap
+  protocol_gas: 30000
+  # Minimum capabilities we can expect, individual pools may extend these
+  capabilities:
+    - SellSide
+    - BuySide
+    - PriceFunction
+    - ConstantPrice
+
+# The file containing the adapter contract
+contract: FermiSwapAdapter.sol
+
+# Deployment instances used to generate chain specific bytecode.
+instances:
+  - chain:
+      name: mainnet
+      id: 1
+    arguments:
+      - "0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e"

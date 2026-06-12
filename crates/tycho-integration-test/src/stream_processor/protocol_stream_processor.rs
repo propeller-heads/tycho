@@ -190,6 +190,7 @@ impl ProtocolStreamProcessor {
                 "ekubo_v3".to_string(),
                 "rocketpool".to_string(),
                 "vm:liquidityparty".to_string(),
+                "vm:fermiswap".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -351,6 +352,10 @@ impl ProtocolStreamProcessor {
             "aerodrome_v1" => {
                 stream =
                     stream.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None);
+            }
+            "vm:fermiswap" => {
+                stream =
+                    stream.exchange::<EVMPoolState<PreCachedDB>>("vm:fermiswap", tvl_filter.clone(), None);
             }
             _ => {
                 return Err(miette::miette!("Unknown protocol: {}", protocol));
