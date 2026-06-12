@@ -28,8 +28,10 @@ fn maybe_flip_ratios(a: U256, b: U256) -> (U256, U256) {
 fn div_rounding_up(a: U256, b: U256) -> Result<U256, SimulationError> {
     let (result, rest) = div_mod_u256(a, b)?;
     if rest > U256::from(0u64) {
-        let res = safe_add_u256(result, U256::from(1u64))?;
-        Ok(res)
+        // SAFETY: rest > 0 implies result * b = a - rest <= a - 1, and b >= 1 (zero divisor
+        // already errored), so result <= a - 1 < U256::MAX and the increment cannot wrap.
+        debug_assert!(result < U256::MAX, "rounding increment would wrap");
+        Ok(result.wrapping_add(U256::from(1u64)))
     } else {
         Ok(result)
     }
@@ -128,7 +130,10 @@ fn get_next_sqrt_price_from_amount0_rounding_up(
     let numerator1 = U256::from(liquidity) << RESOLUTION;
 
     if add {
-        let (product, _) = amount.overflowing_mul(sqrt_price);
+        // The wrapped product is intentional: the quotient check below detects wrap-around
+        // (Solidity-port idiom), so the double-width overflow flag of `overflowing_mul` is
+        // redundant work.
+        let product = amount.wrapping_mul(sqrt_price);
         if product / amount == sqrt_price {
             // No overflow case: liquidity * sqrtPX96 / (liquidity +- amount * sqrtPX96)
             let denominator = safe_add_u256(numerator1, product)?;
@@ -139,7 +144,8 @@ fn get_next_sqrt_price_from_amount0_rounding_up(
         // Overflow: liquidity / (liquidity / sqrtPX96 +- amount)
         div_rounding_up(numerator1, safe_add_u256(safe_div_u256(numerator1, sqrt_price)?, amount)?)
     } else {
-        let (product, _) = amount.overflowing_mul(sqrt_price);
+        // Same wrapped-product idiom as the `add` branch: the quotient check detects wrap.
+        let product = amount.wrapping_mul(sqrt_price);
         if safe_div_u256(product, amount)? != sqrt_price || numerator1 <= product {
             return Err(SimulationError::FatalError(
                 "sqrt_price_math: overflow in get_next_sqrt_price_from_amount0".to_string(),
