@@ -93,6 +93,24 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
     true
 }
 
+/// Filters out Killed LiquidityParty pools
+///
+/// The Substreams module sets a `killed` dynamic attribute (`0x01`) and this
+/// filter removes such components from the stream.
+/// Attempting a swap on a killed pool will revert.
+pub fn liquidityparty_killed_pools_filter(component: &ComponentWithState) -> bool {
+    if let Some(killed) = component.state.attributes.get("killed") {
+        if killed.to_vec() == [1u8] {
+            debug!(
+                "Filtering out LiquidityParty pool {} because it is killed",
+                component.component.id
+            );
+            return false;
+        }
+    }
+    true
+}
+
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
     const UNSUPPORTED_POOLS: [&str; 4] = [
         "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",

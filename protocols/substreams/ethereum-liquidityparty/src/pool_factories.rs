@@ -30,8 +30,8 @@ pub fn maybe_create_component(
                     .with_tokens(&event.tokens.clone())
                     .with_contracts(&[
                         event.pool.clone(),
-                        params.mint_impl.clone(),
-                        params.swap_impl.clone(),
+                        params.extra_impl1.clone(),
+                        params.extra_impl2.clone(),
                         params.info.clone(),
                     ])
                     .as_swap_type("liquidityparty_pool", ImplementationType::Vm),

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-LMSR_HOME=../../../lmsr-amm
+LMSR_HOME=../../../../lmsr-amm
 CHAIN_ID=1
 
 

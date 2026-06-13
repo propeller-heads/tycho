@@ -2,36 +2,29 @@ substreams_yaml_path: ./ethereum-liquidityparty.yaml
 adapter_contract: "LiquidityPartySwapAdapter"
 adapter_build_signature: "constructor(address,address)"
 # Adapter constructor args are (PartyPlanner, PartyInfo)
-adapter_build_args: "0x7692e502FB8cE1c13A97DbBE380Be05A545ee0a9,0xAAb5751696d081bF077793a6d86EddF9DF512Ac2"
+adapter_build_args: "0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3,0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643"
 skip_balance_check: false
 protocol_type_names:
   - "liquidityparty_pool"
 protocol_system: "vm:liquidityparty"
 initialized_accounts: [
-  "0x7692e502FB8cE1c13A97DbBE380Be05A545ee0a9", # PartyPlanner
-  "0xAAb5751696d081bF077793a6d86EddF9DF512Ac2", # PartyInfo
-  "0x92bb4799Ef9e622Cb9C5bc7c8655ea43c18E7660", # PartyPoolMintImpl
-  "0xE64605889C32cC8ec858146b428Fa38302B5baA9", # PartyPoolSwapImpl
+  "0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3", # PartyPlanner
+  "0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643", # PartyInfo
+  "0xAcb7089D62b67545299842bc7133582f8bE9eB86", # PartyPoolExtraImpl1
+  "0x669a9B0cBdEFb31380b912C1dF3b77fA7C18D821", # PartyPoolExtraImpl2
 ]
 
 tests:
   - name: test_pool_creation
-    start_block: 24537169
-    stop_block: 24537170
+    start_block: 25301915
+    stop_block: 25301916
     expected_components:
-      - id: "0xfa0be6148f66a6499666cf790d647d00dab76904"
+      - id: "0x1270da05cf1d047763ceefde25a4a5438b26fda6"
         tokens:
-          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
-          - "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" # WBTC
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
-          - "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984" # UNI
-          - "0xD31a59c85aE9D8edEFeC411D448f90841571b89c" # SOL
-          - "0x50327c6c5a14DCaDE707ABad2E27eB517df87AB5" # TRX
           - "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9" # AAVE
-          - "0x6982508145454Ce325dDbE47a25d4ec3d2311933" # PEPE
-          - "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE" # SHIB
         static_attributes: {}
-        creation_tx: "0xf829f55cc90104362822d8f946e171db7f555da163b598c01e5ce5e9754e2ebc"
+        creation_tx: "0xf63725e6d81e5700652bb1ac5b42495fab98fa171c0228aa3605a225bded66ba"
         skip_simulation: false
-        skip_execution: true # TODO revert to false once tycho-execution is ready
+        skip_execution: false

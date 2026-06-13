@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use substreams::{pb::substreams::StoreDeltas, prelude::*};
 use substreams_ethereum::{pb::eth, Event};
 use tycho_substreams::{
-    abi::erc20, balances::aggregate_balances_changes, contract::extract_contract_changes_builder,
-    prelude::*,
+    balances::aggregate_balances_changes, contract::extract_contract_changes_builder, prelude::*,
 };
 
 /// Find and create all relevant protocol components
@@ -43,20 +42,7 @@ fn map_protocol_components(
     })
 }
 
-/// Stores all protocol components in a store.
-///
-/// Stores information about components in a key value store. This is only necessary if
-/// you need to access the whole set of components within your indexing logic.
-///
-/// Popular use cases are:
-/// - Checking if a contract belongs to a component. In this case suggest to use an address as the
-///   store key so lookup operations are O(1).
-/// - Tallying up relative balances changes to calcualte absolute erc20 token balances per
-///   component.
-///
-/// Usually you can skip this step if:
-/// - You are interested in a static set of components only
-/// - Your protocol emits balance change events with absolute values
+/// Stores all protocol components.
 #[substreams::handlers::store]
 fn store_protocol_components(
     map_protocol_components: BlockTransactionProtocolComponents,
@@ -79,6 +65,26 @@ fn store_protocol_components(
         });
 }
 
+/// Records killed pool addresses so downstream modules can skip them.
+#[substreams::handlers::store]
+fn store_killed_components(
+    map_killed_components: BlockTransactionProtocolComponents,
+    store: StoreSetInt64,
+) {
+    map_killed_components
+        .tx_components
+        .into_iter()
+        .for_each(|tx_pc| {
+            tx_pc
+                .components
+                .into_iter()
+                .for_each(|pc| {
+                    store.set(0, pc.id, &1);
+                })
+        });
+}
+
+/// Tracks killed pools that can no longer swap
 #[substreams::handlers::map]
 fn map_killed_components(
     block: eth::v2::Block,
@@ -114,61 +120,80 @@ fn map_killed_components(
     })
 }
 
-/// Extracts balance changes per component
+/// Tracks TVL changes per component using PartyPool events.
 ///
-/// This template function uses ERC20 transfer events to extract balance changes. It
-/// assumes that each component is deployed at a dedicated contract address. If a
-/// transfer to the component is detected, its balance is increased and if a transfer
-/// from the component is detected its balance is decreased.
-///
-/// ## Note:
-/// Changes are necessary if your protocol uses native ETH, uses a vault contract or if
-/// your component burn or mint tokens without emitting transfer events.
-///
-/// You may want to ignore LP tokens if your protocol emits transfer events for these
-/// here.
+/// Protocol fees sit in the pool until being collected but have separate accounting
+/// and do not contribute to TVL.
 #[substreams::handlers::map]
 fn map_relative_component_balance(
     block: eth::v2::Block,
     store: StoreGetString,
+    killed_store: StoreGetInt64,
 ) -> Result<BlockBalanceDeltas, anyhow::Error> {
-    let res = block
-        .logs()
-        .filter_map(|log| {
-            erc20::events::Transfer::match_and_decode(log).map(|transfer| {
-                let to_addr = encode_addr(transfer.to.as_slice());
-                let from_addr = encode_addr(transfer.from.as_slice());
-                let tx = log.receipt.transaction;
-                if let Some(val) = store.get_last(&to_addr) {
-                    let component_tokens: Vec<Vec<u8>> = decode_addrs(&val).unwrap();
-                    if component_tokens.contains(&log.address().to_vec()) {
-                        return Some(BalanceDelta {
-                            ord: log.ordinal(),
-                            tx: Some(tx.into()),
-                            token: log.address().to_vec(),
-                            delta: transfer.value.to_signed_bytes_be(),
-                            component_id: to_addr.as_bytes().to_vec(),
-                        });
-                    }
-                } else if let Some(val) = store.get_last(&from_addr) {
-                    let component_tokens: Vec<Vec<u8>> = decode_addrs(&val).unwrap();
-                    if component_tokens.contains(&log.address().to_vec()) {
-                        return Some(BalanceDelta {
-                            ord: log.ordinal(),
-                            tx: Some(tx.into()),
-                            token: log.address().to_vec(),
-                            delta: (transfer.value.neg()).to_signed_bytes_be(),
-                            component_id: from_addr.as_bytes().to_vec(),
-                        });
-                    }
-                }
-                None
-            })
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+    let mut deltas: Vec<BalanceDelta> = Vec::new();
 
-    Ok(BlockBalanceDeltas { balance_deltas: res })
+    for log in block.logs() {
+        let pool_addr = encode_addr(log.address());
+        // Short circuit if the address doesn't match any of our pools
+        let Some(tokens_str) = store.get_last(&pool_addr) else { continue };
+        // Short circuit if the pool has been killed
+        if killed_store
+            .get_last(&pool_addr)
+            .is_some()
+        {
+            continue;
+        }
+        let component_tokens = decode_addrs(&tokens_str)?;
+        let component_id = pool_addr.as_bytes().to_vec();
+        let tx = log.receipt.transaction;
+        let ord = log.ordinal();
+
+        let mut push = |token: Vec<u8>, delta: substreams::scalar::BigInt| {
+            if !delta.is_zero() {
+                deltas.push(BalanceDelta {
+                    ord,
+                    tx: Some(tx.into()),
+                    token,
+                    delta: delta.to_signed_bytes_be(),
+                    component_id: component_id.clone(),
+                });
+            }
+        };
+
+        if let Some(ev) = party_pool::events::Mint::match_and_decode(log) {
+            // Basket mint deposits some of every token
+            for (token, amount) in component_tokens
+                .iter()
+                .zip(ev.amounts.into_iter())
+            {
+                push(token.clone(), amount);
+            }
+        } else if let Some(ev) = party_pool::events::Burn::match_and_decode(log) {
+            // Basket burn withdraws some of every token
+            for (token, amount) in component_tokens
+                .iter()
+                .zip(ev.amounts.into_iter())
+            {
+                push(token.clone(), amount.neg());
+            }
+        } else if let Some(ev) = party_pool::events::Swap::match_and_decode(log) {
+            // Fee-on-output: the full input enters the pool. The protocol fee is
+            // taken from the output token and moved to the protocol-fee ledger
+            // (excluded from TVL), so the LP-owned reserve loses the net output
+            // plus the protocol fee. The LP fee stays in the reserve.
+            push(ev.token_in, ev.amount_in);
+            push(ev.token_out, (ev.amount_out + ev.protocol_fee).neg());
+        } else if let Some(ev) = party_pool::events::SwapMint::match_and_decode(log) {
+            // Excludes the protocol fee taken the from input amount
+            push(ev.token_in, ev.amount_in - ev.protocol_fee);
+        } else if let Some(ev) = party_pool::events::BurnSwap::match_and_decode(log) {
+            // The output amount is what the user receives, but the pool TVL also
+            // loses the protocol fee.
+            push(ev.token_out, (ev.amount_out + ev.protocol_fee).neg());
+        }
+    }
+
+    Ok(BlockBalanceDeltas { balance_deltas: deltas })
 }
 
 /// Aggregates relative balances values into absolute values
@@ -196,7 +221,7 @@ fn map_protocol_changes(
     param_string: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
-    _killed_components: BlockTransactionProtocolComponents, // PC delete events not yet supported
+    killed_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
     components_store: StoreGetString,
     balance_store: StoreDeltas, // Note, this map module is using the `deltas` mode for the store.
@@ -227,27 +252,32 @@ fn map_protocol_changes(
                 });
         });
 
-    // Aggregate killed components per tx
-    /* Protocol component deletion events not yet supported
+    // We mark killed components with a `killed` dynamic attribute, then
+    // tycho-simulation uses a stream filter to remove the pool. See
+    // `liquidityparty_killed_pools_filter` in protocol_stream_processor.rs
     killed_components
         .tx_components
         .iter()
         .for_each(|tx_component| {
-            // initialise builder if not yet present for this tx
             let tx = tx_component.tx.as_ref().unwrap();
             let builder = transaction_changes
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(tx));
 
-            // iterate over individual components killed within this tx
             tx_component
                 .components
                 .iter()
                 .for_each(|component| {
-                    builder.add_protocol_component(component);
+                    builder.add_entity_change(&EntityChanges {
+                        component_id: component.id.clone(),
+                        attributes: vec![Attribute {
+                            name: "killed".to_string(),
+                            value: vec![1u8],
+                            change: ChangeType::Update.into(),
+                        }],
+                    });
                 });
         });
-     */
 
     // Aggregate absolute balances per transaction.
     aggregate_balances_changes(balance_store, deltas)
@@ -275,8 +305,8 @@ fn map_protocol_changes(
             components_store
                 .get_last(addr_str)
                 .is_some() ||
-                addr == params.mint_impl.as_slice() ||
-                addr == params.swap_impl.as_slice() ||
+                addr == params.extra_impl1.as_slice() ||
+                addr == params.extra_impl2.as_slice() ||
                 addr == params.planner.as_slice() ||
                 addr == params.info.as_slice()
         },

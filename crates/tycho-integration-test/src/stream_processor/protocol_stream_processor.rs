@@ -20,7 +20,10 @@ use tycho_simulation::{
             ekubo::state::EkuboState,
             ekubo_v3::{self, state::EkuboV3State},
             erc4626::state::ERC4626State,
-            filters::{balancer_v2_pool_filter, erc4626_filter, fluid_v1_paused_pools_filter},
+            filters::{
+                balancer_v2_pool_filter, erc4626_filter, fluid_v1_paused_pools_filter,
+                liquidityparty_killed_pools_filter,
+            },
             fluid::FluidV1,
             pancakeswap_v2::state::PancakeswapV2State,
             rocketpool::state::RocketpoolState,
@@ -341,7 +344,7 @@ impl ProtocolStreamProcessor {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:liquidityparty",
                     tvl_filter.clone(),
-                    None,
+                    Some(liquidityparty_killed_pools_filter),
                 );
             }
             "quickswap_v2" => {

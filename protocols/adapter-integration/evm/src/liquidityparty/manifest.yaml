@@ -3,10 +3,11 @@ author:
   email: tim@dexorder.com
 
 constants:
-  # This is our median gas cost for a 20-asset pool. Gas varies by pool size from 120k to 200k.
-  protocol_gas: 147238
+  # This is our median gas cost for a 10-asset pool. Gas varies by pool size from 120k to 200k.
+  protocol_gas: 150857
   capabilities:
     - SellSide
+    - BuySide
     - PriceFunction
     - MarginalPrice
 
@@ -18,5 +19,5 @@ instances:
       name: mainnet
       id: 1
     arguments:
-      - "0x7692e502FB8cE1c13A97DbBE380Be05A545ee0a9"  # PartyPlanner
-      - "0xAAb5751696d081bF077793a6d86EddF9DF512Ac2"  # PartyInfo
+      - "0x5E9DB9fa66aeA7f254d4A6783b1a6180C4B8AAe3"  # PartyPlanner
+      - "0xefF3Ed388D3887e7C9F375B7f1ad8A0B77C05643"  # PartyInfo
