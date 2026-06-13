@@ -11,6 +11,7 @@
 use std::{
     any::Any,
     collections::HashMap,
+    sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1035,8 +1036,16 @@ fn from_adjusted_amount(adjusted_amount: U256, decimals: i64) -> U256 {
     }
 }
 
+// Every power of ten that fits in a U256; 10^78 does not.
+static TEN_POW: LazyLock<[U256; 78]> =
+    LazyLock::new(|| std::array::from_fn(|i| U256::from(10u64).pow(U256::from(i as u64))));
+
 fn ten_pow(v: i64) -> U256 {
-    U256::from(10u64).pow(U256::from((v) as u64))
+    if (0..TEN_POW.len() as i64).contains(&v) {
+        TEN_POW[v as usize]
+    } else {
+        U256::from(10u64).pow(U256::from(v as u64))
+    }
 }
 
 /// Checks if token0 reserves are sufficient compared to token1 reserves.
@@ -1267,6 +1276,17 @@ mod test {
     use anyhow::bail;
     use num_traits::Num;
     use tycho_common::models::Chain;
+
+    #[test]
+    fn ten_pow_matches_runtime_computation() {
+        for v in 0..=200i64 {
+            assert_eq!(
+                super::ten_pow(v),
+                U256::from(10u64).pow(U256::from(v as u64)),
+                "ten_pow({v}) diverged from runtime pow",
+            );
+        }
+    }
 
     use super::*;
 
