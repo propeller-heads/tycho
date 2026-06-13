@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
 use alloy::primitives::{Address, Sign, I256, U256};
 use num_bigint::BigUint;
@@ -69,7 +69,11 @@ pub struct UniswapV4State {
     sqrt_price: U256,
     fees: UniswapV4Fees,
     tick: i32,
-    ticks: TickList,
+    // C1: ticks live behind an `Arc` so cloning a state -- which `get_amount_out` does on every
+    // call to build the post-swap `new_state` -- is a refcount bump instead of a deep copy of up
+    // to ~1k `TickInfo` entries. Every tick mutation goes through `Arc::make_mut` (copy-on-write),
+    // so a previously cloned state is never mutated through a shared `Arc`.
+    ticks: Arc<TickList>,
     tick_spacing: i32,
     pub hook: Option<Box<dyn HookHandler>>,
 }
@@ -158,7 +162,7 @@ impl UniswapV4State {
             sqrt_price,
             fees,
             tick,
-            ticks: tick_list,
+            ticks: Arc::new(tick_list),
             tick_spacing,
             hook: None,
         })
@@ -865,7 +869,7 @@ impl ProtocolSim for UniswapV4State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -880,7 +884,7 @@ impl ProtocolSim for UniswapV4State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
