@@ -1136,6 +1136,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn arc_tick_storage_is_copy_on_write() {
+        // C1: a cloned state shares ticks by Arc; mutating the clone via delta_transition must
+        // copy-on-write so the original's ticks stay untouched (otherwise the post-swap new_state
+        // built by get_amount_out's self.clone() could be corrupted through the shared Arc).
+        let original = UniswapV4State::new(
+            1000,
+            U256::from(1000u64),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
+            100,
+            60,
+            vec![TickInfo::new(120, 10000).unwrap(), TickInfo::new(180, -10000).unwrap()],
+        )
+        .unwrap();
+        let mut cloned = original.clone();
+
+        let attributes: HashMap<String, Bytes> = [(
+            "ticks/120/net_liquidity".to_string(),
+            Bytes::from(99999_u64.to_be_bytes().to_vec()),
+        )]
+        .into_iter()
+        .collect();
+        cloned
+            .delta_transition(
+                ProtocolStateDelta {
+                    component_id: "State1".to_owned(),
+                    updated_attributes: attributes,
+                    deleted_attributes: HashSet::new(),
+                },
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            cloned
+                .ticks
+                .get_tick(120)
+                .unwrap()
+                .net_liquidity,
+            99999
+        );
+        assert_eq!(
+            original
+                .ticks
+                .get_tick(120)
+                .unwrap()
+                .net_liquidity,
+            10000
+        );
+    }
+
     #[tokio::test]
     /// Compares a quote from the UniswapV4 Quoter contract on Sepolia with a simulation.
     async fn test_swap_sim() {
