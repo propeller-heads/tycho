@@ -1,0 +1,48 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_ring_swap_v2"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ring-swap-v2"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+  importPaths:
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_ring_swap_v2.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 20231667
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 20231667
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_pools_created
+
+  - name: map_pool_events
+    kind: map
+    initialBlock: 20231667
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: factory_address=eb2A625B704d73e82946D8d026E1F588Eed06416&protocol_type_name=ring_swap_v2_pool

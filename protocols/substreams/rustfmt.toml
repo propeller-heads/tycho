@@ -15,6 +15,7 @@ ignore = [
     "ethereum-sfraxeth/src/abi",
     "ethereum-sfrax/src/abi",
     "ethereum-curve/src/abi",
+    "ethereum-ring-swap-v2/src/abi",
     "ethereum-uniswap-v2/src/abi",
     "ethereum-uniswap-v3/src/abi",
     "ethereum-uniswap-v3-logs-only/src/abi",
