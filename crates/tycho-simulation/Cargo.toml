@@ -106,6 +106,7 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
+criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [features]
 default = ["evm", "rfq", "price-level-stream"]
@@ -131,3 +132,14 @@ rfq = [
     "dep:http",
     "dep:prost",
 ]
+
+[[bench]]
+name = "get_amount_out"
+harness = false
+
+[[bench]]
+name = "concurrency_throughput"
+harness = false
+
+[[example]]
+name = "capture_vm_fixtures"
