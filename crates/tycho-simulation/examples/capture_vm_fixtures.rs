@@ -17,21 +17,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    fs,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::{
-    feed::{
-        component_tracker::ComponentFilter,
-        dto,
-        BlockHeader,
-        FeedMessage,
-    },
+    feed::{component_tracker::ComponentFilter, dto, BlockHeader, FeedMessage},
     stream::TychoStreamBuilder,
 };
 use tycho_common::{
@@ -66,14 +60,16 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    let api_key = env::var("TYCHO_API_KEY")
-        .expect("TYCHO_API_KEY environment variable must be set");
+    let api_key =
+        env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY environment variable must be set");
 
     let fixtures_dir = fixtures_path();
     fs::create_dir_all(&fixtures_dir).expect("Failed to create fixtures directory");
 
     info!("Connecting to Tycho at {TYCHO_ENDPOINT}...");
 
+    // `with_tvl_range` takes (remove_tvl, add_tvl). Both are equal here on purpose: this is a
+    // one-shot capture, so there is no need for a hysteresis band between add/remove thresholds.
     let tvl_filter = ComponentFilter::with_tvl_range(TVL_THRESHOLD, TVL_THRESHOLD);
 
     let (_handle, mut rx) = TychoStreamBuilder::new(TYCHO_ENDPOINT, Chain::Ethereum)
@@ -88,19 +84,15 @@ async fn main() {
 
     info!("Waiting for first snapshot (up to {SNAPSHOT_TIMEOUT_SECS}s)...");
 
-    let feed_msg = tokio::time::timeout(
-        Duration::from_secs(SNAPSHOT_TIMEOUT_SECS),
-        rx.recv(),
-    )
-    .await
-    .expect("Timed out waiting for first snapshot")
-    .expect("Stream channel closed before first message")
-    .expect("Stream returned an error on first message");
+    // The builder's `.startup_timeout()` bounds how long the synchronizer waits for the first
+    // message, so no outer timeout is needed here.
+    let feed_msg = rx
+        .recv()
+        .await
+        .expect("Stream channel closed before first message — did startup timeout fire?")
+        .expect("Stream returned an error on first message");
 
-    info!(
-        "Received snapshot with {} protocol state messages",
-        feed_msg.state_msgs.len()
-    );
+    info!("Received snapshot with {} protocol state messages", feed_msg.state_msgs.len());
     for (name, msg) in &feed_msg.state_msgs {
         info!(
             "  protocol={name} components={} vm_storage_accounts={}",
@@ -141,100 +133,9 @@ async fn main() {
     let mut captured_count = 0;
 
     for target in &targets {
-        let Some(state_msg) = dto_feed.state_msgs.get(target.protocol) else {
-            warn!("Protocol '{}' not found in snapshot — skipping {}", target.protocol, target.label);
-            continue;
-        };
-
-        let chosen = choose_component(state_msg, target.min_tokens, target.max_tokens);
-        let Some((component_id, component_with_state)) = chosen else {
-            warn!(
-                "No component with {}-{} tokens found in '{}' — skipping {}",
-                target.min_tokens, target.max_tokens, target.protocol, target.label
-            );
-            continue;
-        };
-
-        info!(
-            "Selected component '{}' (tokens={}) for {}",
-            component_id,
-            component_with_state.component.tokens.len(),
-            target.label
-        );
-
-        // Collect token addresses from this component.
-        for token in &component_with_state.component.tokens {
-            all_referenced_tokens.insert(token.clone());
+        if capture_target(target, &dto_feed, &fixtures_dir, &mut all_referenced_tokens) {
+            captured_count += 1;
         }
-
-        // Determine which contract addresses belong to this component.
-        let component_contracts: HashSet<Bytes> = component_with_state
-            .component
-            .contract_ids
-            .iter()
-            .cloned()
-            .collect();
-
-        // Build a filtered snapshot: just this one component + its vm_storage.
-        let filtered_vm_storage: HashMap<Bytes, _> = state_msg
-            .snapshots
-            .vm_storage
-            .iter()
-            .filter(|(addr, _)| component_contracts.contains(*addr))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        info!(
-            "  vm_storage entries for component: {} (out of {} total)",
-            filtered_vm_storage.len(),
-            state_msg.snapshots.vm_storage.len()
-        );
-
-        let mut filtered_states = HashMap::new();
-        filtered_states.insert(component_id.clone(), component_with_state.clone());
-
-        let filtered_snapshot = dto::Snapshot {
-            states: filtered_states,
-            vm_storage: filtered_vm_storage,
-        };
-
-        let filtered_state_msg = dto::StateSyncMessage {
-            header: state_msg.header.clone(),
-            snapshots: filtered_snapshot,
-            deltas: None,
-            removed_components: HashMap::new(),
-        };
-
-        let mut filtered_state_msgs = HashMap::new();
-        filtered_state_msgs.insert(target.protocol.to_string(), filtered_state_msg);
-
-        let filtered_feed = dto::FeedMessage {
-            state_msgs: filtered_state_msgs,
-            sync_states: dto_feed
-                .sync_states
-                .iter()
-                .filter(|(k, _)| k.as_str() == target.protocol)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        };
-
-        let json = serde_json::to_string_pretty(&filtered_feed)
-            .expect("Failed to serialize fixture to JSON");
-
-        let output_path = fixtures_dir.join(target.filename);
-        fs::write(&output_path, &json).expect("Failed to write fixture file");
-
-        info!(
-            "Wrote {} ({} bytes) to {:?}",
-            target.filename,
-            json.len(),
-            output_path
-        );
-
-        // Verify round-trip: the dto JSON must deserialise back into the runtime FeedMessage type.
-        verify_round_trip(&json, target.filename);
-
-        captured_count += 1;
     }
 
     if captured_count == 0 {
@@ -248,12 +149,108 @@ async fn main() {
     info!("Done. Captured {}/{} fixtures.", captured_count, targets.len());
 }
 
+/// Captures a single fixture for `target`: selects a matching component, filters the snapshot to
+/// that component plus its contract `vm_storage`, writes the JSON fixture, and verifies it
+/// round-trips. Token addresses for the chosen component are added to `all_referenced_tokens`.
+///
+/// Returns `true` if a fixture was written, `false` if the protocol or a matching component was
+/// not present in the snapshot.
+fn capture_target(
+    target: &FixtureTarget,
+    dto_feed: &dto::FeedMessage<BlockHeader>,
+    fixtures_dir: &Path,
+    all_referenced_tokens: &mut HashSet<Bytes>,
+) -> bool {
+    let Some(state_msg) = dto_feed.state_msgs.get(target.protocol) else {
+        warn!("Protocol '{}' not found in snapshot — skipping {}", target.protocol, target.label);
+        return false;
+    };
+
+    let chosen = choose_component(state_msg, target.min_tokens, target.max_tokens);
+    let Some((component_id, component_with_state)) = chosen else {
+        warn!(
+            "No component with {}-{} tokens found in '{}' — skipping {}",
+            target.min_tokens, target.max_tokens, target.protocol, target.label
+        );
+        return false;
+    };
+
+    info!(
+        "Selected component '{}' (tokens={}) for {}",
+        component_id,
+        component_with_state
+            .component
+            .tokens
+            .len(),
+        target.label
+    );
+
+    for token in &component_with_state.component.tokens {
+        all_referenced_tokens.insert(token.clone());
+    }
+
+    // Determine which contract addresses belong to this component.
+    let component_contracts: HashSet<Bytes> = component_with_state
+        .component
+        .contract_ids
+        .iter()
+        .cloned()
+        .collect();
+
+    // Build a filtered snapshot: just this one component + its vm_storage.
+    let filtered_vm_storage: HashMap<Bytes, _> = state_msg
+        .snapshots
+        .vm_storage
+        .iter()
+        .filter(|(addr, _)| component_contracts.contains(*addr))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    info!(
+        "  vm_storage entries for component: {} (out of {} total)",
+        filtered_vm_storage.len(),
+        state_msg.snapshots.vm_storage.len()
+    );
+
+    let filtered_states = HashMap::from([(component_id, component_with_state.clone())]);
+
+    let filtered_state_msg = dto::StateSyncMessage {
+        header: state_msg.header.clone(),
+        snapshots: dto::Snapshot { states: filtered_states, vm_storage: filtered_vm_storage },
+        deltas: None,
+        removed_components: HashMap::new(),
+    };
+
+    let filtered_feed = dto::FeedMessage {
+        state_msgs: HashMap::from([(target.protocol.to_string(), filtered_state_msg)]),
+        sync_states: dto_feed
+            .sync_states
+            .iter()
+            .filter(|(k, _)| k.as_str() == target.protocol)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
+
+    let json =
+        serde_json::to_string_pretty(&filtered_feed).expect("Failed to serialize fixture to JSON");
+
+    let output_path = fixtures_dir.join(target.filename);
+    fs::write(&output_path, &json).expect("Failed to write fixture file");
+
+    info!("Wrote {} ({} bytes) to {:?}", target.filename, json.len(), output_path);
+
+    // Verify round-trip: the dto JSON must deserialise back into the runtime FeedMessage type.
+    verify_round_trip(&json, target.filename);
+
+    true
+}
+
 /// Chooses the first component whose token count is in `[min_tokens, max_tokens]`.
-fn choose_component<'a>(
-    state_msg: &'a dto::StateSyncMessage<BlockHeader>,
+fn choose_component(
+    state_msg: &dto::StateSyncMessage<BlockHeader>,
     min_tokens: usize,
     max_tokens: usize,
-) -> Option<(String, &'a dto::ComponentWithState)> {
+) -> Option<(String, &dto::ComponentWithState)> {
     state_msg
         .snapshots
         .states
@@ -285,26 +282,16 @@ fn verify_round_trip(json: &str, filename: &str) {
 
 /// Fetches token metadata for the referenced addresses and writes `tokens.json`.
 async fn write_tokens_fixture(
-    fixtures_dir: &PathBuf,
+    fixtures_dir: &Path,
     api_key: &str,
     referenced_addresses: &HashSet<Bytes>,
 ) {
-    info!(
-        "Fetching token metadata for {} token addresses...",
-        referenced_addresses.len()
-    );
+    info!("Fetching token metadata for {} token addresses...", referenced_addresses.len());
 
-    let all_tokens = load_all_tokens(
-        TYCHO_ENDPOINT,
-        false,
-        Some(api_key),
-        true,
-        Chain::Ethereum,
-        None,
-        None,
-    )
-    .await
-    .expect("Failed to load token metadata from Tycho");
+    let all_tokens =
+        load_all_tokens(TYCHO_ENDPOINT, false, Some(api_key), true, Chain::Ethereum, None, None)
+            .await
+            .expect("Failed to load token metadata from Tycho");
 
     // Keep only tokens whose address appears in one of our captured components.
     let relevant: Vec<&Token> = all_tokens
@@ -314,8 +301,7 @@ async fn write_tokens_fixture(
 
     info!("Found {} relevant tokens (out of {} total)", relevant.len(), all_tokens.len());
 
-    let json = serde_json::to_string_pretty(&relevant)
-        .expect("Failed to serialize tokens to JSON");
+    let json = serde_json::to_string_pretty(&relevant).expect("Failed to serialize tokens to JSON");
 
     let output_path = fixtures_dir.join("tokens.json");
     fs::write(&output_path, &json).expect("Failed to write tokens.json");
