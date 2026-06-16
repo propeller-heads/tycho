@@ -15,10 +15,18 @@ adapter_build_args: "0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"
 
 skip_balance_check: true # Venue is intermittently idle; balances validated separately.
 
+# The registry was deployed at block 25,099,176 — before this test's range — so the
+# substreams only emit its storage updates here, never its account creation. Bootstrap its
+# account from RPC so slot updates have something to attach to. The settlement and module
+# are deployed inside the range, so they don't need this.
+initialized_accounts:
+  - "0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F" # PrioUpdateRegistry
+
 tests:
   - name: test_book_discovery
-    # Covers the settlement/module/registry deployments (~25171611-12), the asset-config
-    # write that creates both books (25171616), and the maker assignment (25171618).
+    # Covers the settlement/module deployments (~25171611-12), the asset-config write that
+    # creates both books (25171616), and the maker assignment (25171618). The registry was
+    # deployed earlier (25099176) and is bootstrapped via initialized_accounts above.
     start_block: 25171610
     stop_block: 25171620
     expected_components:
