@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use num_bigint::BigUint;
 use tycho_client::feed::{dto, BlockHeader, FeedMessage};
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_simulation::evm::{
@@ -69,10 +68,12 @@ pub fn load_pools(fixture: &str) -> HashMap<String, Box<dyn ProtocolSim>> {
     })
 }
 
-/// Returns the first two tokens of the first component in a fixture, in the order they appear
+/// Returns the first two tokens of the fixture's single component, in the order they appear
 /// in the component's token list.
 ///
-/// These are used as `(token_in, token_out)` in benchmarks and smoke tests.
+/// These are used as `(token_in, token_out)` in benchmarks and smoke tests. The fixtures are
+/// single-pool by construction; this panics if the fixture contains anything other than exactly
+/// one component so multi-pool fixtures fail loudly instead of silently picking one at random.
 pub fn pool_tokens(fixture: &str) -> (Token, Token) {
     let path = fixtures_dir().join(format!("{fixture}.json"));
     let raw = fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -89,12 +90,17 @@ pub fn pool_tokens(fixture: &str) -> (Token, Token) {
         .next()
         .expect("Fixture has no protocol state messages");
 
-    let component = state_msg
-        .snapshots
-        .states
+    let states = state_msg.snapshots.states;
+    assert_eq!(
+        states.len(),
+        1,
+        "Fixture {fixture} must contain exactly one component, found {}",
+        states.len()
+    );
+    let component = states
         .into_values()
         .next()
-        .expect("Fixture has no snapshot states");
+        .expect("Component count asserted to be 1");
 
     let token_addrs = &component.component.tokens;
     assert!(
@@ -110,19 +116,4 @@ pub fn pool_tokens(fixture: &str) -> (Token, Token) {
     };
 
     (lookup(&token_addrs[0]), lookup(&token_addrs[1]))
-}
-
-/// Convenience wrapper: call `get_amount_out` on a pool state.
-///
-/// Returns the `Ok` result or panics with a descriptive message.
-#[allow(dead_code)]
-pub fn get_amount_out_or_panic(
-    state: &dyn ProtocolSim,
-    amount: BigUint,
-    token_in: &Token,
-    token_out: &Token,
-) -> tycho_common::simulation::protocol_sim::GetAmountOutResult {
-    state
-        .get_amount_out(amount, token_in, token_out)
-        .unwrap_or_else(|e| panic!("get_amount_out failed: {e:?}"))
 }
