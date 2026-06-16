@@ -27,8 +27,15 @@ contract BopAMMAdapterTest is AdapterTest {
     error StaleUpdate();
     error InsufficientLiquidity();
 
+    // A block containing a quote commit for the WETH/USDC book, where exactly
+    // two books (WETH, WBTC) are configured and the block's timestamp equals
+    // book 0's committed quote timestamp. Pinned so the test is reproducible:
+    // the venue is operator-driven, so `latest` drifts (new books, stale
+    // quotes) and would otherwise break these assertions.
+    uint256 constant FORK_BLOCK = 25266710;
+
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("mainnet"));
+        vm.createSelectFork(vm.rpcUrl("mainnet"), FORK_BLOCK);
         _refreshBook(0);
         _refreshBook(1);
 

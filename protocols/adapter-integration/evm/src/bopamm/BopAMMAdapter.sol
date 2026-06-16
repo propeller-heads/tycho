@@ -32,13 +32,24 @@ contract BopAMMAdapter is ISwapAdapter {
     uint256 constant MIN_QUOTABLE_SCAN_ROUNDS = 13;
 
     IBopAmmV2 public immutable settlement;
-    IBopAmmPricing public immutable pricing;
-    address public immutable usdc;
 
     constructor(address settlement_) {
         settlement = IBopAmmV2(settlement_);
-        pricing = IBopAmmPricing(settlement.pricing());
-        usdc = settlement.usdc();
+    }
+
+    /// @notice The pricing module, read from the settlement contract.
+    /// @dev Resolved lazily rather than cached in the constructor: the
+    /// simulation engine deploys this adapter in a context where the
+    /// settlement contract's code is injected at call time, not at
+    /// construction, so a constructor that called into it would revert.
+    function pricing() public view returns (IBopAmmPricing) {
+        return IBopAmmPricing(settlement.pricing());
+    }
+
+    /// @notice The USDC (hub) token, read from the settlement contract.
+    /// @dev Resolved lazily for the same reason as {pricing}.
+    function usdc() public view returns (address) {
+        return settlement.usdc();
     }
 
     /// @inheritdoc ISwapAdapter
@@ -163,13 +174,13 @@ contract BopAMMAdapter is ISwapAdapter {
         override
         returns (address[] memory tokens)
     {
-        (address asset,,,,) = pricing.getAssetConfig(_assetId(poolId));
+        (address asset,,,,) = pricing().getAssetConfig(_assetId(poolId));
         if (asset == address(0)) {
             revert InvalidOrder("Unknown pool");
         }
         tokens = new address[](2);
         tokens[0] = asset;
-        tokens[1] = usdc;
+        tokens[1] = usdc();
     }
 
     /// @inheritdoc ISwapAdapter
@@ -182,7 +193,7 @@ contract BopAMMAdapter is ISwapAdapter {
         bytes32[] memory configured = new bytes32[](MAX_ASSET_ID);
         uint256 count = 0;
         for (uint256 i = 0; i < MAX_ASSET_ID; i++) {
-            (address asset,,,,) = pricing.getAssetConfig(uint8(i));
+            (address asset,,,,) = pricing().getAssetConfig(uint8(i));
             if (asset == address(0)) {
                 continue;
             }
@@ -227,12 +238,12 @@ contract BopAMMAdapter is ISwapAdapter {
         address sellToken,
         address buyToken
     ) internal view {
-        (address asset,,,,) = pricing.getAssetConfig(_assetId(poolId));
+        (address asset,,,,) = pricing().getAssetConfig(_assetId(poolId));
         if (asset == address(0)) {
             revert InvalidOrder("Unknown pool");
         }
-        bool validPair = (sellToken == asset && buyToken == usdc)
-            || (sellToken == usdc && buyToken == asset);
+        bool validPair = (sellToken == asset && buyToken == usdc())
+            || (sellToken == usdc() && buyToken == asset);
         if (!validPair) {
             revert InvalidOrder("Pool/token mismatch");
         }
