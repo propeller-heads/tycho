@@ -177,3 +177,14 @@ Observation: Multi-token `get_amount_out` is slower than 2-token (Curve 3-token 
 Balancer 2-token ~454 µs), reflecting the larger spot-price permutation set. Concurrent reads
 scale nearly linearly (1→8 threads yields ~6.9× throughput), confirming the shared-DB
 `Arc<RwLock>` read lock is not a meaningful contention bottleneck at baseline.
+
+### Fynd routing (most_liquid find_best_route, median)
+
+| fixture | median |
+|---|---|
+| balancer_v2_2token | 454.13 µs |
+| curve_3token | 1.9530 ms |
+| curve_4token | 5.1430 ms |
+
+Routing drives the real per-hop get_amount_out loop via the public `find_best_route`. Times exceed
+a single get_amount_out because path enumeration simulates multiple candidate hops.
