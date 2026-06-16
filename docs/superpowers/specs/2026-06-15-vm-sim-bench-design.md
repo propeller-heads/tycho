@@ -148,3 +148,32 @@ This exercises the genuine Fynd routing functions, not an imitation.
 - **Cross-repo fixture drift:** mitigated by single-source capture writing both copies.
 - **Patch path portability:** the `[patch.crates-io]` path is absolute to the local worktree;
   it stays local to the Fynd bench branch and is not merged.
+
+## Baseline numbers (main, 2026-06-16)
+
+Release criterion baseline saved as `before` (in-worktree `target/criterion`).
+Hardware: x86_64 (Linux 6.8.0-124-generic). Not committed — reproduce with `--save-baseline before`.
+
+### get_amount_out (median)
+
+| fixture | small | large |
+|---|---|---|
+| balancer_v2_2token | 454.21 µs | 481.15 µs |
+| curve_3token | 767.39 µs | 769.80 µs |
+| curve_4token | 615.92 µs | 609.06 µs |
+
+spot_price (median): balancer_v2_2token 970.56 ns, curve_3token 974.09 ns, curve_4token 936.36 ns
+
+### get_amount_out_contended (median wall time / throughput)
+
+| threads | time | throughput |
+|---|---|---|
+| 1 | 33.689 ms | 1.4842 Kelem/s |
+| 2 | 33.894 ms | 2.9504 Kelem/s |
+| 4 | 35.175 ms | 5.6858 Kelem/s |
+| 8 | 38.996 ms | 10.258 Kelem/s |
+
+Observation: Multi-token `get_amount_out` is slower than 2-token (Curve 3-token ~769 µs vs
+Balancer 2-token ~454 µs), reflecting the larger spot-price permutation set. Concurrent reads
+scale nearly linearly (1→8 threads yields ~6.9× throughput), confirming the shared-DB
+`Arc<RwLock>` read lock is not a meaningful contention bottleneck at baseline.
