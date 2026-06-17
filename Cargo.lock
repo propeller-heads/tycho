@@ -10256,6 +10256,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "uniswap-v2-core"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "dotenv",
+ "ethabi 18.0.0",
+ "getrandom 0.2.16",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "prost 0.11.9",
+ "substreams",
+ "substreams-ethereum",
+ "tokio",
+ "tokio-stream",
+ "tycho-common",
+ "tycho-indexer",
+ "tycho-substreams 0.8.0",
+]
+
+[[package]]
 name = "uniswap-v3-core"
 version = "0.1.0"
 dependencies = [

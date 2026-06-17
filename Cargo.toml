@@ -13,6 +13,7 @@ members = [
     "crates/tycho-execution",
     "crates/tycho-execution/model",
     "protocols/testing",
+    "protocols/crates/uniswap-v2",
     "protocols/crates/uniswap-v3",
     "protocols/crates/uniswap-v4",
 ]

@@ -15,6 +15,8 @@ truth for a parity integration test.
 - `protocols/crates/uniswap-v4` (canonical: pool registry keyed by id, sqrt-price tracking,
   spkg-from-main test, `scripts/build_main_spkg.sh`)
 - `protocols/crates/uniswap-v3` (factory-pattern pools keyed by contract address)
+- `protocols/crates/uniswap-v2` (simplest: one `Sync` event carrying absolute reserves —
+  no ticks/liquidity, no running accumulators, processor state is just the pool registry)
 
 ## Step 1: Understand the substreams package
 
@@ -48,8 +50,12 @@ The substreams pipeline reads stores with `get_at(log_ordinal)`. The native equi
 consumed by an event must reflect all prior Initialize/Swap-type events in the same block.
 
 - Ordinal: `tx.index() * 100_000 + log_index` (matches cross-tx event ordering)
-- Balances: running `BigInt` accumulators per `(pool, token)`; emit the absolute value,
-  **clamped to zero** (mirrors `tycho_substreams::balances`)
+- Balances: usually running `BigInt` accumulators per `(pool, token)`, emitting the
+  absolute value **clamped to zero** (mirrors `tycho_substreams::balances`). But some
+  protocols report absolute balances directly — uniswap-v2's `Sync` carries the reserves,
+  so there is no accumulation and the balance is emitted as `reserve.to_signed_bytes_be()`
+  (match the substreams' exact encoding: signed vs unsigned magnitude differs by a leading
+  zero byte). Check what the substreams module actually emits.
 - Tick net-liquidity change type, checked in this order: Creation if the previous running
   value was missing **or zero**; Deletion if the new value is zero; else Update
 - Component ids: normalize incoming ids at the `apply_block` boundary (trim `0x`,
@@ -63,13 +69,22 @@ consumed by an event must reflect all prior Initialize/Swap-type events in the s
 
 ## Step 4: Parity integration test
 
-The test streams `map_protocol_changes` from the spkg as ground truth and asserts
-byte-identical attributes/balances per block. The per-block flow (copy it from
-uniswap-v4's test, do not reinvent):
+The test streams the package's final map module from the spkg as ground truth and asserts
+byte-identical attributes/balances per block. The module name varies — `map_protocol_changes`
+for uniswap-v3/v4, `map_pool_events` for uniswap-v2; check the manifest. The per-block flow
+(copy it from uniswap-v4's test, do not reinvent):
 
 1. `generate_deltas(rpc_txs)` — pending deltas from raw `eth_getLogs`/block data
 2. Compare against the aggregated substreams output, restricted to known pools
 3. `apply_block(substreams ground truth)` — advance state and register new pools
+
+**Aggregate the substreams side in ascending transaction-index order.** When a pool changes
+in several transactions within one block, the block-final value is the highest-index
+transaction's — which is what the processor produces (it orders by `tx.index()`). Some
+substreams emit per-transaction changes in non-deterministic order (uniswap-v2's
+`merge_block` collects via `into_values()`), so sort `proto.changes` by `tx.index` before
+the last-write-wins aggregation, or the comparison flaps on multi-tx pools. (uniswap-v3/v4
+already sort upstream, so their tests didn't need it.)
 
 Two non-obvious setup points:
 
@@ -113,3 +128,5 @@ STREAMINGFAST_KEY="$TOKEN" cargo test -p <protocol>-core --test integration -- -
 | Default window at protocol genesis with no activity | Scan for an active window first (uniswap-v4 launch had ~0 events for 60k blocks) |
 | Reading state "as of block start" for in-block events | Apply events sequentially; update running state between events |
 | Deriving static attributes (fee→tick_spacing maps) | Take them from the creation event exactly as the substreams does |
+| Test flaps on pools that change in multiple txs per block | Sort the substreams `proto.changes` by `tx.index` before aggregating (last write = highest index, matching the processor) |
+| Emitting unsigned-magnitude balances when substreams emit signed | Match the substreams encoding exactly (`to_signed_bytes_be` vs `to_bytes_be().1`) |
