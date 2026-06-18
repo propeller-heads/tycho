@@ -1,9 +1,9 @@
 use super::{
-    state_store::{state_slot_key, StateArea},
-    storage::{
+    slot_layout::{
         decode_block_pricing, decode_maker, decode_pool, BlockPricingState, MakerState, PoolState,
         SLOT_LEN,
     },
+    slot_stores::{state_slot_key, StateArea},
 };
 use num_bigint::BigInt;
 use num_traits::{One, ToPrimitive, Zero};
@@ -829,7 +829,7 @@ fn bool_attribute(name: &str, value: bool, change: ChangeType) -> Attribute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::storage::{BlockPricingState, MakerState, PoolState};
+    use crate::modules::slot_layout::{BlockPricingState, MakerState, PoolState};
     use std::collections::HashMap;
 
     fn dec(value: &str) -> BigInt {

@@ -4,10 +4,10 @@
 //! simulation is hydrated from quote-state attributes reconstructed from relay
 //! storage diffs.
 
+mod manual_updates;
 mod quote_state;
-mod state_store;
-mod storage;
-mod update_events;
+mod slot_layout;
+mod slot_stores;
 
 use crate::abi::b_swap::events::Swap;
 use crate::{pool_factories, pool_factories::DeploymentConfig};
@@ -154,7 +154,7 @@ fn map_protocol_changes(
                 }
                 Swap::match_and_decode(log)
                     .map(|event| format!("0x{}", hex::encode(event.b_token)))
-                    .or_else(|| update_events::maybe_component_id(log))
+                    .or_else(|| manual_updates::maybe_component_id(log))
             })
             .for_each(|component_id| {
                 let tx: Transaction = tx.into();

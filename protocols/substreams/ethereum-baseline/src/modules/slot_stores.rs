@@ -1,4 +1,4 @@
-use super::storage::{
+use super::slot_layout::{
     block_pricing_base_slot, maker_base_slot, pool_base_slot, slot_with_offset, ADDRESS_LEN,
     SLOT_LEN,
 };
