@@ -1,8 +1,8 @@
-# Baseline Mercury Storage-Diff Quote State Design
+# Baseline Storage-Diff Quote State Design
 
 ## Context
 
-PR <https://github.com/propeller-heads/tycho/pull/1076> currently refreshes Baseline Mercury quote state in the substream by calling `getQuoteState(address)` for every created or updated component. The maintainer concern is that an RPC call from substreams can hurt indexer performance and should be replaced with state derived from block data if possible.
+PR <https://github.com/propeller-heads/tycho/pull/1076> currently refreshes Baseline quote state in the substream by calling `getQuoteState(address)` for every created or updated component. The maintainer concern is that an RPC call from substreams can hurt indexer performance and should be replaced with state derived from block data if possible.
 
 Event-only reconstruction is not sufficient. The Baseline events in the current PR expose pool creation, swaps, and fee updates, but they do not expose the full quote state required by `tycho-simulation`. In particular, the simulation decoder currently requires a complete `BaselineQuoteState` on every delta and replaces the whole state during `delta_transition`.
 
@@ -38,7 +38,7 @@ snapshot_active_price
 
 ## Source Contracts
 
-Relevant Mercury source files are in the private `0xBaseline/mercury` repository:
+Relevant Baseline source files used for this storage-layout analysis:
 
 ```text
 src/components/BLens.sol
@@ -67,7 +67,7 @@ The storage still belongs to the relay, because the components run through the r
 
 ## Storage Layout
 
-Mercury uses namespaced storage. These are not ordinary low-numbered Solidity slots.
+Baseline uses namespaced storage. These are not ordinary low-numbered Solidity slots.
 
 From `StateLib.sol`:
 
@@ -386,35 +386,35 @@ Tycho already uses storage changes in other substreams. `tycho_substreams::block
 The Baseline substream now uses two stores:
 
 ```text
-store_mercury_slot_index:
+store_slot_index:
     key:   slot:<32-byte storage slot>
     value: <bToken>|<state area>|<offset>
 
-store_mercury_state_slots:
+store_state_slots:
     key:   state:<bToken>:<state area>:<offset>
     value: <32-byte storage value>
 ```
 
-`store_mercury_slot_index` is populated from created components. It precomputes the `Pool`,
+`store_slot_index` is populated from created components. It precomputes the `Pool`,
 `Maker`, and `BlockPricing` slots for each bToken because a raw storage slot cannot be inverted back
 to the bToken mapping key.
 
-`store_mercury_state_slots` iterates non-reverted transaction calls, filters `call.storage_changes`
-to the singleton relay address, looks up each changed slot in `store_mercury_slot_index`, and writes
+`store_state_slots` iterates non-reverted transaction calls, filters `call.storage_changes`
+to the singleton relay address, looks up each changed slot in `store_slot_index`, and writes
 the latest 32-byte slot value with the storage-change ordinal.
 
 `map_protocol_changes` now marks components updated from these state-slot deltas and reconstructs the
-complete 19-field quote state from `store_mercury_state_slots`. The steady-state production path no
+complete 19-field quote state from `store_state_slots`. The steady-state production path no
 longer calls `getQuoteState`.
 
-For storage-driven changes, `map_protocol_changes` reads `store_mercury_state_slots` at the latest
+For storage-driven changes, `map_protocol_changes` reads `store_state_slots` at the latest
 storage-change ordinal for the component. This is required because Substreams `get_last` reads the
 beginning-of-block state, while same-block storage deltas need the post-change state at the relevant
 ordinal.
 
 Reconstruction treats a missing tracked state-slot key as a zero storage word, matching EVM storage
 semantics. This is important because Substreams storage changes are sparse: an untouched zero slot is
-not expected to appear in `storage_changes`, but it is still a valid input to the Mercury struct
+not expected to appear in `storage_changes`, but it is still a valid input to the Baseline struct
 decoder. Malformed stored slot values still fail reconstruction.
 
 The stale block-pricing branch with pending buy/sell deltas is handled by the Rust port of
@@ -455,15 +455,15 @@ Recommended tests:
 
 ### Rounding Drift
 
-`getQuoteState` depends on Solidity fixed-point behavior from Solady and Mercury math. The Rust version must match rounding exactly. Reuse existing Rust Baseline math helpers where possible, and add fixture tests around known blocks.
+`getQuoteState` depends on Solidity fixed-point behavior from Solady and Baseline math. The Rust version must match rounding exactly. Reuse existing Rust Baseline math helpers where possible, and add fixture tests around known blocks.
 
 ### Private Contract Source
 
-The source is currently in private `0xBaseline/mercury`. The Tycho PR should not require maintainers to access private source to understand the slot layout. The substream code should document the slot constants and struct packing clearly.
+The Tycho PR should not require maintainers to access private source to understand the slot layout. The substream code should document the slot constants and struct packing clearly.
 
 ### Contract Upgrades
 
-The relay is routed/modular. If Mercury upgrades storage layout or quote-state semantics, the storage decoder must be versioned or guarded. The current deployed Base/Ethereum relay uses the Mercury layout described here.
+The relay is routed/modular. If Baseline upgrades storage layout or quote-state semantics, the storage decoder must be versioned or guarded. The current deployed Base/Ethereum relay uses the Baseline layout described here.
 
 ### Full-State Store Required
 
@@ -477,6 +477,6 @@ Storage diffs only show changed slots. Since simulation needs complete state, th
 
 Event reconstruction is a dead end because events do not include enough state to reproduce `BLens.getQuoteState`.
 
-Storage diffs are feasible. Mercury stores the required state in namespaced mappings keyed by bToken. We can decode `Pool`, `Maker`, and `BlockPricing` storage from substream storage changes, maintain full per-bToken stores, and reconstruct the same quote state as `BLens.getQuoteState` without per-component RPC calls.
+Storage diffs are feasible. Baseline stores the required state in namespaced mappings keyed by bToken. We can decode `Pool`, `Maker`, and `BlockPricing` storage from substream storage changes, maintain full per-bToken stores, and reconstruct the same quote state as `BLens.getQuoteState` without per-component RPC calls.
 
 The implementation is nontrivial because `getQuoteState` includes preview logic for stale block-pricing state and same-block accumulators. The production substream now reconstructs those values from storage; `getQuoteState` remains useful only as a test/oracle source when adding new fixtures.

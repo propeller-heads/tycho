@@ -1,13 +1,13 @@
-//! Baseline/Mercury Substreams handlers.
+//! Baseline Substreams handlers.
 //!
 //! Baseline uses a singleton relay/proxy. Components are bTokens, and native
 //! simulation is hydrated from quote-state attributes reconstructed from relay
 //! storage diffs.
 
-mod mercury_quote_state;
-mod mercury_state_store;
-mod mercury_storage;
-mod mercury_update_events;
+mod quote_state;
+mod state_store;
+mod storage;
+mod update_events;
 
 use crate::abi::b_swap::events::Swap;
 use crate::{pool_factories, pool_factories::DeploymentConfig};
@@ -120,8 +120,8 @@ fn map_protocol_changes(
     params: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
-    mercury_state_deltas: StoreDeltas,
-    mercury_state: StoreGetString,
+    state_deltas: StoreDeltas,
+    state: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let config: DeploymentConfig = serde_qs::from_str(params.as_str())?;
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
@@ -154,7 +154,7 @@ fn map_protocol_changes(
                 }
                 Swap::match_and_decode(log)
                     .map(|event| format!("0x{}", hex::encode(event.b_token)))
-                    .or_else(|| mercury_update_events::maybe_component_id(log))
+                    .or_else(|| update_events::maybe_component_id(log))
             })
             .for_each(|component_id| {
                 let tx: Transaction = tx.into();
@@ -166,10 +166,10 @@ fn map_protocol_changes(
             });
     });
 
-    mercury_state_deltas
+    state_deltas
         .deltas
         .iter()
-        .filter_map(|delta| mercury_state_component_id(&delta.key).map(|id| (id, delta.ordinal)))
+        .filter_map(|delta| state_component_id(&delta.key).map(|id| (id, delta.ordinal)))
         .for_each(|(component_id, ordinal)| {
             let Some(tx) = transaction_for_ordinal(&block, ordinal) else {
                 return;
@@ -193,8 +193,8 @@ fn map_protocol_changes(
             let Some(builder) = transaction_changes.get_mut(&state_tx.tx_index) else {
                 return;
             };
-            let quote_state_attributes = mercury_quote_state::attributes_from_store(
-                &mercury_state,
+            let quote_state_attributes = quote_state::attributes_from_store(
+                &state,
                 &component_id,
                 state_tx.read_ordinal,
                 block.number,
@@ -220,7 +220,7 @@ fn map_protocol_changes(
     })
 }
 
-fn mercury_state_component_id(key: &str) -> Option<String> {
+fn state_component_id(key: &str) -> Option<String> {
     let mut segments = key.split(':');
     (segments.next()? == "state").then_some(())?;
     let component_id = segments.next()?.to_string();
@@ -254,17 +254,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_mercury_state_store_keys() {
+    fn parses_state_store_keys() {
         assert_eq!(
-            mercury_state_component_id("state:0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63:pool:6"),
+            state_component_id("state:0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63:pool:6"),
             Some("0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63".to_string())
         );
         assert_eq!(
-            mercury_state_component_id("state:0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63:pool"),
+            state_component_id("state:0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63:pool"),
             None
         );
         assert_eq!(
-            mercury_state_component_id("other:0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63:pool:6"),
+            state_component_id("other:0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63:pool:6"),
             None
         );
     }

@@ -1,6 +1,6 @@
-//! Storage helpers for Baseline Mercury's namespaced relay state.
+//! Storage helpers for Baseline's namespaced relay state.
 //!
-//! Mercury components execute through the relay, but core quote state is stored
+//! Baseline components execute through the relay, but core quote state is stored
 //! in namespaced mappings on the relay itself. These helpers are intentionally
 //! pure so slot math and packed decoding can be tested before substream stores
 //! are wired into `map_protocol_changes`.
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn computes_mercury_namespace_slots() {
+    fn computes_namespace_slots() {
         assert_eq!(
             hex::encode(pool_namespace_slot()),
             "5e0c90d658953447a9a6183fafee6ce210d189b3996a6a327daf1c089411a92d"
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn computes_mercury_mapping_base_slots() {
+    fn computes_mapping_base_slots() {
         let b_token = address(BTOKEN);
 
         assert_eq!(

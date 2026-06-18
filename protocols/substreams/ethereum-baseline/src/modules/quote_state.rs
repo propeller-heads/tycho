@@ -1,6 +1,6 @@
 use super::{
-    mercury_state_store::{state_slot_key, MercuryStateArea},
-    mercury_storage::{
+    state_store::{state_slot_key, StateArea},
+    storage::{
         decode_block_pricing, decode_maker, decode_pool, BlockPricingState, MakerState, PoolState,
         SLOT_LEN,
     },
@@ -75,10 +75,10 @@ fn load_state(
     component_id: &str,
     read_ordinal: Option<u64>,
 ) -> Option<(PoolState, MakerState, BlockPricingState)> {
-    let pool = read_slots::<8>(store, component_id, MercuryStateArea::Pool, read_ordinal)?;
-    let maker = read_slots::<4>(store, component_id, MercuryStateArea::Maker, read_ordinal)?;
+    let pool = read_slots::<8>(store, component_id, StateArea::Pool, read_ordinal)?;
+    let maker = read_slots::<4>(store, component_id, StateArea::Maker, read_ordinal)?;
     let block_pricing =
-        read_slots::<4>(store, component_id, MercuryStateArea::BlockPricing, read_ordinal)?;
+        read_slots::<4>(store, component_id, StateArea::BlockPricing, read_ordinal)?;
     Some((decode_pool(&pool), decode_maker(&maker), decode_block_pricing(&block_pricing)))
 }
 
@@ -772,7 +772,7 @@ fn pow10(exp: u8) -> BigInt {
 fn read_slots<const N: usize>(
     store: &StoreGetString,
     component_id: &str,
-    area: MercuryStateArea,
+    area: StateArea,
     read_ordinal: Option<u64>,
 ) -> Option<[[u8; SLOT_LEN]; N]> {
     let slots = (0..N)
@@ -829,7 +829,7 @@ fn bool_attribute(name: &str, value: bool, change: ChangeType) -> Attribute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::mercury_storage::{BlockPricingState, MakerState, PoolState};
+    use crate::modules::storage::{BlockPricingState, MakerState, PoolState};
     use std::collections::HashMap;
 
     fn dec(value: &str) -> BigInt {
