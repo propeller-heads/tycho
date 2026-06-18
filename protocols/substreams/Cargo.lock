@@ -941,11 +941,13 @@ dependencies = [
  "hex",
  "itertools 0.10.5",
  "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
+ "tiny-keccak",
  "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

@@ -16,8 +16,10 @@ ethabi = "18.0.0"
 hex = { version = "0.4", features = ["serde"] }
 itertools = "0.10.5"
 num-bigint = "0.4.6"
+num-traits = "0.2.19"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_qs = "0.13.0"
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 
 [build-dependencies]
