@@ -307,6 +307,7 @@ impl SynchronizerStream {
     ///
     /// ## Note
     /// This method assumes that the current state is `Ready`.
+    #[allow(clippy::result_large_err)]
     async fn try_recv_next_expected(
         &mut self,
         max_wait: std::time::Duration,
@@ -352,6 +353,7 @@ impl SynchronizerStream {
     /// If a synchronizer is delayed, this method will try to catch up to the next expected block
     /// by consuming all waiting messages in its queue and waiting for any new block messages
     /// within a timeout. Finally, all update messages are merged into one and returned.
+    #[allow(clippy::result_large_err)]
     async fn try_catch_up(
         &mut self,
         block_history: &BlockHistory,
@@ -666,6 +668,7 @@ where
     ///
     /// Will error directly if the startup fails. Once the startup is complete, it will
     /// communicate any fatal errors through the stream before closing it.
+    #[allow(clippy::result_large_err)]
     pub async fn run(
         mut self,
     ) -> BlockSyncResult<(JoinHandle<()>, Receiver<BlockSyncResult<FeedMessage<BlockHeader>>>)>
@@ -867,6 +870,7 @@ where
     ///
     /// The result is written into `ready_sync_messages`. Errors only if there is a
     /// non-recoverable error or all synchronizers have ended.
+    #[allow(clippy::result_large_err)]
     async fn handle_next_message(
         &self,
         sync_streams: &mut [SynchronizerStream],
