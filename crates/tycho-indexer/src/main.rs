@@ -38,8 +38,7 @@ use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
         contract::AccountDelta,
-        Address, Chain, ChainConfigError, ChainTokenConfig, CustomChainConfig, ExtractionState,
-        ImplementationType, TvlThresholds,
+        Address, Chain, CustomChainConfig, ExtractionState, ImplementationType,
     },
     storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
@@ -69,26 +68,17 @@ use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
 mod ot;
 
-#[derive(Debug, Deserialize, Clone)]
-struct ChainConfig {
-    chain_id: u64,
-    block_time_secs: u64,
-    native_token: ChainTokenConfig,
-    wrapped_native_token: ChainTokenConfig,
-    tvl_thresholds: TvlThresholds,
-}
-
 #[derive(Debug, Deserialize)]
 struct ExtractorConfigs {
     extractors: std::collections::HashMap<String, ExtractorConfig>,
     #[serde(default)]
-    chains: std::collections::HashMap<String, ChainConfig>,
+    chains: Vec<CustomChainConfig>,
 }
 
 impl ExtractorConfigs {
     fn new(
         extractors: std::collections::HashMap<String, ExtractorConfig>,
-        chains: std::collections::HashMap<String, ChainConfig>,
+        chains: Vec<CustomChainConfig>,
     ) -> Self {
         Self { extractors, chains }
     }
@@ -104,27 +94,19 @@ impl ExtractorConfigs {
 
 fn resolve_chain(
     name: &str,
-    custom_chains: &HashMap<String, ChainConfig>,
+    custom_chains: &[CustomChainConfig],
 ) -> Result<Chain, ExtractionError> {
     match Chain::from_str(name) {
         Ok(chain) => Ok(chain),
-        Err(_) => {
-            let entry = custom_chains.get(name).ok_or_else(|| {
+        Err(_) => custom_chains
+            .iter()
+            .find(|cfg| cfg.name() == name)
+            .map(|cfg| Chain::Custom(*cfg))
+            .ok_or_else(|| {
                 ExtractionError::Setup(format!(
                     "Unknown chain '{name}': add it to the [chains] config section"
                 ))
-            })?;
-            let cfg = CustomChainConfig::try_new(
-                name,
-                entry.chain_id,
-                entry.block_time_secs,
-                entry.native_token,
-                entry.wrapped_native_token,
-                entry.tvl_thresholds,
-            )
-            .map_err(|e: ChainConfigError| ExtractionError::Setup(e.to_string()))?;
-            Ok(Chain::Custom(cfg))
-        }
+            }),
     }
 }
 
@@ -377,7 +359,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
                 dci_plugin,
             ),
         )]),
-        HashMap::new(),
+        Vec::new(),
     );
 
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
@@ -741,11 +723,13 @@ async fn run_analyze_tokens(
 
 #[cfg(test)]
 mod tests {
+    use tycho_common::models::{ChainTokenConfig, TvlThresholds};
+
     use super::*;
 
     #[test]
     fn test_resolve_unknown_chain_fails() {
-        let err = resolve_chain("notachain", &HashMap::new()).unwrap_err();
+        let err = resolve_chain("notachain", &[]).unwrap_err();
         assert!(matches!(err, ExtractionError::Setup(msg) if msg.contains("notachain")));
     }
 
@@ -769,18 +753,18 @@ mod tests {
         let yaml = r#"
 extractors: {}
 chains:
-  mychain:
+  - name: mychain
     chain_id: 99999
     block_time_secs: 2
-    native_token:
+    native:
       address: "0x0000000000000000000000000000000000000000"
       symbol: "ETH"
       decimals: 18
-    wrapped_native_token:
+    wrapped_native:
       address: "0x4200000000000000000000000000000000000006"
       symbol: "WETH"
       decimals: 18
-    tvl_thresholds:
+    default_tvl_thresholds:
       low: 1000
       medium: 10000
 "#;
