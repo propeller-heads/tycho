@@ -70,18 +70,11 @@ use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 mod ot;
 
 #[derive(Debug, Deserialize, Clone)]
-struct TokenConfig {
-    address: String,
-    symbol: String,
-    decimals: u8,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 struct ChainConfig {
     chain_id: u64,
     block_time_secs: u64,
-    native_token: TokenConfig,
-    wrapped_native_token: TokenConfig,
+    native_token: ChainTokenConfig,
+    wrapped_native_token: ChainTokenConfig,
     tvl_thresholds: TvlThresholds,
 }
 
@@ -121,28 +114,15 @@ fn resolve_chain(
                     "Unknown chain '{name}': add it to the [chains] config section"
                 ))
             })?;
-            let map_err = |e: ChainConfigError| ExtractionError::Setup(e.to_string());
-            let native = ChainTokenConfig::try_new(
-                &entry.native_token.address,
-                &entry.native_token.symbol,
-                entry.native_token.decimals,
-            )
-            .map_err(map_err)?;
-            let wrapped_native = ChainTokenConfig::try_new(
-                &entry.wrapped_native_token.address,
-                &entry.wrapped_native_token.symbol,
-                entry.wrapped_native_token.decimals,
-            )
-            .map_err(map_err)?;
             let cfg = CustomChainConfig::try_new(
                 name,
                 entry.chain_id,
                 entry.block_time_secs,
-                native,
-                wrapped_native,
+                entry.native_token,
+                entry.wrapped_native_token,
                 entry.tvl_thresholds,
             )
-            .map_err(map_err)?;
+            .map_err(|e: ChainConfigError| ExtractionError::Setup(e.to_string()))?;
             Ok(Chain::Custom(cfg))
         }
     }

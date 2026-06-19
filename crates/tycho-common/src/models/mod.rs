@@ -59,7 +59,7 @@ pub type ProtocolSystem = String;
 /// Entry point id literal type to uniquely identify an entry point.
 pub type EntryPointId = String;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChainAddress {
     bytes: [u8; 32],
     len: u8,
@@ -77,6 +77,23 @@ impl ChainAddress {
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
+    }
+}
+
+/// Serialized as a `0x`-prefixed hex string so config files and wire payloads use the same
+/// representation a human writes (e.g. `"0x0000...0000"`).
+impl Serialize for ChainAddress {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.as_bytes())))
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let raw = hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| serde::de::Error::custom(format!("invalid hex address '{s}': {e}")))?;
+        ChainAddress::new(&raw).map_err(serde::de::Error::custom)
     }
 }
 
