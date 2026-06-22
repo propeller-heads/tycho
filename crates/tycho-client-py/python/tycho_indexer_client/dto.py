@@ -55,8 +55,8 @@ class ChainTokenConfig(BaseModel):
 
 
 class TvlThresholds(BaseModel):
-    low: int
-    medium: int
+    low: float
+    medium: float
 
 
 class CustomChainConfig(BaseModel):
