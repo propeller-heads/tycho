@@ -158,3 +158,5 @@ RUN strip /usr/local/bin/* 2>/dev/null || true
 
 WORKDIR /app
 ENTRYPOINT ["/entrypoint.sh"]
+
+# fork CI gate verification — safe to revert
