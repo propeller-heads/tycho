@@ -1509,6 +1509,17 @@ fn process_execution_result(
             let estimated_gas = execution_info.estimated_gas.clone();
 
             if let Some(estimated) = estimated_gas.to_f64() {
+                let actual = *gas_used as f64;
+                let error_pct =
+                    if actual > 0.0 { (estimated - actual) / actual * 100.0 } else { 0.0 };
+                warn!(
+                    protocol = %execution_info.protocol_system,
+                    component = %execution_info.component_id,
+                    estimated_gas = estimated,
+                    actual_gas = actual,
+                    error_pct = format!("{:.1}%", error_pct),
+                    "Large gas estimation error",
+                );
                 metrics::record_gas_signed_error_ratio(
                     &execution_info.protocol_system,
                     estimated,
