@@ -667,12 +667,6 @@ where
             self.get_overwrites(vec![sell_token_address, buy_token_address], sell_amount_limit)?;
         let complete_overwrites = self.merge(&overwrites, &overwrites_with_sell_limit);
 
-        tracing::warn!(
-            component = %self.id,
-            ?complete_overwrites,
-            "Simulation running with state overrides",
-        );
-
         let (trade, state_changes) = self.adapter_contract.swap(
             &self.id,
             sell_token_address,

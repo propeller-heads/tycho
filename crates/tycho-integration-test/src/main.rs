@@ -1518,6 +1518,7 @@ fn process_execution_result(
                     estimated_gas = estimated,
                     actual_gas = actual,
                     error_pct = format!("{:.1}%", error_pct),
+                    overwrites = %overwrites_string,
                     "Large gas estimation error",
                 );
                 metrics::record_gas_signed_error_ratio(
