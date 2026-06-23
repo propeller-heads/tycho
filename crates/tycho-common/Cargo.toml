@@ -35,6 +35,7 @@ bytes = "1.5.0"
 mockall = { workspace = true, optional = true }
 num-bigint = "0.4"
 deepsize.workspace = true # perf: make optional, as used only by the indexer for memory profiling
+arrayvec = { version = "0.7", features = ["serde"] }
 itertools = "0.10.5"
 uuid.workspace = true
 
