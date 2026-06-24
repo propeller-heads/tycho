@@ -10,6 +10,7 @@ import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
 error FeeCalculator__AddressZero();
+error FeeCalculator__InvalidBps();
 
 /**
  * @title FeeCalculator
@@ -31,6 +32,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     uint32 public constant MAX_FEE_BPS = 100_000_000;
     // Combined denominator when both fees use the MAX_FEE_BPS scale (MAX_FEE_BPS^2)
     uint64 public constant MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000;
+    // 100% in basis points (for slippage share validation)
+    uint16 public constant MAX_SLIPPAGE_SHARE_BPS = 10_000;
 
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
@@ -43,6 +46,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     // Tracks all clients that currently have at least one custom fee override
     EnumerableSet.AddressSet private _customFeeClients;
+
+    // Positive slippage configuration
+    bool private _positiveSlippageEnabled;
+    uint16 private _defaultClientSlippageShareBps;
 
     //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
@@ -61,40 +68,94 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event RouterFeeReceiverUpdated(
         address indexed oldReceiver, address indexed newReceiver
     );
+    event PositiveSlippageToggled(bool enabled);
+    event DefaultClientSlippageShareUpdated(uint16 oldBps, uint16 newBps);
+    event CustomClientSlippageShareSet(address indexed client, uint16 bps);
+    event CustomClientSlippageShareRemoved(address indexed client);
 
     constructor(address routerFeeSetter) {
         _routerFeeReceiver = msg.sender;
-
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
     }
 
     /**
-     * @notice Calculates fees from the swap output amount
+     * @notice Calculates all fees and slippage surplus from swap output
      * @dev Called from TychoRouter. Does not perform any accounting.
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
      *      clientFeeBps uses the legacy BPS scale (10000 = 100%). Internally it is scaled to the
      *      same 8-decimal unit system used for router fees (100_000_000 = 100%).
-     * @param amountIn The amount before fee deduction
-     * @param client The client address to look up custom router fees for and to receive fees.
-     *               Pass address(0) to fall back to tx.origin for the custom fee lookup.
+     * @param grossAmountOut The actual amount received from the swap
+     *        (used for slippage surplus calculation)
+     * @param quotedAmountOut Caller-supplied quoted amount out.
      * @param clientFeeBps Client fee in basis points (10000 = 100%)
-     * @return amountOut The amount remaining after all fee deductions
+     * @param client The client address to look up custom router fees
+     *        and slippage share for and to receive fees.
+     *        Pass address(0) to fall back to tx.origin for the
+     *        custom fee lookup.
      * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
      */
-    function calculateFee(uint256 amountIn, address client, uint16 clientFeeBps)
+    function calculateFee(
+        uint256 grossAmountOut,
+        uint256 quotedAmountOut,
+        uint32 clientFeeBps,
+        address client
+    ) external view returns (FeeRecipient[] memory feeRecipients) {
+        address resolvedClient = _resolveClient(client);
+
+        // Calculate fees
+        FeeRecipient[] memory fees =
+            _calculateFee(quotedAmountOut, resolvedClient, clientFeeBps);
+
+        // Calculate slippage
+        FeeRecipient[] memory slippage = _calculatePositiveSlippage(
+            grossAmountOut, quotedAmountOut, resolvedClient
+        );
+
+        // Merge results
+        return _mergeFeeRecipients(fees, slippage);
+    }
+
+    /**
+     * @notice Whether the router must receive swap output before forwarding
+     * @param clientFeeBps Client fee in basis points
+     * @param client The client address to check
+     * @return True if the router must intercept output
+     */
+    function mustInterceptOutput(uint32 clientFeeBps, address client)
         external
         view
-        returns (uint256 amountOut, FeeRecipient[] memory feeRecipients)
+        returns (bool)
     {
+        if (_positiveSlippageEnabled) return true;
+
+        address resolvedClient = _resolveClient(client);
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
-            _getFeeInfo(_resolveClient(client));
+            _getFeeInfo(resolvedClient);
+
+        if (clientFeeBps > 0) return true;
+        if (routerFeeOnOutputBps > 0) return true;
+        if (routerFeeOnClientFeeBps > 0) return true;
+
+        return false;
+    }
+
+    /**
+     * @dev Calculates fees from the swap output amount
+     */
+    function _calculateFee(
+        uint256 amountOut,
+        address client,
+        uint32 clientFeeBps
+    ) internal view returns (FeeRecipient[] memory feeRecipients) {
+        (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
+            _getFeeInfo(client);
 
         // Scale clientFeeBps from legacy scale (10_000 = 100%) to internal scale
         // (100_000_000 = 100%) so both fee types can be compared and combined.
-        uint32 scaledClientFeeBps = uint32(clientFeeBps) * 10_000;
+        uint32 scaledClientFeeBps = clientFeeBps * 10_000;
 
         if (
             (scaledClientFeeBps + routerFeeOnOutputBps > MAX_FEE_BPS)
@@ -103,7 +164,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             revert FeeCalculator__FeeTooHigh();
         }
 
-        amountOut = amountIn;
         uint256 routerFeeOnClientFee = 0;
         uint256 clientPortion = 0;
 
@@ -145,8 +205,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         });
         feeRecipients[1] =
             FeeRecipient({recipient: client, feeAmount: clientPortion});
-
-        return (amountOut, feeRecipients);
     }
 
     /**
@@ -157,6 +215,68 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // slither-disable-next-line tx-origin
     function _resolveClient(address client) internal view returns (address) {
         return client == address(0) ? tx.origin : client;
+    }
+
+    /**
+     * @dev Calculates positive slippage surplus distribution
+     * @return Empty array if disabled or no surplus; otherwise 2-element array [router, client]
+     */
+    function _calculatePositiveSlippage(
+        uint256 grossAmountOut,
+        uint256 quotedAmountOut,
+        address client
+    ) internal view returns (FeeRecipient[] memory) {
+        if (!_positiveSlippageEnabled || grossAmountOut <= quotedAmountOut) {
+            return new FeeRecipient[](0);
+        }
+
+        uint256 surplus = grossAmountOut - quotedAmountOut;
+        uint32 clientShareBps = _getClientSlippageShareBps(client);
+
+        uint256 clientCut = (surplus * clientShareBps) / MAX_SLIPPAGE_SHARE_BPS;
+        uint256 routerCut = surplus - clientCut;
+
+        FeeRecipient[] memory result = new FeeRecipient[](2);
+        result[0] =
+            FeeRecipient({recipient: _routerFeeReceiver, feeAmount: routerCut});
+        result[1] = FeeRecipient({recipient: client, feeAmount: clientCut});
+
+        return result;
+    }
+
+    /**
+     * @dev Returns the client's slippage share: custom if set, otherwise the default
+     */
+    function _getClientSlippageShareBps(address client)
+        internal
+        view
+        returns (uint32)
+    {
+        CustomFees memory customFees = _customRouterFees[client];
+        if (customFees.hasCustomClientSlippageShare) {
+            return customFees.clientSlippageShareBps;
+        }
+        return _defaultClientSlippageShareBps;
+    }
+
+    /**
+     * @dev Merges fee recipients with slippage recipients.
+     *      Combines amounts for the same recipient (router fee receiver).
+     */
+    function _mergeFeeRecipients(
+        FeeRecipient[] memory fees,
+        FeeRecipient[] memory slippage
+    ) internal pure returns (FeeRecipient[] memory) {
+        if (slippage.length == 0) return fees;
+
+        // fees[0] = router fees, slippage[0] = router slippage
+        // fees[1] = client fees, slippage[1] = client slippage
+        // Merge router amounts into fees[0]
+        fees[0].feeAmount += slippage[0].feeAmount;
+        // Merge client slippage into fees[1]
+        fees[1].feeAmount += slippage[1].feeAmount;
+
+        return fees;
     }
 
     /**
@@ -417,5 +537,90 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      */
     function getRouterFeeReceiver() external view returns (address) {
         return _routerFeeReceiver;
+    }
+
+    /**
+     * @dev Enables or disables positive slippage capture
+     * @param enabled True to enable, false to disable
+     */
+    function setPositiveSlippageEnabled(bool enabled)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        _positiveSlippageEnabled = enabled;
+        emit PositiveSlippageToggled(enabled);
+    }
+
+    /**
+     * @dev Returns whether positive slippage capture is enabled
+     */
+    function getPositiveSlippageEnabled() external view returns (bool) {
+        return _positiveSlippageEnabled;
+    }
+
+    /**
+     * @dev Sets the default client share of positive slippage
+     * @param bps Share in basis points (10_000 = 100%)
+     */
+    function setDefaultClientSlippageShare(uint16 bps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (bps > MAX_SLIPPAGE_SHARE_BPS) {
+            revert FeeCalculator__InvalidBps();
+        }
+        uint16 oldBps = _defaultClientSlippageShareBps;
+        _defaultClientSlippageShareBps = bps;
+        emit DefaultClientSlippageShareUpdated(oldBps, bps);
+    }
+
+    /**
+     * @dev Returns the default client share of positive slippage in basis points
+     */
+    function getDefaultClientSlippageShare() external view returns (uint16) {
+        return _defaultClientSlippageShareBps;
+    }
+
+    /**
+     * @dev Sets a custom client share of positive slippage for a specific client
+     * @param client The client address to set the custom share for
+     * @param bps Share in basis points (10_000 = 100%)
+     */
+    function setCustomClientSlippageShare(address client, uint16 bps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (bps > MAX_SLIPPAGE_SHARE_BPS) {
+            revert FeeCalculator__InvalidBps();
+        }
+        CustomFees memory customFees = _customRouterFees[client];
+        customFees.hasCustomClientSlippageShare = true;
+        customFees.clientSlippageShareBps = bps;
+        _customRouterFees[client] = customFees;
+        // slither-disable-next-line unused-return
+        _customFeeClients.add(client);
+
+        emit CustomClientSlippageShareSet(client, bps);
+    }
+
+    /**
+     * @dev Removes the custom client slippage share for a specific client, reverting to default
+     * @param client The client address to remove the custom share from
+     */
+    function removeCustomClientSlippageShare(address client)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        CustomFees memory customFees = _customRouterFees[client];
+        customFees.hasCustomClientSlippageShare = false;
+        customFees.clientSlippageShareBps = 0;
+        _customRouterFees[client] = customFees;
+
+        if (!customFees.hasCustomFeeOnOutput) {
+            // slither-disable-next-line unused-return
+            _customFeeClients.remove(client);
+        }
+
+        emit CustomClientSlippageShareRemoved(client);
     }
 }

@@ -297,16 +297,24 @@ contract Dispatcher is TransferManager {
 
     function _callCalculateFee(
         address feeCalculator,
-        uint256 amountIn,
-        uint16 clientFeeBps,
+        uint256 grossAmountOut,
+        uint256 quotedAmountOut,
+        uint32 clientFeeBps,
         address client
-    )
-        internal
-        view
-        returns (uint256 amountOut, FeeRecipient[] memory feeRecipients)
-    {
+    ) internal view returns (FeeRecipient[] memory feeRecipients) {
         // slither-disable-next-line calls-loop
-        (amountOut, feeRecipients) = IFeeCalculator(feeCalculator)
-            .calculateFee(amountIn, client, clientFeeBps);
+        feeRecipients = IFeeCalculator(feeCalculator)
+            .calculateFee(grossAmountOut, quotedAmountOut, clientFeeBps, client);
+    }
+
+    function _callMustInterceptOutput(
+        address feeCalculator,
+        uint32 clientFeeBps,
+        address client
+    ) internal view returns (bool) {
+        // slither-disable-next-line calls-loop
+        return
+            IFeeCalculator(feeCalculator)
+                .mustInterceptOutput(clientFeeBps, client);
     }
 }
