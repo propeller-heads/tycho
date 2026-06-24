@@ -5,7 +5,7 @@ import {FeeRecipient} from "../lib/FeeStructs.sol";
 
 /**
  * @notice Per-client custom fee configuration
- * @dev All fields pack into a single storage slot (10 bytes total).
+ * @dev All fields pack into a single storage slot (13 bytes total).
  *      Fee values use 8-decimal precision: 1 unit = 0.0001 BPS = 0.000001%.
  *      100% = 100_000_000 units.
  */
@@ -14,24 +14,47 @@ struct CustomFees {
     uint32 feeBpsOnOutput; // 4 bytes
     bool hasCustomFeeOnClientFee; // 1 byte
     uint32 feeBpsOnClientFee; // 4 bytes
+    bool hasCustomClientSlippageShare; // 1 byte
+    uint16 clientSlippageShareBps; // 2 bytes
 }
 
 interface IFeeCalculator {
     /**
-     * @notice Calculates fees from the swap output amount
+     * @notice Calculates all fees and slippage surplus from swap output
      * @dev Called from TychoRouter. Does not perform any accounting.
-     *      Router fee parameters are retrieved from contract storage based on the user address.
-     *      Client fee parameters are passed as function arguments.
-     * @param amountIn The amount before fee deduction
-     * @param client The client address to look up custom router fees for and to receive fees
-     * @param clientFeeBps Client fee in basis points
-     * @return amountOut The amount remaining after all fee deductions
-     * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
+     *      Handles both regular fees and positive slippage surplus
+     *      in a single call. Router fee parameters and slippage
+     *      share are retrieved from contract storage based on the
+     *      client address; client fee parameters are passed as
+     *      function arguments.
+     * @param grossAmountOut The actual amount received from the swap
+     * @param quotedAmountOut Caller-supplied quoted amount out.
+     *        Base for fee calculation and slippage surplus
+     * @param clientFeeBps Client fee in basis points (10_000 = 100%)
+     * @param client The client address to look up custom router fees
+     *        and slippage share for, and to receive the client fee
+     * @return feeRecipients Array of (address, feeAmount) tuples for
+     *         fee distribution. Returns [] when there is nothing to
+     *         capture (no fees, no surplus, or toggle off).
      */
-    function calculateFee(uint256 amountIn, address client, uint16 clientFeeBps)
-        external
-        view
-        returns (uint256 amountOut, FeeRecipient[] memory feeRecipients);
+    function calculateFee(
+        uint256 grossAmountOut,
+        uint256 quotedAmountOut,
+        uint32 clientFeeBps,
+        address client
+    ) external view returns (FeeRecipient[] memory feeRecipients);
+
+    /**
+     * @notice Whether the router must receive swap output before forwarding
+     * @dev Covers: slippage enabled, fees > 0, or any future condition.
+     * @param clientFeeBps Client fee in basis points
+     * @param client The client address to check
+     * @return True if the router must intercept output
+     */
+    function mustInterceptOutput(
+        uint32 clientFeeBps,
+        address client
+    ) external view returns (bool);
 
     /**
      * @dev Returns the effective router fee on output amount for a specific client
@@ -49,7 +72,7 @@ interface IFeeCalculator {
      * @param client The client address to check
      * @return The fee in fee units (custom if set, otherwise default)
      */
-    function getEffectiveRouterFeeOnOutputScaled(address client)
+   function getEffectiveRouterFeeOnOutputScaled(address client)
         external
         view
         returns (uint32);
@@ -61,7 +84,10 @@ interface IFeeCalculator {
      * @return clients Addresses of clients with at least one custom fee
      * @return fees Custom fee configuration for each client (parallel array)
      */
-    function getAllClientFees(uint256 start, uint256 count)
+    function getAllClientFees(
+        uint256 start,
+        uint256 count
+    )
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);

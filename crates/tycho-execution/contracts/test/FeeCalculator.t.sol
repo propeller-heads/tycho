@@ -16,6 +16,13 @@ uint32 constant _10_PCT = 10_000_000; // 10%
 uint32 constant _50_PCT = 50_000_000; // 50%
 uint32 constant _100_PCT = 100_000_000; // 100%
 
+/// @dev Helper to sum all fee amounts from the returned array
+function _sumFees(FeeRecipient[] memory fees) pure returns (uint256 total) {
+    for (uint256 i = 0; i < fees.length; i++) {
+        total += fees[i].feeAmount;
+    }
+}
+
 contract FeeCalculatorTest is Constants {
     FeeCalculator feeCalculator;
 
@@ -33,8 +40,9 @@ contract FeeCalculatorTest is Constants {
         uint256 amountIn = 1 ether;
 
         // The client is BOB - he doesn't get any router fee discounts.
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, BOB, 0);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, BOB);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
         // routerFeeOnOutput = 1 ether * 1_000_000 / 100_000_000 = 0.01 ether
         // amountOut = 1 ether - 0.01 ether = 0.99 ether
@@ -48,17 +56,19 @@ contract FeeCalculatorTest is Constants {
     }
 
     function testCalculateOnlyRouterFeeOnClientFee() public {
-        // Test with only router fee on client fee set (requires client fee to be set too)
+        // Test with only router fee on client fee set
+        // (requires client fee to be set too)
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnClientFee(_10_PCT); // 10% of client fee
 
         uint256 amountIn = 1 ether;
-        uint16 clientFeeBps = 200; // 2% in legacy BPS scale
+        uint32 clientFeeBps = 200; // 2% in legacy BPS scale
 
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, BOB, clientFeeBps);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
-        // clientFee = 1 ether * (200 * 10_000) / 100_000_000 = 0.02 ether
+        // clientFee = 1 ether * (200*10_000) / 100_000_000 = 0.02 ether
         // routerFeeOnClientFee = 0.02 ether * 10% = 0.002 ether
         // clientPortion = 0.02 - 0.002 = 0.018 ether
         // amountOut = 1 ether - 0.02 ether = 0.98 ether
@@ -75,7 +85,6 @@ contract FeeCalculatorTest is Constants {
         // Set default router fee
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT); // 1%
-
         // Set custom fee for BOB
         feeCalculator.setCustomRouterFeeOnOutput(BOB, _HALF_PCT); // 0.5%
         vm.stopPrank();
@@ -83,15 +92,17 @@ contract FeeCalculatorTest is Constants {
         uint256 amountIn = 1 ether;
 
         // ALICE should get default fee
-        (uint256 amountOutAlice, FeeRecipient[] memory feeRecipientsAlice) =
-            feeCalculator.calculateFee(amountIn, ALICE, 0);
+        FeeRecipient[] memory feeRecipientsAlice =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, ALICE);
+        uint256 amountOutAlice = amountIn - _sumFees(feeRecipientsAlice);
         assertEq(amountOutAlice, 0.99 ether);
         // Router fee
         assertEq(feeRecipientsAlice[0].feeAmount, 0.01 ether);
 
         // BOB should get custom fee
-        (uint256 amountOutBob, FeeRecipient[] memory feeRecipientsBob) =
-            feeCalculator.calculateFee(amountIn, BOB, 0);
+        FeeRecipient[] memory feeRecipientsBob =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, BOB);
+        uint256 amountOutBob = amountIn - _sumFees(feeRecipientsBob);
         assertEq(amountOutBob, 0.995 ether); // 0.5% fee
         // Router fee
         assertEq(feeRecipientsBob[0].feeAmount, 0.005 ether);
@@ -101,8 +112,9 @@ contract FeeCalculatorTest is Constants {
         // No fees set, should return full amount
         uint256 amountIn = 1 ether;
 
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, ALICE, 0);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, ALICE);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
         assertEq(amountOut, 1 ether);
         // Router fee
@@ -116,11 +128,12 @@ contract FeeCalculatorTest is Constants {
     function testCalculateOnlyClientFee() public view {
         // Test with only client fee set, no router fees
         uint256 amountIn = 1 ether;
-        uint16 clientFeeBps = 150; // 1.5% in legacy BPS scale
+        uint32 clientFeeBps = 150; // 1.5% in legacy BPS scale
 
         // BOB is the client - but there are no router fees to overwrite with custom client fees
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, BOB, clientFeeBps);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
         // clientFee = 1 ether * 150 / 10000 = 0.015 ether
         // amountOut = 1 ether - 0.015 ether = 0.985 ether
@@ -140,24 +153,25 @@ contract FeeCalculatorTest is Constants {
         vm.stopPrank();
 
         uint256 amountIn = 1 ether;
-        uint16 clientFeeBps = 200; // 2%
+        uint32 clientFeeBps = 200; // 2%
 
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, BOB, clientFeeBps);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
         // 1. clientFee = 1 ether * 200 / 10000 = 0.02 ether
         //    routerFeeOnClientFee = 0.02 ether * 5% = 0.001 ether
         //    clientPortion = 0.02 - 0.001 = 0.019 ether
         // 2. routerFeeOnOutput = 1 ether * 0.5% = 0.005 ether (calculated on original amount)
         //    totalRouterFee = 0.001 + 0.005 = 0.006 ether
-        //    amountOut = 1 ether - 0.019 ether - 0.006 ether = 0.975 ether
+        //    amountOut = 1 ether - 0.019 ether - 0.006 ether= 0.975 ether
         assertEq(amountOut, 0.975 ether);
         // Router fee
         assertEq(feeRecipients[0].recipient, address(this));
         assertEq(feeRecipients[0].feeAmount, 0.006 ether);
         // Client fee
         assertEq(feeRecipients[1].recipient, BOB);
-        assertEq(feeRecipients[1].feeAmount, 0.019 ether);
+        assertEq(feeRecipients[1].feeAmount, 0.019 ether); // 0.02 - 0.001 router cut
     }
 
     function testCalculateCombinedFeeTooHigh() public {
@@ -166,12 +180,12 @@ contract FeeCalculatorTest is Constants {
         feeCalculator.setRouterFeeOnOutput(_50_PCT); // 50%
 
         uint256 amountIn = 1 ether;
-        uint16 clientFeeBps = 5001; // 50.01% in legacy scale — combined makes 100.01%
+        uint32 clientFeeBps = 5001; // 50.01% in legacy scale — combined makes 100.01%
 
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__FeeTooHigh.selector)
         );
-        feeCalculator.calculateFee(amountIn, BOB, clientFeeBps);
+        feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
     }
 
     function testCalculateRouterFeeOnClientFeeTooHigh() public {
@@ -192,8 +206,8 @@ contract FeeCalculatorTest is Constants {
 
         uint256 amountIn = 1 ether;
 
-        (, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, ALICE, 0);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, ALICE);
 
         // Router fee
         assertEq(feeRecipients[0].recipient, BOB);
@@ -208,11 +222,12 @@ contract FeeCalculatorTest is Constants {
         vm.stopPrank();
 
         uint256 amountIn = 1 ether;
-        uint16 clientFeeBps = 200; // 2%
+        uint32 clientFeeBps = 200; // 2%
 
         // ALICE should get custom router fee on client fee (5%)
-        (uint256 amountOutAlice, FeeRecipient[] memory feeRecipientsAlice) =
-            feeCalculator.calculateFee(amountIn, ALICE, clientFeeBps);
+        FeeRecipient[] memory feeRecipientsAlice =
+            feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, ALICE);
+        uint256 amountOutAlice = amountIn - _sumFees(feeRecipientsAlice);
 
         // routerFeeOnClientFee = 0.02 * 5% = 0.001 ether
         assertEq(amountOutAlice, 0.98 ether); // 1 - 0.02 client fee
@@ -221,11 +236,15 @@ contract FeeCalculatorTest is Constants {
         assertEq(feeRecipientsAlice[0].feeAmount, 0.001 ether);
         // Client fee
         assertEq(feeRecipientsAlice[1].recipient, ALICE);
-        assertEq(feeRecipientsAlice[1].feeAmount, 0.019 ether); // 0.02 - 0.001 router cut
+        assertEq(
+            feeRecipientsAlice[1].feeAmount,
+            0.019 ether // 0.02 - 0.001 router cut
+        );
 
         // BOB should get default router fee on client fee (10%)
-        (uint256 amountOutBob, FeeRecipient[] memory feeRecipientsBob) =
-            feeCalculator.calculateFee(amountIn, BOB, clientFeeBps);
+        FeeRecipient[] memory feeRecipientsBob =
+            feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
+        uint256 amountOutBob = amountIn - _sumFees(feeRecipientsBob);
 
         // routerFeeOnClientFee = 0.02 * 10% = 0.002 ether
         assertEq(amountOutBob, 0.98 ether); // 1 - 0.02 client fee
@@ -234,7 +253,10 @@ contract FeeCalculatorTest is Constants {
         assertEq(feeRecipientsBob[0].feeAmount, 0.002 ether);
         // Client fee
         assertEq(feeRecipientsBob[1].recipient, BOB);
-        assertEq(feeRecipientsBob[1].feeAmount, 0.018 ether); // 0.02 - 0.002 router cut
+        assertEq(
+            feeRecipientsBob[1].feeAmount,
+            0.018 ether // 0.02 - 0.002 router cut
+        );
     }
 
     function testCalculateBothCustomFeesSet() public {
@@ -247,10 +269,11 @@ contract FeeCalculatorTest is Constants {
         vm.stopPrank();
 
         uint256 amountIn = 1 ether;
-        uint16 clientFeeBps = 200; // 2%
+        uint32 clientFeeBps = 200; // 2%
 
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, ALICE, clientFeeBps);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, ALICE);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
         // 1. clientFee = 1 ether * 200 / 10000 = 0.02 ether
         //    routerFeeOnClientFee = 0.02 * 5% (custom) = 0.001 ether
@@ -274,8 +297,9 @@ contract FeeCalculatorTest is Constants {
 
         uint256 amountIn = 1 ether;
 
-        (uint256 amountOut, FeeRecipient[] memory feeRecipients) =
-            feeCalculator.calculateFee(amountIn, BOB, 0);
+        FeeRecipient[] memory feeRecipients =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, BOB);
+        uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
         // routerFeeOnOutput = 1 ether * 15_000 / 100_000_000 = 0.00015 ether
         assertEq(amountOut, 1 ether - 0.00015 ether);
@@ -301,8 +325,9 @@ contract FeeCalculatorTest is Constants {
 
         // Call with client=address(0) and tx.origin=ALICE
         vm.prank(address(this), ALICE);
-        (uint256 amountOut, FeeRecipient[] memory fees) =
-            feeCalculator.calculateFee(amountIn, address(0), 0);
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, address(0));
+        uint256 amountOut = amountIn - _sumFees(fees);
 
         // ALICE's 1% custom fee should be applied
         assertEq(fees[0].feeAmount, 0.01 ether);
@@ -321,8 +346,9 @@ contract FeeCalculatorTest is Constants {
 
         // Call with client=BOB (no custom fee), tx.origin=ALICE
         vm.prank(address(this), ALICE);
-        (uint256 amountOut, FeeRecipient[] memory fees) =
-            feeCalculator.calculateFee(amountIn, BOB, 0);
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(amountIn, amountIn, 0, BOB);
+        uint256 amountOut = amountIn - _sumFees(fees);
 
         // Default 5% fee is applied for BOB — ALICE's 1% custom fee is ignored
         // fee = 1 ether * 5_000_000 / 100_000_000 = 0.05 ether
@@ -389,7 +415,6 @@ contract FeeCalculatorConfigTest is Constants {
         assertEq(
             feeCalculator.getEffectiveRouterFeeOnOutputScaled(BOB), userFee
         );
-
         // Check other users still get default fee
         assertEq(
             feeCalculator.getEffectiveRouterFeeOnOutputScaled(ALICE), defaultFee
@@ -472,7 +497,6 @@ contract FeeCalculatorConfigTest is Constants {
 
         // Check user gets custom fee
         assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(BOB), userFee);
-
         // Check other users still get default fee
         assertEq(
             feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), defaultFee
@@ -603,7 +627,6 @@ contract FeeCalculatorConfigTest is Constants {
         assertEq(
             feeCalculator.getEffectiveRouterFeeOnOutputScaled(BOB), _HALF_PCT
         );
-
         // Other users should get new default
         assertEq(
             feeCalculator.getEffectiveRouterFeeOnOutputScaled(ALICE), 2_000_000
@@ -618,6 +641,8 @@ contract FeeCalculatorConfigTest is Constants {
         assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), 0);
         // Default fee receiver should be the contract deployer
         assertEq(feeCalculator.getRouterFeeReceiver(), address(this));
+        assertFalse(feeCalculator.getPositiveSlippageEnabled());
+        assertEq(feeCalculator.getDefaultClientSlippageShare(), 0);
     }
 
     function testMaximumFee() public {
@@ -774,5 +799,103 @@ contract FeeCalculatorConfigTest is Constants {
         assertFalse(fees[0].hasCustomFeeOnOutput);
         assertTrue(fees[0].hasCustomFeeOnClientFee);
         assertEq(fees[0].feeBpsOnClientFee, _5_PCT);
+    }
+}
+
+// Tests for positive slippage surplus distribution
+contract FeeCalculatorSlippageTest is Constants {
+    FeeCalculator feeCalculator;
+
+    function setUp() public {
+        feeCalculator = new FeeCalculator(FEE_SETTER);
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeReceiver(BOB);
+        feeCalculator.setPositiveSlippageEnabled(true);
+        vm.stopPrank();
+    }
+
+    function testCalculatePositiveSlippage_routerKeepsAll() public view {
+        // Default clientSlippageShareBps = 0 → router keeps all
+        uint256 grossAmountOut = 1.1 ether;
+        uint256 quotedAmountOut = 1 ether;
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+
+        // surplus = 0.1 ether, all to router
+        assertEq(fees[0].recipient, ADMIN);
+        assertEq(fees[0].feeAmount, 0.1 ether);
+        assertEq(fees[1].recipient, BOB);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testCalculatePositiveSlippage_clientGetsHalf() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setDefaultClientSlippageShare(5000); // 50%
+
+        uint256 grossAmountOut = 1.1 ether;
+        uint256 quotedAmountOut = 1 ether;
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+
+        // surplus = 0.1 ether, 50% each
+        assertEq(fees[0].recipient, ADMIN);
+        assertEq(fees[0].feeAmount, 0.05 ether);
+        assertEq(fees[1].recipient, BOB);
+        assertEq(fees[1].feeAmount, 0.05 ether);
+    }
+
+    function testCalculatePositiveSlippage_customOverridesDefault() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setDefaultClientSlippageShare(2000); // 20%
+        feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
+        vm.stopPrank();
+
+        uint256 grossAmountOut = 1.1 ether;
+        uint256 quotedAmountOut = 1 ether;
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+
+        // surplus = 0.1 ether, BOB gets 80% custom share
+        assertEq(fees[0].recipient, ADMIN);
+        assertEq(fees[0].feeAmount, 0.02 ether);
+        assertEq(fees[1].recipient, BOB);
+        assertEq(fees[1].feeAmount, 0.08 ether);
+    }
+
+    function testCalculatePositiveSlippage_removeCustom() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setDefaultClientSlippageShare(2000); // 20%
+        feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
+        feeCalculator.removeCustomClientSlippageShare(BOB);
+        vm.stopPrank();
+
+        uint256 grossAmountOut = 1.1 ether;
+        uint256 quotedAmountOut = 1 ether;
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+
+        // After removal, falls back to default 20%
+        assertEq(fees[0].feeAmount, 0.08 ether); // router 80%
+        assertEq(fees[1].feeAmount, 0.02 ether); // BOB 20%
+    }
+
+    function testSetDefaultClientSlippageShare_tooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(
+            abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
+        );
+        feeCalculator.setDefaultClientSlippageShare(10_001);
+    }
+
+    function testSetCustomClientSlippageShare_tooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(
+            abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
+        );
+        feeCalculator.setCustomClientSlippageShare(BOB, 10_001);
     }
 }
