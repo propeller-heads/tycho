@@ -1,4 +1,5 @@
 pub mod blockchain;
+mod chain_config;
 pub mod contract;
 pub mod error;
 pub mod protocol;
@@ -6,12 +7,11 @@ pub mod token;
 
 use std::{collections::HashMap, fmt::Display, str::FromStr};
 
-use arrayvec::ArrayString;
+pub use chain_config::*;
 use deepsize::DeepSizeOf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use token::Token;
-use utoipa::ToSchema;
 
 use crate::{dto, Bytes};
 
@@ -58,163 +58,6 @@ pub type ProtocolSystem = String;
 
 /// Entry point id literal type to uniquely identify an entry point.
 pub type EntryPointId = String;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChainAddress {
-    bytes: [u8; 32],
-    len: u8,
-}
-
-impl ChainAddress {
-    pub fn new(bytes: &[u8]) -> Result<Self, ChainAddressError> {
-        if bytes.len() > 32 {
-            return Err(ChainAddressError::TooLong(bytes.len()));
-        }
-        let mut arr = [0u8; 32];
-        arr[..bytes.len()].copy_from_slice(bytes);
-        Ok(Self { bytes: arr, len: bytes.len() as u8 })
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
-    }
-}
-
-/// Serialized as a `0x`-prefixed hex string so config files and wire payloads use the same
-/// representation a human writes (e.g. `"0x0000...0000"`).
-impl Serialize for ChainAddress {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("0x{}", hex::encode(self.as_bytes())))
-    }
-}
-
-impl<'de> Deserialize<'de> for ChainAddress {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        let raw = hex::decode(s.trim_start_matches("0x"))
-            .map_err(|e| serde::de::Error::custom(format!("invalid hex address '{s}': {e}")))?;
-        ChainAddress::new(&raw).map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Error, Debug, PartialEq)]
-pub enum ChainAddressError {
-    #[error("address is {0} bytes, max is 32")]
-    TooLong(usize),
-}
-
-#[derive(Error, Debug, PartialEq)]
-pub enum ChainConfigError {
-    #[error("invalid hex address '{0}': {1}")]
-    InvalidAddress(String, String),
-    #[error("address '{0}': {1}")]
-    AddressTooLong(String, String),
-    #[error("symbol '{0}' too long (max 8 chars)")]
-    SymbolTooLong(String),
-    #[error("chain name '{0}' too long (max 32 chars)")]
-    NameTooLong(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-pub struct ChainTokenConfig {
-    #[schema(value_type = String)]
-    address: ChainAddress,
-    #[schema(value_type = String)]
-    symbol: ArrayString<8>,
-    decimals: u8,
-}
-
-impl ChainTokenConfig {
-    pub fn try_new(
-        address_hex: &str,
-        symbol: &str,
-        decimals: u8,
-    ) -> Result<Self, ChainConfigError> {
-        let raw = hex::decode(address_hex.trim_start_matches("0x"))
-            .map_err(|e| ChainConfigError::InvalidAddress(address_hex.to_owned(), e.to_string()))?;
-        let address = ChainAddress::new(&raw)
-            .map_err(|e| ChainConfigError::AddressTooLong(address_hex.to_owned(), e.to_string()))?;
-        let symbol = ArrayString::from(symbol)
-            .map_err(|_| ChainConfigError::SymbolTooLong(symbol.to_owned()))?;
-        Ok(Self { address, symbol, decimals })
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
-pub struct TvlThresholds {
-    low: f64,
-    medium: f64,
-}
-
-impl TvlThresholds {
-    pub fn new(low: f64, medium: f64) -> Self {
-        Self { low, medium }
-    }
-}
-
-impl PartialEq for TvlThresholds {
-    fn eq(&self, other: &Self) -> bool {
-        self.low.to_bits() == other.low.to_bits() && self.medium.to_bits() == other.medium.to_bits()
-    }
-}
-
-impl Eq for TvlThresholds {}
-
-impl std::hash::Hash for TvlThresholds {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.low.to_bits().hash(state);
-        self.medium.to_bits().hash(state);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-pub struct CustomChainConfig {
-    #[schema(value_type = String)]
-    name: ArrayString<32>,
-    chain_id: u64,
-    pub block_time_secs: u64,
-    native: ChainTokenConfig,
-    wrapped_native: ChainTokenConfig,
-    default_tvl_thresholds: TvlThresholds,
-}
-
-impl CustomChainConfig {
-    pub fn try_new(
-        name: &str,
-        chain_id: u64,
-        block_time_secs: u64,
-        native: ChainTokenConfig,
-        wrapped_native: ChainTokenConfig,
-        default_tvl_thresholds: TvlThresholds,
-    ) -> Result<Self, ChainConfigError> {
-        let name =
-            ArrayString::from(name).map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))?;
-        Ok(Self { name, chain_id, block_time_secs, native, wrapped_native, default_tvl_thresholds })
-    }
-
-    pub fn name(&self) -> &str {
-        self.name.as_str()
-    }
-}
-
-impl DeepSizeOf for CustomChainConfig {
-    fn deep_size_of_children(&self, _context: &mut deepsize::Context) -> usize {
-        0
-    }
-}
-
-/// TVL threshold tiers for chain-aware filtering defaults.
-///
-/// TVL is denominated in each chain's native token. Since native tokens have different USD values,
-/// the same numeric threshold produces wildly different USD-equivalent filters across chains.
-/// These tiers provide sensible defaults targeting equivalent USD values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TvlThresholdTier {
-    /// Filters out dust pools (~$20K USD equivalent in native token).
-    Low,
-    /// Filters for pools with meaningful liquidity (~$200K USD equivalent in native token).
-    Medium,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, DeepSizeOf)]
 #[serde(rename_all = "lowercase")]
@@ -642,22 +485,17 @@ mod tests {
     use super::*;
 
     fn test_config() -> CustomChainConfig {
-        CustomChainConfig {
-            name: ArrayString::from("testchain").unwrap(),
-            chain_id: 9999,
-            block_time_secs: 5,
-            native: ChainTokenConfig {
-                address: ChainAddress::new(&[0xAA; 20]).unwrap(),
-                symbol: ArrayString::from("TST").unwrap(),
-                decimals: 18,
-            },
-            wrapped_native: ChainTokenConfig {
-                address: ChainAddress::new(&[0xBB; 20]).unwrap(),
-                symbol: ArrayString::from("WTST").unwrap(),
-                decimals: 18,
-            },
-            default_tvl_thresholds: TvlThresholds { low: 50.0, medium: 500.0 },
-        }
+        CustomChainConfig::try_new(
+            "testchain",
+            9999,
+            5,
+            ChainTokenConfig::try_new("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "TST", 18)
+                .unwrap(),
+            ChainTokenConfig::try_new("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "WTST", 18)
+                .unwrap(),
+            TvlThresholds::new(50.0, 500.0),
+        )
+        .unwrap()
     }
 
     #[test]
