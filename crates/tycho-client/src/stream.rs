@@ -117,7 +117,10 @@ impl TychoStreamBuilder {
             Chain::Bsc => (1, 12, 50),
             Chain::Unichain => (1, 10, 100),
             Chain::Polygon => (2, 12, 50), // ~2s block time
-            Chain::Custom(cfg) => (cfg.block_time_secs, cfg.block_time_secs * 3, 50),
+            Chain::Custom(_) => {
+                let block_time = chain.block_time_secs();
+                (block_time, block_time * 3, 50)
+            }
         }
     }
 
