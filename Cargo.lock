@@ -9809,6 +9809,7 @@ dependencies = [
  "rstest 0.24.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "strum 0.25.0",
  "strum_macros 0.25.3",
  "thiserror 1.0.69",
