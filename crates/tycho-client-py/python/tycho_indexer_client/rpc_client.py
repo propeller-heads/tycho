@@ -5,7 +5,7 @@ import requests
 
 from .dto import (
     Chain,
-    CustomChainConfig,
+    CustomChain,
     ProtocolComponentsParams,
     ProtocolStateParams,
     ContractStateParams,
@@ -58,7 +58,7 @@ class TychoRPCClient:
         self,
         rpc_url: str = "http://0.0.0.0:4242",
         auth_token: str = None,
-        chain: Union[Chain, CustomChainConfig] = Chain.ethereum,
+        chain: Union[Chain, CustomChain] = Chain.ethereum,
     ):
         """
         Initialize the Tycho RPC client.

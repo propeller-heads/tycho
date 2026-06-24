@@ -4,15 +4,13 @@ from hexbytes import HexBytes
 
 from tycho_indexer_client.dto import (
     Chain,
-    ChainTokenConfig,
     ContractId,
     ContractStateParams,
-    CustomChainConfig,
+    CustomChain,
     ExtractorIdentity,
     FeedMessage,
     SynchronizerState,
     SynchronizerStateEnum,
-    TvlThresholds,
     Header,
 )
 
@@ -51,29 +49,9 @@ def test_decode_deltas(asset_dir):
     )
 
 
-# JSON shaped exactly as Tycho serialises `Chain::Custom(..)` (serde, externally tagged, lowercase
-# variant name), mirroring the Rust `test_config()` in tycho-common/src/models/mod.rs. The TVL
-# thresholds are deliberately fractional: Rust serialises them as f64, so this guards that the
-# Python client preserves the fractional part instead of truncating to int. If the Rust wire
-# format changes, this fixture must change with it.
-CUSTOM_CHAIN_JSON = {
-    "custom": {
-        "name": "testchain",
-        "chain_id": 9999,
-        "block_time_secs": 5,
-        "native": {
-            "address": "0x" + "aa" * 20,
-            "symbol": "TST",
-            "decimals": 18,
-        },
-        "wrapped_native": {
-            "address": "0x" + "bb" * 20,
-            "symbol": "WTST",
-            "decimals": 18,
-        },
-        "default_tvl_thresholds": {"low": 50.5, "medium": 500.25},
-    }
-}
+# JSON shaped exactly as Tycho serialises `Chain::Custom("name")`: externally tagged with the chain
+# name as a string. If the Rust wire format changes, this fixture must change with it.
+CUSTOM_CHAIN_JSON = {"custom": "testchain"}
 
 
 def test_decode_extractor_identity_known_chain():
@@ -86,22 +64,10 @@ def test_decode_extractor_identity_known_chain():
 def test_decode_extractor_identity_custom_chain():
     ident = ExtractorIdentity(chain=CUSTOM_CHAIN_JSON, name="my_extractor")
 
-    assert isinstance(ident.chain, CustomChainConfig)
-    assert ident.chain == CustomChainConfig(
-        name="testchain",
-        chain_id=9999,
-        block_time_secs=5,
-        native=ChainTokenConfig(
-            address="0x" + "aa" * 20, symbol="TST", decimals=18
-        ),
-        wrapped_native=ChainTokenConfig(
-            address="0x" + "bb" * 20, symbol="WTST", decimals=18
-        ),
-        default_tvl_thresholds=TvlThresholds(low=50.5, medium=500.25),
-    )
-    # Guard against silent int truncation of the f64 thresholds.
-    assert ident.chain.default_tvl_thresholds.low == 50.5
-    assert ident.chain.default_tvl_thresholds.medium == 500.25
+    assert isinstance(ident.chain, CustomChain)
+    assert ident.chain == CustomChain(name="testchain")
+    assert ident.chain.name == "testchain"
+    assert str(ident.chain) == "testchain"
 
 
 def test_decode_contract_state_params_backward_compatibility():
