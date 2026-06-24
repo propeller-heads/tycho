@@ -335,12 +335,15 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             _ => Err(ExtractionError::Setup(format!("Unknown DCI plugin: {s}"))),
         })?;
 
+    let chain = Chain::from_str(&run_args.chain)
+        .map_err(|e| ExtractionError::Setup(format!("Invalid chain '{}': {e}", run_args.chain)))?;
+
     let config = ExtractorConfigs::new(
         HashMap::from([(
             run_args.protocol_system.clone(),
             ExtractorConfig::new(
                 run_args.protocol_system.clone(),
-                Chain::from_str(&run_args.chain).unwrap(),
+                chain,
                 ImplementationType::Vm,
                 1, /* TODO: if we want to increase this, we need to commit the cache when we
                     * reached `end_block` */
@@ -367,7 +370,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,
         &run_args.substreams_args,
-        &[Chain::from_str(&run_args.chain).unwrap()],
+        &[chain],
         Utc::now().naive_utc(),
         config,
         None,
