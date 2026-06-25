@@ -59,6 +59,7 @@ fn test_evm_sequential_swap_strategy_encoder() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        200u16,
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -124,6 +125,7 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        200u16,
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     );
 
@@ -148,16 +150,17 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
     let hex_calldata = encode(&calldata);
 
     let expected = String::from(concat!(
-        "6fc8683a", // function selector (sequentialSwap)
+        "8d1eaea0", // function selector (sequentialSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
-        "00000000000000000000000000000000000000000000000000000000018f61ec", // min amount out
+        "00000000000000000000000000000000000000000000000000000000018f61ec", // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000000e0", /* clientFeeParams
-                     * offset = 224 */
-        "00000000000000000000000000000000000000000000000000000000000001a0", /* swapData offset =
-                                                                             * 416 */
+        "0000000000000000000000000000000000000000000000000000000000000100", /* clientFeeParams
+                     * offset = 256 */
+        "00000000000000000000000000000000000000000000000000000000000001c0", /* swapData offset =
+                                                                             * 448 */
         // clientFeeParams tail (6 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
         "0000000000000000000000000000000000000000000000000000000000000000", /* clientFeeReceiver
@@ -253,6 +256,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99389294").unwrap(),
+        200u16,
         vec![swap_usdc_weth, swap_weth_usdc],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -276,14 +280,13 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     .data;
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "cd914fde", // selector (sequentialSwapPermit2)
+        "b6bfa3c2", // selector (sequentialSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
-        "0000000000000000000000000000000000000000000000000000000005ec8f6e", // min amount out
+        "0000000000000000000000000000000000000000000000000000000005ec8f6e", // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000001c0", /* clientFeeParams
-                     * offset = 448 */
     ]
     .join("");
 
@@ -314,7 +317,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     .join("");
 
     assert_eq!(hex_calldata[..392], expected_input);
-    assert_eq!(hex_calldata[1544..], expected_swaps);
+    assert_eq!(hex_calldata[1608..], expected_swaps);
     write_calldata_to_file("test_sequential_strategy_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -378,6 +381,7 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99389294").unwrap(),
+        200u16,
         vec![swap_usdc_weth, swap_weth_usdc],
     )
     .with_user_transfer_type(UserTransferType::UseVaultsFunds);
@@ -401,14 +405,15 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
     .data;
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "2e7200fc", // selector (sequentialSwapUsingVault)
+        "463c8373", // selector (sequentialSwapUsingVault)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
-        "0000000000000000000000000000000000000000000000000000000005ec8f6e", // min amount out
+        "0000000000000000000000000000000000000000000000000000000005ec8f6e", // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000000e0", // clientFeeParams offset = 224
-        "00000000000000000000000000000000000000000000000000000000000001a0", // swapData offset = 416
+        "0000000000000000000000000000000000000000000000000000000000000100", // clientFeeParams offset = 256
+        "00000000000000000000000000000000000000000000000000000000000001c0", // swapData offset = 448
         // clientFeeParams tail (6 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeReceiver = 0
@@ -481,6 +486,7 @@ fn test_evm_sequential_swap_strategy_encoder_with_fees() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        200u16,
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     );
 

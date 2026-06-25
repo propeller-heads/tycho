@@ -51,6 +51,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // min amount,
+            200,
             ALICE,
             noClientFee(),
             permitSingle,
@@ -86,6 +87,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // min amount
+            200,
             ALICE,
             noClientFee(),
             pleEncode(swaps)
@@ -111,6 +113,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // min amount
+            200,
             tychoRouterAddr, // output goes to vault
             noClientFee(),
             pleEncode(swaps)
@@ -133,12 +136,13 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
 
         bytes[] memory swaps = _getSequentialSwaps();
-        vm.expectRevert(TychoRouter__UndefinedMinAmountOut.selector);
+        vm.expectRevert(TychoRouter__AmountOutZero.selector);
         tychoRouter.sequentialSwap(
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
             0, // min amount
+            200,
             ALICE,
             noClientFee(),
             pleEncode(swaps)
@@ -150,7 +154,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.sequentialSwap(
-            0, WETH_ADDR, USDC_ADDR, 1, ALICE, noClientFee(), pleEncode(swaps)
+            0, WETH_ADDR, USDC_ADDR, 1, 200, ALICE, noClientFee(), pleEncode(swaps)
         );
     }
 
@@ -169,6 +173,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             0, // min amount
+            200,
             ALICE,
             noClientFee(),
             pleEncode(swaps)
@@ -202,6 +207,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            200,
             ALICE,
             noClientFee(),
             permitSingle,
@@ -408,6 +414,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             ETH_ADDR, // tokenIn = native ETH
             WETH_ADDR,
             1, // min amount out
+            200,
             ALICE,
             noClientFee(),
             pleEncode(swaps)

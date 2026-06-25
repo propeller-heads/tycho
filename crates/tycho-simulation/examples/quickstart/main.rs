@@ -686,6 +686,7 @@ fn create_solution(
         buy_token.address,
         sell_amount,
         min_amount_out,
+        0u16,
         vec![simple_swap],
     )
     .with_user_transfer_type(transfer_type)
@@ -711,7 +712,8 @@ fn encode_tycho_router_call(
     signer: PrivateKeySigner,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
-    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let amount_out = biguint_to_u256(solution.amount_out());
+    let max_slippage_bps = solution.max_slippage_bps();
     let given_token = convert_to_router_token(Address::from_slice(solution.token_in()));
     let checked_token = convert_to_router_token(Address::from_slice(solution.token_out()));
     let receiver = Address::from_slice(solution.receiver());
@@ -727,7 +729,8 @@ fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             receiver,
             client_fee_params,
             encoded_solution.swaps().to_vec(),
@@ -750,7 +753,8 @@ fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             receiver,
             client_fee_params,
             permit,

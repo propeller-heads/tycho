@@ -56,6 +56,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             2008817438608734439722,
+            uint16(200),
             address(filler),
             noClientFee(),
             swap
@@ -172,6 +173,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
             DAI_ADDR,
             USDT_ADDR,
             1,
+            uint16(200),
             fillerAddr,
             noClientFee(),
             swap

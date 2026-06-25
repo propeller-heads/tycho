@@ -85,6 +85,7 @@ fn test_evm_split_swap_strategy_encoder() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        200u16,
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -196,6 +197,7 @@ fn test_evm_split_input_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99574171").unwrap(),
+        200u16,
         vec![swap_usdc_weth_pool1, swap_usdc_weth_pool2, swap_weth_usdc_pool2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -220,15 +222,14 @@ fn test_evm_split_input_cyclic_swap() {
 
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "e6675f5c", // selector (splitSwapPermit2)
+        "ce4cf5a0", // selector (splitSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
-        "0000000000000000000000000000000000000000000000000000000005ef619b", // min amount out
+        "0000000000000000000000000000000000000000000000000000000005ef619b", // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "0000000000000000000000000000000000000000000000000000000000000002", // tokens length
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000001e0", /* clientFeeParams
-                     * offset = 480 */
     ]
     .join("");
 
@@ -272,7 +273,7 @@ fn test_evm_split_input_cyclic_swap() {
     ]
     .join("");
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1672..], expected_swaps);
     write_calldata_to_file("test_split_input_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -354,6 +355,7 @@ fn test_evm_split_output_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99025908").unwrap(),
+        200u16,
         vec![swap_usdc_weth_v2, swap_weth_usdc_v3_pool1, swap_weth_usdc_v3_pool2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -378,15 +380,14 @@ fn test_evm_split_output_cyclic_swap() {
 
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "e6675f5c", // selector (splitSwapPermit2)
+        "ce4cf5a0", // selector (splitSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
-        "0000000000000000000000000000000000000000000000000000000005e703f4", // min amount out
+        "0000000000000000000000000000000000000000000000000000000005e703f4", // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "0000000000000000000000000000000000000000000000000000000000000002", // tokens length
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000001e0", /* clientFeeParams
-                     * offset = 480 */
     ]
     .join("");
 
@@ -431,7 +432,7 @@ fn test_evm_split_output_cyclic_swap() {
     .join("");
 
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1672..], expected_swaps);
     write_calldata_to_file("test_split_output_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -500,6 +501,7 @@ fn test_evm_split_swap_strategy_with_fees() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        200u16,
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     );
 

@@ -124,6 +124,7 @@ pub fn create_solution(
         // We want to keep track of how bad the slippage really is and not just error at execution
         // time. NEVER DO THIS IN PRODUCTION!
         BigUint::from(1u64),
+        0u16,
         vec![simple_swap],
     ))
 }
@@ -134,7 +135,8 @@ fn encoded_transaction(
     native_address: Bytes,
 ) -> miette::Result<Transaction> {
     let amount_in = biguint_to_u256(solution.amount_in());
-    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let amount_out = biguint_to_u256(solution.amount_out());
+    let max_slippage_bps = solution.max_slippage_bps();
     let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
     let to_router_address = |raw: Address| {
         if raw.as_slice() == native_address.as_ref() {
@@ -153,7 +155,8 @@ fn encoded_transaction(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        amount_out,
+        max_slippage_bps,
         receiver,
         client_fee_params,
         encoded_solution.swaps(),

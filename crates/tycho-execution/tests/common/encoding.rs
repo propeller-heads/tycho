@@ -102,12 +102,13 @@ pub fn encode_tycho_router_call(
     solution: &Solution,
     native_address: &Bytes,
     signer: Option<PrivateKeySigner>,
-    client_fee_bps: u16,
+    client_fee_bps: u32,
     client_fee_receiver: Bytes,
     max_client_contribution: BigUint,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
-    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let amount_out = biguint_to_u256(solution.amount_out());
+    let max_slippage_bps: U256 = U256::from(solution.max_slippage_bps());
     let native_addr = bytes_to_address(native_address)?;
     let router_eth = bytes_to_address(&ROUTER_ETH_ADDRESS)?;
     let given_token = bytes_to_address(solution.token_in())?;
@@ -133,14 +134,15 @@ pub fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             receiver,
             encoded_solution.swaps(),
         )?;
         (client_fee_receiver, sig)
     };
 
-    // ABI tuple matching ClientFeeParams: (uint16, address, uint256, uint256, bytes)
+    // ABI tuple matching ClientFeeParams: (uint32, address, uint256, uint256, bytes)
     let client_fee_params =
         (client_fee_bps, client_fee_receiver, max_client_contribution, deadline, client_signature);
     let (permit, signature) = if *solution.user_transfer_type() ==
@@ -177,7 +179,8 @@ pub fn encode_tycho_router_call(
                 given_amount,
                 given_token,
                 checked_token,
-                min_amount_out,
+                amount_out,
+                max_slippage_bps,
                 n_tokens,
                 receiver,
                 client_fee_params,
@@ -191,7 +194,8 @@ pub fn encode_tycho_router_call(
                 given_amount,
                 given_token,
                 checked_token,
-                min_amount_out,
+                amount_out,
+                max_slippage_bps,
                 receiver,
                 client_fee_params,
                 permit,
@@ -205,7 +209,8 @@ pub fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             n_tokens,
             receiver,
             client_fee_params,
@@ -219,7 +224,8 @@ pub fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             receiver,
             client_fee_params,
             swaps,
@@ -257,14 +263,15 @@ pub fn encode_tycho_router_call(
 fn sign_client_fee(
     chain_id: u64,
     router_address: Address,
-    client_fee_bps: u16,
+    client_fee_bps: u32,
     client_fee_receiver: Address,
     max_client_contribution: U256,
     deadline: U256,
     amount_in: U256,
     token_in: Address,
     token_out: Address,
-    min_amount_out: U256,
+    amount_out: U256,
+    max_slippage_bps: U256,
     receiver: Address,
     swaps: &[u8],
 ) -> Result<Vec<u8>, EncodingError> {
@@ -274,10 +281,10 @@ fn sign_client_fee(
     assert_eq!(signer.address(), client_fee_receiver);
     // Must match CLIENT_FEE_TYPEHASH in TychoRouter.sol.
     let type_hash: B256 = keccak256(
-        b"ClientFee(uint16 clientFeeBps,address clientFeeReceiver,\
+        b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
 uint256 maxClientContribution,uint256 deadline,\
 uint256 amountIn,address tokenIn,address tokenOut,\
-uint256 minAmountOut,address receiver,bytes swaps)",
+uint256 amountOut,uint16 maxSlippageBps,address receiver,bytes swaps)",
     );
 
     // EIP-712 domain separator for TychoRouter ("TychoRouter", "1")
@@ -306,7 +313,8 @@ uint256 minAmountOut,address receiver,bytes swaps)",
             amount_in,
             token_in,
             token_out,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             receiver,
             swaps_hash,
         )

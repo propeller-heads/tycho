@@ -67,6 +67,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -83,7 +84,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         emit FeesTaken(DAI_ADDR, expectedFees);
 
         uint256 swapOutput = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, 200, ALICE, feeParams, swap
         );
         vm.stopPrank();
 
@@ -269,6 +270,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -283,7 +285,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             )
         );
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -313,6 +315,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -321,7 +324,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__InvalidClientSignature.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -351,6 +354,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -361,7 +365,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__InvalidClientSignature.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -391,6 +395,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -400,7 +405,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__InvalidClientSignature.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -472,6 +477,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             STA_ADDR,
             1,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -479,7 +485,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, STA_ADDR, 1, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, STA_ADDR, 1, 200, ALICE, feeParams, swap
         );
 
         // Pool transfer to router 1284621860562858120776317
@@ -522,6 +528,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            200,
             ALICE,
             noClientFee(),
             swap
@@ -578,6 +585,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            200,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -585,7 +593,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, 200, ALICE, feeParams, swap
         );
         vm.stopPrank();
 
