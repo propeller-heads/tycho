@@ -34,13 +34,13 @@ Configure the stack through `docker/.env`. The compose file reads it for both th
 <tr><td><code>START_BLOCK</code></td><td>poller</td><td>No</td><td><code>0</code></td><td>First block the poller fetches.</td></tr>
 <tr><td><code>CHAIN_NAME</code></td><td>poller</td><td>No</td><td><code>mainnet</code></td><td>Chain name the Firehose advertises (<code>--advertise-chain-name</code>).</td></tr>
 <tr><td><code>SUBSTREAMS_ENDPOINT</code></td><td>indexer</td><td>Yes</td><td><code>https://mainnet.eth.streamingfast.io:443</code></td><td>Substreams tier1 gRPC. Self-hosted: <code>http://substreams-endpoint:10016</code>.</td></tr>
-<tr><td><code>CHAINS</code></td><td>indexer</td><td>No</td><td><code>ethereum</code></td><td>Comma-separated chains to index; filters which extractors run. Custom-chain workaround until ENG-5738 (see below).</td></tr>
+<tr><td><code>CHAINS</code></td><td>indexer</td><td>No</td><td><code>ethereum</code></td><td>Active chain to index. The indexer uses only the first value (multichain is not yet supported). Name a built-in chain, or a custom chain you declare under <code>chains:</code> in the extractors config (see below).</td></tr>
 <tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest block data the indexer retains.</td></tr>
 <tr><td><code>TYCHO_IMAGE</code></td><td>indexer</td><td>Yes</td><td>—</td><td>tycho-indexer image tag.</td></tr>
 <tr><td><code>EXTRACTORS_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/extractors.yaml</code></td><td>Path to the extractors config inside the container.</td></tr>
 <tr><td><code>TYCHO_PROTOCOL_SDK_PATH</code></td><td>indexer</td><td>No</td><td><code>../tycho-protocol-sdk</code></td><td>Host tycho-protocol-sdk checkout, mounted read-only.</td></tr>
 <tr><td><code>SUBSTREAMS_API_TOKEN</code></td><td>indexer</td><td>No</td><td><code>readme</code></td><td>Auth token for a hosted Substreams endpoint; unused self-hosted.</td></tr>
-<tr><td><code>TRACE_RPC_URL</code></td><td>indexer</td><td>For DCI</td><td>—</td><td>Trace-capable RPC for dynamic contract indexing.</td></tr>
+<tr><td><code>TRACE_RPC_URL</code></td><td>indexer</td><td>For DCI</td><td><code>readme</code> (placeholder)</td><td>Trace-capable RPC for dynamic contract indexing.</td></tr>
 <tr><td><code>OTLP_EXPORTER_ENDPOINT</code></td><td>indexer</td><td>No</td><td>empty (disabled)</td><td>OpenTelemetry collector. Set <code>http://lgtm:4317</code> with the <code>observability</code> profile.</td></tr>
 <tr><td><code>AUTH_API_KEY</code></td><td>indexer</td><td>No</td><td><code>local-dev-key</code></td><td>Tycho RPC API key.</td></tr>
 <tr><td><code>RUST_LOG</code></td><td>indexer</td><td>No</td><td><code>info</code></td><td>Log level.</td></tr>
@@ -59,8 +59,8 @@ START_BLOCK=24542000
 # Self-hosted Firehose, reachable by its docker service name
 SUBSTREAMS_ENDPOINT=http://substreams-endpoint:10016
 
-# Custom-chain workaround: reuse a known chain's extractors (see below)
-CHAINS=unichain
+# Custom chain — declared under `chains:` in extractors.yaml (see below)
+CHAINS=tempo
 
 RETENTION_HORIZON=2000-01-01T00:00:00
 SUBSTREAMS_API_TOKEN=local
@@ -71,7 +71,7 @@ OTLP_EXPORTER_ENDPOINT=
 
 ### Writing your extractors.yaml
 
-The indexer loads its extractors from `crates/tycho-indexer/extractors.yaml`, mounted into the container at `/opt/tycho-indexer/extractors.yaml`. Use that file as your template. Each entry under `extractors:` configures one protocol:
+Copy <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/extractors.example.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/extractors.example.yaml</code></a> to `crates/tycho-indexer/extractors.yaml` and edit it — the compose file mounts `extractors.yaml` into the container at `/opt/tycho-indexer/extractors.yaml`. The example file documents every field, including the optional `chains:` section. Each entry under `extractors:` configures one protocol:
 
 ```yaml
 extractors:
@@ -90,18 +90,45 @@ extractors:
 
 <table><thead><tr><th width="220">Field</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>name</code></td><td>Unique extractor name; also the protocol system name exposed over the RPC.</td></tr>
-<tr><td><code>chain</code></td><td>Chain this extractor runs on. Must match an entry in <code>CHAINS</code> for the extractor to start.</td></tr>
+<tr><td><code>chain</code></td><td>Chain this extractor runs on — a built-in chain name, or a custom chain you declare under <code>chains:</code> below. The indexer rejects an unknown chain name at startup.</td></tr>
 <tr><td><code>implementation_type</code></td><td><code>Custom</code> for native substreams that emit Tycho protocol messages directly, or <code>Vm</code> for protocols simulated through the tycho-protocol-sdk.</td></tr>
 <tr><td><code>sync_batch_size</code></td><td>Number of blocks the indexer requests per Substreams batch.</td></tr>
 <tr><td><code>start_block</code></td><td>Block at which the protocol was deployed; the indexer starts streaming here.</td></tr>
 <tr><td><code>spkg</code></td><td>Path to the compiled <code>.spkg</code>, relative to <code>/opt/tycho-indexer/</code> (i.e. under <code>docker/substreams/</code>).</td></tr>
 <tr><td><code>module_name</code></td><td>Substreams output module to consume (e.g. <code>map_protocol_changes</code>).</td></tr>
-<tr><td><code>protocol_types</code></td><td>Protocol component types this extractor produces, each with a <code>name</code> and a <code>financial_type</code>.</td></tr>
+<tr><td><code>protocol_types</code></td><td>Protocol component types this extractor produces, each with a <code>name</code> and a <code>financial_type</code> (<code>Swap</code>, <code>Psm</code>, <code>Debt</code>, or <code>Leverage</code>).</td></tr>
 </tbody></table>
 
-{% hint style="info" %}
-A top-level `chains:` section that lets you declare a custom chain directly in `extractors.yaml` is pending ENG-5738. Until it ships, point `CHAINS` at a known chain whose extractors you want to reuse — for example `CHAINS=unichain` runs the Unichain extractors against the Tempo RPC.
-{% endhint %}
+### Declaring a custom chain
+
+Built-in chains (`ethereum`, `base`, `unichain`, …) need no extra config. To index a chain Tycho does not know, declare it in a top-level `chains:` section of the same file. Each extractor's `chain:` field resolves against these entries, and `CHAINS` names the active one. The indexer reads this section directly and fails fast at startup if an extractor references a chain that is neither built-in nor declared here.
+
+```yaml
+chains:
+  - name: tempo                       # the value used as `chain:` on extractors and in CHAINS
+    chain_id: 12345                   # EVM chain id
+    block_time_secs: 1
+    native:                           # native gas token
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "ETH"
+      decimals: 18
+    wrapped_native:                   # wrapped native token (e.g. WETH)
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "WETH"
+      decimals: 18
+    default_tvl_thresholds:           # TVL gates (in native token units) for component tracking
+      low: 1000
+      medium: 10000
+```
+
+<table><thead><tr><th width="220">Field</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>name</code></td><td>Chain identifier; reference it from an extractor's <code>chain:</code> field and from <code>CHAINS</code>.</td></tr>
+<tr><td><code>chain_id</code></td><td>EVM chain id.</td></tr>
+<tr><td><code>block_time_secs</code></td><td>Average block time in seconds.</td></tr>
+<tr><td><code>native</code></td><td>Native gas token: <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
+<tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
+<tr><td><code>default_tvl_thresholds</code></td><td>TVL gates in native-token units (<code>low</code>, <code>medium</code>) for component tracking.</td></tr>
+</tbody></table>
 
 ### Pointing to a local tycho-protocol-sdk checkout
 
