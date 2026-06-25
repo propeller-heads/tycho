@@ -269,7 +269,9 @@ mod tests {
     use tycho_common::models::token::{TokenOwnerStore, TokenQuality};
 
     use super::*;
-    use crate::test_fixtures::{TestFixture, TEST_BLOCK_NUMBER, TOKEN_HOLDERS, USDC_STR, WETH_STR};
+    use crate::test_fixtures::{
+        TestFixture, TEST_BLOCK_NUMBER, TOKEN_HOLDERS, USDC_STR, USDT_STR, WETH_STR,
+    };
 
     const COWSWAP_SETTLEMENT: Address = address!("c9f2e6ea1637E499406986ac50ddC92401ce1f58");
 
@@ -390,6 +392,27 @@ mod tests {
             .expect("detect_impl failed");
 
         assert_eq!(quality, TokenQuality::Good);
+        assert!(gas.is_some_and(|g| g > U256::ZERO));
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    // USDT (0xdAC1...) omits the bool return value from approve(). This reproduces the bug where
+    // forwardApprove uses a typed call that reverts when ABI-decoding USDT's empty return data,
+    // setting approvalOk = false and misclassifying USDT as Bad. Expected to FAIL until the
+    // Forwarder uses a low-level call for approve.
+    #[tokio::test]
+    #[ignore = "require RPC connection"]
+    async fn test_detect_impl_usdt() {
+        let fixture = TestFixture::new();
+        let detector = fixture.create_ethcall_detector();
+        let usdt = Address::from_str(USDT_STR).unwrap();
+
+        let (quality, gas, tax) = detector
+            .detect_impl(usdt, BlockTag::Number(TEST_BLOCK_NUMBER))
+            .await
+            .expect("detect_impl failed");
+
+        assert_eq!(quality, TokenQuality::Good, "USDT should be classified as Good");
         assert!(gas.is_some_and(|g| g > U256::ZERO));
         assert_eq!(tax, Some(U256::ZERO));
     }
