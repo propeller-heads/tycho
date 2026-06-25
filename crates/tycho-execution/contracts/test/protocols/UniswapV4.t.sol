@@ -515,7 +515,14 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         IERC20(USDE_ADDR).approve(tychoRouterAddr, amountIn);
         tychoRouter.singleSwap(
-            amountIn, USDE_ADDR, WBTC_ADDR, 118280, 200, ALICE, noClientFee(), swap
+            amountIn,
+            USDE_ADDR,
+            WBTC_ADDR,
+            118280,
+            200,
+            ALICE,
+            noClientFee(),
+            swap
         );
 
         assertEq(IERC20(WBTC_ADDR).balanceOf(ALICE), 118281);

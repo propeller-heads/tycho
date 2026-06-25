@@ -268,7 +268,14 @@ contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
 
         vm.prank(ALICE);
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
-            amountIn, ETH_ADDR, address(ezETH), 1, 200, ALICE, noClientFee(), swap
+            amountIn,
+            ETH_ADDR,
+            address(ezETH),
+            1,
+            200,
+            ALICE,
+            noClientFee(),
+            swap
         );
 
         assertGt(amountOut, 0);

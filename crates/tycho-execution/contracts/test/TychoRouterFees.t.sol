@@ -84,7 +84,14 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         emit FeesTaken(DAI_ADDR, expectedFees);
 
         uint256 swapOutput = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, 200, ALICE, feeParams, swap
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            200,
+            ALICE,
+            feeParams,
+            swap
         );
         vm.stopPrank();
 
@@ -593,7 +600,14 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, 200, ALICE, feeParams, swap
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            200,
+            ALICE,
+            feeParams,
+            swap
         );
         vm.stopPrank();
 

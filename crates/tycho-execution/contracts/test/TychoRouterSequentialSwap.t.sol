@@ -154,7 +154,14 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.sequentialSwap(
-            0, WETH_ADDR, USDC_ADDR, 1, 200, ALICE, noClientFee(), pleEncode(swaps)
+            0,
+            WETH_ADDR,
+            USDC_ADDR,
+            1,
+            200,
+            ALICE,
+            noClientFee(),
+            pleEncode(swaps)
         );
     }
 

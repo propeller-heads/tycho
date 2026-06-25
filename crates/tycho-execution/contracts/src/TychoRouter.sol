@@ -730,8 +730,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (maxSlippageBps > 10_000) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
-        uint256 effectiveMin =
-            amountOut * (10_000 - maxSlippageBps) / 10_000;
+        uint256 effectiveMin = amountOut * (10_000 - maxSlippageBps) / 10_000;
 
         uint256 amountOutBeforeFees;
         {
@@ -806,21 +805,26 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (maxSlippageBps > 10_000) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
-        uint256 effectiveMin =
-            amountOut * (10_000 - maxSlippageBps) / 10_000;
+        uint256 effectiveMin = amountOut * (10_000 - maxSlippageBps) / 10_000;
 
         (address executor, bytes calldata protocolData) =
             swap_.decodeSingleSwap();
 
         address client = clientFeeParams.clientFeeReceiver;
-        address finalReceiver =
-            _determineFinalReceiver(receiver, clientFeeParams.clientFeeBps, client);
+        address finalReceiver = _determineFinalReceiver(
+            receiver, clientFeeParams.clientFeeBps, client
+        );
 
-        uint256 amountOutBeforeFees =
-            _callSwapOnExecutor(executor, amountIn, protocolData, true, false, finalReceiver);
+        uint256 amountOutBeforeFees = _callSwapOnExecutor(
+            executor, amountIn, protocolData, true, false, finalReceiver
+        );
 
         actualOut = _takeFees(
-            tokenOut, amountOutBeforeFees, amountOut, clientFeeParams.clientFeeBps, client
+            tokenOut,
+            amountOutBeforeFees,
+            amountOut,
+            clientFeeParams.clientFeeBps,
+            client
         );
 
         actualOut = _maybeAddClientContribution(
@@ -872,20 +876,25 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (maxSlippageBps > 10_000) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
-        uint256 effectiveMin =
-            amountOut * (10_000 - maxSlippageBps) / 10_000;
+        uint256 effectiveMin = amountOut * (10_000 - maxSlippageBps) / 10_000;
         if (swaps.length == 0) {
             revert TychoRouter__EmptySwaps();
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        address finalReceiver =
-            _determineFinalReceiver(receiver, clientFeeParams.clientFeeBps, client);
+        address finalReceiver = _determineFinalReceiver(
+            receiver, clientFeeParams.clientFeeBps, client
+        );
 
-        uint256 amountOutBeforeFees = _sequentialSwap(amountIn, swaps, finalReceiver);
+        uint256 amountOutBeforeFees =
+            _sequentialSwap(amountIn, swaps, finalReceiver);
 
         actualOut = _takeFees(
-            tokenOut, amountOutBeforeFees, amountOut, clientFeeParams.clientFeeBps, client
+            tokenOut,
+            amountOutBeforeFees,
+            amountOut,
+            clientFeeParams.clientFeeBps,
+            client
         );
 
         actualOut = _maybeAddClientContribution(
