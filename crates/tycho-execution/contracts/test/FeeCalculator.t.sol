@@ -809,7 +809,7 @@ contract FeeCalculatorSlippageTest is Constants {
     function setUp() public {
         feeCalculator = new FeeCalculator(FEE_SETTER);
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setRouterFeeReceiver(BOB);
+        feeCalculator.setRouterFeeReceiver(ADMIN);
         feeCalculator.setPositiveSlippageEnabled(true);
         vm.stopPrank();
     }

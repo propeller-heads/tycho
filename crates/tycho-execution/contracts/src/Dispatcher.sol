@@ -295,6 +295,7 @@ contract Dispatcher is TransferManager {
             IFeeCalculator(feeCalculator).getEffectiveRouterFeeOnOutput(client);
     }
 
+    // slither-disable-next-line dead-code
     function _callCalculateFee(
         address feeCalculator,
         uint256 grossAmountOut,
@@ -307,6 +308,7 @@ contract Dispatcher is TransferManager {
             .calculateFee(grossAmountOut, quotedAmountOut, clientFeeBps, client);
     }
 
+    // slither-disable-next-line dead-code
     function _callMustInterceptOutput(
         address feeCalculator,
         uint32 clientFeeBps,

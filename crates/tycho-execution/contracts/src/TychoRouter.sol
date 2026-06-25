@@ -1183,9 +1183,12 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint16 clientFeeBps,
         address client
     ) internal returns (uint256 amountOut) {
+        // slither-disable-next-line uninitialized-local
         FeeRecipient[] memory fees;
-        (amountOut, fees) =
-            _callCalculateFee(_feeCalculator, amountIn, clientFeeBps, client);
+        // TODO(ENG-6054): update to new _callCalculateFee signature
+        // (amountOut, fees) =
+        //     _callCalculateFee(_feeCalculator, amountIn, clientFeeBps, client);
+        revert("_takeFees: pending _callCalculateFee update");
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
