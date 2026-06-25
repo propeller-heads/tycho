@@ -43,7 +43,7 @@ pub enum UserTransferType {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ClientFeeParams {
     /// Fee in basis points charged by the client (0–10000).
-    client_fee_bps: u16,
+    client_fee_bps: u32,
     /// Address that identifies the client and receives any client fee.
     client_fee_receiver: Bytes,
     /// Maximum amount the client will contribute from their vault if slippage reduces the output
@@ -63,7 +63,7 @@ impl ClientFeeParams {
         client_fee_receiver: Bytes,
         client_signature: Bytes,
         deadline: BigUint,
-        client_fee_bps: u16,
+        client_fee_bps: u32,
     ) -> Self {
         Self {
             client_fee_bps,
@@ -98,7 +98,7 @@ impl ClientFeeParams {
 #[cfg(feature = "evm")]
 impl ClientFeeParams {
     /// Converts into the ABI-encodable tuple matching the Solidity `ClientFeeParams` struct.
-    pub fn into_abi_params(self) -> (u16, Address, U256, U256, Vec<u8>) {
+    pub fn into_abi_params(self) -> (u32, Address, U256, U256, Vec<u8>) {
         let receiver = if self.client_fee_receiver.is_empty() {
             Address::ZERO
         } else {
@@ -133,9 +133,12 @@ pub struct Solution {
     amount_in: BigUint,
     /// The token being bought
     token_out: Bytes,
-    /// Minimum amount that the receiver must receive at the end of the transaction.
+    /// Quoted output amount from simulation. Used as the baseline for slippage:
+    /// effective min = amount_out * (10000 - max_slippage_bps) / 10000.
     #[serde(with = "biguint_string")]
-    min_amount_out: BigUint,
+    amount_out: BigUint,
+    /// Maximum slippage in basis points (0–10000).
+    max_slippage_bps: u16,
     /// List of swaps to fulfill the solution.
     swaps: Vec<Swap>,
     /// The transfer type to be used in this swap for user's funds (token in)
@@ -149,7 +152,8 @@ impl Solution {
         token_in: Bytes,
         token_out: Bytes,
         amount_in: BigUint,
-        min_amount_out: BigUint,
+        amount_out: BigUint,
+        max_slippage_bps: u16,
         swaps: Vec<Swap>,
     ) -> Self {
         Self {
@@ -158,7 +162,8 @@ impl Solution {
             token_in,
             token_out,
             amount_in,
-            min_amount_out,
+            amount_out,
+            max_slippage_bps,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
         }
@@ -182,8 +187,12 @@ impl Solution {
         &self.token_out
     }
 
-    pub fn min_amount_out(&self) -> &BigUint {
-        &self.min_amount_out
+    pub fn amount_out(&self) -> &BigUint {
+        &self.amount_out
+    }
+
+    pub fn max_slippage_bps(&self) -> u16 {
+        self.max_slippage_bps
     }
 
     pub fn swaps(&self) -> &[Swap] {
@@ -219,8 +228,13 @@ impl Solution {
         self
     }
 
-    pub fn with_min_amount_out(mut self, min_amount_out: BigUint) -> Self {
-        self.min_amount_out = min_amount_out;
+    pub fn with_amount_out(mut self, amount_out: BigUint) -> Self {
+        self.amount_out = amount_out;
+        self
+    }
+
+    pub fn with_max_slippage_bps(mut self, max_slippage_bps: u16) -> Self {
+        self.max_slippage_bps = max_slippage_bps;
         self
     }
 
@@ -411,10 +425,10 @@ impl EncodedSolution {
             "singleSwap" |
             "singleSwapUsingVault" |
             "sequentialSwap" |
-            "sequentialSwapUsingVault" => 7,
-            "splitSwap" | "splitSwapUsingVault" => 8,
-            "singleSwapPermit2" | "sequentialSwapPermit2" => 14,
-            "splitSwapPermit2" => 15,
+            "sequentialSwapUsingVault" => 8,
+            "splitSwap" | "splitSwapUsingVault" => 9,
+            "singleSwapPermit2" | "sequentialSwapPermit2" => 15,
+            "splitSwapPermit2" => 16,
             _ => 0,
         };
         // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple

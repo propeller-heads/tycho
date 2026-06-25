@@ -57,6 +57,7 @@ fn main() {
         usdc.clone(),
         BigUint::from_str("1_000000000000000000").expect("Failed to create amount"),
         BigUint::from(1u64),
+        200u16,
         vec![simple_swap],
     );
 
