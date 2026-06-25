@@ -32,16 +32,16 @@ pub(crate) fn calculate_fee(
             (true, true) => {
                 let first_transfer_fees = error_div(
                     error_mul(
-                        error_add(balance_before_in, error_sub(amount, balance_after_in)?)?,
+                        error_sub(error_add(balance_before_in, amount)?, balance_after_in)?,
                         U256::from(10_000),
                     )?,
                     amount,
                 )?;
                 let second_transfer_fees = error_div(
                     error_mul(
-                        error_add(
-                            balance_recipient_before,
-                            error_sub(middle_amount, balance_recipient_after)?,
+                        error_sub(
+                            error_add(balance_recipient_before, middle_amount)?,
+                            balance_recipient_after,
                         )?,
                         U256::from(10_000),
                     )?,
@@ -55,16 +55,16 @@ pub(crate) fn calculate_fee(
             }
             (true, false) => error_div(
                 error_mul(
-                    error_add(balance_before_in, error_sub(amount, balance_after_in)?)?,
+                    error_sub(error_add(balance_before_in, amount)?, balance_after_in)?,
                     U256::from(10_000),
                 )?,
                 amount,
             )?,
             (false, true) => error_div(
                 error_mul(
-                    error_add(
-                        balance_recipient_before,
-                        error_sub(middle_amount, balance_recipient_after)?,
+                    error_sub(
+                        error_add(balance_recipient_before, middle_amount)?,
+                        balance_recipient_after,
                     )?,
                     U256::from(10_000),
                 )?,
@@ -126,10 +126,10 @@ fn error_mul(a: U256, b: U256) -> Result<U256, String> {
 
 #[cfg(test)]
 mod tests {
-    use alloy::rpc::types::BlockNumberOrTag;
+    use alloy::{primitives::U256, rpc::types::BlockNumberOrTag};
     use tycho_common::models::blockchain::BlockTag;
 
-    use super::map_block_tag;
+    use super::{calculate_fee, map_block_tag};
 
     #[test]
     fn test_map_block_tag() {
@@ -139,5 +139,57 @@ mod tests {
         assert_eq!(map_block_tag(BlockTag::Earliest), BlockNumberOrTag::Earliest);
         assert_eq!(map_block_tag(BlockTag::Pending), BlockNumberOrTag::Pending);
         assert_eq!(map_block_tag(BlockTag::Number(123)), BlockNumberOrTag::Number(123));
+    }
+
+    #[test]
+    fn calculate_fee_does_not_underflow_when_settlement_holds_prior_balance() {
+        // Fee-on-transfer token where the settlement already holds more than the per-transfer
+        // fee. The taxed inbound transfer pushes the settlement balance above `amount`, so the
+        // fee must add the prior balance before subtracting; the old code computed
+        // `amount - balance_after_in` first, which underflows here.
+        let amount = U256::from(100_000u64);
+        let balance_before_in = U256::from(5_000u64);
+        // 2% inbound fee: 98_000 received on top of the prior 5_000 balance.
+        let balance_after_in = U256::from(103_000u64);
+        let middle_amount = balance_after_in - balance_before_in;
+        // Outbound leg takes no extra fee: recipient starts at 0 and receives all of it.
+        let recipient_before = U256::ZERO;
+        let recipient_after = middle_amount;
+
+        let fee = calculate_fee(
+            amount,
+            middle_amount,
+            balance_before_in,
+            balance_after_in,
+            recipient_before,
+            recipient_after,
+        )
+        .expect("fee calculation must not underflow when settlement holds a prior balance");
+
+        assert_eq!(fee, U256::from(200u64), "2% inbound fee should be 200 bps");
+    }
+
+    #[test]
+    fn calculate_fee_matches_basis_points_with_zero_prior_balance() {
+        // Control case: settlement holds nothing beforehand. A 1% inbound fee on 1_000_000
+        // leaves 990_000 and must still report 100 bps after the fix.
+        let amount = U256::from(1_000_000u64);
+        let balance_before_in = U256::ZERO;
+        let balance_after_in = U256::from(990_000u64);
+        let middle_amount = balance_after_in - balance_before_in;
+        let recipient_before = U256::ZERO;
+        let recipient_after = middle_amount;
+
+        let fee = calculate_fee(
+            amount,
+            middle_amount,
+            balance_before_in,
+            balance_after_in,
+            recipient_before,
+            recipient_after,
+        )
+        .expect("fee calculation should succeed for the zero prior balance case");
+
+        assert_eq!(fee, U256::from(100u64), "1% inbound fee should be 100 bps");
     }
 }
