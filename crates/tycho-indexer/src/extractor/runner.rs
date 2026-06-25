@@ -467,6 +467,7 @@ impl ProtocolTypeConfig {
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ExtractorConfig {
     name: String,
+    #[serde(deserialize_with = "deserialize_chain")]
     chain: Chain,
     implementation_type: ImplementationType,
     sync_batch_size: usize,
@@ -517,6 +518,26 @@ impl ExtractorConfig {
             post_processor,
             dci_plugin,
         }
+    }
+
+    /// The chain this extractor runs on, as parsed from config. Custom chains are accepted as bare
+    /// names here and validated against the registry separately.
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+}
+
+/// Deserializes a chain from a bare name. Built-in names map to their variant; any other name
+/// becomes a [`Chain::Custom`], to be validated against the custom-chain registry after parsing
+/// (the registry is built from the same config file and so does not exist yet at this point).
+fn deserialize_chain<'de, D>(deserializer: D) -> Result<Chain, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    match Chain::builtin_from_str(&name) {
+        Some(chain) => Ok(chain),
+        None => Chain::custom(&name).map_err(serde::de::Error::custom),
     }
 }
 
