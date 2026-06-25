@@ -286,17 +286,6 @@ contract Dispatcher is TransferManager {
         }
     }
 
-    function _callGetEffectiveRouterFeeOnOutput(
-        address feeCalculator,
-        address client
-    ) internal view returns (uint32 routerFeeOnOutputBps) {
-        // slither-disable-next-line calls-loop
-        routerFeeOnOutputBps =
-            IFeeCalculator(feeCalculator).getEffectiveRouterFeeOnOutput(client);
-    }
-
-    // TODO(ENG-6054): remove dead-code suppression once _takeFees is wired up
-    // slither-disable-next-line dead-code
     function _callCalculateFee(
         address feeCalculator,
         uint256 actualAmountOut,
@@ -311,8 +300,6 @@ contract Dispatcher is TransferManager {
             );
     }
 
-    // TODO(ENG-6054): remove dead-code suppression once _takeFees is wired up
-    // slither-disable-next-line dead-code
     function _callMustInterceptOutput(
         address feeCalculator,
         uint32 clientFeeBps,
