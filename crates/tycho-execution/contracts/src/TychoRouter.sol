@@ -734,13 +734,16 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 minAmountOut = expectedAmountOut
             * (MAX_SLIPPAGE_BPS - maxSlippageBps) / MAX_SLIPPAGE_BPS;
 
+        address client = clientFeeParams.clientFeeReceiver;
+        // Stack pressure in this function prevents keeping finalReceiver in scope
+        // outside the block, so we cache the interception decision as a bool instead.
+        bool intercepting = _callMustInterceptOutput(
+            _feeCalculator, clientFeeParams.clientFeeBps, client
+        );
+
         uint256 actualAmountOut;
         {
-            address finalReceiver = _determineFinalReceiver(
-                receiver,
-                clientFeeParams.clientFeeBps,
-                clientFeeParams.clientFeeReceiver
-            );
+            address finalReceiver = intercepting ? address(this) : receiver;
             actualAmountOut = _splitSwap(
                 amountIn,
                 nTokens,
@@ -750,13 +753,17 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             );
         }
 
-        amountOutAfterFees = _takeFees(
-            tokenOut,
-            actualAmountOut,
-            expectedAmountOut,
-            clientFeeParams.clientFeeBps,
-            clientFeeParams.clientFeeReceiver
-        );
+        if (intercepting) {
+            amountOutAfterFees = _takeFees(
+                tokenOut,
+                actualAmountOut,
+                expectedAmountOut,
+                clientFeeParams.clientFeeBps,
+                client
+            );
+        } else {
+            amountOutAfterFees = actualAmountOut;
+        }
 
         amountOutAfterFees = _maybeAddClientContribution(
             amountOutAfterFees,
@@ -764,7 +771,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             clientFeeParams.maxClientContribution,
             tokenOut,
             receiver,
-            clientFeeParams.clientFeeReceiver
+            client
         );
 
         amountOutAfterFees = _settleOutput(
@@ -827,13 +834,17 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             executor, amountIn, protocolData, true, false, finalReceiver
         );
 
-        amountOutAfterFees = _takeFees(
-            tokenOut,
-            actualAmountOut,
-            expectedAmountOut,
-            clientFeeParams.clientFeeBps,
-            client
-        );
+        if (finalReceiver == address(this)) {
+            amountOutAfterFees = _takeFees(
+                tokenOut,
+                actualAmountOut,
+                expectedAmountOut,
+                clientFeeParams.clientFeeBps,
+                client
+            );
+        } else {
+            amountOutAfterFees = actualAmountOut;
+        }
 
         amountOutAfterFees = _maybeAddClientContribution(
             amountOutAfterFees,
@@ -903,13 +914,17 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 actualAmountOut =
             _sequentialSwap(amountIn, swaps, finalReceiver);
 
-        amountOutAfterFees = _takeFees(
-            tokenOut,
-            actualAmountOut,
-            expectedAmountOut,
-            clientFeeParams.clientFeeBps,
-            client
-        );
+        if (finalReceiver == address(this)) {
+            amountOutAfterFees = _takeFees(
+                tokenOut,
+                actualAmountOut,
+                expectedAmountOut,
+                clientFeeParams.clientFeeBps,
+                client
+            );
+        } else {
+            amountOutAfterFees = actualAmountOut;
+        }
 
         amountOutAfterFees = _maybeAddClientContribution(
             amountOutAfterFees,
