@@ -485,7 +485,7 @@ fn test_evm_sequential_swap_strategy_encoder_with_fees() {
         weth,
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("1951856272").unwrap(),
         200u16,
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     );

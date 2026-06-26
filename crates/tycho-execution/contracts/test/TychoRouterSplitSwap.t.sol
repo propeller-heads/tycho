@@ -349,7 +349,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             4,
             ALICE,
             noClientFee(),

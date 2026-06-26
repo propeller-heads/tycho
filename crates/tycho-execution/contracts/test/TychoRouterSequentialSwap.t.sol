@@ -214,7 +214,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             noClientFee(),
             permitSingle,

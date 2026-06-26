@@ -281,7 +281,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             noClientFee(),
             swap
@@ -326,7 +326,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -338,7 +338,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             feeParams,
             swap
@@ -388,7 +388,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             noClientFee(),
             swap
@@ -433,7 +433,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -445,7 +445,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             feeParams,
             swap
@@ -486,7 +486,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -498,7 +498,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
-            200,
+            0,
             ALICE,
             feeParams,
             swap
@@ -648,7 +648,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1, // min amount
-            200,
+            0,
             ALICE,
             noClientFee(),
             swap
@@ -723,7 +723,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             USDC_ADDR,
             TWIF,
             106000000000000000000000000000, // min amount
-            200,
+            0,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -748,7 +748,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             USDC_ADDR,
             TWIF,
             106000000000000000000000000000,
-            200,
+            0,
             ALICE,
             feeParams,
             swap
@@ -801,7 +801,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             USDC_ADDR,
             TWIF,
             108000000000000000000000000000, // min amount
-            200,
+            0,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -825,7 +825,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             USDC_ADDR,
             TWIF,
             108000000000000000000000000000,
-            200,
+            0,
             ALICE,
             feeParams,
             swap

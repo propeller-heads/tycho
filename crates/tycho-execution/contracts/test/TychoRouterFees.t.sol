@@ -18,7 +18,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
     // TODO(ENG-6054): Rename skip_ → test once _takeFees is wired to
     // the new _callCalculateFee signature.
-    function skip_testSingleSwapWithAllFeeTypes() public {
+    function testSingleSwapWithAllFeeTypes() public {
         // Set up fees: 1% router fee on output, 2% client fee, 10% router fee on client fee
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
@@ -40,7 +40,8 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        uint256 minAmountOut = 1900 * 1e18;
+        // quotedAmountOut = expected gross output; fees are calculated on this amount
+        uint256 quotedAmountOut = 2018817438608734439722;
 
         // Flow with fees:
         // 1. Swap sends full output to router (2018817438608734439722 DAI)
@@ -53,21 +54,24 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // 1. clientFee = 2018817438608734439722 * 200 / 10000 = 40376348772174688794
         //    routerFeeOnClientFee = 40376348772174688794 * 1000 / 10000 = 4037634877217468879
         //    clientPortion = 40376348772174688794 - 4037634877217468879 = 36338713894957219915
-        // 2. routerFeeOnOutput = 2018817438608734439722 * 100 / 10000 = 20188174386087344397 (calculated on original amount)
+        // 2. routerFeeOnOutput = 2018817438608734439722 * 100 / 10000 = 20188174386087344397
         //    totalRouterFee = 4037634877217468879 + 20188174386087344397 = 24225809263304813276
-        // 3. amountOut = 2018817438608734439722 - 36338713894957219915 - 24225809263304813276 = 1958252915450472406531
+        // 3. amountOut = 2018817438608734439722 - 36338713894957219915 - 24225809263304813276
+        //    = 1958252915450472406531
         uint256 expectedRouterFee = 24225809263304813276;
         uint256 expectedClientFee = 36338713894957219915;
         uint256 expectedAmountOut = 1958252915450472406531;
 
+        // maxSlippageBps=500: total fees are ~3% of quotedAmountOut; need slippage > 3% to avoid
+        // NegativeSlippage after fee deduction (slippage check is on post-fee output)
         ClientFeeParams memory feeParams = makeClientFeeParams(
             200,
             0,
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
-            200,
+            quotedAmountOut,
+            500,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -87,8 +91,8 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
-            200,
+            quotedAmountOut,
+            500,
             ALICE,
             feeParams,
             swap
@@ -114,7 +118,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         assertEq(userBalance, expectedAmountOut);
     }
 
-    function skip_testSingleSwapWithClientFees() public {
+    function testSingleSwapWithClientFees() public {
         // Tests swapping WETH -> DAI on a USV2 pool with fees and client contribution
         // Swap is 1 WETH for 2018.8 DAI (2018817438608734439722)
         // Client takes 1% ->  20.18 DAI (20188174386087344397)
@@ -153,12 +157,13 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         assertEq(clientFeeReceiverBalance, expectedFeeAmount);
     }
 
-    function skip_testSingleSwapWithFeesAndContribution() public {
+    function testSingleSwapWithFeesAndContribution() public {
         // Tests swapping WETH -> DAI on a USV2 pool with fees and client contribution
-        // Swap is 1 WETH for      2018.8 DAI (2018817438608734439722)
-        // Tycho Router takes 1% -> 20.18 DAI (20188174386087344397)
-        // Client takes 1% ->       20.18 DAI (20188174386087344397)
-        // But (for some reason) the client contributes with at most 22 DAI
+        // Swap is 1 WETH for      2018.8 DAI (gross output)
+        // quotedAmountOut = 2000e18; fees are 1% of that = 20 DAI each
+        // Tycho Router takes 1% -> 20 DAI (20000000000000000000)
+        // Client takes 1% ->       20 DAI (20000000000000000000)
+        // Remaining = 2018.8 - 40 = 1978.8 < 2000 so client contributes ~21.2 DAI (max 22)
 
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
@@ -180,7 +185,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory callData = loadCallDataFromFile(
             "test_single_swap_with_fees_and_client_contribution"
         );
-        uint256 expectedFeeAmount = 20188174386087344397;
+        uint256 expectedFeeAmount = 20000000000000000000;
         FeeRecipient[] memory expectedFees = new FeeRecipient[](2);
         expectedFees[0] = FeeRecipient({
             recipient: routerFeeReceiver, feeAmount: expectedFeeAmount
@@ -212,7 +217,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         assertGt(clientFeeReceiverBalance, expectedFeeAmount);
     }
 
-    function skip_testSequentialSwapWithClientFees() public {
+    function testSequentialSwapWithClientFees() public {
         // Performs a sequential swap from WETH to USDC through WBTC using USV2 pools
         //
         //   WETH ───(USV2)──> WBTC ───(USV2)──> USDC
@@ -417,7 +422,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         vm.stopPrank();
     }
 
-    function skip_testSplitSwapWithClientFees() public {
+    function testSplitSwapWithClientFees() public {
         // Performs a split swap from WETH to USDC though WBTC and DAI using USV2 pools
         //
         //         ┌──(USV2)──> WBTC ───(USV2)──> USDC
@@ -460,7 +465,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         assertEq(clientFeeReceiverBalance, expectedFeeAmount);
     }
 
-    function skip_testSingleSwapFeeOnTransferTokenSTA() public {
+    function testSingleSwapFeeOnTransferTokenSTA() public {
         // STA is a fee token that takes a fee in ALL transfers (by protocols or direct from user to user)
         address STA_ADDR = address(0xa7DE087329BFcda5639247F96140f9DAbe3DeED1);
         address STA_WETH_UNIV2_POOL = 0x59F96b8571E3B11f859A09Eaf5a790A138FC64D0;
@@ -477,13 +482,15 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
+        // router actually received 1271775641957229539568553 STA after pool fee
+        uint256 quotedSTA = 1271775641957229539568553;
         ClientFeeParams memory feeParams = makeClientFeeParams(
             1,
             20,
             amountIn,
             WETH_ADDR,
             STA_ADDR,
-            1,
+            quotedSTA,
             200,
             ALICE,
             swap,
@@ -492,7 +499,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, STA_ADDR, 1, 200, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, STA_ADDR, quotedSTA, 200, ALICE, feeParams, swap
         );
 
         // Pool transfer to router 1284621860562858120776317
@@ -508,7 +515,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         vm.stopPrank();
     }
 
-    function skip_testSingleSwapAppliesTxOriginCustomFee() public {
+    function testSingleSwapAppliesTxOriginCustomFee() public {
         // ALICE (tx.origin) has a custom 1% router fee that overrides the 2% default.
         // No client signature is provided, so tx.origin is used for the fee lookup.
         vm.startPrank(FEE_SETTER);
@@ -529,12 +536,13 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        uint256 minAmountOut = 1900 * 1e18;
+        // quotedAmountOut = expected gross output; 1% fee is calculated on this
+        uint256 quotedAmountOut = 2018817438608734439722;
         uint256 amountOut = tychoRouter.singleSwap(
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
+            quotedAmountOut,
             200,
             ALICE,
             noClientFee(),

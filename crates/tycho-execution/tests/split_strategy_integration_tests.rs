@@ -500,7 +500,7 @@ fn test_evm_split_swap_strategy_with_fees() {
         weth,
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("1995860454").unwrap(),
         200u16,
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     );

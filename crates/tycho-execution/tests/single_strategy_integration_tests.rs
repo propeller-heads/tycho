@@ -191,9 +191,9 @@ fn test_single_swap_strategy_encoder_transfer_from() {
 #[test]
 fn test_single_swap_with_client_fees() {
     // Performs a single swap from WETH to DAI on a USV2 pool, with fees
-    // Swap is 1 WETH for 2018.8 DAI
+    // Swap is 1 WETH for 2018.8 DAI (2018817438608734439722)
     // Client takes 1% -> 20.18 DAI (20188174386087344397)
-    let checked_amount = BigUint::from_str("1995_000000000000000000").unwrap();
+    let checked_amount = BigUint::from_str("2018817438608734439722").unwrap();
     let weth = weth();
     let dai = dai();
 
@@ -245,11 +245,11 @@ fn test_single_swap_with_client_fees() {
 
 #[test]
 fn test_single_swap_with_fees_and_client_contribution() {
-    // Performs a single swap from WETH to DAI on a USV2 pool, with fees
-    // Swap is 1 WETH for 2018.8 DAI
-    // Tycho Router takes 1% -> 20.18 DAI (20188174386087344397)
-    // Client takes 1% -> 20.18 DAI (20188174386087344397)
-    // But (for some reason) the client contributes with at most 22 DAI
+    // Performs a single swap from WETH to DAI on a USV2 pool, with fees and client contribution
+    // Swap is 1 WETH for 2018.8 DAI; quotedAmountOut = 2000e18
+    // Tycho Router takes 1% of 2000e18 -> 20 DAI
+    // Client takes 1% of 2000e18 -> 20 DAI
+    // Client contributes up to 22 DAI to cover shortfall (actual 1978.8 < quoted 2000)
     let checked_amount = BigUint::from_str("2000_000000000000000000").unwrap();
     let weth = weth();
     let dai = dai();
@@ -273,7 +273,7 @@ fn test_single_swap_with_fees_and_client_contribution() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
-        200u16,
+        0u16,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFrom);
