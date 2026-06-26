@@ -800,6 +800,30 @@ contract FeeCalculatorConfigTest is Constants {
         assertTrue(fees[0].hasCustomFeeOnClientFee);
         assertEq(fees[0].feeBpsOnClientFee, _5_PCT);
     }
+
+    function testClientRemovedOnlyWhenAllCustomFeesCleared() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setCustomRouterFeeOnOutput(BOB, _1_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(BOB, _5_PCT);
+        feeCalculator.setCustomClientSlippageShare(BOB, 5000);
+
+        // Remove output fee — client stays (2 custom fees remain)
+        feeCalculator.removeCustomRouterFeeOnOutput(BOB);
+        (address[] memory clients,) = feeCalculator.getAllClientFees(0, 10);
+        assertEq(clients.length, 1);
+
+        // Remove client fee — client stays (slippage share remains)
+        feeCalculator.removeCustomRouterFeeOnClientFee(BOB);
+        (clients,) = feeCalculator.getAllClientFees(0, 10);
+        assertEq(clients.length, 1);
+
+        // Remove slippage share — client removed (no custom fees left)
+        feeCalculator.removeCustomClientSlippageShare(BOB);
+        vm.stopPrank();
+
+        (clients,) = feeCalculator.getAllClientFees(0, 10);
+        assertEq(clients.length, 0);
+    }
 }
 
 // Tests for positive slippage surplus distribution
