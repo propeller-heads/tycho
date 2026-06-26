@@ -137,7 +137,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
         if (clientFeeBps > 0) return true;
         if (routerFeeOnOutputBps > 0) return true;
-        if (routerFeeOnClientFeeBps > 0) return true;
 
         return false;
     }
