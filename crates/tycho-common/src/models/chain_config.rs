@@ -59,6 +59,10 @@ pub enum ChainConfigError {
     NameTooLong(String),
     #[error("unknown chain '{0}': not a built-in chain and no custom config registered")]
     UnknownChain(String),
+    #[error("failed to read chain config file: {0}")]
+    Io(String),
+    #[error("failed to parse chain config: {0}")]
+    Parse(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -175,14 +179,6 @@ struct ChainConfigFile {
     chains: Vec<CustomChainConfig>,
 }
 
-#[derive(Debug, Error)]
-pub enum ChainConfigFileError {
-    #[error("failed to read chain config file: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("failed to parse chain config: {0}")]
-    Parse(#[from] serde_yaml::Error),
-}
-
 /// Resolves the full configuration of custom chains by name.
 ///
 /// Built-in chains are resolved without this registry; it only holds user-defined chains loaded
@@ -215,7 +211,7 @@ impl ChainConfigRegistry {
     /// file. Returns an error if the file exists but cannot be read or parsed, leaving it to the
     /// caller to decide how to react. Install the result with [`init_chain_registry`] to make it
     /// the process-wide registry.
-    pub fn load_default() -> Result<Self, ChainConfigFileError> {
+    pub fn load_default() -> Result<Self, ChainConfigError> {
         let path = std::env::var(CHAIN_CONFIG_ENV)
             .unwrap_or_else(|_| DEFAULT_CHAIN_CONFIG_PATH.to_owned());
         if !std::path::Path::new(&path).exists() {
@@ -225,14 +221,16 @@ impl ChainConfigRegistry {
     }
 
     /// Parses a registry from a YAML file with a top-level `chains:` list.
-    pub fn from_yaml_file(path: &str) -> Result<Self, ChainConfigFileError> {
-        let contents = std::fs::read_to_string(path)?;
+    pub fn from_yaml_file(path: &str) -> Result<Self, ChainConfigError> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| ChainConfigError::Io(e.to_string()))?;
         Self::from_yaml_str(&contents)
     }
 
     /// Parses a registry from a YAML string with a top-level `chains:` list.
-    pub fn from_yaml_str(contents: &str) -> Result<Self, ChainConfigFileError> {
-        let file: ChainConfigFile = serde_yaml::from_str(contents)?;
+    pub fn from_yaml_str(contents: &str) -> Result<Self, ChainConfigError> {
+        let file: ChainConfigFile =
+            serde_yaml::from_str(contents).map_err(|e| ChainConfigError::Parse(e.to_string()))?;
         Ok(Self::from_configs(file.chains))
     }
 
