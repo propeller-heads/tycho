@@ -8,7 +8,7 @@ import {FeeRecipient} from "../lib/FeeStructs.sol";
 import "./Constants.sol";
 
 // Fee constants in the internal 8-decimal scale (100_000_000 = 100%).
-// clientFeeBps arguments to calculateFee use the legacy BPS scale (10_000 = 100%).
+// clientFeeBps arguments to calculateFee use the 8-decimal fee unit scale (100_000_000 = 100%).
 uint32 constant _HALF_PCT = 500_000; // 0.5%
 uint32 constant _1_PCT = 1_000_000; // 1%
 uint32 constant _5_PCT = 5_000_000; // 5%
@@ -62,13 +62,13 @@ contract FeeCalculatorTest is Constants {
         feeCalculator.setRouterFeeOnClientFee(_10_PCT); // 10% of client fee
 
         uint256 amountIn = 1 ether;
-        uint32 clientFeeBps = 200; // 2% in legacy BPS scale
+        uint32 clientFeeBps = 2_000_000; // 2%
 
         FeeRecipient[] memory feeRecipients =
             feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
         uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
-        // clientFee = 1 ether * (200*10_000) / 100_000_000 = 0.02 ether
+        // clientFee = 1 ether * 2_000_000 / 100_000_000 = 0.02 ether
         // routerFeeOnClientFee = 0.02 ether * 10% = 0.002 ether
         // clientPortion = 0.02 - 0.002 = 0.018 ether
         // amountOut = 1 ether - 0.02 ether = 0.98 ether
@@ -128,14 +128,14 @@ contract FeeCalculatorTest is Constants {
     function testCalculateOnlyClientFee() public view {
         // Test with only client fee set, no router fees
         uint256 amountIn = 1 ether;
-        uint32 clientFeeBps = 150; // 1.5% in legacy BPS scale
+        uint32 clientFeeBps = 1_500_000; // 1.5%
 
         // BOB is the client - but there are no router fees to overwrite with custom client fees
         FeeRecipient[] memory feeRecipients =
             feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
         uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
-        // clientFee = 1 ether * 150 / 10000 = 0.015 ether
+        // clientFee = 1 ether * 1_500_000 / 100_000_000 = 0.015 ether
         // amountOut = 1 ether - 0.015 ether = 0.985 ether
         assertEq(amountOut, 0.985 ether);
         // Router fee
@@ -153,13 +153,13 @@ contract FeeCalculatorTest is Constants {
         vm.stopPrank();
 
         uint256 amountIn = 1 ether;
-        uint32 clientFeeBps = 200; // 2%
+        uint32 clientFeeBps = 2_000_000; // 2%
 
         FeeRecipient[] memory feeRecipients =
             feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, BOB);
         uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
-        // 1. clientFee = 1 ether * 200 / 10000 = 0.02 ether
+        // 1. clientFee = 1 ether * 2_000_000 / 100_000_000 = 0.02 ether
         //    routerFeeOnClientFee = 0.02 ether * 5% = 0.001 ether
         //    clientPortion = 0.02 - 0.001 = 0.019 ether
         // 2. routerFeeOnOutput = 1 ether * 0.5% = 0.005 ether (calculated on original amount)
@@ -180,7 +180,7 @@ contract FeeCalculatorTest is Constants {
         feeCalculator.setRouterFeeOnOutput(_50_PCT); // 50%
 
         uint256 amountIn = 1 ether;
-        uint32 clientFeeBps = 5001; // 50.01% in legacy scale — combined makes 100.01%
+        uint32 clientFeeBps = 50_010_000; // 50.01% — combined makes 100.01%
 
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__FeeTooHigh.selector)
@@ -222,7 +222,7 @@ contract FeeCalculatorTest is Constants {
         vm.stopPrank();
 
         uint256 amountIn = 1 ether;
-        uint32 clientFeeBps = 200; // 2%
+        uint32 clientFeeBps = 2_000_000; // 2%
 
         // ALICE should get custom router fee on client fee (5%)
         FeeRecipient[] memory feeRecipientsAlice =
@@ -269,13 +269,13 @@ contract FeeCalculatorTest is Constants {
         vm.stopPrank();
 
         uint256 amountIn = 1 ether;
-        uint32 clientFeeBps = 200; // 2%
+        uint32 clientFeeBps = 2_000_000; // 2%
 
         FeeRecipient[] memory feeRecipients =
             feeCalculator.calculateFee(amountIn, amountIn, clientFeeBps, ALICE);
         uint256 amountOut = amountIn - _sumFees(feeRecipients);
 
-        // 1. clientFee = 1 ether * 200 / 10000 = 0.02 ether
+        // 1. clientFee = 1 ether * 2_000_000 / 100_000_000 = 0.02 ether
         //    routerFeeOnClientFee = 0.02 * 5% (custom) = 0.001 ether
         //    clientPortion = 0.02 - 0.001 = 0.019 ether
         // 2. routerFeeOnOutput = 1 * 0.5% (custom) = 0.005 ether (calculated on original amount)
@@ -805,7 +805,7 @@ contract FeeCalculatorConfigTest is Constants {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setCustomRouterFeeOnOutput(BOB, _1_PCT);
         feeCalculator.setCustomRouterFeeOnClientFee(BOB, _5_PCT);
-        feeCalculator.setCustomClientSlippageShare(BOB, 5000);
+        feeCalculator.setCustomClientSlippageShare(BOB, _50_PCT);
 
         // Remove output fee — client stays (2 custom fees remain)
         feeCalculator.removeCustomRouterFeeOnOutput(BOB);
@@ -843,8 +843,9 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 actualAmountOut = 1.1 ether;
         uint256 expectedAmountOut = 1 ether;
 
-        FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            actualAmountOut, expectedAmountOut, 0, BOB
+        );
 
         // surplus = 0.1 ether, all to router
         assertEq(fees[0].recipient, ADMIN);
@@ -855,13 +856,14 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testClientGetsHalfPositiveSlippage() public {
         vm.prank(FEE_SETTER);
-        feeCalculator.setDefaultClientSlippageShare(5000); // 50%
+        feeCalculator.setDefaultClientSlippageShare(_50_PCT); // 50%
 
         uint256 actualAmountOut = 1.1 ether;
         uint256 expectedAmountOut = 1 ether;
 
-        FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            actualAmountOut, expectedAmountOut, 0, BOB
+        );
 
         // surplus = 0.1 ether, 50% each
         assertEq(fees[0].recipient, ADMIN);
@@ -872,15 +874,16 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testCustomSlippageShareOverridesDefault() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setDefaultClientSlippageShare(2000); // 20%
-        feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
+        feeCalculator.setDefaultClientSlippageShare(20_000_000); // 20%
+        feeCalculator.setCustomClientSlippageShare(BOB, 80_000_000); // 80%
         vm.stopPrank();
 
         uint256 actualAmountOut = 1.1 ether;
         uint256 expectedAmountOut = 1 ether;
 
-        FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            actualAmountOut, expectedAmountOut, 0, BOB
+        );
 
         // surplus = 0.1 ether, BOB gets 80% custom share
         assertEq(fees[0].recipient, ADMIN);
@@ -891,16 +894,17 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testRemoveCustomSlippageFallsBackToDefault() public {
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setDefaultClientSlippageShare(2000); // 20%
-        feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
+        feeCalculator.setDefaultClientSlippageShare(20_000_000); // 20%
+        feeCalculator.setCustomClientSlippageShare(BOB, 80_000_000); // 80%
         feeCalculator.removeCustomClientSlippageShare(BOB);
         vm.stopPrank();
 
         uint256 actualAmountOut = 1.1 ether;
         uint256 expectedAmountOut = 1 ether;
 
-        FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            actualAmountOut, expectedAmountOut, 0, BOB
+        );
 
         // After removal, falls back to default 20%
         assertEq(fees[0].feeAmount, 0.08 ether); // router 80%
@@ -912,7 +916,7 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
         );
-        feeCalculator.setDefaultClientSlippageShare(10_001);
+        feeCalculator.setDefaultClientSlippageShare(100_000_001);
     }
 
     function testSetCustomClientSlippageShareTooHighReverts() public {
@@ -920,7 +924,7 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
         );
-        feeCalculator.setCustomClientSlippageShare(BOB, 10_001);
+        feeCalculator.setCustomClientSlippageShare(BOB, 100_000_001);
     }
 
     function testNegativeSlippageNoSurplus() public {
