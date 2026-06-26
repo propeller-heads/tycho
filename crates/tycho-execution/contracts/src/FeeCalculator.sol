@@ -360,7 +360,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnOutput = 0;
         _customRouterFees[client] = customFees;
 
-        if (!customFees.hasCustomFeeOnClientFee) {
+        if (
+            !customFees.hasCustomFeeOnClientFee
+                && !customFees.hasCustomClientSlippageShare
+        ) {
             // slither-disable-next-line unused-return
             _customFeeClients.remove(client);
         }
@@ -466,7 +469,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnClientFee = 0;
         _customRouterFees[client] = customFees;
 
-        if (!customFees.hasCustomFeeOnOutput) {
+        if (
+            !customFees.hasCustomFeeOnOutput
+                && !customFees.hasCustomClientSlippageShare
+        ) {
             // slither-disable-next-line unused-return
             _customFeeClients.remove(client);
         }
@@ -615,7 +621,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.clientSlippageShareBps = 0;
         _customRouterFees[client] = customFees;
 
-        if (!customFees.hasCustomFeeOnOutput) {
+        if (
+            !customFees.hasCustomFeeOnOutput
+                && !customFees.hasCustomFeeOnClientFee
+        ) {
             // slither-disable-next-line unused-return
             _customFeeClients.remove(client);
         }
