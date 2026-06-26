@@ -37,8 +37,9 @@ use tracing_subscriber::EnvFilter;
 use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
+        chain_config::CustomChainConfig,
         contract::AccountDelta,
-        Address, Chain, CustomChainConfig, ExtractionState, ImplementationType,
+        Address, Chain, ExtractionState, ImplementationType,
     },
     storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
@@ -723,7 +724,7 @@ async fn run_analyze_tokens(
 
 #[cfg(test)]
 mod tests {
-    use tycho_common::models::{ChainTokenConfig, TvlThresholds};
+    use tycho_common::models::chain_config::{ChainTokenConfig, TvlThresholds};
 
     use super::*;
 
