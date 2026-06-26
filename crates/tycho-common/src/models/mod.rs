@@ -483,7 +483,7 @@ pub enum MergeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        chain_config::{ChainAddress, ChainAddressError, ChainTokenConfig, TvlThresholds},
+        chain_config::{ChainAddress, ChainConfigError, ChainTokenConfig, TvlThresholds},
         *,
     };
 
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_chain_address_new_rejects_oversized_input() {
-        assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainAddressError::TooLong(33)));
+        assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainConfigError::AddressTooLong(33)));
     }
 
     #[test]

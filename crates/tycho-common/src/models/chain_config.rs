@@ -16,9 +16,9 @@ pub struct ChainAddress {
 }
 
 impl ChainAddress {
-    pub fn new(bytes: &[u8]) -> Result<Self, ChainAddressError> {
+    pub fn new(bytes: &[u8]) -> Result<Self, ChainConfigError> {
         if bytes.len() > 32 {
-            return Err(ChainAddressError::TooLong(bytes.len()));
+            return Err(ChainConfigError::AddressTooLong(bytes.len()));
         }
         let mut arr = [0u8; 32];
         arr[..bytes.len()].copy_from_slice(bytes);
@@ -48,17 +48,11 @@ impl<'de> Deserialize<'de> for ChainAddress {
 }
 
 #[derive(Error, Debug, PartialEq)]
-pub enum ChainAddressError {
-    #[error("address is {0} bytes, max is 32")]
-    TooLong(usize),
-}
-
-#[derive(Error, Debug, PartialEq)]
 pub enum ChainConfigError {
     #[error("invalid hex address '{0}': {1}")]
     InvalidAddress(String, String),
-    #[error("address '{0}': {1}")]
-    AddressTooLong(String, String),
+    #[error("address is {0} bytes, max is 32")]
+    AddressTooLong(usize),
     #[error("symbol '{0}' too long (max 8 chars)")]
     SymbolTooLong(String),
     #[error("chain name '{0}' too long (max 32 chars)")]
@@ -84,8 +78,7 @@ impl ChainTokenConfig {
     ) -> Result<Self, ChainConfigError> {
         let raw = hex::decode(address_hex.trim_start_matches("0x"))
             .map_err(|e| ChainConfigError::InvalidAddress(address_hex.to_owned(), e.to_string()))?;
-        let address = ChainAddress::new(&raw)
-            .map_err(|e| ChainConfigError::AddressTooLong(address_hex.to_owned(), e.to_string()))?;
+        let address = ChainAddress::new(&raw)?;
         let symbol = ArrayString::from(symbol)
             .map_err(|_| ChainConfigError::SymbolTooLong(symbol.to_owned()))?;
         Ok(Self { address, symbol, decimals })
