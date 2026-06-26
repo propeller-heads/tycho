@@ -71,3 +71,68 @@ impl SwapEncoder for SlipstreamsSwapEncoder {
         Box::new(self.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::hex::encode;
+    use num_bigint::{BigInt, BigUint};
+    use tycho_common::models::protocol::ProtocolComponent;
+
+    use super::*;
+    use crate::encoding::models::{default_token, Swap};
+
+    /// Covers the encoder shared by the slipstream forks and Ramses V3: it packs the immutable
+    /// `tick_spacing` static attribute into the 3-byte slot, which the Uniswap V3 executor ignores.
+    #[test]
+    fn test_encode_slipstreams() {
+        let tick_spacing = BigInt::from(50);
+
+        let pool = ProtocolComponent {
+            id: String::from("0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"),
+            static_attributes: [(
+                "tick_spacing".into(),
+                Bytes::from(tick_spacing.to_signed_bytes_be()),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let token_in = Bytes::from("0x1111111111111111111111111111111111111111");
+        let token_out = Bytes::from("0x2222222222222222222222222222222222222222");
+        let swap = Swap::new(
+            pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in.clone(),
+            group_token_out: token_out.clone(),
+        };
+        let encoder = SlipstreamsSwapEncoder::new(
+            Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
+            Chain::Ethereum,
+            None,
+        )
+        .unwrap();
+        let encoded_swap = encoder
+            .encode_swap(&swap, &encoding_context)
+            .unwrap();
+        let hex_swap = encode(&encoded_swap);
+        assert_eq!(
+            hex_swap,
+            String::from(concat!(
+                // in token
+                "1111111111111111111111111111111111111111",
+                // out token
+                "2222222222222222222222222222222222222222",
+                // tick spacing
+                "000032",
+                // pool id
+                "88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+                // zero for one
+                "01",
+            ))
+        );
+    }
+}

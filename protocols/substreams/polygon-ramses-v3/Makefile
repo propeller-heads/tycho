@@ -1,2 +1,2 @@
 build:
-	cargo build --target wasm32-unknown-unknown --profile substreams
+	cargo build --target wasm32-unknown-unknown --release

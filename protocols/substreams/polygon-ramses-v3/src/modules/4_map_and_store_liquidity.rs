@@ -1,137 +1,113 @@
-use std::str::FromStr;
-
 use substreams::store::{
     StoreGet, StoreGetInt64, StoreSet, StoreSetInt64, StoreSetSum, StoreSetSumBigInt,
 };
 
-use crate::pb::uniswap::v3::{
-    events::{pool_event, PoolEvent},
-    Events, LiquidityChange, LiquidityChangeType, LiquidityChanges,
+use crate::pb::ramses::v3::{
+    events::pool_event::Typ, Events, LiquidityChange, LiquidityChangeType, LiquidityChanges,
 };
 
 use substreams::{scalar::BigInt, store::StoreNew};
-
-use anyhow::Ok;
 
 #[substreams::handlers::store]
 pub fn store_pool_current_tick(events: Events, store: StoreSetInt64) {
     events
         .pool_events
         .into_iter()
-        .filter_map(event_to_current_tick)
-        .for_each(|(pool, ordinal, new_tick_index)| {
-            store.set(ordinal, format!("pool:{pool}"), &new_tick_index.into())
-        });
+        .filter_map(|event| {
+            let tick = maybe_current_tick(event.typ.unwrap())?;
+            Some((hex::encode(&event.pool_address), event.log_ordinal, tick))
+        })
+        .for_each(|(pool, ordinal, tick)| store.set(ordinal, pool, &tick.into()));
 }
 
 #[substreams::handlers::map]
 pub fn map_liquidity_changes(
     events: Events,
     pools_current_tick_store: StoreGetInt64,
-) -> Result<LiquidityChanges, anyhow::Error> {
-    let mut changes = events
+) -> LiquidityChanges {
+    let changes = events
         .pool_events
         .into_iter()
-        .filter(PoolEvent::can_introduce_liquidity_changes)
-        .map(|e| {
-            (
-                pools_current_tick_store
-                    .get_at(e.log_ordinal, format!("pool:{0}", &e.pool_address))
-                    .unwrap_or(0),
-                e,
-            )
-        })
-        .filter_map(|(current_tick, event)| event_to_liquidity_deltas(current_tick, event))
-        .collect::<Vec<_>>();
+        .filter_map(|event| {
+            let (value, change_type) = maybe_liquidity_change(
+                || {
+                    pools_current_tick_store
+                        .get_at(event.log_ordinal, hex::encode(&event.pool_address))
+                        .expect("current tick to exist for pool")
+                        .try_into()
+                        .expect("current tick to fit into i32")
+                },
+                event.typ.unwrap(),
+            )?;
 
-    changes.sort_unstable_by_key(|l| l.ordinal);
-    Ok(LiquidityChanges { changes })
+            Some(LiquidityChange {
+                pool_address: event.pool_address,
+                value,
+                change_type: change_type.into(),
+                ordinal: event.log_ordinal,
+                transaction: event.transaction,
+            })
+        })
+        .collect();
+
+    LiquidityChanges { changes }
 }
 
 #[substreams::handlers::store]
 pub fn store_liquidity(ticks_deltas: LiquidityChanges, store: StoreSetSumBigInt) {
-    ticks_deltas
-        .changes
-        .iter()
-        .for_each(|changes| match changes.change_type() {
+    for changes in ticks_deltas.changes {
+        let ord = changes.ordinal;
+        let key = hex::encode(&changes.pool_address);
+        let value = BigInt::from_signed_bytes_be(&changes.value);
+
+        match changes.change_type() {
             LiquidityChangeType::Delta => {
-                store.sum(
-                    changes.ordinal,
-                    format!("pool:{0}", hex::encode(&changes.pool_address)),
-                    BigInt::from_signed_bytes_be(&changes.value),
-                );
+                store.sum(ord, key, value);
             }
             LiquidityChangeType::Absolute => {
-                store.set(
-                    changes.ordinal,
-                    format!("pool:{0}", hex::encode(&changes.pool_address)),
-                    BigInt::from_signed_bytes_be(&changes.value),
-                );
-            }
-        });
-}
-
-fn event_to_liquidity_deltas(current_tick: i64, event: PoolEvent) -> Option<LiquidityChange> {
-    match event.r#type.as_ref().unwrap() {
-        pool_event::Type::Mint(mint) => {
-            if current_tick >= mint.tick_lower.into() && current_tick < mint.tick_upper.into() {
-                Some(LiquidityChange {
-                    pool_address: hex::decode(event.pool_address).unwrap(),
-                    value: BigInt::from_str(&mint.amount)
-                        .unwrap()
-                        .to_signed_bytes_be(),
-                    change_type: LiquidityChangeType::Delta.into(),
-                    ordinal: event.log_ordinal,
-                    transaction: Some(event.transaction.unwrap()),
-                })
-            } else {
-                None
+                store.set(ord, key, value);
             }
         }
-        pool_event::Type::Burn(burn) => {
-            if current_tick >= burn.tick_lower.into() && current_tick < burn.tick_upper.into() {
-                Some(LiquidityChange {
-                    pool_address: hex::decode(event.pool_address).unwrap(),
-                    value: BigInt::from_str(&burn.amount)
-                        .unwrap()
+    }
+}
+
+fn maybe_current_tick(ty: Typ) -> Option<i32> {
+    Some(match ty {
+        Typ::Initialize(init) => init.tick,
+        Typ::Swap(swap) => swap.tick,
+        _ => return None,
+    })
+}
+
+fn maybe_liquidity_change(
+    current_tick_fn: impl FnOnce() -> i32,
+    ty: Typ,
+) -> Option<(Vec<u8>, LiquidityChangeType)> {
+    match ty {
+        Typ::Mint(mint) => {
+            let current_tick = current_tick_fn();
+            (current_tick >= mint.tick_lower && current_tick < mint.tick_upper).then(|| {
+                (
+                    BigInt::from_unsigned_bytes_be(&mint.amount).to_signed_bytes_be(),
+                    LiquidityChangeType::Delta,
+                )
+            })
+        }
+        Typ::Burn(burn) => {
+            let current_tick = current_tick_fn();
+            (current_tick >= burn.tick_lower && current_tick < burn.tick_upper).then(|| {
+                (
+                    BigInt::from_unsigned_bytes_be(&burn.amount)
                         .neg()
                         .to_signed_bytes_be(),
-                    change_type: LiquidityChangeType::Delta.into(),
-                    ordinal: event.log_ordinal,
-                    transaction: Some(event.transaction.unwrap()),
-                })
-            } else {
-                None
-            }
+                    LiquidityChangeType::Delta,
+                )
+            })
         }
-        pool_event::Type::Swap(swap) => Some(LiquidityChange {
-            pool_address: hex::decode(event.pool_address).unwrap(),
-            value: BigInt::from_str(&swap.liquidity)
-                .unwrap()
-                .to_signed_bytes_be(),
-            change_type: LiquidityChangeType::Absolute.into(),
-            ordinal: event.log_ordinal,
-            transaction: Some(event.transaction.unwrap()),
-        }),
-        _ => None,
-    }
-}
-
-impl PoolEvent {
-    fn can_introduce_liquidity_changes(&self) -> bool {
-        matches!(
-            self.r#type.as_ref().unwrap(),
-            pool_event::Type::Mint(_) | pool_event::Type::Burn(_) | pool_event::Type::Swap(_)
-        )
-    }
-}
-
-fn event_to_current_tick(event: PoolEvent) -> Option<(String, u64, i32)> {
-    match event.r#type.as_ref().unwrap() {
-        pool_event::Type::Initialize(initialize) => {
-            Some((event.pool_address, event.log_ordinal, initialize.tick))
-        }
-        pool_event::Type::Swap(swap) => Some((event.pool_address, event.log_ordinal, swap.tick)),
+        Typ::Swap(swap) => Some((
+            BigInt::from_unsigned_bytes_be(&swap.liquidity).to_signed_bytes_be(),
+            LiquidityChangeType::Absolute,
+        )),
         _ => None,
     }
 }

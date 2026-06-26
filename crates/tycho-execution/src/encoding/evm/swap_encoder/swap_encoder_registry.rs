@@ -167,6 +167,12 @@ impl SwapEncoderRegistry {
             "velodrome_slipstreams" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            // Ramses V3 shares the Uniswap V3 swap ABI and callback, and (like the slipstream
+            // forks) keys pools by tick spacing. The Slipstreams encoder packs the immutable
+            // `tick_spacing` static attribute, so it works with the standard Uniswap V3 executor.
+            "ramses_v3" => {
+                Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }

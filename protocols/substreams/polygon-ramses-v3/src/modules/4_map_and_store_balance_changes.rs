@@ -1,26 +1,38 @@
-use std::str::FromStr;
+use substreams_helper::hex::Hexable;
+use tycho_substreams::models::{BalanceDelta, BlockBalanceDeltas, Transaction};
 
-use anyhow::Ok;
-use tycho_substreams::models::{BalanceDelta, BlockBalanceDeltas};
-
-use crate::pb::uniswap::v3::{
-    events::{pool_event, PoolEvent},
-    Events,
-};
+use crate::pb::ramses::v3::{events::pool_event::Typ, Events};
 use substreams::{
     scalar::BigInt,
     store::{StoreAddBigInt, StoreNew},
 };
 
 #[substreams::handlers::map]
-pub fn map_balance_changes(events: Events) -> Result<BlockBalanceDeltas, anyhow::Error> {
+pub fn map_balance_changes(events: Events) -> BlockBalanceDeltas {
     let balance_deltas = events
         .pool_events
         .into_iter()
-        .flat_map(event_to_balance_deltas)
+        .flat_map(|event| {
+            let (delta0, delta1) = maybe_balance_deltas(event.typ.unwrap())?;
+            let component_id = event.pool_address.to_hex().into_bytes();
+            let tx: Option<Transaction> = event.transaction.map(Into::into);
+
+            Some(
+                [(delta0, event.token0), (delta1, event.token1)]
+                    .into_iter()
+                    .map(move |(delta, token)| BalanceDelta {
+                        ord: event.log_ordinal,
+                        tx: tx.clone(),
+                        token,
+                        delta,
+                        component_id: component_id.clone(),
+                    }),
+            )
+        })
+        .flatten()
         .collect();
 
-    Ok(BlockBalanceDeltas { balance_deltas })
+    BlockBalanceDeltas { balance_deltas }
 }
 
 #[substreams::handlers::store]
@@ -28,136 +40,23 @@ pub fn store_pools_balances(balances_deltas: BlockBalanceDeltas, store: StoreAdd
     tycho_substreams::balances::store_balance_changes(balances_deltas, store);
 }
 
-fn event_to_balance_deltas(event: PoolEvent) -> Vec<BalanceDelta> {
-    let address = format!("0x{}", event.pool_address)
-        .as_bytes()
-        .to_vec();
-    match event.r#type.unwrap() {
-        pool_event::Type::Mint(e) => vec![
-            BalanceDelta {
-                token: hex::decode(event.token0).unwrap(),
-                delta: BigInt::from_str(&e.amount_0)
-                    .unwrap()
-                    .to_signed_bytes_be(),
-                component_id: address.clone(),
-                ord: event.log_ordinal,
-                tx: event
-                    .transaction
-                    .as_ref()
-                    .map(Into::into),
-            },
-            BalanceDelta {
-                token: hex::decode(event.token1).unwrap(),
-                delta: BigInt::from_str(&e.amount_1)
-                    .unwrap()
-                    .to_signed_bytes_be(),
-                component_id: address,
-                ord: event.log_ordinal,
-                tx: event.transaction.map(Into::into),
-            },
-        ],
-        pool_event::Type::Collect(e) => vec![
-            BalanceDelta {
-                token: hex::decode(event.token0).unwrap(),
-                delta: BigInt::from_str(&e.amount_0)
-                    .unwrap()
-                    .neg()
-                    .to_signed_bytes_be(),
-                component_id: address.clone(),
-                ord: event.log_ordinal,
-                tx: event
-                    .transaction
-                    .as_ref()
-                    .map(Into::into),
-            },
-            BalanceDelta {
-                token: hex::decode(event.token1).unwrap(),
-                delta: BigInt::from_str(&e.amount_1)
-                    .unwrap()
-                    .neg()
-                    .to_signed_bytes_be(),
-                component_id: address,
-                ord: event.log_ordinal,
-                tx: event.transaction.map(Into::into),
-            },
-        ],
-        //Burn balance changes are accounted for in the Collect event.
-        pool_event::Type::Burn(_) => vec![],
-        pool_event::Type::Swap(e) => {
-            vec![
-                BalanceDelta {
-                    token: hex::decode(event.token0).unwrap(),
-                    delta: BigInt::from_str(&e.amount_0)
-                        .unwrap()
-                        .to_signed_bytes_be(),
-                    component_id: address.clone(),
-                    ord: event.log_ordinal,
-                    tx: event
-                        .transaction
-                        .as_ref()
-                        .map(Into::into),
-                },
-                BalanceDelta {
-                    token: hex::decode(event.token1).unwrap(),
-                    delta: BigInt::from_str(&e.amount_1)
-                        .unwrap()
-                        .to_signed_bytes_be(),
-                    component_id: address,
-                    ord: event.log_ordinal,
-                    tx: event.transaction.map(Into::into),
-                },
-            ]
-        }
-        pool_event::Type::Flash(e) => vec![
-            BalanceDelta {
-                token: hex::decode(event.token0).unwrap(),
-                delta: BigInt::from_str(&e.paid_0)
-                    .unwrap()
-                    .to_signed_bytes_be(),
-                component_id: address.clone(),
-                ord: event.log_ordinal,
-                tx: event
-                    .transaction
-                    .as_ref()
-                    .map(Into::into),
-            },
-            BalanceDelta {
-                token: hex::decode(event.token1).unwrap(),
-                delta: BigInt::from_str(&e.paid_1)
-                    .unwrap()
-                    .to_signed_bytes_be(),
-                component_id: address,
-                ord: event.log_ordinal,
-                tx: event.transaction.map(Into::into),
-            },
-        ],
-        pool_event::Type::CollectProtocol(e) => {
-            vec![
-                BalanceDelta {
-                    token: hex::decode(event.token0).unwrap(),
-                    delta: BigInt::from_str(&e.amount_0)
-                        .unwrap()
-                        .neg()
-                        .to_signed_bytes_be(),
-                    component_id: address.clone(),
-                    ord: event.log_ordinal,
-                    tx: event
-                        .transaction
-                        .as_ref()
-                        .map(Into::into),
-                },
-                BalanceDelta {
-                    token: hex::decode(event.token1).unwrap(),
-                    delta: BigInt::from_str(&e.amount_1)
-                        .unwrap()
-                        .neg()
-                        .to_signed_bytes_be(),
-                    component_id: address,
-                    ord: event.log_ordinal,
-                    tx: event.transaction.map(Into::into),
-                },
-            ]
-        }
-        _ => vec![],
-    }
+fn maybe_balance_deltas(ty: Typ) -> Option<(Vec<u8>, Vec<u8>)> {
+    Some(match ty {
+        Typ::Mint(e) => (inflow(&e.amount_0), inflow(&e.amount_1)),
+        Typ::Swap(e) => (e.amount_0, e.amount_1),
+        Typ::Collect(e) => (outflow(&e.amount_0), outflow(&e.amount_1)),
+        Typ::Flash(e) => (inflow(&e.paid_0), inflow(&e.paid_1)),
+        Typ::CollectProtocol(e) => (outflow(&e.amount_0), outflow(&e.amount_1)),
+        _ => return None,
+    })
+}
+
+fn inflow(unsigned: &[u8]) -> Vec<u8> {
+    BigInt::from_unsigned_bytes_be(unsigned).to_signed_bytes_be()
+}
+
+fn outflow(unsigned: &[u8]) -> Vec<u8> {
+    BigInt::from_unsigned_bytes_be(unsigned)
+        .neg()
+        .to_signed_bytes_be()
 }

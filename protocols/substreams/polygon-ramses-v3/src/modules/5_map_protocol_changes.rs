@@ -1,15 +1,10 @@
-use crate::pb::uniswap::v3::{
-    events::{pool_event, PoolEvent},
-    Events, LiquidityChanges, TickDeltas,
-};
+use crate::pb::ramses::v3::{events::pool_event::Typ, Events, LiquidityChanges, TickDeltas};
 use itertools::Itertools;
 use std::{collections::HashMap, str::FromStr, vec};
 use substreams::{pb::substreams::StoreDeltas, scalar::BigInt};
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use substreams_helper::hex::Hexable;
 use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
-
-type PoolAddress = Vec<u8>;
 
 #[substreams::handlers::map]
 pub fn map_protocol_changes(
@@ -22,12 +17,10 @@ pub fn map_protocol_changes(
     ticks_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
-) -> Result<BlockChanges, substreams::errors::Error> {
-    // We merge contract changes by transaction (identified by transaction index) making it easy to
-    //  sort them at the very end.
+) -> BlockChanges {
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
 
-    // Add created pools to the tx_changes_map
+    // Add created pools to the tx changes map
     for change in created_pools.changes.into_iter() {
         let tx = change.tx.as_ref().unwrap();
         let builder = transaction_changes
@@ -86,7 +79,7 @@ pub fn map_protocol_changes(
                 BigInt::from_str(&String::from_utf8(store_delta.old_value).unwrap())
                     .unwrap()
                     .is_zero();
-            let attribute_name = format!("ticks/{}/net-liquidity", tick_delta.tick_index);
+            let attribute_name = format!("ticks/{}", tick_delta.tick_index);
             let attribute = Attribute {
                 name: attribute_name,
                 value: new_value_bigint.to_signed_bytes_be(),
@@ -132,28 +125,29 @@ pub fn map_protocol_changes(
                 component_id: change.pool_address.to_hex(),
                 attributes: vec![Attribute {
                     name: "liquidity".to_string(),
-                    value: new_value_bigint.to_signed_bytes_be(),
+                    value: new_value_bigint.to_bytes_be().1,
                     change: ChangeType::Update.into(),
                 }],
             });
         });
 
-    // Insert others changes
-    events
-        .pool_events
-        .into_iter()
-        .flat_map(event_to_attributes_updates)
-        .for_each(|(tx, pool_address, attr)| {
-            let builder = transaction_changes
-                .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&tx));
-            builder.add_entity_change(&EntityChanges {
-                component_id: pool_address.to_hex(),
-                attributes: vec![attr],
-            });
+    // Insert other attributes
+    for event in events.pool_events {
+        let attributes = event_to_attributes_updates(event.typ.unwrap());
+        if attributes.is_empty() {
+            continue;
+        }
+        let tx: Transaction = event.transaction.unwrap().into();
+        let builder = transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+        builder.add_entity_change(&EntityChanges {
+            component_id: event.pool_address.to_hex(),
+            attributes,
         });
+    }
 
-    Ok(BlockChanges {
+    BlockChanges {
         block: Some((&block).into()),
         changes: transaction_changes
             .drain()
@@ -161,88 +155,34 @@ pub fn map_protocol_changes(
             .filter_map(|(_, builder)| builder.build())
             .collect::<Vec<_>>(),
         ..Default::default()
-    })
+    }
 }
 
-fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddress, Attribute)> {
-    match event.r#type.as_ref().unwrap() {
-        pool_event::Type::Initialize(initalize) => {
-            vec![
-                (
-                    event
-                        .transaction
-                        .as_ref()
-                        .unwrap()
-                        .into(),
-                    hex::decode(&event.pool_address).unwrap(),
-                    Attribute {
-                        name: "sqrt_price_x96".to_string(),
-                        value: BigInt::from_str(&initalize.sqrt_price)
-                            .unwrap()
-                            .to_signed_bytes_be(),
-                        change: ChangeType::Update.into(),
-                    },
-                ),
-                (
-                    event.transaction.unwrap().into(),
-                    hex::decode(event.pool_address).unwrap(),
-                    Attribute {
-                        name: "tick".to_string(),
-                        value: BigInt::from(initalize.tick).to_signed_bytes_be(),
-                        change: ChangeType::Update.into(),
-                    },
-                ),
-            ]
-        }
-        pool_event::Type::Swap(swap) => vec![
-            (
-                event
-                    .transaction
-                    .as_ref()
-                    .unwrap()
-                    .into(),
-                hex::decode(&event.pool_address).unwrap(),
-                Attribute {
-                    name: "sqrt_price_x96".to_string(),
-                    value: BigInt::from_str(&swap.sqrt_price)
-                        .unwrap()
-                        .to_signed_bytes_be(),
-                    change: ChangeType::Update.into(),
-                },
-            ),
-            (
-                event.transaction.unwrap().into(),
-                hex::decode(event.pool_address).unwrap(),
-                Attribute {
-                    name: "tick".to_string(),
-                    value: BigInt::from(swap.tick).to_signed_bytes_be(),
-                    change: ChangeType::Update.into(),
-                },
-            ),
+fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
+    match ty {
+        Typ::Initialize(init) => vec![
+            Attribute {
+                name: "sqrt_price_x96".to_string(),
+                value: init.sqrt_price,
+                change: ChangeType::Update.into(),
+            },
+            Attribute {
+                name: "tick".to_string(),
+                value: BigInt::from(init.tick).to_signed_bytes_be(),
+                change: ChangeType::Update.into(),
+            },
         ],
-        pool_event::Type::SetFeeProtocol(sfp) => vec![
-            (
-                event
-                    .transaction
-                    .as_ref()
-                    .unwrap()
-                    .into(),
-                hex::decode(&event.pool_address).unwrap(),
-                Attribute {
-                    name: "protocol_fees/token0".to_string(),
-                    value: BigInt::from(sfp.fee_protocol_0_new).to_signed_bytes_be(),
-                    change: ChangeType::Update.into(),
-                },
-            ),
-            (
-                event.transaction.unwrap().into(),
-                hex::decode(event.pool_address).unwrap(),
-                Attribute {
-                    name: "protocol_fees/token1".to_string(),
-                    value: BigInt::from(sfp.fee_protocol_1_new).to_signed_bytes_be(),
-                    change: ChangeType::Update.into(),
-                },
-            ),
+        Typ::Swap(swap) => vec![
+            Attribute {
+                name: "sqrt_price_x96".to_string(),
+                value: swap.sqrt_price,
+                change: ChangeType::Update.into(),
+            },
+            Attribute {
+                name: "tick".to_string(),
+                value: BigInt::from(swap.tick).to_signed_bytes_be(),
+                change: ChangeType::Update.into(),
+            },
         ],
         _ => vec![],
     }

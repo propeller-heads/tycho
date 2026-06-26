@@ -8,8 +8,6 @@ pub struct Pool {
     pub token0: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes="vec", tag="3")]
     pub token1: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes="vec", tag="4")]
-    pub created_tx_hash: ::prost::alloc::vec::Vec<u8>,
 }
 /// A struct describing a transaction.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -38,7 +36,7 @@ pub struct TickDelta {
     /// The index of the tick.
     #[prost(int32, tag="2")]
     pub tick_index: i32,
-    /// The liquidity net delta of this tick. Bigint encoded as signed little endian bytes.
+    /// The liquidity net delta of this tick. Bigint encoded as signed big endian bytes.
     #[prost(bytes="vec", tag="3")]
     pub liquidity_net_delta: ::prost::alloc::vec::Vec<u8>,
     /// Used to determine the order of the balance changes. Necessary for the balance store.
@@ -61,7 +59,7 @@ pub struct LiquidityChange {
     /// The address of the pool.
     #[prost(bytes="vec", tag="1")]
     pub pool_address: ::prost::alloc::vec::Vec<u8>,
-    /// The liquidity changed amount. Bigint encoded as signed little endian bytes.
+    /// The liquidity changed amount. Bigint encoded as signed big endian bytes.
     #[prost(bytes="vec", tag="2")]
     pub value: ::prost::alloc::vec::Vec<u8>,
     /// The type of update, can be absolute or delta.
@@ -80,10 +78,11 @@ pub struct LiquidityChanges {
     #[prost(message, repeated, tag="1")]
     pub changes: ::prost::alloc::vec::Vec<LiquidityChange>,
 }
+/// All numeric amounts below are BigInt values encoded as signed big-endian bytes.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Events {
-    #[prost(message, repeated, tag="3")]
+    #[prost(message, repeated, tag="1")]
     pub pool_events: ::prost::alloc::vec::Vec<events::PoolEvent>,
 }
 /// Nested message and enum types in `Events`.
@@ -91,165 +90,94 @@ pub mod events {
     #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct PoolEvent {
-        #[prost(uint64, tag="100")]
+        #[prost(uint64, tag="8")]
         pub log_ordinal: u64,
-        #[prost(string, tag="102")]
-        pub pool_address: ::prost::alloc::string::String,
-        #[prost(string, tag="103")]
-        pub token0: ::prost::alloc::string::String,
-        #[prost(string, tag="104")]
-        pub token1: ::prost::alloc::string::String,
-        #[prost(message, optional, tag="105")]
+        #[prost(bytes="vec", tag="9")]
+        pub pool_address: ::prost::alloc::vec::Vec<u8>,
+        #[prost(bytes="vec", tag="10")]
+        pub token0: ::prost::alloc::vec::Vec<u8>,
+        #[prost(bytes="vec", tag="11")]
+        pub token1: ::prost::alloc::vec::Vec<u8>,
+        #[prost(message, optional, tag="12")]
         pub transaction: ::core::option::Option<super::Transaction>,
-        #[prost(oneof="pool_event::Type", tags="1, 2, 3, 4, 5, 6, 7, 8")]
-        pub r#type: ::core::option::Option<pool_event::Type>,
+        #[prost(oneof="pool_event::Typ", tags="1, 2, 3, 4, 5, 6, 7")]
+        pub typ: ::core::option::Option<pool_event::Typ>,
     }
     /// Nested message and enum types in `PoolEvent`.
     pub mod pool_event {
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Initialize {
-            /// Unsigned
-            #[prost(string, tag="1")]
-            pub sqrt_price: ::prost::alloc::string::String,
+            #[prost(bytes="vec", tag="1")]
+            pub sqrt_price: ::prost::alloc::vec::Vec<u8>,
             #[prost(int32, tag="2")]
             pub tick: i32,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Mint {
-            #[prost(string, tag="1")]
-            pub sender: ::prost::alloc::string::String,
-            #[prost(string, tag="2")]
-            pub owner: ::prost::alloc::string::String,
-            /// Signed
-            #[prost(int32, tag="3")]
+            #[prost(int32, tag="1")]
             pub tick_lower: i32,
-            /// Signed
-            #[prost(int32, tag="4")]
+            #[prost(int32, tag="2")]
             pub tick_upper: i32,
-            /// Unsigned
-            #[prost(string, tag="5")]
-            pub amount: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="6")]
-            pub amount_0: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="7")]
-            pub amount_1: ::prost::alloc::string::String,
+            #[prost(bytes="vec", tag="3")]
+            pub amount: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="4")]
+            pub amount_0: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="5")]
+            pub amount_1: ::prost::alloc::vec::Vec<u8>,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Collect {
-            #[prost(string, tag="1")]
-            pub owner: ::prost::alloc::string::String,
-            #[prost(string, tag="2")]
-            pub recipient: ::prost::alloc::string::String,
-            #[prost(int32, tag="3")]
-            pub tick_lower: i32,
-            #[prost(int32, tag="4")]
-            pub tick_upper: i32,
-            /// Unsigned
-            #[prost(string, tag="5")]
-            pub amount_0: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="6")]
-            pub amount_1: ::prost::alloc::string::String,
+            #[prost(bytes="vec", tag="1")]
+            pub amount_0: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="2")]
+            pub amount_1: ::prost::alloc::vec::Vec<u8>,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Burn {
-            #[prost(string, tag="1")]
-            pub owner: ::prost::alloc::string::String,
-            #[prost(int32, tag="2")]
+            #[prost(int32, tag="1")]
             pub tick_lower: i32,
-            #[prost(int32, tag="3")]
+            #[prost(int32, tag="2")]
             pub tick_upper: i32,
-            /// Unsigned
-            #[prost(string, tag="4")]
-            pub amount: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="5")]
-            pub amount_0: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="6")]
-            pub amount_1: ::prost::alloc::string::String,
+            #[prost(bytes="vec", tag="3")]
+            pub amount: ::prost::alloc::vec::Vec<u8>,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Swap {
-            #[prost(string, tag="1")]
-            pub sender: ::prost::alloc::string::String,
-            #[prost(string, tag="2")]
-            pub recipient: ::prost::alloc::string::String,
-            /// Signed
-            #[prost(string, tag="3")]
-            pub amount_0: ::prost::alloc::string::String,
-            /// Signed
-            #[prost(string, tag="4")]
-            pub amount_1: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="6")]
-            pub sqrt_price: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="7")]
-            pub liquidity: ::prost::alloc::string::String,
-            #[prost(int32, tag="8")]
+            #[prost(bytes="vec", tag="1")]
+            pub amount_0: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="2")]
+            pub amount_1: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="3")]
+            pub sqrt_price: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="4")]
+            pub liquidity: ::prost::alloc::vec::Vec<u8>,
+            #[prost(int32, tag="5")]
             pub tick: i32,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Flash {
-            #[prost(string, tag="1")]
-            pub sender: ::prost::alloc::string::String,
-            #[prost(string, tag="2")]
-            pub recipient: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="3")]
-            pub amount_0: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="4")]
-            pub amount_1: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="5")]
-            pub paid_0: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="6")]
-            pub paid_1: ::prost::alloc::string::String,
-        }
-        #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-        pub struct SetFeeProtocol {
-            /// Unsigned
-            #[prost(uint64, tag="1")]
-            pub fee_protocol_0_old: u64,
-            /// Unsigned
-            #[prost(uint64, tag="2")]
-            pub fee_protocol_1_old: u64,
-            /// Unsigned
-            #[prost(uint64, tag="3")]
-            pub fee_protocol_0_new: u64,
-            /// Unsigned
-            #[prost(uint64, tag="4")]
-            pub fee_protocol_1_new: u64,
+            #[prost(bytes="vec", tag="1")]
+            pub paid_0: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="2")]
+            pub paid_1: ::prost::alloc::vec::Vec<u8>,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct CollectProtocol {
-            #[prost(string, tag="1")]
-            pub sender: ::prost::alloc::string::String,
-            #[prost(string, tag="2")]
-            pub recipient: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="3")]
-            pub amount_0: ::prost::alloc::string::String,
-            /// Unsigned
-            #[prost(string, tag="4")]
-            pub amount_1: ::prost::alloc::string::String,
+            #[prost(bytes="vec", tag="1")]
+            pub amount_0: ::prost::alloc::vec::Vec<u8>,
+            #[prost(bytes="vec", tag="2")]
+            pub amount_1: ::prost::alloc::vec::Vec<u8>,
         }
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Oneof)]
-        pub enum Type {
+        pub enum Typ {
             #[prost(message, tag="1")]
             Initialize(Initialize),
             #[prost(message, tag="2")]
@@ -263,8 +191,6 @@ pub mod events {
             #[prost(message, tag="6")]
             Flash(Flash),
             #[prost(message, tag="7")]
-            SetFeeProtocol(SetFeeProtocol),
-            #[prost(message, tag="8")]
             CollectProtocol(CollectProtocol),
         }
     }
