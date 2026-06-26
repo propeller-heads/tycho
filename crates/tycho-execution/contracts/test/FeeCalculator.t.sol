@@ -840,11 +840,11 @@ contract FeeCalculatorSlippageTest is Constants {
 
     function testRouterKeepsAllPositiveSlippage() public view {
         // Default clientSlippageShareBps = 0 → router keeps all
-        uint256 grossAmountOut = 1.1 ether;
-        uint256 quotedAmountOut = 1 ether;
+        uint256 actualAmountOut = 1.1 ether;
+        uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
 
         // surplus = 0.1 ether, all to router
         assertEq(fees[0].recipient, ADMIN);
@@ -857,11 +857,11 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.prank(FEE_SETTER);
         feeCalculator.setDefaultClientSlippageShare(5000); // 50%
 
-        uint256 grossAmountOut = 1.1 ether;
-        uint256 quotedAmountOut = 1 ether;
+        uint256 actualAmountOut = 1.1 ether;
+        uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
 
         // surplus = 0.1 ether, 50% each
         assertEq(fees[0].recipient, ADMIN);
@@ -876,11 +876,11 @@ contract FeeCalculatorSlippageTest is Constants {
         feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
         vm.stopPrank();
 
-        uint256 grossAmountOut = 1.1 ether;
-        uint256 quotedAmountOut = 1 ether;
+        uint256 actualAmountOut = 1.1 ether;
+        uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
 
         // surplus = 0.1 ether, BOB gets 80% custom share
         assertEq(fees[0].recipient, ADMIN);
@@ -896,11 +896,11 @@ contract FeeCalculatorSlippageTest is Constants {
         feeCalculator.removeCustomClientSlippageShare(BOB);
         vm.stopPrank();
 
-        uint256 grossAmountOut = 1.1 ether;
-        uint256 quotedAmountOut = 1 ether;
+        uint256 actualAmountOut = 1.1 ether;
+        uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+            feeCalculator.calculateFee(actualAmountOut, expectedAmountOut, 0, BOB);
 
         // After removal, falls back to default 20%
         assertEq(fees[0].feeAmount, 0.08 ether); // router 80%
@@ -927,15 +927,15 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
 
-        uint256 grossAmountOut = 0.9 ether;
-        uint256 quotedAmountOut = 1 ether;
+        uint256 actualAmountOut = 0.9 ether;
+        uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            grossAmountOut, quotedAmountOut, 0, BOB
+            actualAmountOut, expectedAmountOut, 0, BOB
         );
 
         // No surplus, but router fee on output still applies
-        // routerFee = 1 ether * 1% = 0.01 ether (based on quotedAmountOut)
+        // routerFee = 1 ether * 1% = 0.01 ether (based on expectedAmountOut)
         assertEq(fees[0].feeAmount, 0.01 ether);
         assertEq(fees[1].feeAmount, 0);
     }
