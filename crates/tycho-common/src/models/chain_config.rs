@@ -194,7 +194,8 @@ pub enum ChainConfigFileError {
 ///
 /// Built-in chains are resolved without this registry; it only holds user-defined chains loaded
 /// from a YAML source. Build it explicitly via [`ChainConfigRegistry::from_configs`] (e.g. the
-/// indexer reusing its `chains:` config) or rely on the lazily-loaded global [`chain_registry`].
+/// indexer reusing its `chains:` config) or [`ChainConfigRegistry::load_default`], then install it
+/// as the process-wide registry with [`init_chain_registry`].
 #[derive(Debug, Default, Clone)]
 pub struct ChainConfigRegistry {
     custom: HashMap<String, CustomChainConfig>,
@@ -218,15 +219,16 @@ impl ChainConfigRegistry {
     /// Reads custom chain configs from `TYCHO_CHAIN_CONFIG` (default `./chain.yaml`).
     ///
     /// Returns an empty registry when the file is absent, so runs on built-in chains need no config
-    /// file. Panics with context if the file exists but cannot be read or parsed.
-    pub fn load_default() -> Self {
+    /// file. Returns an error if the file exists but cannot be read or parsed, leaving it to the
+    /// caller to decide how to react. Install the result with [`init_chain_registry`] to make it
+    /// the process-wide registry.
+    pub fn load_default() -> Result<Self, ChainConfigFileError> {
         let path = std::env::var(CHAIN_CONFIG_ENV)
             .unwrap_or_else(|_| DEFAULT_CHAIN_CONFIG_PATH.to_owned());
         if !std::path::Path::new(&path).exists() {
-            return Self::empty();
+            return Ok(Self::empty());
         }
         Self::from_yaml_file(&path)
-            .unwrap_or_else(|e| panic!("failed to load chain config from '{path}': {e}"))
     }
 
     /// Parses a registry from a YAML file with a top-level `chains:` list.
@@ -254,10 +256,13 @@ impl ChainConfigRegistry {
 
 static CHAIN_REGISTRY: OnceLock<ChainConfigRegistry> = OnceLock::new();
 
-/// Returns the process-wide chain config registry, lazily loading it from the configured file on
-/// first access (see [`ChainConfigRegistry::load_default`]).
+/// Returns the process-wide chain config registry.
+///
+/// Defaults to an empty registry — only built-in chains resolve — unless one was installed with
+/// [`init_chain_registry`]. This never reads from disk; load custom chains explicitly via
+/// [`ChainConfigRegistry::load_default`] and install them before first access.
 pub fn chain_registry() -> &'static ChainConfigRegistry {
-    CHAIN_REGISTRY.get_or_init(ChainConfigRegistry::load_default)
+    CHAIN_REGISTRY.get_or_init(ChainConfigRegistry::empty)
 }
 
 /// Installs the process-wide chain config registry explicitly, before any call to
