@@ -128,8 +128,7 @@ fn test_evm_split_input_cyclic_swap() {
     // USDC -> WETH (Pool 1) - 60% of input
     let swap_usdc_weth_pool1 = Swap::new(
         ProtocolComponent {
-            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 1 */
+            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), // USDC-WETH USV3 Pool 1
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -149,8 +148,7 @@ fn test_evm_split_input_cyclic_swap() {
     // USDC -> WETH (Pool 2) - 40% of input (remaining)
     let swap_usdc_weth_pool2 = Swap::new(
         ProtocolComponent {
-            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 2 */
+            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), // USDC-WETH USV3 Pool 2
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -170,8 +168,7 @@ fn test_evm_split_input_cyclic_swap() {
     // WETH -> USDC (Pool 2)
     let swap_weth_usdc_pool2 = Swap::new(
         ProtocolComponent {
-            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), /* USDC-WETH USV2
-                                                                           * Pool 2 */
+            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), // USDC-WETH USV2 Pool 2
             protocol_system: "uniswap_v2".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -223,12 +220,12 @@ fn test_evm_split_input_cyclic_swap() {
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
         "ce4cf5a0", // selector (splitSwapPermit2)
-        "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
+        "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "0000000000000000000000000000000000000000000000000000000005ef619b", // amount out
         "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
-        "0000000000000000000000000000000000000000000000000000000000000002", // tokens length
+        "0000000000000000000000000000000000000000000000000000000000000002", // nTokens
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
     ]
     .join("");
@@ -237,11 +234,9 @@ fn test_evm_split_input_cyclic_swap() {
     // time) it's hard to assert back
 
     let expected_swaps = [
-        "000000000000000000000000000000000000000000000000000000000000010d", /* length of ple
-                                                                             * encoded swaps
-                                                                             * without padding
-                                                                             * (269 bytes) */
-        "0059",                                     // ple encoded swaps (89 bytes)
+        "000000000000000000000000000000000000000000000000000000000000010d", // swapData len = 269
+        // ple encoded swaps (89 bytes)
+        "0059",
         "00",                                       // token in index
         "01",                                       // token out index
         "999999",                                   // split
@@ -292,7 +287,7 @@ fn test_evm_split_output_cyclic_swap() {
 
     let swap_usdc_weth_v2 = Swap::new(
         ProtocolComponent {
-            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), /* USDC-WETH USV2 */
+            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), // USDC-WETH USV2
             protocol_system: "uniswap_v2".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -309,8 +304,7 @@ fn test_evm_split_output_cyclic_swap() {
 
     let swap_weth_usdc_v3_pool1 = Swap::new(
         ProtocolComponent {
-            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 1 */
+            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), // USDC-WETH USV3 Pool 1
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -328,8 +322,7 @@ fn test_evm_split_output_cyclic_swap() {
 
     let swap_weth_usdc_v3_pool2 = Swap::new(
         ProtocolComponent {
-            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 2 */
+            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), // USDC-WETH USV3 Pool 2
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -381,12 +374,12 @@ fn test_evm_split_output_cyclic_swap() {
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
         "ce4cf5a0", // selector (splitSwapPermit2)
-        "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
+        "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "0000000000000000000000000000000000000000000000000000000005e703f4", // amount out
         "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
-        "0000000000000000000000000000000000000000000000000000000000000002", // tokens length
+        "0000000000000000000000000000000000000000000000000000000000000002", // nTokens
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
     ]
     .join("");
@@ -395,11 +388,9 @@ fn test_evm_split_output_cyclic_swap() {
     // time) it's hard to assert back
 
     let expected_swaps = [
-        "000000000000000000000000000000000000000000000000000000000000010d", /* length of ple
-                                                                             * encoded swaps
-                                                                             * without padding
-                                                                             * (269 bytes) */
-        "0055",                                     // ple encoded swaps (85 bytes)
+        "000000000000000000000000000000000000000000000000000000000000010d", // swapData len = 269
+        // ple encoded swaps (85 bytes)
+        "0055",
         "00",                                       // token in index
         "01",                                       // token out index
         "000000",                                   // split

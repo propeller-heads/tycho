@@ -69,7 +69,7 @@ fn test_evm_single_swap_strategy_encoder() {
     .data;
     let expected_min_amount_encoded = encode(U256::abi_encode(&biguint_to_u256(&checked_amount)));
     let expected_input = [
-        "04df9f39", // Function selector (singleSwapPermit2)
+        "04df9f39", // selector (singleSwapPermit2)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out

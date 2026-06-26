@@ -150,24 +150,30 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
     let hex_calldata = encode(&calldata);
 
     let expected = String::from(concat!(
-        "8d1eaea0", // function selector (sequentialSwap)
+        "8d1eaea0", // selector (sequentialSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "00000000000000000000000000000000000000000000000000000000018f61ec", // amount out
         "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "0000000000000000000000000000000000000000000000000000000000000100", /* clientFeeParams * offset = 256 */
-        "00000000000000000000000000000000000000000000000000000000000001c0", /* swapData offset = * 448 */
+        // clientFeeParams offset = 256
+        "0000000000000000000000000000000000000000000000000000000000000100",
+        // swapData offset = 448
+        "00000000000000000000000000000000000000000000000000000000000001c0",
         // clientFeeParams tail (6 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
-        "0000000000000000000000000000000000000000000000000000000000000000", /* clientFeeReceiver * = 0 */
-        "0000000000000000000000000000000000000000000000000000000000000000", /* maxClientContribution = 0 */
+        // clientFeeReceiver = 0
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        // maxClientContribution = 0
+        "0000000000000000000000000000000000000000000000000000000000000000",
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // deadline = U256::MAX
-        "00000000000000000000000000000000000000000000000000000000000000a0", /* clientSignature offset in struct = 160 */
-        "0000000000000000000000000000000000000000000000000000000000000000", /* clientSignature * length = 0 */
-        // swapData:
-        "00000000000000000000000000000000000000000000000000000000000000a4", /* len swaps (164 * bytes) */
+        // clientSignature offset in struct = 160
+        "00000000000000000000000000000000000000000000000000000000000000a0",
+        // clientSignature length = 0
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        // swapData length = 164 bytes
+        "00000000000000000000000000000000000000000000000000000000000000a4",
         // swap 1: WETH -> WBTC
         "0050",                                     // swap length (80 bytes)
         "5615deb798bb3e4dfa0139dfa1b3d433cc23b72f", // executor address
@@ -203,8 +209,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     // USDC -> WETH (Pool 1)
     let swap_usdc_weth = Swap::new(
         ProtocolComponent {
-            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 1 */
+            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), // USDC-WETH USV3 Pool 1
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -222,8 +227,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     // WETH -> USDC (Pool 2)
     let swap_weth_usdc = Swap::new(
         ProtocolComponent {
-            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 2 */
+            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), // USDC-WETH USV3 Pool 2
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -274,9 +278,9 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
         "b6bfa3c2", // selector (sequentialSwapPermit2)
-        "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
+        "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "0000000000000000000000000000000000000000000000000000000005ec8f6e", // amount out
         "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
@@ -287,11 +291,9 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     // time) it's hard to assert back
 
     let expected_swaps = [
-        "00000000000000000000000000000000000000000000000000000000000000ac", /* length of ple
-                                                                             * encoded swaps
-                                                                             * without padding
-                                                                             * (172 bytes) */
-        "0054",                                     // ple encoded swaps (84 bytes)
+        "00000000000000000000000000000000000000000000000000000000000000ac", // swapData len = 172
+        // ple encoded swaps (84 bytes)
+        "0054",
         "2e234dae75c793f67a35089c9d99245e1c58470b", // executor address
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token out
@@ -328,8 +330,7 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
     // USDC -> WETH (Pool 1)
     let swap_usdc_weth = Swap::new(
         ProtocolComponent {
-            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 1 */
+            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), // USDC-WETH USV3 Pool 1
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -347,8 +348,7 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
     // WETH -> USDC (Pool 2)
     let swap_weth_usdc = Swap::new(
         ProtocolComponent {
-            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 2 */
+            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), // USDC-WETH USV3 Pool 2
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
