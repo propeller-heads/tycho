@@ -37,7 +37,7 @@ use tracing_subscriber::EnvFilter;
 use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
-        chain_config::CustomChainConfig,
+        chain_config::{ChainConfigRegistry, CustomChainConfig},
         contract::AccountDelta,
         Address, Chain, ExtractionState, ImplementationType,
     },
@@ -93,15 +93,11 @@ impl ExtractorConfigs {
     }
 }
 
-fn resolve_chain(
-    name: &str,
-    custom_chains: &[CustomChainConfig],
-) -> Result<Chain, ExtractionError> {
+fn resolve_chain(name: &str, registry: &ChainConfigRegistry) -> Result<Chain, ExtractionError> {
     match Chain::from_str(name) {
         Ok(chain) => Ok(chain),
-        Err(_) => custom_chains
-            .iter()
-            .find(|cfg| cfg.name() == name)
+        Err(_) => registry
+            .get(name)
             .map(|cfg| Chain::Custom(*cfg))
             .ok_or_else(|| {
                 ExtractionError::Setup(format!(
@@ -271,10 +267,14 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .parse()
                 .expect("Failed to parse retention horizon");
 
+            let chain_registry =
+                ChainConfigRegistry::from_configs(extractors_config.chains.clone())
+                    .map_err(|e| ExtractionError::Setup(e.to_string()))?;
+
             let chains = index_args
                 .chains
                 .iter()
-                .map(|name| resolve_chain(name, &extractors_config.chains))
+                .map(|name| resolve_chain(name, &chain_registry))
                 .collect::<Result<Vec<_>, _>>()?;
 
             let (extraction_tasks, other_tasks) = create_indexing_tasks(
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_resolve_unknown_chain_fails() {
-        let err = resolve_chain("notachain", &[]).unwrap_err();
+        let err = resolve_chain("notachain", &ChainConfigRegistry::empty()).unwrap_err();
         assert!(matches!(err, ExtractionError::Setup(msg) if msg.contains("notachain")));
     }
 
@@ -770,7 +770,9 @@ chains:
       medium: 10000
 "#;
         let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
-        let Chain::Custom(cfg) = resolve_chain("mychain", &config.chains).expect("resolve failed")
+        let registry =
+            ChainConfigRegistry::from_configs(config.chains).expect("registry build failed");
+        let Chain::Custom(cfg) = resolve_chain("mychain", &registry).expect("resolve failed")
         else {
             panic!("expected Chain::Custom")
         };
