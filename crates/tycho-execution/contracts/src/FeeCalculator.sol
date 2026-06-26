@@ -83,6 +83,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @notice Calculates all fees and slippage surplus from swap output
      * @dev Called from TychoRouter. Does not perform any accounting.
+     *
+     *      Deduction order:
+     *      1. Positive slippage surplus (grossAmountOut - quotedAmountOut) is
+     *         split between router and client first.
+     *      2. Fees (client fee + router fees) are then calculated on
+     *         quotedAmountOut, i.e. on the amount *after* surplus extraction.
+     *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
      *      clientFeeBps uses the legacy BPS scale (10000 = 100%). Internally it is scaled to the
@@ -90,7 +97,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @param grossAmountOut The actual amount received from the swap
      *        (used for slippage surplus calculation)
      * @param quotedAmountOut Caller-supplied quoted amount out.
-     * @param clientFeeBps Client fee in basis points (10000 = 100%)
+     *        Fees are calculated on this amount.
      * @param client The client address to look up custom router fees
      *        and slippage share for and to receive fees.
      *        Pass address(0) to fall back to tx.origin for the
@@ -105,16 +112,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     ) external view returns (FeeRecipient[] memory feeRecipients) {
         address resolvedClient = _resolveClient(client);
 
-        // Calculate fees
         FeeRecipient[] memory fees =
             _calculateFee(quotedAmountOut, resolvedClient, clientFeeBps);
 
-        // Calculate slippage
         FeeRecipient[] memory slippage = _calculatePositiveSlippage(
             grossAmountOut, quotedAmountOut, resolvedClient
         );
 
-        // Merge results
         return _mergeFeeRecipients(fees, slippage);
     }
 
@@ -122,13 +126,16 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @notice Whether the router must receive swap output before forwarding
      * @param clientFeeBps Client fee in basis points
      * @param client The client address to check
-     * @return True if the router must intercept output
+     * @return True if funds must pass through the router after the
+     *         final swap instead of going directly to the receiver
      */
     function mustInterceptOutput(uint32 clientFeeBps, address client)
         external
         view
         returns (bool)
     {
+        // Slippage direction is unknown before the swap, so we always
+        // route funds through the router when positive slippage is enabled.
         if (_positiveSlippageEnabled) return true;
 
         address resolvedClient = _resolveClient(client);

@@ -49,7 +49,8 @@ interface IFeeCalculator {
      * @dev Covers: slippage enabled, fees > 0, or any future condition.
      * @param clientFeeBps Client fee in basis points
      * @param client The client address to check
-     * @return True if the router must intercept output
+     * @return True if funds must pass through the router after the
+     *         final swap instead of going directly to the receiver
      */
     function mustInterceptOutput(
         uint32 clientFeeBps,
