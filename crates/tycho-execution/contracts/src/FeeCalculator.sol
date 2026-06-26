@@ -22,8 +22,8 @@ error FeeCalculator__InvalidBps();
  *      Router fees use an 8-decimal precision unit: 1 unit = 0.0001 BPS = 0.000001%.
  *      100% = 100_000_000 units. This allows sub-BPS fee rates (e.g. 1.5 BPS = 15_000 units).
  *
- *      The external interface (calculateFee, getEffectiveRouterFeeOnOutput) preserves legacy
- *      BPS semantics (10_000 = 100%) for compatibility with TychoRouter and Dispatcher.
+ *      getEffectiveRouterFeeOnOutput preserves legacy BPS semantics (10_000 = 100%)
+ *      for compatibility with TychoRouter and Dispatcher.
  */
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -32,8 +32,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     uint32 public constant MAX_FEE_BPS = 100_000_000;
     // Combined denominator when both fees use the MAX_FEE_BPS scale (MAX_FEE_BPS^2)
     uint64 public constant MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000;
-    // 100% in basis points (for slippage share validation)
-    uint16 public constant MAX_SLIPPAGE_SHARE_BPS = 10_000;
+    // 100% in 8-decimal fee units (for slippage share validation)
+    uint32 public constant MAX_SLIPPAGE_SHARE_BPS = 100_000_000;
 
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
@@ -49,7 +49,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     // Positive slippage configuration
     bool private _positiveSlippageEnabled;
-    uint16 private _defaultClientSlippageShareBps;
+    uint32 private _defaultClientSlippageShareBps;
 
     //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
@@ -69,8 +69,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         address indexed oldReceiver, address indexed newReceiver
     );
     event PositiveSlippageToggled(bool enabled);
-    event DefaultClientSlippageShareUpdated(uint16 oldBps, uint16 newBps);
-    event CustomClientSlippageShareSet(address indexed client, uint16 bps);
+    event DefaultClientSlippageShareUpdated(uint32 oldBps, uint32 newBps);
+    event CustomClientSlippageShareSet(address indexed client, uint32 bps);
     event CustomClientSlippageShareRemoved(address indexed client);
 
     constructor(address routerFeeSetter) {
@@ -96,6 +96,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *        (used for slippage surplus calculation)
      * @param expectedAmountOut Caller-supplied quoted amount out.
      *        Fees are calculated on this amount.
+     * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to look up custom router fees
      *        and slippage share for and to receive fees.
      *        Pass address(0) to fall back to tx.origin for the
@@ -157,12 +158,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(client);
 
-        // Scale clientFeeBps from legacy scale (10_000 = 100%) to internal scale
-        // (100_000_000 = 100%) so both fee types can be compared and combined.
-        uint32 scaledClientFeeBps = clientFeeBps * 10_000;
-
         if (
-            (scaledClientFeeBps + routerFeeOnOutputBps > MAX_FEE_BPS)
+            (clientFeeBps + routerFeeOnOutputBps > MAX_FEE_BPS)
                 || routerFeeOnClientFeeBps > MAX_FEE_BPS
         ) {
             revert FeeCalculator__FeeTooHigh();
@@ -172,7 +169,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 clientPortion = 0;
 
         // Calculate client fee if > 0
-        if (scaledClientFeeBps > 0) {
+        if (clientFeeBps > 0) {
             // Save numerator for later routerFeeOnClientFee calculation to avoid
             // divide-before-multiply precision loss and warning
             uint256 clientFeeNumerator = expectedAmountOut * clientFeeBps;
@@ -198,9 +195,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
                 (expectedAmountOut * routerFeeOnOutputBps) / MAX_FEE_BPS;
             totalRouterFee += routerFeeOnOutput;
         }
-
-        // Update amountOut considering both fees
-        amountOut -= (clientPortion + totalRouterFee);
 
         // Build fee recipients array
         feeRecipients = new FeeRecipient[](2);
@@ -570,33 +564,33 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     /**
      * @dev Sets the default client share of positive slippage
-     * @param bps Share in basis points (10_000 = 100%)
+     * @param bps Share in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
      */
-    function setDefaultClientSlippageShare(uint16 bps)
+    function setDefaultClientSlippageShare(uint32 bps)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
         if (bps > MAX_SLIPPAGE_SHARE_BPS) {
             revert FeeCalculator__InvalidBps();
         }
-        uint16 oldBps = _defaultClientSlippageShareBps;
+        uint32 oldBps = _defaultClientSlippageShareBps;
         _defaultClientSlippageShareBps = bps;
         emit DefaultClientSlippageShareUpdated(oldBps, bps);
     }
 
     /**
-     * @dev Returns the default client share of positive slippage in basis points
+     * @dev Returns the default client share of positive slippage in fee units
      */
-    function getDefaultClientSlippageShare() external view returns (uint16) {
+    function getDefaultClientSlippageShare() external view returns (uint32) {
         return _defaultClientSlippageShareBps;
     }
 
     /**
      * @dev Sets a custom client share of positive slippage for a specific client
      * @param client The client address to set the custom share for
-     * @param bps Share in basis points (10_000 = 100%)
+     * @param bps Share in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
      */
-    function setCustomClientSlippageShare(address client, uint16 bps)
+    function setCustomClientSlippageShare(address client, uint32 bps)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {

@@ -306,7 +306,9 @@ contract Dispatcher is TransferManager {
     ) internal view returns (FeeRecipient[] memory feeRecipients) {
         // slither-disable-next-line calls-loop
         feeRecipients = IFeeCalculator(feeCalculator)
-            .calculateFee(actualAmountOut, expectedAmountOut, clientFeeBps, client);
+            .calculateFee(
+                actualAmountOut, expectedAmountOut, clientFeeBps, client
+            );
     }
 
     // TODO(ENG-6054): remove dead-code suppression once _takeFees is wired up

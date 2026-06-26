@@ -5,7 +5,7 @@ import {FeeRecipient} from "../lib/FeeStructs.sol";
 
 /**
  * @notice Per-client custom fee configuration
- * @dev All fields pack into a single storage slot (13 bytes total).
+ * @dev All fields pack into a single storage slot (15 bytes total).
  *      Fee values use 8-decimal precision: 1 unit = 0.0001 BPS = 0.000001%.
  *      100% = 100_000_000 units.
  */
@@ -15,7 +15,7 @@ struct CustomFees {
     bool hasCustomFeeOnClientFee; // 1 byte
     uint32 feeBpsOnClientFee; // 4 bytes
     bool hasCustomClientSlippageShare; // 1 byte
-    uint16 clientSlippageShareBps; // 2 bytes
+    uint32 clientSlippageShareBps; // 4 bytes
 }
 
 interface IFeeCalculator {
@@ -30,7 +30,7 @@ interface IFeeCalculator {
      * @param actualAmountOut The actual amount received from the swap
      * @param expectedAmountOut Caller-supplied quoted amount out.
      *        Base for fee calculation and slippage surplus
-     * @param clientFeeBps Client fee in basis points (10_000 = 100%)
+     * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to look up custom router fees
      *        and slippage share for, and to receive the client fee
      * @return feeRecipients Array of (address, feeAmount) tuples for
@@ -47,7 +47,7 @@ interface IFeeCalculator {
     /**
      * @notice Whether the router must receive swap output before forwarding
      * @dev Covers: slippage enabled, fees > 0, or any future condition.
-     * @param clientFeeBps Client fee in basis points
+     * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to check
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
