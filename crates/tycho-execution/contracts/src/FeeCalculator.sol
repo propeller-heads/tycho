@@ -85,18 +85,16 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Called from TychoRouter. Does not perform any accounting.
      *
      *      Deduction order:
-     *      1. Positive slippage surplus (grossAmountOut - quotedAmountOut) is
+     *      1. Positive slippage surplus (actualAmountOut - expectedAmountOut) is
      *         split between router and client first.
      *      2. Fees (client fee + router fees) are then calculated on
-     *         quotedAmountOut, i.e. on the amount *after* surplus extraction.
+     *         expectedAmountOut, i.e. on the amount *after* surplus extraction.
      *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
-     *      clientFeeBps uses the legacy BPS scale (10000 = 100%). Internally it is scaled to the
-     *      same 8-decimal unit system used for router fees (100_000_000 = 100%).
-     * @param grossAmountOut The actual amount received from the swap
+     * @param actualAmountOut The actual amount received from the swap
      *        (used for slippage surplus calculation)
-     * @param quotedAmountOut Caller-supplied quoted amount out.
+     * @param expectedAmountOut Caller-supplied quoted amount out.
      *        Fees are calculated on this amount.
      * @param client The client address to look up custom router fees
      *        and slippage share for and to receive fees.
@@ -105,18 +103,18 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
      */
     function calculateFee(
-        uint256 grossAmountOut,
-        uint256 quotedAmountOut,
+        uint256 actualAmountOut,
+        uint256 expectedAmountOut,
         uint32 clientFeeBps,
         address client
     ) external view returns (FeeRecipient[] memory feeRecipients) {
         address resolvedClient = _resolveClient(client);
 
         FeeRecipient[] memory fees =
-            _calculateFee(quotedAmountOut, resolvedClient, clientFeeBps);
+            _calculateFee(expectedAmountOut, resolvedClient, clientFeeBps);
 
         FeeRecipient[] memory slippage = _calculatePositiveSlippage(
-            grossAmountOut, quotedAmountOut, resolvedClient
+            actualAmountOut, expectedAmountOut, resolvedClient
         );
 
         return _mergeFeeRecipients(fees, slippage);
@@ -152,7 +150,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Calculates fees from the swap output amount
      */
     function _calculateFee(
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         address client,
         uint32 clientFeeBps
     ) internal view returns (FeeRecipient[] memory feeRecipients) {
@@ -177,7 +175,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         if (scaledClientFeeBps > 0) {
             // Save numerator for later routerFeeOnClientFee calculation to avoid
             // divide-before-multiply precision loss and warning
-            uint256 clientFeeNumerator = amountOut * scaledClientFeeBps;
+            uint256 clientFeeNumerator = expectedAmountOut * clientFeeBps;
             uint256 totalClientFee = clientFeeNumerator / MAX_FEE_BPS;
 
             // Calculate router's cut of the client fee
@@ -197,7 +195,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // Calculate router fee on output amount if > 0
         if (routerFeeOnOutputBps > 0) {
             uint256 routerFeeOnOutput =
-                (amountOut * routerFeeOnOutputBps) / MAX_FEE_BPS;
+                (expectedAmountOut * routerFeeOnOutputBps) / MAX_FEE_BPS;
             totalRouterFee += routerFeeOnOutput;
         }
 
@@ -228,15 +226,15 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @return Empty array if disabled or no surplus; otherwise 2-element array [router, client]
      */
     function _calculatePositiveSlippage(
-        uint256 grossAmountOut,
-        uint256 quotedAmountOut,
+        uint256 actualAmountOut,
+        uint256 expectedAmountOut,
         address client
     ) internal view returns (FeeRecipient[] memory) {
-        if (!_positiveSlippageEnabled || grossAmountOut <= quotedAmountOut) {
+        if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
             return new FeeRecipient[](0);
         }
 
-        uint256 surplus = grossAmountOut - quotedAmountOut;
+        uint256 surplus = actualAmountOut - expectedAmountOut;
         uint32 clientShareBps = _getClientSlippageShareBps(client);
 
         uint256 clientCut = (surplus * clientShareBps) / MAX_SLIPPAGE_SHARE_BPS;

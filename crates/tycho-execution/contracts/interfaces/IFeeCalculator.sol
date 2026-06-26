@@ -27,8 +27,8 @@ interface IFeeCalculator {
      *      share are retrieved from contract storage based on the
      *      client address; client fee parameters are passed as
      *      function arguments.
-     * @param grossAmountOut The actual amount received from the swap
-     * @param quotedAmountOut Caller-supplied quoted amount out.
+     * @param actualAmountOut The actual amount received from the swap
+     * @param expectedAmountOut Caller-supplied quoted amount out.
      *        Base for fee calculation and slippage surplus
      * @param clientFeeBps Client fee in basis points (10_000 = 100%)
      * @param client The client address to look up custom router fees
@@ -38,8 +38,8 @@ interface IFeeCalculator {
      *         capture (no fees, no surplus, or toggle off).
      */
     function calculateFee(
-        uint256 grossAmountOut,
-        uint256 quotedAmountOut,
+        uint256 actualAmountOut,
+        uint256 expectedAmountOut,
         uint32 clientFeeBps,
         address client
     ) external view returns (FeeRecipient[] memory feeRecipients);

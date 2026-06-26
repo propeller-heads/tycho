@@ -299,14 +299,14 @@ contract Dispatcher is TransferManager {
     // slither-disable-next-line dead-code
     function _callCalculateFee(
         address feeCalculator,
-        uint256 grossAmountOut,
-        uint256 quotedAmountOut,
+        uint256 actualAmountOut,
+        uint256 expectedAmountOut,
         uint32 clientFeeBps,
         address client
     ) internal view returns (FeeRecipient[] memory feeRecipients) {
         // slither-disable-next-line calls-loop
         feeRecipients = IFeeCalculator(feeCalculator)
-            .calculateFee(grossAmountOut, quotedAmountOut, clientFeeBps, client);
+            .calculateFee(actualAmountOut, expectedAmountOut, clientFeeBps, client);
     }
 
     // TODO(ENG-6054): remove dead-code suppression once _takeFees is wired up
