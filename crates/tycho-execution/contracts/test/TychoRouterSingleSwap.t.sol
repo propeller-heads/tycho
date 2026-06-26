@@ -630,7 +630,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         return 22689128;
     }
 
-    // skip until ENG-6054 is merged
+    // TODO(ENG-6054): skip until ENG-6054 is merged
     function skip_testFinalFeeBelowMinAmount() public {
         // Swap USDC → TWIF (6% fee-on-transfer) via UniswapV4.
         // A small client fee forces the output through the router instead of going

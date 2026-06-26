@@ -295,6 +295,7 @@ contract Dispatcher is TransferManager {
             IFeeCalculator(feeCalculator).getEffectiveRouterFeeOnOutput(client);
     }
 
+    // TODO(ENG-6054): remove dead-code suppression once _takeFees is wired up
     // slither-disable-next-line dead-code
     function _callCalculateFee(
         address feeCalculator,
@@ -308,6 +309,7 @@ contract Dispatcher is TransferManager {
             .calculateFee(grossAmountOut, quotedAmountOut, clientFeeBps, client);
     }
 
+    // TODO(ENG-6054): remove dead-code suppression once _takeFees is wired up
     // slither-disable-next-line dead-code
     function _callMustInterceptOutput(
         address feeCalculator,
