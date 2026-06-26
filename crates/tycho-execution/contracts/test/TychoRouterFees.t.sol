@@ -499,7 +499,14 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, STA_ADDR, quotedSTA, 200, ALICE, feeParams, swap
+            amountIn,
+            WETH_ADDR,
+            STA_ADDR,
+            quotedSTA,
+            200,
+            ALICE,
+            feeParams,
+            swap
         );
 
         // Pool transfer to router 1284621860562858120776317

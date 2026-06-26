@@ -116,6 +116,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
 
     uint256 public constant DELAY_FEE_CALCULATOR_ACTIVATION = 3 days;
+    uint16 private constant MAX_SLIPPAGE_BPS = 10_000;
 
     bytes32 public constant CLIENT_FEE_TYPEHASH = keccak256(
         "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
@@ -188,7 +189,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -246,7 +247,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -303,7 +304,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -368,7 +369,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -423,7 +424,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -476,7 +477,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
@@ -538,7 +539,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swapData Encoded swap details.
@@ -592,7 +593,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swapData Encoded swap details.
@@ -645,7 +646,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param amountOut The quoted output amount used to compute slippage.
-     * @param maxSlippageBps Maximum slippage in basis points (0-10000).
+     * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
@@ -708,13 +709,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         uint256 nTokens,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) internal returns (uint256 actualOut) {
+    ) internal returns (uint256 amountOutAfterFees) {
         if (amountIn == 0) {
             revert TychoRouter__ZeroInput();
         }
@@ -724,22 +725,23 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         ) {
             revert TychoRouter__AddressZero();
         }
-        if (amountOut == 0) {
+        if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (maxSlippageBps > 10_000) {
+        if (maxSlippageBps > MAX_SLIPPAGE_BPS) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
-        uint256 effectiveMin = amountOut * (10_000 - maxSlippageBps) / 10_000;
+        uint256 minAmountOut = expectedAmountOut
+            * (MAX_SLIPPAGE_BPS - maxSlippageBps) / MAX_SLIPPAGE_BPS;
 
-        uint256 amountOutBeforeFees;
+        uint256 actualAmountOut;
         {
             address finalReceiver = _determineFinalReceiver(
                 receiver,
                 clientFeeParams.clientFeeBps,
                 clientFeeParams.clientFeeReceiver
             );
-            amountOutBeforeFees = _splitSwap(
+            actualAmountOut = _splitSwap(
                 amountIn,
                 nTokens,
                 swaps,
@@ -748,25 +750,30 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             );
         }
 
-        actualOut = _takeFees(
+        amountOutAfterFees = _takeFees(
             tokenOut,
-            amountOutBeforeFees,
-            amountOut,
+            actualAmountOut,
+            expectedAmountOut,
             clientFeeParams.clientFeeBps,
             clientFeeParams.clientFeeReceiver
         );
 
-        actualOut = _maybeAddClientContribution(
-            actualOut,
-            effectiveMin,
+        amountOutAfterFees = _maybeAddClientContribution(
+            amountOutAfterFees,
+            minAmountOut,
             clientFeeParams.maxClientContribution,
             tokenOut,
             receiver,
             clientFeeParams.clientFeeReceiver
         );
 
-        actualOut = _settleOutput(
-            actualOut, effectiveMin, amountIn, tokenIn, tokenOut, receiver
+        amountOutAfterFees = _settleOutput(
+            amountOutAfterFees,
+            minAmountOut,
+            amountIn,
+            tokenIn,
+            tokenOut,
+            receiver
         );
     }
 
@@ -784,12 +791,12 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swap_
-    ) internal returns (uint256 actualOut) {
+    ) internal returns (uint256 amountOutAfterFees) {
         if (amountIn == 0) {
             revert TychoRouter__ZeroInput();
         }
@@ -799,13 +806,14 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         ) {
             revert TychoRouter__AddressZero();
         }
-        if (amountOut == 0) {
+        if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (maxSlippageBps > 10_000) {
+        if (maxSlippageBps > MAX_SLIPPAGE_BPS) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
-        uint256 effectiveMin = amountOut * (10_000 - maxSlippageBps) / 10_000;
+        uint256 minAmountOut = expectedAmountOut
+            * (MAX_SLIPPAGE_BPS - maxSlippageBps) / MAX_SLIPPAGE_BPS;
 
         (address executor, bytes calldata protocolData) =
             swap_.decodeSingleSwap();
@@ -815,29 +823,34 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             receiver, clientFeeParams.clientFeeBps, client
         );
 
-        uint256 amountOutBeforeFees = _callSwapOnExecutor(
+        uint256 actualAmountOut = _callSwapOnExecutor(
             executor, amountIn, protocolData, true, false, finalReceiver
         );
 
-        actualOut = _takeFees(
+        amountOutAfterFees = _takeFees(
             tokenOut,
-            amountOutBeforeFees,
-            amountOut,
+            actualAmountOut,
+            expectedAmountOut,
             clientFeeParams.clientFeeBps,
             client
         );
 
-        actualOut = _maybeAddClientContribution(
-            actualOut,
-            effectiveMin,
+        amountOutAfterFees = _maybeAddClientContribution(
+            amountOutAfterFees,
+            minAmountOut,
             clientFeeParams.maxClientContribution,
             tokenOut,
             receiver,
             client
         );
 
-        actualOut = _settleOutput(
-            actualOut, effectiveMin, amountIn, tokenIn, tokenOut, receiver
+        amountOutAfterFees = _settleOutput(
+            amountOutAfterFees,
+            minAmountOut,
+            amountIn,
+            tokenIn,
+            tokenOut,
+            receiver
         );
     }
 
@@ -855,12 +868,12 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
-    ) internal returns (uint256 actualOut) {
+    ) internal returns (uint256 amountOutAfterFees) {
         if (amountIn == 0) {
             revert TychoRouter__ZeroInput();
         }
@@ -870,13 +883,14 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         ) {
             revert TychoRouter__AddressZero();
         }
-        if (amountOut == 0) {
+        if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (maxSlippageBps > 10_000) {
+        if (maxSlippageBps > MAX_SLIPPAGE_BPS) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
-        uint256 effectiveMin = amountOut * (10_000 - maxSlippageBps) / 10_000;
+        uint256 minAmountOut = expectedAmountOut
+            * (MAX_SLIPPAGE_BPS - maxSlippageBps) / MAX_SLIPPAGE_BPS;
         if (swaps.length == 0) {
             revert TychoRouter__EmptySwaps();
         }
@@ -886,28 +900,33 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             receiver, clientFeeParams.clientFeeBps, client
         );
 
-        uint256 amountOutBeforeFees =
+        uint256 actualAmountOut =
             _sequentialSwap(amountIn, swaps, finalReceiver);
 
-        actualOut = _takeFees(
+        amountOutAfterFees = _takeFees(
             tokenOut,
-            amountOutBeforeFees,
-            amountOut,
+            actualAmountOut,
+            expectedAmountOut,
             clientFeeParams.clientFeeBps,
             client
         );
 
-        actualOut = _maybeAddClientContribution(
-            actualOut,
-            effectiveMin,
+        amountOutAfterFees = _maybeAddClientContribution(
+            amountOutAfterFees,
+            minAmountOut,
             clientFeeParams.maxClientContribution,
             tokenOut,
             receiver,
             client
         );
 
-        actualOut = _settleOutput(
-            actualOut, effectiveMin, amountIn, tokenIn, tokenOut, receiver
+        amountOutAfterFees = _settleOutput(
+            amountOutAfterFees,
+            minAmountOut,
+            amountIn,
+            tokenIn,
+            tokenOut,
+            receiver
         );
     }
 
@@ -1204,27 +1223,27 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
     /**
      * @notice Calculates and takes fees using the FeeCalculator contract
      * @param token The token address for which fees are being taken
-     * @param grossAmountOut The actual amount received from the swap
-     * @param quotedAmountOut The off-chain quoted amount
+     * @param actualAmountOut The actual amount received from the swap
+     * @param expectedAmountOut The off-chain quoted amount
      * @param clientFeeBps Client fee in basis points
      * @param client Address to receive client fees
-     * @return amountOut The amount remaining after all fee deductions
+     * @return amountOutAfterFees The amount remaining after all fee deductions
      */
     function _takeFees(
         address token,
-        uint256 grossAmountOut,
-        uint256 quotedAmountOut,
+        uint256 actualAmountOut,
+        uint256 expectedAmountOut,
         uint32 clientFeeBps,
         address client
-    ) internal returns (uint256 amountOut) {
+    ) internal returns (uint256 amountOutAfterFees) {
         FeeRecipient[] memory fees = _callCalculateFee(
             _feeCalculator,
-            grossAmountOut,
-            quotedAmountOut,
+            actualAmountOut,
+            expectedAmountOut,
             clientFeeBps,
             client
         );
-        amountOut = grossAmountOut;
+        amountOutAfterFees = actualAmountOut;
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
@@ -1235,7 +1254,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 // delta, and cause the _finalizeBalances method to revert.
                 _updateDeltaAccounting(token, -int256(fees[i].feeAmount));
                 _creditVaultForFees(fees[i].recipient, token, fees[i].feeAmount);
-                amountOut -= fees[i].feeAmount;
+                amountOutAfterFees -= fees[i].feeAmount;
             }
         }
         if (fees.length > 0) {
