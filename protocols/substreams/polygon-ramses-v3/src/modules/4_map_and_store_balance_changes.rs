@@ -1,5 +1,5 @@
 use substreams_helper::hex::Hexable;
-use tycho_substreams::models::{BalanceDelta, BlockBalanceDeltas, Transaction};
+use tycho_substreams::models::{BalanceDelta, BlockBalanceDeltas};
 
 use crate::pb::ramses::v3::{events::pool_event::Typ, Events};
 use substreams::{
@@ -15,7 +15,7 @@ pub fn map_balance_changes(events: Events) -> BlockBalanceDeltas {
         .flat_map(|event| {
             let (delta0, delta1) = maybe_balance_deltas(event.typ.unwrap())?;
             let component_id = event.pool_address.to_hex().into_bytes();
-            let tx: Option<Transaction> = event.transaction.map(Into::into);
+            let tx = event.transaction;
 
             Some(
                 [(delta0, event.token0), (delta1, event.token1)]

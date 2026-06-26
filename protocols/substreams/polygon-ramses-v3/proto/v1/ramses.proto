@@ -2,22 +2,12 @@ syntax = "proto3";
 
 package ramses.v3;
 
+import "tycho/evm/v1/common.proto";
+
 message Pool {
   bytes address = 1;
   bytes token0 = 2;
   bytes token1 = 3;
-}
-
-// A struct describing a transaction.
-message Transaction {
-  // The transaction hash.
-  bytes hash = 1;
-  // The sender of the transaction.
-  bytes from = 2;
-  // The receiver of the transaction.
-  bytes to = 3;
-  // The transactions index within the block.
-  uint64 index = 4;
 }
 
 // A change to a pool's tick.
@@ -30,7 +20,7 @@ message TickDelta {
   bytes liquidity_net_delta = 3;
   // Used to determine the order of the balance changes. Necessary for the balance store.
   uint64 ordinal = 4;
-  Transaction transaction = 5;
+  tycho.evm.v1.Transaction transaction = 5;
 }
 
 // A group of TickDelta
@@ -48,7 +38,7 @@ message LiquidityChange {
   LiquidityChangeType change_type = 3;
   // Used to determine the order of the balance changes. Necessary for the balance store.
   uint64 ordinal = 4;
-  Transaction transaction = 5;
+  tycho.evm.v1.Transaction transaction = 5;
 }
 
 // A group of LiquidityChange
@@ -79,7 +69,7 @@ message Events {
     bytes pool_address = 9;
     bytes token0 = 10;
     bytes token1 = 11;
-    Transaction transaction = 12;
+    tycho.evm.v1.Transaction transaction = 12;
 
     message Initialize {
       bytes sqrt_price = 1;

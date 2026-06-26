@@ -94,7 +94,7 @@ pub fn map_protocol_changes(
             let tx = tick_delta.transaction.unwrap();
             let builder = transaction_changes
                 .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&tx.into()));
+                .or_insert_with(|| TransactionChangesBuilder::new(&tx));
 
             builder.add_entity_change(&EntityChanges {
                 component_id: tick_delta.pool_address.to_hex(),
@@ -119,7 +119,7 @@ pub fn map_protocol_changes(
             let tx = change.transaction.unwrap();
             let builder = transaction_changes
                 .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&tx.into()));
+                .or_insert_with(|| TransactionChangesBuilder::new(&tx));
 
             builder.add_entity_change(&EntityChanges {
                 component_id: change.pool_address.to_hex(),
@@ -137,7 +137,7 @@ pub fn map_protocol_changes(
         if attributes.is_empty() {
             continue;
         }
-        let tx: Transaction = event.transaction.unwrap().into();
+        let tx = event.transaction.unwrap();
         let builder = transaction_changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx));
