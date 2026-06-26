@@ -838,7 +838,7 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.stopPrank();
     }
 
-    function testCalculatePositiveSlippage_routerKeepsAll() public view {
+    function testRouterKeepsAllPositiveSlippage() public view {
         // Default clientSlippageShareBps = 0 → router keeps all
         uint256 grossAmountOut = 1.1 ether;
         uint256 quotedAmountOut = 1 ether;
@@ -853,7 +853,7 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0);
     }
 
-    function testCalculatePositiveSlippage_clientGetsHalf() public {
+    function testClientGetsHalfPositiveSlippage() public {
         vm.prank(FEE_SETTER);
         feeCalculator.setDefaultClientSlippageShare(5000); // 50%
 
@@ -870,7 +870,7 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0.05 ether);
     }
 
-    function testCalculatePositiveSlippage_customOverridesDefault() public {
+    function testCustomSlippageShareOverridesDefault() public {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setDefaultClientSlippageShare(2000); // 20%
         feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
@@ -889,7 +889,7 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0.08 ether);
     }
 
-    function testCalculatePositiveSlippage_removeCustom() public {
+    function testRemoveCustomSlippageFallsBackToDefault() public {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setDefaultClientSlippageShare(2000); // 20%
         feeCalculator.setCustomClientSlippageShare(BOB, 8000); // 80%
@@ -907,7 +907,7 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[1].feeAmount, 0.02 ether); // BOB 20%
     }
 
-    function testSetDefaultClientSlippageShare_tooHigh() public {
+    function testSetDefaultClientSlippageShareTooHighReverts() public {
         vm.prank(FEE_SETTER);
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
@@ -915,7 +915,7 @@ contract FeeCalculatorSlippageTest is Constants {
         feeCalculator.setDefaultClientSlippageShare(10_001);
     }
 
-    function testSetCustomClientSlippageShare_tooHigh() public {
+    function testSetCustomClientSlippageShareTooHighReverts() public {
         vm.prank(FEE_SETTER);
         vm.expectRevert(
             abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
