@@ -922,4 +922,35 @@ contract FeeCalculatorSlippageTest is Constants {
         );
         feeCalculator.setCustomClientSlippageShare(BOB, 10_001);
     }
+
+    function testNegativeSlippageNoSurplus() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+
+        uint256 grossAmountOut = 0.9 ether;
+        uint256 quotedAmountOut = 1 ether;
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            grossAmountOut, quotedAmountOut, 0, BOB
+        );
+
+        // No surplus, but router fee on output still applies
+        // routerFee = 1 ether * 1% = 0.01 ether (based on quotedAmountOut)
+        assertEq(fees[0].feeAmount, 0.01 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testZeroSlippageNoSurplus() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+
+        uint256 amount = 1 ether;
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(amount, amount, 0, BOB);
+
+        // No surplus, but router fee on output still applies
+        assertEq(fees[0].feeAmount, 0.01 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
 }
