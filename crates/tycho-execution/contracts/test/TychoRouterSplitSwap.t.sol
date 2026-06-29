@@ -339,7 +339,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__NegativeSlippage.selector,
+                TychoRouter__SlippageExceeded.selector,
                 1989737355, // actual amountOut
                 minAmountOut
             )

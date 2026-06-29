@@ -63,7 +63,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         uint256 expectedAmountOut = 1958252915450472406531;
 
         // maxSlippageBps=500: total fees are ~3% of quotedAmountOut; need slippage > 3% to avoid
-        // NegativeSlippage after fee deduction (slippage check is on post-fee output)
+        // SlippageExceeded after fee deduction (slippage check is on post-fee output)
         ClientFeeParams memory feeParams = makeClientFeeParams(
             200,
             0,

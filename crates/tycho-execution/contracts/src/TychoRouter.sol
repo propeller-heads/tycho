@@ -72,7 +72,7 @@ error TychoRouter__EmptySwaps();
 error TychoRouter__MsgValueDoesNotMatchAmountIn(
     uint256 msgValue, uint256 amountIn
 );
-error TychoRouter__NegativeSlippage(uint256 amount, uint256 minAmount);
+error TychoRouter__SlippageExceeded(uint256 amount, uint256 minAmount);
 error TychoRouter__InvalidDataLength();
 error TychoRouter__AmountOutZero();
 error TychoRouter__SlippageBpsTooHigh(uint16 maxSlippageBps);
@@ -183,7 +183,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -241,7 +241,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -298,7 +298,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @dev
      * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -363,7 +363,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -418,7 +418,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -471,7 +471,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -533,7 +533,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *         Takes funds from the user's wallet using transferFrom.
      *
      * @dev
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -587,7 +587,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *         Takes funds from the user's vault balance.
      *
      * @dev
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -640,7 +640,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `maxSlippageBps`.
+     * - Reverts with `TychoRouter__SlippageExceeded` if slippage exceeds `maxSlippageBps`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
@@ -974,7 +974,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
         // Check final amount to account for fee tokens or rebasing tokens
         if (amountOut < minAmountOut) {
-            revert TychoRouter__NegativeSlippage(amountOut, minAmountOut);
+            revert TychoRouter__SlippageExceeded(amountOut, minAmountOut);
         }
 
         return amountOut;
@@ -1303,7 +1303,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
     /**
      * @dev If the amountOut is below the minAmountOut, it tries to add a client contribution (if within limits).
-     * If it can't, it raises NegativeSlippage.
+     * If it can't, it raises SlippageExceeded.
      *   - If the out tokens are still in the Tycho Router, it adds the contribution to the amount out
      *     (the transfer will be done later)
      *   - If the out tokens are already in the receiver, it transfers the contribution separately
@@ -1320,7 +1320,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             uint256 requiredContribution =
                 minAmountOut - amountOut;
             if (requiredContribution > maxClientContribution) {
-                revert TychoRouter__NegativeSlippage(amountOut, minAmountOut);
+                revert TychoRouter__SlippageExceeded(amountOut, minAmountOut);
             }
             // Debit the client's vault balance
             _debitVault(client, tokenOut, requiredContribution);

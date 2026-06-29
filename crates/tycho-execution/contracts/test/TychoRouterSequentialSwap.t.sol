@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 import {
     TychoRouter,
     ClientFeeParams,
-    TychoRouter__NegativeSlippage
+    TychoRouter__SlippageExceeded
 } from "@src/TychoRouter.sol";
 import "./TychoRouterTestSetup.sol";
 
@@ -204,7 +204,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__NegativeSlippage.selector,
+                TychoRouter__SlippageExceeded.selector,
                 2005810530, // actual amountOut
                 minAmountOut
             )
