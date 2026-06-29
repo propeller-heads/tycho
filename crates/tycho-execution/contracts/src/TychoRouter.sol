@@ -690,7 +690,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             revert TychoRouter__UndefinedMinAmountOut();
         }
 
-        uint16 routerFeeOnOutputBps = _callGetEffectiveRouterFeeOnOutput(
+        uint32 routerFeeOnOutputBps = _callGetEffectiveRouterFeeOnOutput(
             _feeCalculator, clientFeeParams.clientFeeReceiver
         );
 
@@ -771,7 +771,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
         address client = clientFeeParams.clientFeeReceiver;
         // Get router fee once and pass it down to avoid duplicate external calls
-        uint16 routerFeeOnOutputBps =
+        uint32 routerFeeOnOutputBps =
             _callGetEffectiveRouterFeeOnOutput(_feeCalculator, client);
 
         address finalReceiver = _determineFinalReceiver(
@@ -844,7 +844,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
         address client = clientFeeParams.clientFeeReceiver;
         // Get router fee once and pass it down to avoid duplicate external calls
-        uint16 routerFeeOnOutputBps =
+        uint32 routerFeeOnOutputBps =
             _callGetEffectiveRouterFeeOnOutput(_feeCalculator, client);
 
         address finalReceiver = _determineFinalReceiver(
@@ -1294,7 +1294,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
     function _determineFinalReceiver(
         address receiver,
         uint16 clientFeeBps,
-        uint16 routerFeeOnOutputBps
+        uint32 routerFeeOnOutputBps
     ) internal view returns (address) {
         // Fast path: if no fees at all, send directly to receiver
         if (clientFeeBps == 0 && routerFeeOnOutputBps == 0) {
