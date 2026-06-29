@@ -6,7 +6,7 @@ use crate::{
     log::{Event, Log},
     math::checked_subtract,
     model::{
-        dispatcher::{_call_get_effective_router_fee_on_output, _call_swap_on_executor},
+        dispatcher::{_call_must_intercept_output, _call_swap_on_executor},
         executors::Executor,
         fee_calculator::calculate_fee,
         transfer_manager::{_transfer_out, _tstore_transfer_from_info},
@@ -15,6 +15,8 @@ use crate::{
     params::{ParamKey, Params},
     state::State,
 };
+
+const MAX_SLIPPAGE_BPS: i64 = 10_000;
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TychoRouter.sol#L184>
 pub fn split_swap(
@@ -25,7 +27,8 @@ pub fn split_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -40,7 +43,8 @@ pub fn split_swap(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         n_tokens,
         receiver,
     )
@@ -55,7 +59,8 @@ pub fn split_swap_using_vault(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -69,7 +74,8 @@ pub fn split_swap_using_vault(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         n_tokens,
         receiver,
     )
@@ -84,7 +90,8 @@ pub fn split_swap_permit2(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -101,7 +108,8 @@ pub fn split_swap_permit2(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         n_tokens,
         receiver,
     )
@@ -116,7 +124,8 @@ pub fn sequential_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _update_native_delta_accounting(params, state, vault, log, amount_in)?;
@@ -130,7 +139,8 @@ pub fn sequential_swap(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         receiver,
     )
 }
@@ -144,7 +154,8 @@ pub fn sequential_swap_using_vault(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _tstore_transfer_from_info(state, token_in, amount_in, false, true);
@@ -157,7 +168,8 @@ pub fn sequential_swap_using_vault(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         receiver,
     )
 }
@@ -171,7 +183,8 @@ pub fn sequential_swap_permit2(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if token_in != Address::NativeETH {
@@ -187,7 +200,8 @@ pub fn sequential_swap_permit2(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         receiver,
     )
 }
@@ -201,7 +215,8 @@ pub fn single_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _update_native_delta_accounting(params, state, vault, log, amount_in)?;
@@ -219,7 +234,8 @@ pub fn single_swap(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         receiver,
     )
 }
@@ -233,7 +249,8 @@ pub fn single_swap_using_vault(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _tstore_transfer_from_info(state, token_in, amount_in, false, true);
@@ -246,7 +263,8 @@ pub fn single_swap_using_vault(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         receiver,
     )
 }
@@ -260,7 +278,8 @@ pub fn single_swap_permit2(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if token_in != Address::NativeETH {
@@ -276,7 +295,8 @@ pub fn single_swap_permit2(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        expected_amount_out,
+        max_slippage_bps,
         receiver,
     )
 }
@@ -290,7 +310,8 @@ fn _split_swap_checked(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -300,25 +321,28 @@ fn _split_swap_checked(
     if receiver == Address::Zero {
         return Err(Error::revert("_split_swap_checked: receiver == address(0)"));
     }
-    if min_amount_out == 0 {
-        return Err(Error::revert("_split_swap_checked: min_amount_out == 0"));
+    if expected_amount_out == 0 {
+        return Err(Error::revert("_split_swap_checked: expected_amount_out == 0"));
     }
-
-    let router_fee_on_output_bps = _call_get_effective_router_fee_on_output(params, state)?;
+    if max_slippage_bps > MAX_SLIPPAGE_BPS {
+        return Err(Error::revert("_split_swap_checked: max_slippage_bps too high"));
+    }
+    let min_amount_out = expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
             ParamKey::String("client_fee_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
+            [0, crate::model::fee_calculator::MAX_BPS],
         )?
     } else {
         0
     };
 
-    let final_receiver =
-        determine_final_receiver(receiver, client_fee_bps, router_fee_on_output_bps)?;
+    let must_intercept = _call_must_intercept_output(params, client_fee_bps)?;
 
-    let amount_out_before_fees = _split_swap(
+    let final_receiver = determine_final_receiver(must_intercept, receiver);
+
+    let actual_amount_out = _split_swap(
         params,
         state,
         vault,
@@ -329,10 +353,18 @@ fn _split_swap_checked(
         token_in == token_out,
     )?;
 
-    let amount_out = if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        amount_out_before_fees
+    let amount_out = if !must_intercept {
+        actual_amount_out
     } else {
-        _take_fees(params, vault, log, token_out, amount_out_before_fees, client_fee_bps)?
+        _take_fees(
+            params,
+            vault,
+            log,
+            token_out,
+            actual_amount_out,
+            expected_amount_out,
+            client_fee_bps,
+        )?
     };
 
     let amount_out = _maybe_add_client_contribution(
@@ -346,7 +378,9 @@ fn _split_swap_checked(
         receiver,
     )?;
 
-    _settle_output(state, vault, log, amount_out, amount_in, token_in, token_out, receiver)?;
+    _settle_output(
+        state, vault, log, amount_out, min_amount_out, amount_in, token_in, token_out, receiver,
+    )?;
     Ok(())
 }
 
@@ -359,7 +393,8 @@ fn _single_swap(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if amount_in == 0 {
@@ -368,28 +403,31 @@ fn _single_swap(
     if receiver == Address::Zero {
         return Err(Error::revert("_single_swap: receiver == address(0)"));
     }
-    if min_amount_out == 0 {
-        return Err(Error::revert("_single_swap: min_amount_out == 0"));
+    if expected_amount_out == 0 {
+        return Err(Error::revert("_single_swap: expected_amount_out == 0"));
     }
-
-    let router_fee_on_output_bps = _call_get_effective_router_fee_on_output(params, state)?;
+    if max_slippage_bps > MAX_SLIPPAGE_BPS {
+        return Err(Error::revert("_single_swap: max_slippage_bps too high"));
+    }
+    let min_amount_out = expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
             ParamKey::String("client_fee_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
+            [0, crate::model::fee_calculator::MAX_BPS],
         )?
     } else {
         0
     };
 
-    let final_receiver =
-        determine_final_receiver(receiver, client_fee_bps, router_fee_on_output_bps)?;
+    let must_intercept = _call_must_intercept_output(params, client_fee_bps)?;
+
+    let final_receiver = determine_final_receiver(must_intercept, receiver);
 
     let swap_index = 0;
     let executor = params.request(ParamKey::Executor { swap_index }, Executor::VARIANTS)?;
 
-    let amount_out_before_fees = _call_swap_on_executor(
+    let actual_amount_out = _call_swap_on_executor(
         params,
         state,
         vault,
@@ -402,10 +440,18 @@ fn _single_swap(
         swap_index,
     )?;
 
-    let amount_out = if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        amount_out_before_fees
+    let amount_out = if !must_intercept {
+        actual_amount_out
     } else {
-        _take_fees(params, vault, log, token_out, amount_out_before_fees, client_fee_bps)?
+        _take_fees(
+            params,
+            vault,
+            log,
+            token_out,
+            actual_amount_out,
+            expected_amount_out,
+            client_fee_bps,
+        )?
     };
 
     let amount_out = _maybe_add_client_contribution(
@@ -419,7 +465,9 @@ fn _single_swap(
         receiver,
     )?;
 
-    _settle_output(state, vault, log, amount_out, amount_in, token_in, token_out, receiver)?;
+    _settle_output(
+        state, vault, log, amount_out, min_amount_out, amount_in, token_in, token_out, receiver,
+    )?;
     Ok(())
 }
 
@@ -432,7 +480,8 @@ fn _sequential_swap_checked(
     amount_in: i64,
     token_in: Address,
     token_out: Address,
-    min_amount_out: i64,
+    expected_amount_out: i64,
+    max_slippage_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if amount_in == 0 {
@@ -441,31 +490,41 @@ fn _sequential_swap_checked(
     if receiver == Address::Zero {
         return Err(Error::revert("_sequential_swap_checked: receiver == address(0)"));
     }
-    if min_amount_out == 0 {
-        return Err(Error::revert("_sequential_swap_checked: min_amount_out == 0"));
+    if expected_amount_out == 0 {
+        return Err(Error::revert("_sequential_swap_checked: expected_amount_out == 0"));
     }
-
-    let router_fee_on_output_bps = _call_get_effective_router_fee_on_output(params, state)?;
+    if max_slippage_bps > MAX_SLIPPAGE_BPS {
+        return Err(Error::revert("_sequential_swap_checked: max_slippage_bps too high"));
+    }
+    let min_amount_out = expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
             ParamKey::String("client_fee_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
+            [0, crate::model::fee_calculator::MAX_BPS],
         )?
     } else {
         0
     };
 
-    let final_receiver =
-        determine_final_receiver(receiver, client_fee_bps, router_fee_on_output_bps)?;
+    let must_intercept = _call_must_intercept_output(params, client_fee_bps)?;
 
-    let amount_out_before_fees =
-        _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
+    let final_receiver = determine_final_receiver(must_intercept, receiver);
 
-    let amount_out = if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        amount_out_before_fees
+    let actual_amount_out = _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
+
+    let amount_out = if !must_intercept {
+        actual_amount_out
     } else {
-        _take_fees(params, vault, log, token_out, amount_out_before_fees, client_fee_bps)?
+        _take_fees(
+            params,
+            vault,
+            log,
+            token_out,
+            actual_amount_out,
+            expected_amount_out,
+            client_fee_bps,
+        )?
     };
 
     let amount_out = _maybe_add_client_contribution(
@@ -479,7 +538,9 @@ fn _sequential_swap_checked(
         receiver,
     )?;
 
-    _settle_output(state, vault, log, amount_out, amount_in, token_in, token_out, receiver)?;
+    _settle_output(
+        state, vault, log, amount_out, min_amount_out, amount_in, token_in, token_out, receiver,
+    )?;
     Ok(())
 }
 
@@ -489,6 +550,7 @@ fn _settle_output(
     vault: &mut Vault,
     log: &mut impl Log,
     mut amount_out: i64,
+    min_amount_out: i64,
     amount_in: i64,
     token_in: Address,
     token_out: Address,
@@ -520,6 +582,10 @@ fn _settle_output(
                 context_hint: "_settle_output: output_delta > 0 && receiver != Address::Router",
             });
         }
+    }
+
+    if amount_out < min_amount_out {
+        return Err(Error::revert("_settle_output: slippage exceeded"));
     }
 
     vault._finalize_balances(state, state.msg_sender(), token_in, amount_in)?;
@@ -655,12 +721,14 @@ fn _take_fees(
     vault: &mut Vault,
     log: &mut impl Log,
     token: Address,
-    amount_in: i64,
+    actual_amount_out: i64,
+    expected_amount_out: i64,
     client_fee_bps: i64,
 ) -> Result<i64, Error> {
-    let (amount_out, fees) = calculate_fee(params, amount_in, client_fee_bps)?;
+    let fees = calculate_fee(params, actual_amount_out, expected_amount_out, client_fee_bps)?;
 
-    for fee in fees {
+    let mut total_fees = 0i64;
+    for fee in &fees {
         if fee.fee_amount > 0 {
             vault._update_delta_accounting(token, -fee.fee_amount);
             log.append(Event::UpdateDeltaAccounting {
@@ -677,10 +745,12 @@ fn _take_fees(
                 amount: fee.fee_amount,
                 context_hint: "_take_fees: fee_amount > 0",
             });
+
+            total_fees += fee.fee_amount;
         }
     }
 
-    Ok(amount_out)
+    checked_subtract(actual_amount_out, total_fees)
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L1063>
@@ -791,14 +861,6 @@ fn _maybe_add_client_contribution(
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L1125>
-fn determine_final_receiver(
-    receiver: Address,
-    client_fee_bps: i64,
-    router_fee_on_output_bps: i64,
-) -> Result<Address, Error> {
-    Ok(if client_fee_bps == 0 && router_fee_on_output_bps == 0 {
-        receiver
-    } else {
-        Address::Router
-    })
+fn determine_final_receiver(must_intercept: bool, receiver: Address) -> Address {
+    if must_intercept { Address::Router } else { receiver }
 }

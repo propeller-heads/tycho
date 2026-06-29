@@ -28,6 +28,12 @@ pub const WORKER_THREAD_COUNT: usize = 10;
 /// at the cost of needing longer to run.
 pub const ENABLE_NONZERO_FEE_BPS: bool = false;
 
+/// Whether to simulate positive slippage scenarios
+/// (actual_amount_out > expected_amount_out).
+/// When enabled, the fee calculator splits surplus between
+/// the router and the client.
+pub const ENABLE_POSITIVE_SLIPPAGE: bool = false;
+
 /// Setting this to `true` introduces a fault,
 /// a transfer of 1000 WETH to `msg.sender` inside `singleSwap`,
 /// and should result in the output of suspicious [Outcome](crate::Outcome)s.

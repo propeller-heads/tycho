@@ -170,19 +170,9 @@ pub fn _call_handle_callback_on_executor(
     Ok(())
 }
 
-/// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/src/Dispatcher.sol#L337>
+/// Mirrors `Dispatcher._callMustInterceptOutput` in Solidity.
 ///
-/// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/src/FeeCalculator.sol#L223>
-pub fn _call_get_effective_router_fee_on_output(
-    params: &Params,
-    _state: &mut State,
-) -> Result<i64, Error> {
-    Ok(if crate::config::ENABLE_NONZERO_FEE_BPS {
-        params.request(
-            ParamKey::String("router_fee_on_output_bps"),
-            [0, crate::model::fee_calculator::MAX_FEE_BPS],
-        )?
-    } else {
-        0
-    })
+/// Delegates to `FeeCalculator.must_intercept_output`.
+pub fn _call_must_intercept_output(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
+    crate::model::fee_calculator::must_intercept_output(params, client_fee_bps)
 }

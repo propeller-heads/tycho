@@ -36,9 +36,10 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     let token_in = params.request("token_in", Address::VARIANTS_EXCEPT_ZERO)?;
     let token_out = params.request("token_out", Address::VARIANTS_EXCEPT_ZERO)?;
 
-    // assumption: all swap methods revert if `min_amount_out = 0`.
+    // assumption: all swap methods revert if `expected_amount_out = 0`.
     // no need to simulate it.
-    let min_amount_out = params.request("min_amount_out", [1, 10000])?;
+    let expected_amount_out = params.request("expected_amount_out", [1, 10000])?;
+    let max_slippage_bps = params.request("max_slippage_bps", [0, 500, 10000])?;
     // assumption: all swap methods revert if `receiver = address(0)`.
     // no need to simulate it.
     let receiver = params.request("receiver", Address::VARIANTS_EXCEPT_ZERO)?;
@@ -89,7 +90,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 receiver,
             )?;
         }
@@ -102,7 +104,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 receiver,
             )?;
         }
@@ -115,7 +118,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 receiver,
             )?;
         }
@@ -128,7 +132,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 receiver,
             )?;
         }
@@ -141,7 +146,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 receiver,
             )?;
         }
@@ -154,7 +160,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 receiver,
             )?;
         }
@@ -167,7 +174,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 params.request("n_tokens", [1, 2])?,
                 receiver,
             )?;
@@ -181,7 +189,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 params.request("n_tokens", [1, 2])?,
                 receiver,
             )?;
@@ -195,7 +204,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
-                min_amount_out,
+                expected_amount_out,
+                max_slippage_bps,
                 params.request("n_tokens", [1, 2])?,
                 receiver,
             )?;
