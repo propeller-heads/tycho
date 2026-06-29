@@ -110,8 +110,16 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             actualAmountOut, expectedAmountOut, resolvedClient
         );
 
+        // Fee base = actual output minus any extracted surplus.
+        // When surplus is taken: feeBase = expectedAmountOut.
+        // When no surplus (disabled or actual <= expected): feeBase = actualAmountOut.
+        uint256 feeBase = actualAmountOut;
+        if (slippage.length > 0) {
+            feeBase -= slippage[0].feeAmount + slippage[1].feeAmount;
+        }
+
         FeeRecipient[] memory fees =
-            _calculateFee(expectedAmountOut, resolvedClient, clientFeeBps);
+            _calculateFee(feeBase, resolvedClient, clientFeeBps);
 
         return _mergeFeeRecipients(fees, slippage);
     }
