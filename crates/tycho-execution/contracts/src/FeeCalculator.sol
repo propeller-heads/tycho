@@ -108,18 +108,18 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     ) external view returns (FeeRecipient[] memory feeRecipients) {
         address resolvedClient = _resolveClient(client);
 
-        FeeRecipient[] memory fees =
-            _calculateFee(expectedAmountOut, resolvedClient, clientFeeBps);
-
         FeeRecipient[] memory slippage = _calculatePositiveSlippage(
             actualAmountOut, expectedAmountOut, resolvedClient
         );
+
+        FeeRecipient[] memory fees =
+            _calculateFee(expectedAmountOut, resolvedClient, clientFeeBps);
 
         return _mergeFeeRecipients(fees, slippage);
     }
 
     /**
-     * @notice Whether the router must receive swap output before forwarding
+     * @notice Whether funds must pass through the router after the final swap instead of going directly to the receiver
      * @param clientFeeBps Client fee in basis points
      * @param client The client address to check
      * @return True if funds must pass through the router after the
@@ -145,7 +145,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates fees from the swap output amount
+     * @dev Calculates fees from the expected swap output amount
+     * @return feeRecipients 2-element array: [0] = router, [1] = client.
+     *         _mergeFeeRecipients relies on this ordering.
      */
     function _calculateFee(
         uint256 expectedAmountOut,
@@ -214,7 +216,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     /**
      * @dev Calculates positive slippage surplus distribution
-     * @return Empty array if disabled or no surplus; otherwise 2-element array [router, client]
+     * @return Empty array if disabled or no surplus; otherwise 2-element array:
+     *         [0] = router, [1] = client. _mergeFeeRecipients relies on this ordering.
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
