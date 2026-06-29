@@ -7,8 +7,7 @@ import {
 import {FeeRecipient} from "../lib/FeeStructs.sol";
 import "./Constants.sol";
 
-// Fee constants in the internal 8-decimal scale (100_000_000 = 100%).
-// clientFeeBps arguments to calculateFee use the 8-decimal fee unit scale (100_000_000 = 100%).
+// Fee constants in the 8-decimal fee unit scale (100_000_000 = 100%).
 uint32 constant _HALF_PCT = 500_000; // 0.5%
 uint32 constant _1_PCT = 1_000_000; // 1%
 uint32 constant _5_PCT = 5_000_000; // 5%
@@ -909,9 +908,32 @@ contract FeeCalculatorSlippageTest is Constants {
         );
 
         // No surplus, but router fee on output still applies
-        // routerFee = 1 ether * 1% = 0.01 ether (based on expectedAmountOut)
-        assertEq(fees[0].feeAmount, 0.01 ether);
+        // routerFee = 0.9 ether * 1% = 0.009 ether (based on actualAmountOut)
+        assertEq(fees[0].feeAmount, 0.009 ether);
         assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testPositiveSlippageWithRouterFeeOnOutput() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setDefaultClientSlippageShare(_50_PCT); // 50%
+        vm.stopPrank();
+
+        uint256 actualAmountOut = 1.1 ether;
+        uint256 expectedAmountOut = 1 ether;
+
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            actualAmountOut, expectedAmountOut, 0, BOB
+        );
+
+        // surplus = 0.1 ether, split 50/50 → router 0.05, BOB 0.05
+        // feeBase = 1.1 - 0.1 = 1 ether (expectedAmountOut)
+        // routerFee on output = 1 ether * 1% = 0.01 ether
+        // total router = 0.05 + 0.01 = 0.06 ether
+        assertEq(fees[0].recipient, ADMIN);
+        assertEq(fees[0].feeAmount, 0.06 ether);
+        assertEq(fees[1].recipient, BOB);
+        assertEq(fees[1].feeAmount, 0.05 ether);
     }
 
     function testZeroSlippageNoSurplus() public {
