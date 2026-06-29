@@ -124,8 +124,12 @@ fn default_false() -> bool {
     false
 }
 
-fn default_implementation_type() -> String {
-    "Vm".to_string()
+pub fn implementation_type_for(protocol_system: &str) -> &'static str {
+    if protocol_system.starts_with("vm:") {
+        "Vm"
+    } else {
+        "Custom"
+    }
 }
 
 /// Configuration for an individual test
@@ -150,8 +154,6 @@ pub struct IntegrationTestsConfig {
     pub initialized_accounts: Option<Vec<String>>,
     pub skip_balance_check: bool,
     pub protocol_type_names: Vec<String>,
-    #[serde(default = "default_implementation_type")]
-    pub implementation_type: String,
     pub protocol_system: String,
     pub module_name: Option<String>,
     pub tests: Vec<IntegrationTest>,

@@ -3,7 +3,6 @@ protocol_system: "baseline"
 module_name: "map_protocol_changes"
 protocol_type_names:
   - "baseline"
-implementation_type: Custom
 skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
 
 tests:

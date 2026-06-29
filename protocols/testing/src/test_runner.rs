@@ -298,7 +298,6 @@ impl TestRunner {
 
         let spkg_path_for_index = spkg_path.clone();
         let protocol_type_names = config.protocol_type_names.clone();
-        let implementation_type = config.implementation_type.clone();
         let protocol_system = config.protocol_system.clone();
         let module_name = config.module_name.clone();
 
@@ -306,8 +305,8 @@ impl TestRunner {
             if let Err(e) = tycho_runner.run_tycho_index(
                 &spkg_path_for_index,
                 start_block,
+                None,
                 &protocol_type_names,
-                &implementation_type,
                 &protocol_system,
                 module_name,
             ) {
@@ -571,7 +570,6 @@ impl TestRunner {
                         test.start_block,
                         test.stop_block,
                         &config.protocol_type_names,
-                        &config.implementation_type,
                         &config.protocol_system,
                         config.module_name.clone(),
                     )
