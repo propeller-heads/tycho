@@ -23,7 +23,6 @@ RUN chmod +x /usr/local/bin/forge
 # excluding .git/ and CI checkout not always fetching submodules).
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
     git init && \
-    rm -rf lib/forge-std lib/openzeppelin-contracts && \
     forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 RUN forge build
@@ -121,7 +120,7 @@ RUN chmod +x /entrypoint.sh
 
 # Create minimal directory structure matching expected layout:
 # The test runner looks for <root>/substreams/ and <root>/adapter-integration/evm/
-RUN mkdir -p /proto /app/adapter-integration/evm
+RUN mkdir -p /app/adapter-integration/evm
 
 # Copy proto files (needed for `substreams pack`). Packages live at /app/substreams/<pkg> and their
 # substreams.yaml uses `importPaths: ../../../proto`, which from there resolves to /proto (the repo
