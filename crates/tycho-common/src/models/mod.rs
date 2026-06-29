@@ -265,10 +265,6 @@ fn wrapped_native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
 
 impl Chain {
     pub fn id(&self) -> u64 {
-        self.id_in(chain_registry())
-    }
-
-    pub(crate) fn id_in(&self, registry: &ChainConfigRegistry) -> u64 {
         match self {
             Chain::Ethereum => 1,
             Chain::ZkSync => 324,
@@ -278,7 +274,7 @@ impl Chain {
             Chain::Bsc => 56,
             Chain::Unichain => 130,
             Chain::Polygon => 137,
-            Chain::Custom(name) => resolve_custom(name, registry).chain_id,
+            Chain::Custom(name) => resolve_custom(name, chain_registry()).chain_id,
         }
     }
 
@@ -289,14 +285,6 @@ impl Chain {
     /// These prices are volatile, and used as a reference. They should not be updated often,
     /// unless big price movements occour, making an update necessary.
     pub fn default_tvl_threshold(&self, tier: TvlThresholdTier) -> f64 {
-        self.default_tvl_threshold_in(tier, chain_registry())
-    }
-
-    pub(crate) fn default_tvl_threshold_in(
-        &self,
-        tier: TvlThresholdTier,
-        registry: &ChainConfigRegistry,
-    ) -> f64 {
         match (self, tier) {
             // ETH-native chains: 10 ETH ≈ $20K, 100 ETH ≈ $200K.
             // Starknet uses ETH-denominated TVL in Tycho (STRK tracked separately).
@@ -328,12 +316,12 @@ impl Chain {
             (Chain::Bsc, TvlThresholdTier::Medium) => 320.0,
 
             (Chain::Custom(name), TvlThresholdTier::Low) => {
-                resolve_custom(name, registry)
+                resolve_custom(name, chain_registry())
                     .default_tvl_thresholds
                     .low
             }
             (Chain::Custom(name), TvlThresholdTier::Medium) => {
-                resolve_custom(name, registry)
+                resolve_custom(name, chain_registry())
                     .default_tvl_thresholds
                     .medium
             }
@@ -342,10 +330,6 @@ impl Chain {
 
     /// Returns the native token for the chain.
     pub fn native_token(&self) -> Token {
-        self.native_token_in(chain_registry())
-    }
-
-    pub(crate) fn native_token_in(&self, registry: &ChainConfigRegistry) -> Token {
         match self {
             Chain::Ethereum => native_eth(Chain::Ethereum),
             // It was decided that STRK token will be tracked as a dedicated AccountBalance on
@@ -357,16 +341,12 @@ impl Chain {
             Chain::Bsc => native_bsc(Chain::Bsc),
             Chain::Unichain => native_eth(Chain::Unichain),
             Chain::Polygon => native_pol(Chain::Polygon),
-            Chain::Custom(name) => native_custom(*self, resolve_custom(name, registry)),
+            Chain::Custom(name) => native_custom(*self, resolve_custom(name, chain_registry())),
         }
     }
 
     /// Returns the wrapped native token for the chain.
     pub fn wrapped_native_token(&self) -> Token {
-        self.wrapped_native_token_in(chain_registry())
-    }
-
-    pub(crate) fn wrapped_native_token_in(&self, registry: &ChainConfigRegistry) -> Token {
         match self {
             Chain::Ethereum => {
                 wrapped_native_eth(Chain::Ethereum, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
@@ -393,16 +373,14 @@ impl Chain {
             Chain::Polygon => {
                 wrapped_native_pol(Chain::Polygon, "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
             }
-            Chain::Custom(name) => wrapped_native_custom(*self, resolve_custom(name, registry)),
+            Chain::Custom(name) => {
+                wrapped_native_custom(*self, resolve_custom(name, chain_registry()))
+            }
         }
     }
 
     /// Returns the expected block time in seconds for the chain.
     pub fn block_time_secs(&self) -> u64 {
-        self.block_time_secs_in(chain_registry())
-    }
-
-    pub(crate) fn block_time_secs_in(&self, registry: &ChainConfigRegistry) -> u64 {
         match self {
             Chain::Ethereum => 12,
             Chain::Starknet => 2,
@@ -412,7 +390,7 @@ impl Chain {
             Chain::Bsc => 1,
             Chain::Unichain => 1,
             Chain::Polygon => 2,
-            Chain::Custom(name) => resolve_custom(name, registry).block_time_secs,
+            Chain::Custom(name) => resolve_custom(name, chain_registry()).block_time_secs,
         }
     }
 }
@@ -576,10 +554,15 @@ pub enum MergeError {
     InvalidState(String),
 }
 
+// The custom-chain tests below install the process-wide chain registry, which is a set-once
+// `OnceLock`. They must run in isolated processes (we use nextest), so each test gets a fresh
+// registry; under a shared-process runner they would contend over the same global.
 #[cfg(test)]
 mod tests {
     use super::{
-        chain_config::{ChainAddress, ChainConfigError, ChainTokenConfig, TvlThresholds},
+        chain_config::{
+            init_chain_registry, ChainAddress, ChainConfigError, ChainTokenConfig, TvlThresholds,
+        },
         *,
     };
 
@@ -595,6 +578,11 @@ mod tests {
             TvlThresholds::new(50.0, 500.0),
         )
         .unwrap()
+    }
+
+    fn init_test_registry() {
+        init_chain_registry(ChainConfigRegistry::from_configs([test_config()]).unwrap())
+            .expect("chain registry already initialised; run tests under nextest");
     }
 
     #[test]
@@ -626,24 +614,24 @@ mod tests {
 
     #[test]
     fn test_custom_chain_id() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
+        init_test_registry();
         let chain = Chain::custom("testchain").unwrap();
-        assert_eq!(chain.id_in(&registry), 9999);
+        assert_eq!(chain.id(), 9999);
     }
 
     #[test]
     fn test_custom_chain_tvl_thresholds() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
+        init_test_registry();
         let chain = Chain::custom("testchain").unwrap();
-        assert_eq!(chain.default_tvl_threshold_in(TvlThresholdTier::Low, &registry), 50.0);
-        assert_eq!(chain.default_tvl_threshold_in(TvlThresholdTier::Medium, &registry), 500.0);
+        assert_eq!(chain.default_tvl_threshold(TvlThresholdTier::Low), 50.0);
+        assert_eq!(chain.default_tvl_threshold(TvlThresholdTier::Medium), 500.0);
     }
 
     #[test]
     fn test_custom_chain_native_token() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
+        init_test_registry();
         let chain = Chain::custom("testchain").unwrap();
-        let token = chain.native_token_in(&registry);
+        let token = chain.native_token();
         assert_eq!(token.symbol, "TST");
         assert_eq!(token.decimals, 18);
         assert_eq!(token.chain, chain);
@@ -652,9 +640,9 @@ mod tests {
 
     #[test]
     fn test_custom_chain_wrapped_native_token() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
+        init_test_registry();
         let chain = Chain::custom("testchain").unwrap();
-        let token = chain.wrapped_native_token_in(&registry);
+        let token = chain.wrapped_native_token();
         assert_eq!(token.symbol, "WTST");
         assert_eq!(token.chain, chain);
         assert_eq!(token.address, Bytes::from(vec![0xBB; 20]));
