@@ -1,0 +1,24 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "baseline"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "baseline"
+skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
+
+tests:
+  - name: test_base_recent_pool_creation
+    # First Base pool creation through first swap, keeping storage-store warm-up short.
+    start_block: 45073551
+    stop_block: 45079661
+    expected_components:
+      - id: "0x4082b90beba6935c7718497165557106e43a6ac6"
+        tokens:
+          - "0x4082b90beba6935c7718497165557106e43a6ac6"
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+        static_attributes:
+          relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+          reserve: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          manual_updates: "0x01"
+        creation_tx: "0xe4bec092a4b160d4020052938cffa7abfbafd1111a237e721ab8a0f5f3085a1c"
+        skip_simulation: false
+        skip_execution: false
