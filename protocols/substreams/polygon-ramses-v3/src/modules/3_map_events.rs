@@ -81,7 +81,7 @@ fn maybe_pool_event(log: &Log, pool: Pool, tx: &TransactionTrace) -> Option<Pool
 
     Some(PoolEvent {
         log_ordinal: log.ordinal,
-        pool_address: pool.address,
+        pool_address: log.address.clone(),
         token0: pool.token0,
         token1: pool.token1,
         transaction: Some(tx.into()),

@@ -5,9 +5,8 @@ package ramses.v3;
 import "tycho/evm/v1/common.proto";
 
 message Pool {
-  bytes address = 1;
-  bytes token0 = 2;
-  bytes token1 = 3;
+  bytes token0 = 1;
+  bytes token1 = 2;
 }
 
 // A change to a pool's tick.

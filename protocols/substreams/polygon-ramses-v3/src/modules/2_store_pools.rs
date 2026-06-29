@@ -21,11 +21,7 @@ pub fn store_pools(pools_created: BlockEntityChanges, store: StoreSetIfNotExists
             store.set_if_not_exists(
                 0,
                 pool_address,
-                &Pool {
-                    address: hex::decode(pool_address).unwrap(),
-                    token0,
-                    token1,
-                },
+                &Pool { token0, token1 },
             );
         }
     }
