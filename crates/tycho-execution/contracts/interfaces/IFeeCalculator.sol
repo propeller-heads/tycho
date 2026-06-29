@@ -58,22 +58,12 @@ interface IFeeCalculator {
     ) external view returns (bool);
 
     /**
-     * @dev Returns the effective router fee on output amount for a specific client
-     * @param client The client address to check
-     * @return The fee in basis points (custom if set, otherwise default)
-     */
-    function getEffectiveRouterFeeOnOutput(address client)
-        external
-        view
-        returns (uint16);
-
-    /**
-     * @dev Returns the effective router fee on output for a specific client in the internal
-     *      8-decimal fee unit scale (100_000_000 = 100%).
+     * @dev Returns the effective router fee on output for a specific client
+     *      in fee units (100_000_000 = 100%).
      * @param client The client address to check
      * @return The fee in fee units (custom if set, otherwise default)
      */
-   function getEffectiveRouterFeeOnOutputScaled(address client)
+    function getEffectiveRouterFeeOnOutput(address client)
         external
         view
         returns (uint32);

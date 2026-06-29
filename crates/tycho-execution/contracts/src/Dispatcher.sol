@@ -289,7 +289,7 @@ contract Dispatcher is TransferManager {
     function _callGetEffectiveRouterFeeOnOutput(
         address feeCalculator,
         address client
-    ) internal view returns (uint16 routerFeeOnOutputBps) {
+    ) internal view returns (uint32 routerFeeOnOutputBps) {
         // slither-disable-next-line calls-loop
         routerFeeOnOutputBps =
             IFeeCalculator(feeCalculator).getEffectiveRouterFeeOnOutput(client);
