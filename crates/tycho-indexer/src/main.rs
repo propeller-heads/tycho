@@ -37,7 +37,7 @@ use tracing_subscriber::EnvFilter;
 use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
-        chain_config::{init_chain_registry, ChainConfigRegistry, CustomChainConfig},
+        chain_config::{init_chain_registry, ChainConfigRegistry},
         contract::AccountDelta,
         Address, Chain, ExtractionState, ImplementationType,
     },
@@ -72,16 +72,11 @@ mod ot;
 #[derive(Debug, Deserialize)]
 struct ExtractorConfigs {
     extractors: std::collections::HashMap<String, ExtractorConfig>,
-    #[serde(default)]
-    chains: Vec<CustomChainConfig>,
 }
 
 impl ExtractorConfigs {
-    fn new(
-        extractors: std::collections::HashMap<String, ExtractorConfig>,
-        chains: Vec<CustomChainConfig>,
-    ) -> Self {
-        Self { extractors, chains }
+    fn new(extractors: std::collections::HashMap<String, ExtractorConfig>) -> Self {
+        Self { extractors }
     }
 
     fn from_yaml(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -93,17 +88,18 @@ impl ExtractorConfigs {
     }
 }
 
-fn resolve_chain(name: &str, registry: &ChainConfigRegistry) -> Result<Chain, ExtractionError> {
-    if let Some(chain) = Chain::builtin_from_str(name) {
-        return Ok(chain);
-    }
-    if registry.contains(name) {
-        Chain::custom(name).map_err(|e| ExtractionError::Setup(e.to_string()))
+/// Loads custom chains from `path` (empty registry if the file is absent) and installs it as the
+/// process-wide registry, so `Chain::from_str` can resolve custom chains by name.
+fn init_chains(path: &str) -> Result<(), ExtractionError> {
+    let registry = if std::path::Path::new(path).exists() {
+        ChainConfigRegistry::from_yaml_file(path)
+            .map_err(|e| ExtractionError::Setup(e.to_string()))?
     } else {
-        Err(ExtractionError::Setup(format!(
-            "Unknown chain '{name}': add it to the [chains] config section"
-        )))
-    }
+        ChainConfigRegistry::empty()
+    };
+    init_chain_registry(registry).map_err(|_| {
+        ExtractionError::Setup("chain config registry already initialised".to_string())
+    })
 }
 
 type ExtractionTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
@@ -266,17 +262,19 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .parse()
                 .expect("Failed to parse retention horizon");
 
-            let chain_registry =
-                ChainConfigRegistry::from_configs(extractors_config.chains.clone())
-                    .map_err(|e| ExtractionError::Setup(e.to_string()))?;
-            init_chain_registry(chain_registry.clone()).map_err(|_| {
-                ExtractionError::Setup("chain config registry already initialised".to_string())
-            })?;
+            init_chains(&index_args.chain_config)?;
 
             let chains = index_args
                 .chains
                 .iter()
-                .map(|name| resolve_chain(name, &chain_registry))
+                .map(|name| {
+                    Chain::from_str(name).map_err(|e| {
+                        ExtractionError::Setup(format!(
+                            "Unknown chain '{name}': {e}; add it to {}",
+                            index_args.chain_config
+                        ))
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
 
             let (extraction_tasks, other_tasks) = create_indexing_tasks(
@@ -336,37 +334,36 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             _ => Err(ExtractionError::Setup(format!("Unknown DCI plugin: {s}"))),
         })?;
 
+    init_chains(&run_args.chain_config)?;
+
     let chain = Chain::from_str(&run_args.chain)
         .map_err(|e| ExtractionError::Setup(format!("Invalid chain '{}': {e}", run_args.chain)))?;
 
-    let config = ExtractorConfigs::new(
-        HashMap::from([(
+    let config = ExtractorConfigs::new(HashMap::from([(
+        run_args.protocol_system.clone(),
+        ExtractorConfig::new(
             run_args.protocol_system.clone(),
-            ExtractorConfig::new(
-                run_args.protocol_system.clone(),
-                chain,
-                ImplementationType::Vm,
-                1, /* TODO: if we want to increase this, we need to commit the cache when we
-                    * reached `end_block` */
-                run_args.start_block,
-                run_args.stop_block(),
-                run_args
-                    .protocol_type_names
-                    .into_iter()
-                    .map(|name| {
-                        ProtocolTypeConfig::new(name, tycho_common::models::FinancialType::Swap)
-                    })
-                    .collect::<Vec<_>>(),
-                run_args.spkg,
-                run_args.module,
-                run_args.initialized_accounts,
-                run_args.initialization_block,
-                None,
-                dci_plugin,
-            ),
-        )]),
-        Vec::new(),
-    );
+            chain,
+            ImplementationType::Vm,
+            1, /* TODO: if we want to increase this, we need to commit the cache when we
+                * reached `end_block` */
+            run_args.start_block,
+            run_args.stop_block(),
+            run_args
+                .protocol_type_names
+                .into_iter()
+                .map(|name| {
+                    ProtocolTypeConfig::new(name, tycho_common::models::FinancialType::Swap)
+                })
+                .collect::<Vec<_>>(),
+            run_args.spkg,
+            run_args.module,
+            run_args.initialized_accounts,
+            run_args.initialization_block,
+            None,
+            dci_plugin,
+        ),
+    )]));
 
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,
@@ -729,15 +726,7 @@ async fn run_analyze_tokens(
 
 #[cfg(test)]
 mod tests {
-    use tycho_common::models::chain_config::{ChainTokenConfig, TvlThresholds};
-
-    use super::*;
-
-    #[test]
-    fn test_resolve_unknown_chain_fails() {
-        let err = resolve_chain("notachain", &ChainConfigRegistry::empty()).unwrap_err();
-        assert!(matches!(err, ExtractionError::Setup(msg) if msg.contains("notachain")));
-    }
+    use tycho_common::models::chain_config::ChainTokenConfig;
 
     #[test]
     fn test_chain_token_invalid_hex() {
@@ -752,53 +741,6 @@ mod tests {
             18
         )
         .is_err());
-    }
-
-    #[test]
-    fn test_resolve_custom_chain_from_yaml() {
-        let yaml = r#"
-extractors: {}
-chains:
-  - name: mychain
-    chain_id: 99999
-    block_time_secs: 2
-    native:
-      address: "0x0000000000000000000000000000000000000000"
-      symbol: "ETH"
-      decimals: 18
-    wrapped_native:
-      address: "0x4200000000000000000000000000000000000006"
-      symbol: "WETH"
-      decimals: 18
-    default_tvl_thresholds:
-      low: 1000
-      medium: 10000
-"#;
-        let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
-        let registry =
-            ChainConfigRegistry::from_configs(config.chains).expect("registry build failed");
-        let chain = resolve_chain("mychain", &registry).expect("resolve failed");
-        assert_eq!(chain, Chain::custom("mychain").unwrap());
-        let cfg = registry
-            .get("mychain")
-            .expect("config present");
-
-        let expected_native =
-            ChainTokenConfig::try_new("0x0000000000000000000000000000000000000000", "ETH", 18)
-                .unwrap();
-        let expected_wrapped =
-            ChainTokenConfig::try_new("0x4200000000000000000000000000000000000006", "WETH", 18)
-                .unwrap();
-        let expected_cfg = CustomChainConfig::try_new(
-            "mychain",
-            99999,
-            2,
-            expected_native,
-            expected_wrapped,
-            TvlThresholds::new(1000.0, 10000.0),
-        )
-        .unwrap();
-        assert_eq!(cfg, &expected_cfg);
     }
 }
 

@@ -219,7 +219,7 @@ fn resolve_custom<'a>(
         .unwrap_or_else(|| {
             panic!(
                 "no configuration registered for custom chain '{name}'; provide it via the chain \
-             config file (TYCHO_CHAIN_CONFIG, default ./chain.yaml) or init_chain_registry"
+             config file (TYCHO_CHAIN_CONFIG, default ./chains.yaml) or init_chain_registry"
             )
         })
 }
