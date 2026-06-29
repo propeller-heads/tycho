@@ -151,12 +151,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates fees from the expected swap output amount
+     * @dev Calculates fees from the fee base amount (output minus any
+     *      extracted surplus).
      * @return feeRecipients 2-element array: [0] = router, [1] = client.
      *         _mergeFeeRecipients relies on this ordering.
      */
     function _calculateFee(
-        uint256 expectedAmountOut,
+        uint256 feeBase,
         address client,
         uint32 clientFeeBps
     ) internal view returns (FeeRecipient[] memory feeRecipients) {
@@ -177,7 +178,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         if (clientFeeBps > 0) {
             // Save numerator for later routerFeeOnClientFee calculation to avoid
             // divide-before-multiply precision loss and warning
-            uint256 clientFeeNumerator = expectedAmountOut * clientFeeBps;
+            uint256 clientFeeNumerator = feeBase * clientFeeBps;
             uint256 totalClientFee = clientFeeNumerator / MAX_BPS;
 
             // Calculate router's cut of the client fee
@@ -197,7 +198,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // Calculate router fee on output amount if > 0
         if (routerFeeOnOutputBps > 0) {
             uint256 routerFeeOnOutput =
-                (expectedAmountOut * routerFeeOnOutputBps) / MAX_BPS;
+                (feeBase * routerFeeOnOutputBps) / MAX_BPS;
             totalRouterFee += routerFeeOnOutput;
         }
 
