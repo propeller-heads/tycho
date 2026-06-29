@@ -21,9 +21,6 @@ error FeeCalculator__InvalidBps();
  *
  *      Router fees use an 8-decimal precision unit: 1 unit = 0.0001 BPS = 0.000001%.
  *      100% = 100_000_000 units. This allows sub-BPS fee rates (e.g. 1.5 BPS = 15_000 units).
- *
- *      getEffectiveRouterFeeOnOutput preserves legacy BPS semantics (10_000 = 100%)
- *      for compatibility with TychoRouter and Dispatcher.
  */
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -371,35 +368,12 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Returns the effective router fee on output for a specific client in legacy BPS scale
-     *      (10_000 = 100%), for interface compatibility with TychoRouter and Dispatcher.
-     * @dev For full-precision value use getEffectiveRouterFeeOnOutputScaled.
-     * @param client The client address to check. Pass address(0) to fall back to tx.origin.
-     * @return Zero if no fee is set; otherwise the fee in legacy BPS (rounded down, minimum 1).
-     */
-    function getEffectiveRouterFeeOnOutput(address client)
-        external
-        view
-        returns (uint16)
-    {
-        CustomFees memory customFees = _customRouterFees[_resolveClient(client)];
-        uint32 fee = customFees.hasCustomFeeOnOutput
-            ? customFees.feeBpsOnOutput
-            : _routerFeeOnOutputBps;
-        if (fee == 0) return 0;
-        // Convert from internal scale (100_000_000 = 100%) to legacy BPS scale (10_000 = 100%).
-        // Return at least 1 so callers can detect that a fee is active.
-        uint32 legacyBps = fee / 10_000;
-        return uint16(legacyBps > 0 ? legacyBps : 1);
-    }
-
-    /**
-     * @dev Returns the effective router fee on output for a specific client in fee units
-     *      (100_000_000 = 100%).
+     * @dev Returns the effective router fee on output for a specific client
+     *      in fee units (100_000_000 = 100%).
      * @param client The client address to check. Pass address(0) to fall back to tx.origin.
      * @return The fee in fee units (custom if set, otherwise default)
      */
-    function getEffectiveRouterFeeOnOutputScaled(address client)
+    function getEffectiveRouterFeeOnOutput(address client)
         external
         view
         returns (uint32)
