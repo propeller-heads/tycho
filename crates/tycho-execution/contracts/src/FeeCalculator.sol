@@ -26,11 +26,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
 
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
-    uint32 public constant MAX_FEE_BPS = 100_000_000;
-    // Combined denominator when both fees use the MAX_FEE_BPS scale (MAX_FEE_BPS^2)
-    uint64 public constant MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000;
-    // 100% in 8-decimal fee units (for slippage share validation)
-    uint32 public constant MAX_SLIPPAGE_SHARE_BPS = 100_000_000;
+    uint32 public constant MAX_BPS = 100_000_000;
+    // Combined denominator when both fees use the MAX_BPS scale (MAX_BPS^2)
+    uint64 public constant MAX_BPS_SQUARED = 10_000_000_000_000_000;
 
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
@@ -158,8 +156,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             _getFeeInfo(client);
 
         if (
-            (clientFeeBps + routerFeeOnOutputBps > MAX_FEE_BPS)
-                || routerFeeOnClientFeeBps > MAX_FEE_BPS
+            (clientFeeBps + routerFeeOnOutputBps > MAX_BPS)
+                || routerFeeOnClientFeeBps > MAX_BPS
         ) {
             revert FeeCalculator__FeeTooHigh();
         }
@@ -172,14 +170,14 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             // Save numerator for later routerFeeOnClientFee calculation to avoid
             // divide-before-multiply precision loss and warning
             uint256 clientFeeNumerator = expectedAmountOut * clientFeeBps;
-            uint256 totalClientFee = clientFeeNumerator / MAX_FEE_BPS;
+            uint256 totalClientFee = clientFeeNumerator / MAX_BPS;
 
             // Calculate router's cut of the client fee
             if (routerFeeOnClientFeeBps > 0) {
                 // Both fees use the 100_000_000 scale, so denominator is 100_000_000^2
                 routerFeeOnClientFee =
                     (clientFeeNumerator * routerFeeOnClientFeeBps)
-                        / MAX_FEE_BPS_SQUARED;
+                        / MAX_BPS_SQUARED;
             }
 
             // Client gets their portion (after router's cut)
@@ -191,7 +189,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // Calculate router fee on output amount if > 0
         if (routerFeeOnOutputBps > 0) {
             uint256 routerFeeOnOutput =
-                (expectedAmountOut * routerFeeOnOutputBps) / MAX_FEE_BPS;
+                (expectedAmountOut * routerFeeOnOutputBps) / MAX_BPS;
             totalRouterFee += routerFeeOnOutput;
         }
 
@@ -231,7 +229,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 surplus = actualAmountOut - expectedAmountOut;
         uint32 clientShareBps = _getClientSlippageShareBps(client);
 
-        uint256 clientCut = (surplus * clientShareBps) / MAX_SLIPPAGE_SHARE_BPS;
+        uint256 clientCut = (surplus * clientShareBps) / MAX_BPS;
         uint256 routerCut = surplus - clientCut;
 
         FeeRecipient[] memory result = new FeeRecipient[](2);
@@ -308,7 +306,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         uint32 oldFeeBps = _routerFeeOnOutputBps;
         _routerFeeOnOutputBps = feeBps;
         emit RouterFeeOnOutputUpdated(oldFeeBps, feeBps);
@@ -330,7 +328,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         CustomFees memory customFees = _customRouterFees[client];
         uint32 oldFeeBps = customFees.hasCustomFeeOnOutput
             ? customFees.feeBpsOnOutput
@@ -395,7 +393,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         uint32 oldFeeBps = _routerFeeOnClientFeeBps;
         _routerFeeOnClientFeeBps = feeBps;
         emit RouterFeeOnClientFeeUpdated(oldFeeBps, feeBps);
@@ -417,7 +415,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         CustomFees memory customFees = _customRouterFees[client];
         uint32 oldFeeBps = customFees.hasCustomFeeOnClientFee
             ? customFees.feeBpsOnClientFee
@@ -547,7 +545,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (bps > MAX_SLIPPAGE_SHARE_BPS) {
+        if (bps > MAX_BPS) {
             revert FeeCalculator__InvalidBps();
         }
         uint32 oldBps = _defaultClientSlippageShareBps;
@@ -571,7 +569,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (bps > MAX_SLIPPAGE_SHARE_BPS) {
+        if (bps > MAX_BPS) {
             revert FeeCalculator__InvalidBps();
         }
         CustomFees memory customFees = _customRouterFees[client];
