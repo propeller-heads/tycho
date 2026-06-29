@@ -16,9 +16,9 @@ pub struct ChainAddress {
 }
 
 impl ChainAddress {
-    pub fn new(bytes: &[u8]) -> Result<Self, ChainAddressError> {
+    pub fn new(bytes: &[u8]) -> Result<Self, ChainConfigError> {
         if bytes.len() > 32 {
-            return Err(ChainAddressError::TooLong(bytes.len()));
+            return Err(ChainConfigError::AddressTooLong(bytes.len()));
         }
         let mut arr = [0u8; 32];
         arr[..bytes.len()].copy_from_slice(bytes);
@@ -48,23 +48,23 @@ impl<'de> Deserialize<'de> for ChainAddress {
 }
 
 #[derive(Error, Debug, PartialEq)]
-pub enum ChainAddressError {
-    #[error("address is {0} bytes, max is 32")]
-    TooLong(usize),
-}
-
-#[derive(Error, Debug, PartialEq)]
 pub enum ChainConfigError {
     #[error("invalid hex address '{0}': {1}")]
     InvalidAddress(String, String),
-    #[error("address '{0}': {1}")]
-    AddressTooLong(String, String),
+    #[error("address is {0} bytes, max is 32")]
+    AddressTooLong(usize),
     #[error("symbol '{0}' too long (max 8 chars)")]
     SymbolTooLong(String),
     #[error("chain name '{0}' too long (max 32 chars)")]
     NameTooLong(String),
     #[error("unknown chain '{0}': not a built-in chain and no custom config registered")]
     UnknownChain(String),
+    #[error("duplicate custom chain config for '{0}'")]
+    DuplicateChain(String),
+    #[error("failed to read chain config file: {0}")]
+    Io(String),
+    #[error("failed to parse chain config: {0}")]
+    Parse(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -84,8 +84,7 @@ impl ChainTokenConfig {
     ) -> Result<Self, ChainConfigError> {
         let raw = hex::decode(address_hex.trim_start_matches("0x"))
             .map_err(|e| ChainConfigError::InvalidAddress(address_hex.to_owned(), e.to_string()))?;
-        let address = ChainAddress::new(&raw)
-            .map_err(|e| ChainConfigError::AddressTooLong(address_hex.to_owned(), e.to_string()))?;
+        let address = ChainAddress::new(&raw)?;
         let symbol = ArrayString::from(symbol)
             .map_err(|_| ChainConfigError::SymbolTooLong(symbol.to_owned()))?;
         Ok(Self { address, symbol, decimals })
@@ -182,19 +181,12 @@ struct ChainConfigFile {
     chains: Vec<CustomChainConfig>,
 }
 
-#[derive(Debug, Error)]
-pub enum ChainConfigFileError {
-    #[error("failed to read chain config file: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("failed to parse chain config: {0}")]
-    Parse(#[from] serde_yaml::Error),
-}
-
 /// Resolves the full configuration of custom chains by name.
 ///
 /// Built-in chains are resolved without this registry; it only holds user-defined chains loaded
 /// from a YAML source. Build it explicitly via [`ChainConfigRegistry::from_configs`] (e.g. the
-/// indexer reusing its `chains:` config) or rely on the lazily-loaded global [`chain_registry`].
+/// indexer reusing its `chains:` config) or [`ChainConfigRegistry::load_default`], then install it
+/// as the process-wide registry with [`init_chain_registry`].
 #[derive(Debug, Default, Clone)]
 pub struct ChainConfigRegistry {
     custom: HashMap<String, CustomChainConfig>,
@@ -206,39 +198,52 @@ impl ChainConfigRegistry {
         Self { custom: HashMap::new() }
     }
 
-    /// Builds a registry from custom chain configs, keyed by chain name.
-    pub fn from_configs(configs: impl IntoIterator<Item = CustomChainConfig>) -> Self {
-        let custom = configs
-            .into_iter()
-            .map(|cfg| (cfg.name().to_owned(), cfg))
-            .collect();
-        Self { custom }
+    /// Builds a registry from custom chain configs, keyed by chain name. Rejects duplicate names
+    /// with [`ChainConfigError::DuplicateChain`] rather than silently overriding, so an ambiguous
+    /// config fails loudly at construction.
+    pub fn from_configs(
+        configs: impl IntoIterator<Item = CustomChainConfig>,
+    ) -> Result<Self, ChainConfigError> {
+        let mut custom = HashMap::new();
+        for cfg in configs {
+            let name = cfg.name().to_owned();
+            if custom
+                .insert(name.clone(), cfg)
+                .is_some()
+            {
+                return Err(ChainConfigError::DuplicateChain(name));
+            }
+        }
+        Ok(Self { custom })
     }
 
     /// Reads custom chain configs from `TYCHO_CHAIN_CONFIG` (default `./chain.yaml`).
     ///
     /// Returns an empty registry when the file is absent, so runs on built-in chains need no config
-    /// file. Panics with context if the file exists but cannot be read or parsed.
-    pub fn load_default() -> Self {
+    /// file. Returns an error if the file exists but cannot be read or parsed, leaving it to the
+    /// caller to decide how to react. Install the result with [`init_chain_registry`] to make it
+    /// the process-wide registry.
+    pub fn load_default() -> Result<Self, ChainConfigError> {
         let path = std::env::var(CHAIN_CONFIG_ENV)
             .unwrap_or_else(|_| DEFAULT_CHAIN_CONFIG_PATH.to_owned());
         if !std::path::Path::new(&path).exists() {
-            return Self::empty();
+            return Ok(Self::empty());
         }
         Self::from_yaml_file(&path)
-            .unwrap_or_else(|e| panic!("failed to load chain config from '{path}': {e}"))
     }
 
     /// Parses a registry from a YAML file with a top-level `chains:` list.
-    pub fn from_yaml_file(path: &str) -> Result<Self, ChainConfigFileError> {
-        let contents = std::fs::read_to_string(path)?;
+    pub fn from_yaml_file(path: &str) -> Result<Self, ChainConfigError> {
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| ChainConfigError::Io(e.to_string()))?;
         Self::from_yaml_str(&contents)
     }
 
     /// Parses a registry from a YAML string with a top-level `chains:` list.
-    pub fn from_yaml_str(contents: &str) -> Result<Self, ChainConfigFileError> {
-        let file: ChainConfigFile = serde_yaml::from_str(contents)?;
-        Ok(Self::from_configs(file.chains))
+    pub fn from_yaml_str(contents: &str) -> Result<Self, ChainConfigError> {
+        let file: ChainConfigFile =
+            serde_yaml::from_str(contents).map_err(|e| ChainConfigError::Parse(e.to_string()))?;
+        Self::from_configs(file.chains)
     }
 
     /// Returns the config for a custom chain by name, if registered.
@@ -254,10 +259,13 @@ impl ChainConfigRegistry {
 
 static CHAIN_REGISTRY: OnceLock<ChainConfigRegistry> = OnceLock::new();
 
-/// Returns the process-wide chain config registry, lazily loading it from the configured file on
-/// first access (see [`ChainConfigRegistry::load_default`]).
+/// Returns the process-wide chain config registry.
+///
+/// Defaults to an empty registry — only built-in chains resolve — unless one was installed with
+/// [`init_chain_registry`]. This never reads from disk; load custom chains explicitly via
+/// [`ChainConfigRegistry::load_default`] and install them before first access.
 pub fn chain_registry() -> &'static ChainConfigRegistry {
-    CHAIN_REGISTRY.get_or_init(ChainConfigRegistry::load_default)
+    CHAIN_REGISTRY.get_or_init(ChainConfigRegistry::empty)
 }
 
 /// Installs the process-wide chain config registry explicitly, before any call to
@@ -323,7 +331,7 @@ chains:
             TvlThresholds::new(1.0, 2.0),
         )
         .unwrap();
-        let registry = ChainConfigRegistry::from_configs([cfg]);
+        let registry = ChainConfigRegistry::from_configs([cfg]).unwrap();
         assert!(registry.contains("mychain"));
         assert_eq!(
             registry
@@ -338,5 +346,31 @@ chains:
     fn empty_chains_list_parses_to_empty_registry() {
         let registry = ChainConfigRegistry::from_yaml_str("chains: []").unwrap();
         assert!(!registry.contains("anything"));
+    }
+
+    #[test]
+    fn from_configs_duplicate_name_errors() {
+        let first = CustomChainConfig::try_new(
+            "dup",
+            1,
+            2,
+            ChainTokenConfig::try_new("0x00", "AAA", 18).unwrap(),
+            ChainTokenConfig::try_new("0x01", "WAAA", 18).unwrap(),
+            TvlThresholds::new(1.0, 2.0),
+        )
+        .unwrap();
+        let second = CustomChainConfig::try_new(
+            "dup",
+            2,
+            2,
+            ChainTokenConfig::try_new("0x00", "AAA", 18).unwrap(),
+            ChainTokenConfig::try_new("0x01", "WAAA", 18).unwrap(),
+            TvlThresholds::new(1.0, 2.0),
+        )
+        .unwrap();
+        assert_eq!(
+            ChainConfigRegistry::from_configs([first, second]).unwrap_err(),
+            ChainConfigError::DuplicateChain("dup".to_owned())
+        );
     }
 }

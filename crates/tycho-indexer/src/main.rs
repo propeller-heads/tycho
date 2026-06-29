@@ -37,9 +37,9 @@ use tracing_subscriber::EnvFilter;
 use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
+        chain_config::{init_chain_registry, ChainConfigRegistry, CustomChainConfig},
         contract::AccountDelta,
-        init_chain_registry, Address, Chain, ChainConfigRegistry, CustomChainConfig,
-        ExtractionState, ImplementationType,
+        Address, Chain, ExtractionState, ImplementationType,
     },
     storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
@@ -267,7 +267,8 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .expect("Failed to parse retention horizon");
 
             let chain_registry =
-                ChainConfigRegistry::from_configs(extractors_config.chains.clone());
+                ChainConfigRegistry::from_configs(extractors_config.chains.clone())
+                    .map_err(|e| ExtractionError::Setup(e.to_string()))?;
             init_chain_registry(chain_registry.clone()).map_err(|_| {
                 ExtractionError::Setup("chain config registry already initialised".to_string())
             })?;
@@ -728,7 +729,7 @@ async fn run_analyze_tokens(
 
 #[cfg(test)]
 mod tests {
-    use tycho_common::models::{ChainTokenConfig, TvlThresholds};
+    use tycho_common::models::chain_config::{ChainTokenConfig, TvlThresholds};
 
     use super::*;
 
@@ -774,7 +775,8 @@ chains:
       medium: 10000
 "#;
         let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
-        let registry = ChainConfigRegistry::from_configs(config.chains.clone());
+        let registry =
+            ChainConfigRegistry::from_configs(config.chains).expect("registry build failed");
         let chain = resolve_chain("mychain", &registry).expect("resolve failed");
         assert_eq!(chain, Chain::custom("mychain").unwrap());
         let cfg = registry

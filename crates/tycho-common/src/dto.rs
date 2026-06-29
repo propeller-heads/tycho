@@ -52,7 +52,7 @@ impl DeepSizeOf for Chain {
     }
 }
 
-pub use models::TvlThresholdTier;
+pub use models::chain_config::TvlThresholdTier;
 
 impl Chain {
     /// Returns a default TVL threshold in native token units for the given tier.
@@ -68,7 +68,7 @@ impl fmt::Display for Chain {
 }
 
 impl FromStr for Chain {
-    type Err = models::ChainConfigError;
+    type Err = models::chain_config::ChainConfigError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         models::Chain::from_str(s).map(Self::from)

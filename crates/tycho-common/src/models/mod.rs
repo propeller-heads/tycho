@@ -1,5 +1,5 @@
 pub mod blockchain;
-mod chain_config;
+pub mod chain_config;
 pub mod contract;
 pub mod error;
 pub mod protocol;
@@ -8,7 +8,9 @@ pub mod token;
 use std::{collections::HashMap, fmt::Display, str::FromStr};
 
 use arrayvec::ArrayString;
-pub use chain_config::*;
+use chain_config::{
+    chain_registry, ChainConfigError, ChainConfigRegistry, CustomChainConfig, TvlThresholdTier,
+};
 use deepsize::DeepSizeOf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -576,7 +578,10 @@ pub enum MergeError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        chain_config::{ChainAddress, ChainConfigError, ChainTokenConfig, TvlThresholds},
+        *,
+    };
 
     fn test_config() -> CustomChainConfig {
         CustomChainConfig::try_new(
@@ -621,14 +626,14 @@ mod tests {
 
     #[test]
     fn test_custom_chain_id() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]);
+        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
         let chain = Chain::custom("testchain").unwrap();
         assert_eq!(chain.id_in(&registry), 9999);
     }
 
     #[test]
     fn test_custom_chain_tvl_thresholds() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]);
+        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
         let chain = Chain::custom("testchain").unwrap();
         assert_eq!(chain.default_tvl_threshold_in(TvlThresholdTier::Low, &registry), 50.0);
         assert_eq!(chain.default_tvl_threshold_in(TvlThresholdTier::Medium, &registry), 500.0);
@@ -636,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_custom_chain_native_token() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]);
+        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
         let chain = Chain::custom("testchain").unwrap();
         let token = chain.native_token_in(&registry);
         assert_eq!(token.symbol, "TST");
@@ -647,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_custom_chain_wrapped_native_token() {
-        let registry = ChainConfigRegistry::from_configs([test_config()]);
+        let registry = ChainConfigRegistry::from_configs([test_config()]).unwrap();
         let chain = Chain::custom("testchain").unwrap();
         let token = chain.wrapped_native_token_in(&registry);
         assert_eq!(token.symbol, "WTST");
@@ -657,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_chain_address_new_rejects_oversized_input() {
-        assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainAddressError::TooLong(33)));
+        assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainConfigError::AddressTooLong(33)));
     }
 
     #[test]
