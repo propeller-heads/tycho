@@ -124,14 +124,6 @@ fn default_false() -> bool {
     false
 }
 
-pub fn implementation_type_for(protocol_system: &str) -> &'static str {
-    if protocol_system.starts_with("vm:") {
-        "Vm"
-    } else {
-        "Custom"
-    }
-}
-
 /// Configuration for an individual test
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationTest {

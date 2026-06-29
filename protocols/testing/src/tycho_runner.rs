@@ -10,9 +10,6 @@ use miette::{IntoDiagnostic, WrapErr};
 use tempfile::NamedTempFile;
 use tracing::{debug, info};
 use tycho_simulation::tycho_common::models::Chain;
-
-use crate::config::implementation_type_for;
-
 pub struct TychoRunner {
     chain: Chain,
     db_url: String,
@@ -46,14 +43,75 @@ impl TychoRunner {
     ) -> miette::Result<()> {
         info!("Running Tycho indexer from block {start_block} to {end_block}...");
 
-        self.run_tycho_index(
+        let mut cmd = Command::new("tycho-indexer");
+        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()))
+            .env("AUTH_API_KEY", "dummy");
+
+        let all_accounts = self.initialized_accounts.clone();
+
+        cmd.args([
+            "--database-url",
+            self.db_url.as_str(),
+            "--server-port",
+            &self.server_port.to_string(),
+            "--endpoint",
+            get_default_endpoint(&self.chain)
+                .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))
+                .as_str(),
+            "run",
+            "--chain",
+            self.chain.to_string().as_str(),
+            "--spkg",
             spkg_path,
-            start_block,
-            Some(end_block + 3),
-            protocol_type_names,
+            "--module",
+            module_name
+                .as_deref()
+                .unwrap_or("map_protocol_changes"),
+            "--protocol-type-names",
+            &protocol_type_names.join(","),
+            "--protocol-system",
             protocol_system,
-            module_name,
-        )
+            "--start-block",
+            &start_block.to_string(),
+            "--stop-block",
+            &(end_block + 3).to_string(), /* +3 is to force our the stop block to be indexed and
+                                           * saved into the db. stop block +1 and +2 will not be
+                                           * included in the db */
+            "--dci-plugin",
+            "rpc",
+        ]);
+
+        if !all_accounts.is_empty() {
+            cmd.args([
+                "--initialized-accounts",
+                &all_accounts.join(","),
+                "--initialization-block",
+                &start_block.to_string(),
+            ]);
+        }
+
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut process = cmd
+            .spawn()
+            .into_diagnostic()
+            .wrap_err("Error running Tycho indexer")?;
+
+        Self::handle_process_output(&mut process);
+
+        let status = process
+            .wait()
+            .into_diagnostic()
+            .wrap_err("Failed to wait on Tycho indexer process")?;
+
+        // Note: tycho-indexer may exit with non-zero status when stream ends normally
+        // This is expected behavior and should not be treated as an error
+        if !status.success() {
+            debug!("Tycho indexer process exited with status: {status}");
+        }
+
+        Ok(())
     }
 
     pub fn start_rpc_server(&self) -> miette::Result<TychoRpcServer> {
@@ -126,7 +184,6 @@ impl TychoRunner {
         &self,
         spkg_path: &str,
         start_block: u64,
-        stop_block: Option<u64>,
         protocol_type_names: &[String],
         protocol_system: &str,
         module_name: Option<String>,
@@ -137,7 +194,6 @@ impl TychoRunner {
         let extractors_config = self.create_extractors_config(
             spkg_path,
             start_block,
-            stop_block,
             protocol_type_names,
             protocol_system,
             module_name,
@@ -208,7 +264,6 @@ impl TychoRunner {
         &self,
         spkg_path: &str,
         start_block: u64,
-        stop_block: Option<u64>,
         protocol_type_names: &[String],
         protocol_system: &str,
         module_name: Option<String>,
@@ -233,15 +288,12 @@ impl TychoRunner {
             )
         };
 
-        let stop_block = stop_block.map_or("null".to_string(), |block| block.to_string());
         let config = format!(
-            "extractors:\n  {}:\n    name: \"{}\"\n    chain: {}\n    implementation_type: {}\n    sync_batch_size: 1\n    start_block: {}\n    stop_block: {}\n    protocol_types:\n{}\n    spkg: \"{}\"\n    module_name: \"{}\"\n{}\n    dci_plugin:\n      type: rpc\n",
+            "extractors:\n  {}:\n    name: \"{}\"\n    chain: {}\n    implementation_type: Vm\n    sync_batch_size: 1\n    start_block: {}\n    stop_block: null\n    protocol_types:\n{}\n    spkg: \"{}\"\n    module_name: \"{}\"\n{}\n    dci_plugin:\n      type: rpc\n",
             protocol_system,
             protocol_system,
             self.chain.to_string().to_lowercase(),
-            implementation_type_for(protocol_system),
             start_block,
-            stop_block,
             protocol_types,
             spkg_path,
             module_name
@@ -272,68 +324,6 @@ impl TychoRunner {
                 }
             });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_yaml::Value;
-    use tycho_simulation::tycho_common::models::Chain;
-
-    use super::*;
-
-    #[test]
-    fn generated_extractor_config_derives_implementation_type() {
-        let runner = TychoRunner::new(Chain::Ethereum, "postgres://test".to_string(), vec![]);
-
-        let config = runner
-            .create_extractors_config(
-                "baseline.spkg",
-                24929812,
-                None,
-                &["baseline".to_string()],
-                "baseline",
-                Some("map_protocol_changes".to_string()),
-            )
-            .unwrap();
-
-        let parsed: Value = serde_yaml::from_str(&config).unwrap();
-        assert_eq!(
-            parsed["extractors"]["baseline"]["implementation_type"],
-            Value::String("Custom".to_string())
-        );
-        assert_eq!(parsed["extractors"]["baseline"]["stop_block"], Value::Null);
-
-        let config = runner
-            .create_extractors_config(
-                "baseline.spkg",
-                24929812,
-                Some(24929820),
-                &["baseline".to_string()],
-                "baseline",
-                Some("map_protocol_changes".to_string()),
-            )
-            .unwrap();
-
-        let parsed: Value = serde_yaml::from_str(&config).unwrap();
-        assert_eq!(parsed["extractors"]["baseline"]["stop_block"], Value::Number(24929820.into()));
-
-        let config = runner
-            .create_extractors_config(
-                "curve.spkg",
-                1,
-                None,
-                &["curve_pool".to_string()],
-                "vm:curve",
-                None,
-            )
-            .unwrap();
-
-        let parsed: Value = serde_yaml::from_str(&config).unwrap();
-        assert_eq!(
-            parsed["extractors"]["vm:curve"]["implementation_type"],
-            Value::String("Vm".to_string())
-        );
     }
 }
 

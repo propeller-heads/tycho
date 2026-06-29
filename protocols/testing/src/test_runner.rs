@@ -72,7 +72,6 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
-        ("base-baseline", "ethereum-baseline"),
         ("unichain-curve", "ethereum-curve"),
     ])
 });
@@ -305,7 +304,6 @@ impl TestRunner {
             if let Err(e) = tycho_runner.run_tycho_index(
                 &spkg_path_for_index,
                 start_block,
-                None,
                 &protocol_type_names,
                 &protocol_system,
                 module_name,
@@ -1577,11 +1575,11 @@ mod tests {
         let parent_dir = curr_dir.parent().unwrap();
         env::set_current_dir(parent_dir).expect("Failed to set working directory");
 
-        let pattern = "./substreams/*/integration_test*.tycho.yaml";
+        let pattern = "./substreams/*/integration_test.tycho.yaml";
         let mut results = Vec::new();
 
         if glob(pattern).unwrap().count() == 0 {
-            panic!("No integration_test*.tycho.yaml files found in substreams/*/");
+            panic!("No integration_test.tycho.yaml files found in substreams/*/");
         }
         for entry in glob(pattern).unwrap() {
             match entry {
