@@ -122,7 +122,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
         "uint256 maxClientContribution,uint256 deadline,"
         "uint256 amountIn,address tokenIn,address tokenOut,"
-        "uint256 amountOut,uint16 maxSlippageBps,address receiver,bytes swaps)"
+        "uint256 expectedAmountOut,uint16 maxSlippageBps,address receiver,bytes swaps)"
     );
 
     event Withdrawal(
@@ -188,7 +188,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
@@ -201,7 +201,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         uint256 nTokens,
         address receiver,
@@ -213,7 +213,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swaps
@@ -225,7 +225,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             nTokens,
             receiver,
@@ -246,7 +246,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
@@ -259,7 +259,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         uint256 nTokens,
         address receiver,
@@ -271,7 +271,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swaps
@@ -282,7 +282,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             nTokens,
             receiver,
@@ -303,7 +303,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
@@ -318,7 +318,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         uint256 nTokens,
         address receiver,
@@ -332,7 +332,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swaps
@@ -347,7 +347,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             nTokens,
             receiver,
@@ -368,7 +368,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -380,7 +380,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -391,7 +391,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swaps
@@ -403,7 +403,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             clientFeeParams,
@@ -423,7 +423,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -435,7 +435,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -446,7 +446,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swaps
@@ -457,7 +457,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             clientFeeParams,
@@ -476,7 +476,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -490,7 +490,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -503,7 +503,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swaps
@@ -519,7 +519,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             clientFeeParams,
@@ -538,7 +538,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -550,7 +550,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -561,7 +561,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swapData
@@ -573,7 +573,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             clientFeeParams,
@@ -592,7 +592,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -604,7 +604,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -615,7 +615,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swapData
@@ -626,7 +626,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             clientFeeParams,
@@ -645,7 +645,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param amountOut The quoted output amount used to compute slippage.
+     * @param expectedAmountOut The quoted output amount used to compute slippage.
      * @param maxSlippageBps Maximum slippage in basis points (0-10_000).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -659,7 +659,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -672,7 +672,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             swapData
@@ -687,7 +687,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn,
             tokenIn,
             tokenOut,
-            amountOut,
+            expectedAmountOut,
             maxSlippageBps,
             receiver,
             clientFeeParams,
@@ -1377,7 +1377,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param amountIn The input token amount.
      * @param tokenIn The input token address.
      * @param tokenOut The output token address.
-     * @param amountOut The quoted output amount.
+     * @param expectedAmountOut The quoted output amount.
      * @param maxSlippageBps Maximum slippage in basis points.
      * @param receiver The address to receive the output tokens.
      * @param swapData The encoded swap routing data.
@@ -1387,7 +1387,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 expectedAmountOut,
         uint16 maxSlippageBps,
         address receiver,
         bytes calldata swapData
@@ -1415,7 +1415,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                     amountIn,
                     tokenIn,
                     tokenOut,
-                    amountOut,
+                    expectedAmountOut,
                     maxSlippageBps,
                     receiver,
                     keccak256(swapData)

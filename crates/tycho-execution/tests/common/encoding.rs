@@ -284,7 +284,7 @@ fn sign_client_fee(
         b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
 uint256 maxClientContribution,uint256 deadline,\
 uint256 amountIn,address tokenIn,address tokenOut,\
-uint256 amountOut,uint16 maxSlippageBps,address receiver,bytes swaps)",
+uint256 expectedAmountOut,uint16 maxSlippageBps,address receiver,bytes swaps)",
     );
 
     // EIP-712 domain separator for TychoRouter ("TychoRouter", "1")
