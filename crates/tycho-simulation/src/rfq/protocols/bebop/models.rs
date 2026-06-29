@@ -34,7 +34,9 @@ impl BebopPriceData {
     /// Output: [(price1, size1), (price2, size2), ...]
     pub fn to_price_size_pairs(array: &[f32]) -> Vec<(f64, f64)> {
         array
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| (chunk[0] as f64, chunk[1] as f64))
             .collect()
     }
