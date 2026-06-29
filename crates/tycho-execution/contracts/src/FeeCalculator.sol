@@ -156,11 +156,11 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @return feeRecipients 2-element array: [0] = router, [1] = client.
      *         _mergeFeeRecipients relies on this ordering.
      */
-    function _calculateFee(
-        uint256 feeBase,
-        address client,
-        uint32 clientFeeBps
-    ) internal view returns (FeeRecipient[] memory feeRecipients) {
+    function _calculateFee(uint256 feeBase, address client, uint32 clientFeeBps)
+        internal
+        view
+        returns (FeeRecipient[] memory feeRecipients)
+    {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(client);
 
