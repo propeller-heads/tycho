@@ -507,7 +507,7 @@ fn test_evm_split_swap_strategy_with_fees() {
         &solution,
         &eth(),
         Some(get_signer()),
-        100,
+        1_000_000,
         client_fee_receiver(),
         BigUint::ZERO,
     )

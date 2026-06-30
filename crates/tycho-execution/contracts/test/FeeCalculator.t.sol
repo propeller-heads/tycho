@@ -900,15 +900,16 @@ contract FeeCalculatorSlippageTest is Constants {
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
 
-        uint256 grossAmountOut = 0.9 ether;
-        uint256 quotedAmountOut = 1 ether;
+        uint256 actualAmountOut = 0.9 ether;
+        uint256 expectedAmountOut = 1 ether;
 
-        FeeRecipient[] memory fees =
-            feeCalculator.calculateFee(grossAmountOut, quotedAmountOut, 0, BOB);
+        FeeRecipient[] memory fees = feeCalculator.calculateFee(
+            actualAmountOut, expectedAmountOut, 0, BOB
+        );
 
         // No surplus, but router fee on output still applies
-        // routerFee = 1 ether * 1% = 0.01 ether (based on quotedAmountOut)
-        assertEq(fees[0].feeAmount, 0.01 ether);
+        // routerFee = 0.9 ether * 1% = 0.009 ether (based on actualAmountOut)
+        assertEq(fees[0].feeAmount, 0.009 ether);
         assertEq(fees[1].feeAmount, 0);
     }
 

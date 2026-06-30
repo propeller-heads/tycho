@@ -82,7 +82,8 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// - `token_in_already_in_router`: Whether the input token is already present in the router.
 /// - `router_address`: The address of the Tycho Router contract.
 /// - `native_address`: The address used to represent the native token
-/// - `client_fee_bps`: Fee in basis points to be paid to the client (0-10000, where 10000 = 100%)
+/// - `client_fee_bps`: Fee in fee units to be paid to the client (0-100_000_000, where 100_000_000
+///   = 100%)
 /// - `client_fee_receiver`: Address to receive the client fee
 /// - `max_client_contribution`: Maximum amount the client is willing to pay out of pocket to
 ///   subsidize this trade. This represents the maximum slippage the client will cover. If

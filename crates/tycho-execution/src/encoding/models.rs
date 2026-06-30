@@ -42,7 +42,7 @@ pub enum UserTransferType {
 /// and signing this struct; `tycho-execution` does not use it internally.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ClientFeeParams {
-    /// Fee in basis points charged by the client (0–10000).
+    /// Fee in fee units charged by the client (0–100_000_000, where 100_000_000 = 100%).
     client_fee_bps: u32,
     /// Address that identifies the client and receives any client fee.
     client_fee_receiver: Bytes,

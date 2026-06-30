@@ -231,7 +231,7 @@ fn test_single_swap_with_client_fees() {
         &solution,
         &eth(),
         None,
-        100,
+        1_000_000,
         client_fee_receiver(),
         BigUint::ZERO,
     )
@@ -288,7 +288,7 @@ fn test_single_swap_with_fees_and_client_contribution() {
         &solution,
         &eth(),
         None,
-        100,
+        1_000_000,
         client_fee_receiver(),
         BigUint::from_str("22_000000000000000000").unwrap(),
     )

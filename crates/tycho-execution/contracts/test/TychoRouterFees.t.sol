@@ -51,10 +51,11 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // 5. Fee recipients have fees in their vaults
 
         // Expected fees with all three fee types:
-        // 1. clientFee = 2018817438608734439722 * 200 / 10000 = 40376348772174688794
-        //    routerFeeOnClientFee = 40376348772174688794 * 1000 / 10000 = 4037634877217468879
+        // 1. clientFee = 2018817438608734439722 * 2_000_000 / 100_000_000 = 40376348772174688794
+        //    routerFeeOnClientFee = (2018817438608734439722 * 2_000_000 * 10_000_000) / 100_000_000^2
+        //                        = 4037634877217468879
         //    clientPortion = 40376348772174688794 - 4037634877217468879 = 36338713894957219915
-        // 2. routerFeeOnOutput = 2018817438608734439722 * 100 / 10000 = 20188174386087344397
+        // 2. routerFeeOnOutput = 2018817438608734439722 * 1_000_000 / 100_000_000 = 20188174386087344397
         //    totalRouterFee = 4037634877217468879 + 20188174386087344397 = 24225809263304813276
         // 3. amountOut = 2018817438608734439722 - 36338713894957219915 - 24225809263304813276
         //    = 1958252915450472406531
@@ -65,7 +66,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // maxSlippageBps=500: total fees are ~3% of quotedAmountOut; need slippage > 3% to avoid
         // SlippageExceeded after fee deduction (slippage check is on post-fee output)
         ClientFeeParams memory feeParams = makeClientFeeParams(
-            200,
+            2_000_000,
             0,
             amountIn,
             WETH_ADDR,
@@ -159,11 +160,11 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
     function testSingleSwapWithFeesAndContribution() public {
         // Tests swapping WETH -> DAI on a USV2 pool with fees and client contribution
-        // Swap is 1 WETH for      2018.8 DAI (gross output)
-        // quotedAmountOut = 2000e18; fees are 1% of that = 20 DAI each
-        // Tycho Router takes 1% -> 20 DAI (20000000000000000000)
-        // Client takes 1% ->       20 DAI (20000000000000000000)
-        // Remaining = 2018.8 - 40 = 1978.8 < 2000 so client contributes ~21.2 DAI (max 22)
+        // Swap is 1 WETH for      2018.8 DAI (2018817438608734439722, gross output)
+        // quotedAmountOut = 2000e18; fees are 1% of actualAmountOut each
+        // Tycho Router takes 1% -> 20.19 DAI (20188174386087344397)
+        // Client takes 1% ->       20.19 DAI (20188174386087344397)
+        // Remaining = 2018.8 - 40.38 = 1978.42 < 2000 so client contributes ~21.56 DAI (max 22)
 
         vm.startPrank(FEE_SETTER);
         feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
@@ -185,7 +186,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory callData = loadCallDataFromFile(
             "test_single_swap_with_fees_and_client_contribution"
         );
-        uint256 expectedFeeAmount = 20000000000000000000;
+        uint256 expectedFeeAmount = 20188174386087344397;
         FeeRecipient[] memory expectedFees = new FeeRecipient[](2);
         expectedFees[0] = FeeRecipient({
             recipient: routerFeeReceiver, feeAmount: expectedFeeAmount
@@ -485,7 +486,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // router actually received 1271775641957229539568553 STA after pool fee
         uint256 quotedSTA = 1271775641957229539568553;
         ClientFeeParams memory feeParams = makeClientFeeParams(
-            1,
+            10_000,
             20,
             amountIn,
             WETH_ADDR,
