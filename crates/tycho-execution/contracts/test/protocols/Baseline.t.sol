@@ -7,8 +7,6 @@ import {Constants} from "../Constants.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract BaselineExecutorExposed is BaselineExecutor {
-    constructor(address relay_) BaselineExecutor(relay_) {}
-
     function decodeData(bytes calldata data)
         external
         pure
@@ -28,6 +26,8 @@ contract BaselineExecutorTest is TestUtils, Constants {
     address internal constant MAINNET_BTOKEN =
         0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63;
     address internal constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address internal constant RELAY =
+        0xc81Fd894C0acE037d133aF4886550aC8133568E8;
 
     BaselineExecutorExposed executor;
     MockBaselineRelay relay;
@@ -39,12 +39,13 @@ contract BaselineExecutorTest is TestUtils, Constants {
         vm.etch(MAINNET_BTOKEN, address(new MockERC20()).code);
         vm.etch(WETH, address(new MockERC20()).code);
 
-        relay = new MockBaselineRelay();
+        vm.etch(RELAY, address(new MockBaselineRelay()).code);
+        relay = MockBaselineRelay(RELAY);
         relay.setReserve(BTOKEN, RESERVE);
         relay.setQuotes(BTOKEN, 42 ether, 2 ether);
         relay.setReserve(MAINNET_BTOKEN, WETH);
         relay.setQuotes(MAINNET_BTOKEN, 42 ether, 2 ether);
-        executor = new BaselineExecutorExposed(address(relay));
+        executor = new BaselineExecutorExposed();
     }
 
     function testDecodeData() public view {
@@ -63,11 +64,6 @@ contract BaselineExecutorTest is TestUtils, Constants {
 
         vm.expectRevert(BaselineExecutor__InvalidDataLength.selector);
         executor.decodeData(data);
-    }
-
-    function testConstructorZeroRelayReverts() public {
-        vm.expectRevert(BaselineExecutor__ZeroAddress.selector);
-        new BaselineExecutorExposed(address(0));
     }
 
     function testFundsExpectedAddressReturnsRouter() public {

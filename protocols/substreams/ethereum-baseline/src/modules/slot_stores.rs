@@ -2,7 +2,7 @@ use super::slot_layout::{
     block_pricing_base_slot, maker_base_slot, pool_base_slot, slot_with_offset, ADDRESS_LEN,
     SLOT_LEN,
 };
-use crate::pool_factories::{maybe_create_component, DeploymentConfig};
+use crate::pool_factories::{maybe_create_component, RELAY_ADDRESS};
 use std::collections::HashMap;
 use substreams::store::{
     StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetIfNotExists, StoreSetIfNotExistsString,
@@ -95,15 +95,7 @@ fn store_slot_index(
 }
 
 #[substreams::handlers::store]
-fn store_raw_slots(
-    params: String,
-    block: eth::v2::Block,
-    slot_index: StoreGetString,
-    store: StoreSetString,
-) {
-    let config: DeploymentConfig =
-        serde_qs::from_str(params.as_str()).expect("invalid Baseline deployment config params");
-
+fn store_raw_slots(block: eth::v2::Block, slot_index: StoreGetString, store: StoreSetString) {
     // Some Baseline slots, notably pool.totalSupply, can be written before PoolCreated makes the
     // component address indexable. Keep pre-index relay writes so creation can backfill typed state
     // from storage without relying on event payloads.
@@ -112,7 +104,7 @@ fn store_raw_slots(
             .iter()
             .filter(|call| !call.state_reverted)
             .flat_map(|call| call.storage_changes.iter())
-            .filter(|change| change.address == config.relay_address)
+            .filter(|change| change.address.as_slice() == RELAY_ADDRESS)
             .filter(|change| {
                 slot_index
                     .get_last(slot_index_key(&change.key))
@@ -130,20 +122,17 @@ fn store_raw_slots(
 
 #[substreams::handlers::store]
 fn store_state_slots(
-    params: String,
     block: eth::v2::Block,
     components: BlockTransactionProtocolComponents,
     raw_slots: StoreGetString,
     slot_index: StoreGetString,
     store: StoreSetString,
 ) {
-    let config: DeploymentConfig =
-        serde_qs::from_str(params.as_str()).expect("invalid Baseline deployment config params");
     let same_block_index = same_block_slot_index(&components);
     let creation_ordinals: HashMap<_, _> = block
         .logs()
         .filter_map(|log| {
-            maybe_create_component(log.log, &config).map(|component| (component.id, log.ordinal()))
+            maybe_create_component(log.log).map(|component| (component.id, log.ordinal()))
         })
         .collect();
 
@@ -179,7 +168,7 @@ fn store_state_slots(
             .iter()
             .filter(|call| !call.state_reverted)
             .flat_map(|call| call.storage_changes.iter())
-            .filter(|change| change.address == config.relay_address)
+            .filter(|change| change.address.as_slice() == RELAY_ADDRESS)
             .filter_map(|change| {
                 let key = slot_index_key(&change.key);
                 let location = same_block_index

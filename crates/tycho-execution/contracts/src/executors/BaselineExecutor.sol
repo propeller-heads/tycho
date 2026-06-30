@@ -6,7 +6,6 @@ import {TransferManager} from "../TransferManager.sol";
 
 error BaselineExecutor__InvalidDataLength();
 error BaselineExecutor__InvalidTokenPair();
-error BaselineExecutor__ZeroAddress();
 
 interface IBaselineRelay {
     function reserve(address bToken) external view returns (address);
@@ -25,12 +24,7 @@ interface IBaselineRelay {
 }
 
 contract BaselineExecutor is IExecutor {
-    address public immutable relay;
-
-    constructor(address relay_) {
-        if (relay_ == address(0)) revert BaselineExecutor__ZeroAddress();
-        relay = relay_;
-    }
+    address public constant relay = 0xc81Fd894C0acE037d133aF4886550aC8133568E8;
 
     function fundsExpectedAddress(
         bytes calldata /* data */

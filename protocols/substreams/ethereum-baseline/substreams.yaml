@@ -25,11 +25,6 @@ networks:
       store_slot_index: 24920863
       store_state_slots: 24920863
       map_protocol_changes: 24920863
-    params:
-      map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      store_raw_slots: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      store_state_slots: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
   base:
     initialBlock:
       map_protocol_components: 45070267
@@ -37,23 +32,10 @@ networks:
       store_slot_index: 45070267
       store_state_slots: 45070267
       map_protocol_changes: 45070267
-    params:
-      map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      store_raw_slots: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      store_state_slots: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-      map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-
-params:
-  map_protocol_components: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-  store_raw_slots: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-  store_state_slots: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-  map_protocol_changes: "relay_address=c81Fd894C0acE037d133aF4886550aC8133568E8&protocol_type_name=baseline"
-
 modules:
   - name: map_protocol_components
     kind: map
     inputs:
-      - params: string
       - source: sf.ethereum.type.v2.Block
     output:
       type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
@@ -70,7 +52,6 @@ modules:
     updatePolicy: set
     valueType: string
     inputs:
-      - params: string
       - source: sf.ethereum.type.v2.Block
       - store: store_slot_index
 
@@ -79,7 +60,6 @@ modules:
     updatePolicy: set
     valueType: string
     inputs:
-      - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
       - store: store_raw_slots
@@ -88,7 +68,6 @@ modules:
   - name: map_protocol_changes
     kind: map
     inputs:
-      - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
       - store: store_state_slots

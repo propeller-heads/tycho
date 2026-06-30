@@ -1,17 +1,14 @@
 use crate::abi::b_factory::events::PoolCreated;
-use serde::Deserialize;
 use substreams_ethereum::pb::eth::v2::Log;
 use substreams_ethereum::Event;
 use tycho_substreams::models::{
     Attribute, ChangeType, FinancialType, ImplementationType, ProtocolComponent, ProtocolType,
 };
 
-#[derive(Deserialize)]
-pub struct DeploymentConfig {
-    #[serde(with = "hex::serde")]
-    pub relay_address: Vec<u8>,
-    pub protocol_type_name: String,
-}
+pub const RELAY_ADDRESS: [u8; 20] = [
+    0xc8, 0x1f, 0xd8, 0x94, 0xc0, 0xac, 0xe0, 0x37, 0xd1, 0x33, 0xaf, 0x48, 0x86, 0x55, 0x0a, 0xc8,
+    0x13, 0x35, 0x68, 0xe8,
+];
 
 /// Potentially constructs a new ProtocolComponent given a call
 ///
@@ -20,8 +17,8 @@ pub struct DeploymentConfig {
 ///
 /// If this call creates a component in your protocol please contstruct and return it
 /// here. Otherwise, simply return None.
-pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<ProtocolComponent> {
-    if log.address != config.relay_address {
+pub fn maybe_create_component(log: &Log) -> Option<ProtocolComponent> {
+    if log.address.as_slice() != RELAY_ADDRESS {
         return None;
     }
 
@@ -35,7 +32,7 @@ pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<Pr
         static_att: vec![
             Attribute {
                 name: "relay".to_string(),
-                value: config.relay_address.clone(),
+                value: RELAY_ADDRESS.to_vec(),
                 change: ChangeType::Creation.into(),
             },
             Attribute {
@@ -51,7 +48,7 @@ pub fn maybe_create_component(log: &Log, config: &DeploymentConfig) -> Option<Pr
         ],
         change: ChangeType::Creation.into(),
         protocol_type: Some(ProtocolType {
-            name: config.protocol_type_name.clone(),
+            name: "baseline".to_string(),
             financial_type: FinancialType::Swap.into(),
             attribute_schema: vec![],
             implementation_type: ImplementationType::Custom.into(),
@@ -69,31 +66,17 @@ mod test {
     ];
 
     #[test]
-    fn test_decode_config() {
-        let config: DeploymentConfig =
-            serde_qs::from_str("relay_address=0001&protocol_type_name=baseline").unwrap();
-
-        assert_eq!(config.relay_address, [0u8, 1u8]);
-        assert_eq!(config.protocol_type_name, "baseline");
-    }
-
-    #[test]
     fn creates_custom_component_from_pool_created_log() {
-        let relay = address(3);
         let b_token = address(1);
         let reserve = address(2);
         let log = substreams_ethereum::pb::eth::v2::Log {
-            address: relay.clone(),
+            address: RELAY_ADDRESS.to_vec(),
             topics: vec![POOL_CREATED_TOPIC.to_vec()],
             data: pool_created_data(&b_token, &reserve),
             ..Default::default()
         };
-        let config = DeploymentConfig {
-            relay_address: relay.clone(),
-            protocol_type_name: "baseline".to_string(),
-        };
 
-        let component = maybe_create_component(&log, &config).expect("component");
+        let component = maybe_create_component(&log).expect("component");
 
         assert_eq!(component.id, format!("0x{}", hex::encode(&b_token)));
         assert_eq!(component.tokens, vec![b_token, reserve.clone()]);

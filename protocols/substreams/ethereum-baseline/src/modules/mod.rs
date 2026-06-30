@@ -10,7 +10,7 @@ mod slot_layout;
 mod slot_stores;
 
 use crate::abi::b_swap::events::Swap;
-use crate::{pool_factories, pool_factories::DeploymentConfig};
+use crate::{pool_factories, pool_factories::RELAY_ADDRESS};
 use anyhow::Result;
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -82,15 +82,11 @@ fn record_quote_state_update(
 
 /// Find and create all relevant protocol components.
 #[substreams::handlers::map]
-fn map_protocol_components(
-    params: String,
-    block: eth::v2::Block,
-) -> Result<BlockTransactionProtocolComponents> {
-    let config = serde_qs::from_str(params.as_str())?;
+fn map_protocol_components(block: eth::v2::Block) -> Result<BlockTransactionProtocolComponents> {
     let mut tx_components_by_index: HashMap<u64, TransactionProtocolComponents> = HashMap::new();
 
     block.logs().for_each(|log| {
-        let Some(component) = pool_factories::maybe_create_component(log.log, &config) else {
+        let Some(component) = pool_factories::maybe_create_component(log.log) else {
             return;
         };
 
@@ -117,13 +113,11 @@ fn map_protocol_components(
 /// Aggregates protocol components and quote-state changes by transaction.
 #[substreams::handlers::map]
 fn map_protocol_changes(
-    params: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
     state_deltas: StoreDeltas,
     state: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
-    let config: DeploymentConfig = serde_qs::from_str(params.as_str())?;
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
     let mut latest_quote_state_tx: HashMap<String, QuoteStateTx> = HashMap::new();
 
@@ -149,7 +143,7 @@ fn map_protocol_changes(
     block.transactions().for_each(|tx| {
         tx.logs_with_calls()
             .filter_map(|(log, _call)| {
-                if log.address != config.relay_address {
+                if log.address.as_slice() != RELAY_ADDRESS {
                     return None;
                 }
                 Swap::match_and_decode(log)

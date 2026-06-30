@@ -253,8 +253,7 @@ contract TychoRouterTestSetup is
         bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
         ringSwapV2Executor =
             new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
-        baselineExecutor =
-            new BaselineExecutor(0xc81Fd894C0acE037d133aF4886550aC8133568E8);
+        baselineExecutor = new BaselineExecutor();
 
         address[] memory executors = new address[](26);
         executors[0] = address(usv2Executor);
