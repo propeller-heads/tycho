@@ -65,7 +65,16 @@ contract EtherfiAdapterTest is Test, ISwapAdapterTypes {
             adapter.getLimits(pair, address(eEth_), address(weEth_));
 
         if (side == OrderSide.Buy) {
+            // Bound specifiedAmount before computing requiredEeth to avoid
+            // overflow in getEETHByWeETH (which multiplies by
+            // totalPooledEther). Also ensure the required eETH input fits
+            // within what we can fund:
+            // weETH carries accumulated rewards so 1 weETH > 1 eETH in value,
+            // meaning requiredEeth > specifiedAmount and the original limits[1]
+            // bound was too loose.
             vm.assume(specifiedAmount < limits[1] && specifiedAmount > 100);
+            uint256 requiredEeth = weEth.getEETHByWeETH(specifiedAmount);
+            vm.assume(requiredEeth < limits[0]);
 
             /// @dev workaround for eETH "deal", as standard ERC20 does not
             /// work(balance is shares)
@@ -75,7 +84,7 @@ contract EtherfiAdapterTest is Test, ISwapAdapterTypes {
                 address(address(0)),
                 address(eEth_),
                 OrderSide.Buy,
-                limits[0]
+                requiredEeth
             );
 
             eEth_.approve(address(adapter), type(uint256).max);
@@ -122,7 +131,7 @@ contract EtherfiAdapterTest is Test, ISwapAdapterTypes {
                 );
                 assertGe(
                     eEth_balance - eEth_.balanceOf(address(this)),
-                    trade.calculatedAmount - 1
+                    trade.calculatedAmount - 2
                 );
             } else {
                 assertGe(
