@@ -324,7 +324,7 @@ fn _split_swap_checked(
     if expected_amount_out == 0 {
         return Err(Error::revert("_split_swap_checked: expected_amount_out == 0"));
     }
-    if max_slippage_bps > MAX_SLIPPAGE_BPS {
+    if max_slippage_bps >= MAX_SLIPPAGE_BPS {
         return Err(Error::revert("_split_swap_checked: max_slippage_bps too high"));
     }
     let min_amount_out =
@@ -415,7 +415,7 @@ fn _single_swap(
     if expected_amount_out == 0 {
         return Err(Error::revert("_single_swap: expected_amount_out == 0"));
     }
-    if max_slippage_bps > MAX_SLIPPAGE_BPS {
+    if max_slippage_bps >= MAX_SLIPPAGE_BPS {
         return Err(Error::revert("_single_swap: max_slippage_bps too high"));
     }
     let min_amount_out =
@@ -511,7 +511,7 @@ fn _sequential_swap_checked(
     if expected_amount_out == 0 {
         return Err(Error::revert("_sequential_swap_checked: expected_amount_out == 0"));
     }
-    if max_slippage_bps > MAX_SLIPPAGE_BPS {
+    if max_slippage_bps >= MAX_SLIPPAGE_BPS {
         return Err(Error::revert("_sequential_swap_checked: max_slippage_bps too high"));
     }
     let min_amount_out =

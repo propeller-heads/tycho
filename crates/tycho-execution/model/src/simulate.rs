@@ -39,7 +39,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     // assumption: all swap methods revert if `expected_amount_out = 0`.
     // no need to simulate it.
     let expected_amount_out = params.request("expected_amount_out", [1, 10000])?;
-    let max_slippage_bps = params.request("max_slippage_bps", [0, 500, 10000])?;
+    let max_slippage_bps = params.request("max_slippage_bps", [0, 500, 9999])?;
     // assumption: all swap methods revert if `receiver = address(0)`.
     // no need to simulate it.
     let receiver = params.request("receiver", Address::VARIANTS_EXCEPT_ZERO)?;

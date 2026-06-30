@@ -728,7 +728,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (maxSlippageBps > MAX_SLIPPAGE_BPS) {
+        if (maxSlippageBps >= MAX_SLIPPAGE_BPS) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
         uint256 minAmountOut = expectedAmountOut
@@ -816,7 +816,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (maxSlippageBps > MAX_SLIPPAGE_BPS) {
+        if (maxSlippageBps >= MAX_SLIPPAGE_BPS) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
         uint256 minAmountOut = expectedAmountOut
@@ -902,7 +902,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (maxSlippageBps > MAX_SLIPPAGE_BPS) {
+        if (maxSlippageBps >= MAX_SLIPPAGE_BPS) {
             revert TychoRouter__SlippageBpsTooHigh(maxSlippageBps);
         }
         uint256 minAmountOut = expectedAmountOut
