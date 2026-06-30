@@ -17,8 +17,8 @@ use crate::encoding::{
 ///
 /// - `encode_solutions` returns raw [`EncodedSolution`] objects, which include Tycho’s swap path
 ///   encoding, but leave **function argument encoding entirely in the user’s hands**.
-/// - The function arguments to the router (e.g., `expectedAmountOut`, `maxSlippageBps`,
-///   `receiver`, `permit2`, etc.) are used as **guardrails** to ensure safe on-chain execution.
+/// - The function arguments to the router (e.g., `expectedAmountOut`, `maxSlippageBps`, `receiver`,
+///   `permit2`, etc.) are used as **guardrails** to ensure safe on-chain execution.
 /// - Automatically constructing full transactions via `encode_calldata` can obscure these important
 ///   safeguards and may result in unexpected behavior or vulnerability to MEV.
 ///

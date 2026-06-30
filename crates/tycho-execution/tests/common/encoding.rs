@@ -87,9 +87,8 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 ///   = 100%)
 /// - `client_fee_receiver`: Address to receive the client fee
 /// - `max_client_contribution`: Maximum amount the client is willing to contribute from their vault
-///   to top up the output if it falls below the slippage floor
-///   (`amount_out * (1 - max_slippage_bps / MAX_SLIPPAGE_BPS)`). If the shortfall exceeds this
-///   value, the tx reverts.
+///   to top up the output if it falls below the slippage floor (`amount_out * (1 - max_slippage_bps
+///   / MAX_SLIPPAGE_BPS)`). If the shortfall exceeds this value, the tx reverts.
 ///
 /// # Returns
 /// A `Result<Transaction, EncodingError>` that either contains the full transaction data (to,
