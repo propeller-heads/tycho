@@ -1385,6 +1385,7 @@ async fn process_state(
             chain,
             None,
             amount_out_result.gas,
+            expected_amount_out.clone(),
         ) {
             Ok(res) => res,
             Err(e) => {

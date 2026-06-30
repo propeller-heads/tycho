@@ -2,7 +2,7 @@ use std::{collections::HashMap, str::FromStr};
 
 use alloy::{
     hex::encode,
-    primitives::{Address, Keccak256},
+    primitives::{Address, Keccak256, U256},
     sol_types::SolValue,
 };
 use num_bigint::{BigInt, BigUint};
@@ -118,6 +118,7 @@ fn main() {
         usdt_addr.clone(),
         BigUint::from_str("2_000_000000000000000000").unwrap(),
         BigUint::from_str("1_990_000000").unwrap(),
+        0.02,
         vec![swap_dai_usdc, swap_usdc_usdt],
     );
 
@@ -128,7 +129,8 @@ fn main() {
         .clone();
 
     let given_amount = biguint_to_u256(solution.amount_in());
-    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let amount_out = biguint_to_u256(solution.amount_out());
+    let max_slippage_bps = U256::from((solution.slippage() * 10_000.0).round() as u16);
     let given_token = bytes_to_address(solution.token_in()).unwrap();
     let checked_token = bytes_to_address(solution.token_out()).unwrap();
     let receiver = bytes_to_address(solution.receiver()).unwrap();
@@ -139,7 +141,8 @@ fn main() {
         given_amount,
         given_token,
         checked_token,
-        min_amount_out,
+        amount_out,
+        max_slippage_bps,
         receiver,
         client_fee_params,
         encoded_solution.swaps(),

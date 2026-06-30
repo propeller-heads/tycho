@@ -138,6 +138,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1, // min amount,
+            200,
             4,
             ALICE,
             noClientFee(),
@@ -178,6 +179,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // min amount
+            200,
             4,
             ALICE,
             noClientFee(),
@@ -207,12 +209,13 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
 
         bytes[] memory swaps = _getSplitSwaps();
 
-        vm.expectRevert(TychoRouter__UndefinedMinAmountOut.selector);
+        vm.expectRevert(TychoRouter__AmountOutZero.selector);
         tychoRouter.splitSwap(
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
             0, // min amount
+            200,
             4,
             ALICE,
             noClientFee(),
@@ -230,6 +233,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1,
+            200,
             4,
             ALICE,
             noClientFee(),
@@ -253,6 +257,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // min amount
+            200,
             2,
             ALICE,
             noClientFee(),
@@ -309,6 +314,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             WBTC_ADDR,
             200_000000, // min amount (2 WBTC)
+            200,
             4,
             ALICE,
             noClientFee(),
@@ -333,7 +339,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__NegativeSlippage.selector,
+                TychoRouter__SlippageExceeded.selector,
                 1989737355, // actual amountOut
                 minAmountOut
             )
@@ -343,6 +349,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            0,
             4,
             ALICE,
             noClientFee(),
@@ -470,6 +477,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             BAL_ADDR,
             1, // min amount out
+            200,
             2, // number of tokens
             ALICE, // receiver
             noClientFee(),
@@ -537,6 +545,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             WBTC_ADDR,
             1, // min amount
+            200,
             4,
             ALICE,
             noClientFee(),
@@ -745,6 +754,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1, // extremely low min amount to make swap pass
+            200,
             3, // nTokens
             ALICE,
             noClientFee(),
@@ -803,6 +813,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             DAI_ADDR,
             USDC_ADDR,
             1, // min amount
+            200,
             2, // nTokens
             ALICE,
             noClientFee(),

@@ -470,6 +470,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR,
             USDT_ADDR,
             99943850,
+            200,
             ALICE,
             noClientFee(),
             permitSingle,
@@ -514,7 +515,14 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
         vm.startPrank(ALICE);
         IERC20(USDE_ADDR).approve(tychoRouterAddr, amountIn);
         tychoRouter.singleSwap(
-            amountIn, USDE_ADDR, WBTC_ADDR, 118280, ALICE, noClientFee(), swap
+            amountIn,
+            USDE_ADDR,
+            WBTC_ADDR,
+            118280,
+            200,
+            ALICE,
+            noClientFee(),
+            swap
         );
 
         assertEq(IERC20(WBTC_ADDR).balanceOf(ALICE), 118281);
@@ -854,6 +862,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 USDT_ADDR,
                 1,
+                uint16(200),
                 address(settler),
                 noClientFee(),
                 swap
@@ -919,6 +928,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 WETH_ADDR,
                 USDT_ADDR,
                 1,
+                200,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -981,6 +991,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDT_ADDR,
                 WETH_ADDR,
                 1,
+                200,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -1056,6 +1067,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 WBTC_ADDR,
                 1,
+                200,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -1140,6 +1152,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 USDC_ADDR,
                 1,
+                200,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)

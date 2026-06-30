@@ -6,10 +6,10 @@ import {Constants} from "./Constants.sol";
 
 contract ClientFeeTestHelper is Test, Constants {
     bytes32 private constant _CLIENT_FEE_TYPEHASH = keccak256(
-        "ClientFee(uint16 clientFeeBps,address clientFeeReceiver,"
+        "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
         "uint256 maxClientContribution,uint256 deadline,"
         "uint256 amountIn,address tokenIn,address tokenOut,"
-        "uint256 minAmountOut,address receiver,bytes swaps)"
+        "uint256 expectedAmountOut,uint16 maxSlippageBps,address receiver,bytes swaps)"
     );
 
     /**
@@ -21,7 +21,8 @@ contract ClientFeeTestHelper is Test, Constants {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 minAmountOut,
+        uint256 expectedAmountOut,
+        uint16 maxSlippageBps,
         address receiver,
         bytes memory swapData,
         address routerAddress,
@@ -32,7 +33,8 @@ contract ClientFeeTestHelper is Test, Constants {
             amountIn,
             tokenIn,
             tokenOut,
-            minAmountOut,
+            expectedAmountOut,
+            maxSlippageBps,
             receiver,
             swapData,
             routerAddress,
@@ -50,7 +52,8 @@ contract ClientFeeTestHelper is Test, Constants {
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 minAmountOut,
+        uint256 expectedAmountOut,
+        uint16 maxSlippageBps,
         address receiver,
         bytes memory swapData,
         address routerAddress,
@@ -79,7 +82,8 @@ contract ClientFeeTestHelper is Test, Constants {
                 amountIn,
                 tokenIn,
                 tokenOut,
-                minAmountOut,
+                expectedAmountOut,
+                maxSlippageBps,
                 receiver,
                 keccak256(swapData)
             )
@@ -113,12 +117,13 @@ contract ClientFeeTestHelper is Test, Constants {
      *      The signer address is derived from the private key and used as clientFeeReceiver.
      */
     function makeClientFeeParams(
-        uint16 clientFeeBps,
+        uint32 clientFeeBps,
         uint256 maxClientContribution,
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 minAmountOut,
+        uint256 expectedAmountOut,
+        uint16 maxSlippageBps,
         address receiver,
         bytes memory swapData,
         address routerAddress,
@@ -137,7 +142,8 @@ contract ClientFeeTestHelper is Test, Constants {
             amountIn,
             tokenIn,
             tokenOut,
-            minAmountOut,
+            expectedAmountOut,
+            maxSlippageBps,
             receiver,
             swapData,
             routerAddress,

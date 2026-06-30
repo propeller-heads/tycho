@@ -730,7 +730,7 @@ mod tests {
 
             write_calldata_to_file("test_encode_angstrom_grouped_swap", combined_hex.as_str());
             // Any different length could indicate we didn't encode attestation data
-            assert!(combined_hex.len() == 2510);
+            assert!(combined_hex.len() == 2512);
         }
     }
 }

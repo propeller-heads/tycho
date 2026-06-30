@@ -61,6 +61,7 @@ pub fn encode_swap(
     chain: Chain,
     executors_json: Option<String>,
     gas_usage: BigUint,
+    expected_amount_out: BigUint,
 ) -> miette::Result<(Solution, Transaction)> {
     let solution = create_solution(
         component.clone(),
@@ -69,6 +70,7 @@ pub fn encode_swap(
         buy_token.clone(),
         amount_in.clone(),
         gas_usage.clone(),
+        expected_amount_out,
     )?;
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(executors_json)
@@ -101,6 +103,7 @@ pub fn create_solution(
     buy_token: Token,
     amount_in: BigUint,
     gas_usage: BigUint,
+    expected_amount_out: BigUint,
 ) -> miette::Result<Solution> {
     let user_address = Bytes::from_str(USER_ADDR).into_diagnostic()?;
 
@@ -121,9 +124,10 @@ pub fn create_solution(
         sell_token.address,
         buy_token.address,
         amount_in,
-        // We want to keep track of how bad the slippage really is and not just error at execution
-        // time. NEVER DO THIS IN PRODUCTION!
-        BigUint::from(1u64),
+        expected_amount_out,
+        // Generous slippage for integration tests — we care about whether the swap executes,
+        // not whether slippage is tight.
+        0.5,
         vec![simple_swap],
     ))
 }
@@ -134,7 +138,8 @@ fn encoded_transaction(
     native_address: Bytes,
 ) -> miette::Result<Transaction> {
     let amount_in = biguint_to_u256(solution.amount_in());
-    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let amount_out = biguint_to_u256(solution.amount_out());
+    let max_slippage_bps = (solution.slippage() * 10_000.0).round() as u16;
     let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
     let to_router_address = |raw: Address| {
         if raw.as_slice() == native_address.as_ref() {
@@ -153,7 +158,8 @@ fn encoded_transaction(
         amount_in,
         token_in,
         token_out,
-        min_amount_out,
+        amount_out,
+        max_slippage_bps,
         receiver,
         client_fee_params,
         encoded_solution.swaps(),

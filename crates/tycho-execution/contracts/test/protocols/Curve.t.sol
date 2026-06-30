@@ -405,6 +405,7 @@ contract TychoRouterForCurveTest is TychoRouterTestSetup {
             ETH_ADDR, // tokenIn = native ETH
             STETH_ADDR,
             1, // min amount out
+            200,
             ALICE,
             noClientFee(),
             swap

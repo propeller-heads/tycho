@@ -46,6 +46,7 @@ fn test_evm_single_swap_strategy_encoder() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -68,19 +69,20 @@ fn test_evm_single_swap_strategy_encoder() {
     .data;
     let expected_min_amount_encoded = encode(U256::abi_encode(&biguint_to_u256(&checked_amount)));
     let expected_input = [
-        "e7a307b0", // Function selector (singleSwapPermit2)
+        "04df9f39", // selector (singleSwapPermit2)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out
-        &expected_min_amount_encoded, // min amount out
+        &expected_min_amount_encoded, // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000001c0", /* clientFeeParams
-                     * offset = 448 */
+        // clientFeeParams offset = 480
+        "00000000000000000000000000000000000000000000000000000000000001e0",
     ]
     .join("");
 
-    // After this there is the permit and because of the deadlines (that depend on block
-    // time) it's hard to assert back
+    // After this there is the permit2 struct (with time-dependent deadline) and swap data.
+    // The permit is hard to assert against due to block time.
 
     let expected_swap = String::from(concat!(
         // length of encoded swap (80 bytes: 20 pool + 20 tokenIn + 20 tokenOut)
@@ -94,8 +96,8 @@ fn test_evm_single_swap_strategy_encoder() {
     ));
     let hex_calldata = encode(&calldata);
 
-    assert_eq!(hex_calldata[..392], expected_input);
-    assert_eq!(hex_calldata[1544..], expected_swap);
+    assert_eq!(hex_calldata[..456], expected_input);
+    assert_eq!(hex_calldata[1608..], expected_swap);
     write_calldata_to_file("test_single_swap_strategy_encoder", &hex_calldata.to_string());
 }
 
@@ -128,6 +130,7 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount,
+        0.02,
         vec![swap],
     );
 
@@ -149,14 +152,15 @@ fn test_single_swap_strategy_encoder_transfer_from() {
     .data;
     let expected_min_amount_encoded = encode(U256::abi_encode(&expected_min_amount));
     let expected_input = [
-        "ce25e49e", // Function selector (singleSwap)
+        "a1499391", // Function selector (singleSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out
-        &expected_min_amount_encoded, // min amount out
+        &expected_min_amount_encoded, // amount out
+        "00000000000000000000000000000000000000000000000000000000000000c8", // max_slippage_bps=200
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000000e0", // clientFeeParams offset = 224
-        "00000000000000000000000000000000000000000000000000000000000001a0", // swapData offset = 416
+        "0000000000000000000000000000000000000000000000000000000000000100", // clientFeeParams offset = 256
+        "00000000000000000000000000000000000000000000000000000000000001c0", // swapData offset = 448
         // clientFeeParams tail (6 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeReceiver = 0
@@ -187,9 +191,9 @@ fn test_single_swap_strategy_encoder_transfer_from() {
 #[test]
 fn test_single_swap_with_client_fees() {
     // Performs a single swap from WETH to DAI on a USV2 pool, with fees
-    // Swap is 1 WETH for 2018.8 DAI
+    // Swap is 1 WETH for 2018.8 DAI (2018817438608734439722)
     // Client takes 1% -> 20.18 DAI (20188174386087344397)
-    let checked_amount = BigUint::from_str("1995_000000000000000000").unwrap();
+    let checked_amount = BigUint::from_str("2018817438608734439722").unwrap();
     let weth = weth();
     let dai = dai();
 
@@ -212,6 +216,7 @@ fn test_single_swap_with_client_fees() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFrom);
@@ -226,7 +231,7 @@ fn test_single_swap_with_client_fees() {
         &solution,
         &eth(),
         None,
-        100,
+        1_000_000,
         client_fee_receiver(),
         BigUint::ZERO,
     )
@@ -240,11 +245,11 @@ fn test_single_swap_with_client_fees() {
 
 #[test]
 fn test_single_swap_with_fees_and_client_contribution() {
-    // Performs a single swap from WETH to DAI on a USV2 pool, with fees
-    // Swap is 1 WETH for 2018.8 DAI
-    // Tycho Router takes 1% -> 20.18 DAI (20188174386087344397)
-    // Client takes 1% -> 20.18 DAI (20188174386087344397)
-    // But (for some reason) the client contributes with at most 22 DAI
+    // Performs a single swap from WETH to DAI on a USV2 pool, with fees and client contribution
+    // Swap is 1 WETH for 2018.8 DAI; quotedAmountOut = 2000e18
+    // Tycho Router takes 1% of 2000e18 -> 20 DAI
+    // Client takes 1% of 2000e18 -> 20 DAI
+    // Client contributes up to 22 DAI to cover shortfall (actual 1978.8 < quoted 2000)
     let checked_amount = BigUint::from_str("2000_000000000000000000").unwrap();
     let weth = weth();
     let dai = dai();
@@ -268,6 +273,7 @@ fn test_single_swap_with_fees_and_client_contribution() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
+        0.0,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFrom);
@@ -282,7 +288,7 @@ fn test_single_swap_with_fees_and_client_contribution() {
         &solution,
         &eth(),
         None,
-        100,
+        1_000_000,
         client_fee_receiver(),
         BigUint::from_str("22_000000000000000000").unwrap(),
     )
