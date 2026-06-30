@@ -46,7 +46,7 @@ fn test_evm_single_swap_strategy_encoder() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
-        200u16,
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -130,7 +130,7 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount,
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -216,7 +216,7 @@ fn test_single_swap_with_client_fees() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
-        200u16,
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFrom);
@@ -273,7 +273,7 @@ fn test_single_swap_with_fees_and_client_contribution() {
         dai,
         BigUint::from_str("1_000000000000000000").unwrap(),
         checked_amount.clone(),
-        0u16,
+        0.0,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFrom);

@@ -134,11 +134,11 @@ pub struct Solution {
     /// The token being bought
     token_out: Bytes,
     /// Quoted output amount from simulation. Used as the baseline for slippage:
-    /// effective min = amount_out * (10000 - max_slippage_bps) / 10000.
+    /// effective min = amount_out * (1 - slippage).
     #[serde(with = "biguint_string")]
     amount_out: BigUint,
-    /// Maximum slippage in basis points (0–10000).
-    max_slippage_bps: u16,
+    /// Maximum slippage as a fraction (0.0–1.0, where 0.0025 = 0.25%).
+    slippage: f64,
     /// List of swaps to fulfill the solution.
     swaps: Vec<Swap>,
     /// The transfer type to be used in this swap for user's funds (token in)
@@ -154,7 +154,7 @@ impl Solution {
         token_out: Bytes,
         amount_in: BigUint,
         amount_out: BigUint,
-        max_slippage_bps: u16,
+        slippage: f64,
         swaps: Vec<Swap>,
     ) -> Self {
         Self {
@@ -164,7 +164,7 @@ impl Solution {
             token_out,
             amount_in,
             amount_out,
-            max_slippage_bps,
+            slippage,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
         }
@@ -192,8 +192,8 @@ impl Solution {
         &self.amount_out
     }
 
-    pub fn max_slippage_bps(&self) -> u16 {
-        self.max_slippage_bps
+    pub fn slippage(&self) -> f64 {
+        self.slippage
     }
 
     pub fn swaps(&self) -> &[Swap] {
@@ -234,8 +234,8 @@ impl Solution {
         self
     }
 
-    pub fn with_max_slippage_bps(mut self, max_slippage_bps: u16) -> Self {
-        self.max_slippage_bps = max_slippage_bps;
+    pub fn with_slippage(mut self, slippage: f64) -> Self {
+        self.slippage = slippage;
         self
     }
 

@@ -57,7 +57,7 @@ fn test_single_encoding_strategy_ekubo() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -119,7 +119,7 @@ fn test_single_encoding_strategy_ekubo_erc20() {
         token_out,
         BigUint::from_str("1_000_000_000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -181,7 +181,7 @@ fn test_single_encoding_strategy_ekubo_mev_resist() {
         token_out,
         BigUint::from_str("1_000_000_000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -232,7 +232,7 @@ fn test_single_encoding_strategy_maverick() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -294,7 +294,7 @@ fn test_evm_single_encoding_strategy_usv4_eth_in() {
         pepe,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("152373460199848577067005852").unwrap(),
-        200u16,
+        0.02,
         vec![swap_eth_pepe],
     );
 
@@ -361,7 +361,7 @@ fn test_evm_single_encoding_strategy_usv4_eth_out() {
         eth.clone(),
         BigUint::from_str("3000_000000").unwrap(),
         BigUint::from_str("1117254495486192350").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_eth],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -447,7 +447,7 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
         pepe,
         BigUint::from_str("1000_000000").unwrap(),
         BigUint::from_str("97191013220606467325121599").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_eth, swap_eth_pepe],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -581,7 +581,7 @@ fn test_evm_single_encoding_strategy_usv4_and_hooks_grouped_swap() {
         eth.clone(),
         BigUint::from_str("1000000000000000000").unwrap(), // 1 WETH
         BigUint::from_str("900000000000000000").unwrap(),  // 0.9 ETH
-        200u16,
+        0.02,
         vec![swap_weth_usdc, swap_usdc_eth],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -670,7 +670,7 @@ fn test_single_encoding_strategy_ekubo_grouped_swap() {
         usdt,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -736,7 +736,7 @@ fn test_single_encoding_strategy_curve() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -802,7 +802,7 @@ fn test_single_encoding_strategy_curve_st_eth() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -877,7 +877,7 @@ fn test_single_encoding_strategy_curve_protocol_will_debit_from_vault() {
         usdc,
         BigUint::from_str("1000_000000000000000000").unwrap(), // 1000 DAI
         BigUint::from_str("1").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::UseVaultsFunds);
@@ -933,7 +933,7 @@ fn test_single_encoding_strategy_balancer_v3() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1012,7 +1012,7 @@ fn test_single_encoding_strategy_bebop() {
         token_out,
         amount_in,
         amount_out, // Expected output amount
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1091,7 +1091,7 @@ fn test_single_encoding_strategy_bebop_aggregate() {
         token_out,
         amount_in,
         amount_out,
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1199,7 +1199,7 @@ fn test_single_encoding_strategy_hashflow() {
         wbtc,
         BigUint::from_str("4308094737").unwrap(),
         BigUint::from_str("3714751").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_wbtc],
     );
 
@@ -1251,7 +1251,7 @@ fn test_single_encoding_strategy_fluid() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1314,7 +1314,7 @@ fn test_sequential_encoding_strategy_fluid() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap_1, swap_2],
     );
 
@@ -1367,7 +1367,7 @@ fn test_single_encoding_strategy_rocketpool_deposit() {
         token_out,
         BigUint::from(85_000_000_000_000_000_000_u128),
         BigUint::from(73_382_345_660_413_064_855_u128),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1424,7 +1424,7 @@ fn test_single_encoding_strategy_rocketpool_burn() {
         token_out,
         BigUint::from(2_515_686_112_138_065_226_u128),
         BigUint::from(2_912_504_376_202_664_754_u128),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1525,7 +1525,7 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from(2_114_000_000_u64),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1585,7 +1585,7 @@ fn test_single_encoding_strategy_slipstreams() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1656,7 +1656,7 @@ fn test_sequential_encoding_strategy_slipstreams() {
         btc.clone(),
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -1707,7 +1707,7 @@ fn test_single_encoding_strategy_aerodrome_v1() {
         token_out,
         BigUint::from_str("10000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1770,7 +1770,7 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
         tbtc,
         BigUint::from_str("10000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -1821,7 +1821,7 @@ fn test_single_encoding_strategy_erc4626() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1884,7 +1884,7 @@ fn test_sequential_encoding_strategy_erc4626() {
         susdc.clone(),
         BigUint::from_str("100_000_000").unwrap(),
         BigUint::from_str("90_000000000000000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -1946,7 +1946,7 @@ fn test_single_swap_with_univ4_angstrom() {
         weth.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99574171").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -1997,7 +1997,7 @@ fn test_single_encoding_strategy_weth_wrap() {
         token_out,
         BigUint::from(1_000_000_000_000_000_000_u128),
         BigUint::from(1_000_000_000_000_000_000_u128),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -2044,7 +2044,7 @@ fn test_single_encoding_strategy_weth_unwrap() {
         token_out,
         BigUint::from(1_000_000_000_000_000_000_u128),
         BigUint::from(1_000_000_000_000_000_000_u128),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -2094,7 +2094,7 @@ fn test_sequential_encoding_strategy_wrap_added() {
         dai(),
         BigUint::from(1_000_000_000_000_000_000_u128),
         BigUint::from(1_000_000_000_000_000_000_u128),
-        200u16,
+        0.02,
         vec![swap_weth_dai],
     );
 
@@ -2156,7 +2156,7 @@ fn test_single_encoding_strategy_ekubo_v3() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -2236,7 +2236,7 @@ fn test_single_ekubo_v3_grouped_swap() {
         eth(),
         BigUint::from_str("10000_000000").unwrap(),
         BigUint::from_str("1_000000000000000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -2298,7 +2298,7 @@ fn test_sequential_encoding_strategy_etherfi_unwrap_weeth() {
         eth(),
         BigUint::from_str("1000000000000000000").unwrap(),
         BigUint::from_str("1000000000000000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -2360,7 +2360,7 @@ fn test_sequential_encoding_strategy_etherfi_wrap_eeth() {
         weeth.clone(),
         BigUint::from_str("1000000000000000000").unwrap(),
         BigUint::from_str("900000000000000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     );
 
@@ -2432,7 +2432,7 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token() {
         // Use a large amount so the swap produces >=1 USDC.
         BigUint::from_str("10000000000000000000000000000000000").unwrap(),
         BigUint::from(1u64),
-        200u16,
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -2509,7 +2509,7 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token_output() {
         twif,
         BigUint::from_str("100000000").unwrap(), // 100 USDC
         BigUint::from(1u64),
-        200u16,
+        0.02,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -2637,7 +2637,7 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
         weth,
         BigUint::from_str("3000000000").unwrap(),
         BigUint::from_str("1000000000000000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_weth],
     );
 
@@ -2793,7 +2793,7 @@ fn test_evm_two_hop_usv4_twif_intermediary() {
         usdc,
         BigUint::from_str("100000000").unwrap(), // 100 USDC
         BigUint::from(1u64),
-        200u16,
+        0.02,
         vec![swap1, swap2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -2936,7 +2936,7 @@ fn test_single_encoding_strategy_liquorice_settle() {
         weth,
         BigUint::from_str("3000000000").unwrap(),
         BigUint::from_str("1000000000000000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_weth],
     );
 
@@ -2992,7 +2992,7 @@ fn test_single_encoding_strategy_uniswap_v3_arbitrum() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -3050,7 +3050,7 @@ fn test_single_encoding_strategy_uniswap_v3_polygon() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 
@@ -3108,7 +3108,7 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
-        200u16,
+        0.02,
         vec![swap],
     );
 

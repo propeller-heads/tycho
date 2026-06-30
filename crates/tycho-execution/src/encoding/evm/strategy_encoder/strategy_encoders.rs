@@ -491,7 +491,7 @@ mod tests {
                 dai,
                 BigUint::from_str("1_000000000000000000").unwrap(),
                 checked_amount.clone(),
-                200u16,
+                0.02,
                 vec![swap],
             )
             .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -564,7 +564,7 @@ mod tests {
                 usdc,
                 BigUint::from_str("1_000000000000000000").unwrap(),
                 BigUint::from_str("26173932").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_weth_wbtc, swap_wbtc_usdc],
             );
 
@@ -693,7 +693,7 @@ mod tests {
                 usdc.clone(),
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99574171").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_usdc_weth_pool1, swap_usdc_weth_pool2, swap_weth_usdc_pool2],
             )
             .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -831,7 +831,7 @@ mod tests {
                 usdc.clone(),
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99025908").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_usdc_weth_v2, swap_weth_usdc_v3_pool1, swap_weth_usdc_v3_pool2],
             );
 

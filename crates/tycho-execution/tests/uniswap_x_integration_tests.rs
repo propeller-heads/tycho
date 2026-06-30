@@ -79,7 +79,7 @@ fn test_evm_sequential_swap_usx() {
         usdt.clone(),
         BigUint::from_str("2000000000000000000000").unwrap(),
         BigUint::from_str("1990000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap_dai_usdc, swap_usdc_usdt],
     );
 

@@ -221,7 +221,7 @@ mod tests {
             Bytes::from(vec![0x02u8; 20]),
             BigUint::from(1u64),
             BigUint::from(0u64),
-            0u16,
+            0.0,
             swaps,
         )
     }

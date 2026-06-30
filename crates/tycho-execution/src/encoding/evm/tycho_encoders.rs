@@ -410,7 +410,7 @@ mod tests {
                 eth(),
                 BigUint::from_str("1000_000000").unwrap(),
                 BigUint::from_str("105_152_000000000000000000").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_usdc_eth, swap_usdc_eth_univ4()],
             );
 
@@ -459,7 +459,7 @@ mod tests {
                 dai(),
                 BigUint::from_str("1000_000000").unwrap(),
                 BigUint::from_str("105_152_000000000000000000").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_dai_usdc, swap_usdc_eth_univ4(), swap_weth_dai],
             );
 
@@ -500,7 +500,7 @@ mod tests {
                 dai(),
                 BigUint::from_str("1000_000000").unwrap(),
                 BigUint::from_str("105_152_000000000000000000").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_weth_dai],
             );
 
@@ -529,7 +529,7 @@ mod tests {
                 weth(),
                 BigUint::from_str("1000_000000").unwrap(),
                 BigUint::from_str("105_152_000000000000000000").unwrap(),
-                200u16,
+                0.02,
                 vec![swap_usdc_eth_univ4()],
             );
 
@@ -564,7 +564,7 @@ mod tests {
                 weth(),
                 BigUint::from_str("1000_000000").unwrap(),
                 BigUint::from_str("105_152_000000000000000000").unwrap(),
-                200u16,
+                0.02,
                 input_swaps.clone(),
             );
 
@@ -583,7 +583,7 @@ mod tests {
                 Bytes::default(),
                 BigUint::default(),
                 BigUint::default(),
-                0u16,
+                0.0,
                 vec![],
             );
 
@@ -644,7 +644,7 @@ mod tests {
                 dai(),
                 BigUint::default(),
                 BigUint::default(),
-                0u16,
+                0.0,
                 swaps,
             );
 
@@ -709,7 +709,7 @@ mod tests {
                 wbtc(),
                 BigUint::default(),
                 BigUint::default(),
-                0u16,
+                0.0,
                 swaps,
             );
 
@@ -772,7 +772,7 @@ mod tests {
                 weth(),
                 BigUint::default(),
                 BigUint::default(),
-                0u16,
+                0.0,
                 swaps,
             );
 
@@ -818,7 +818,7 @@ mod tests {
                 token_out,
                 BigUint::from(1000000000000000000u64),
                 BigUint::from(1000000000000000000u64),
-                0u16,
+                0.0,
                 vec![swap],
             );
 
@@ -872,7 +872,7 @@ mod tests {
                 token_out,
                 BigUint::from(1000000000000000000u64),
                 BigUint::from(1000000000000000000u64),
-                0u16,
+                0.0,
                 vec![swap.clone(), swap],
             );
 
@@ -895,7 +895,7 @@ mod tests {
                 pepe,
                 BigUint::from_str("1000_000000").unwrap(),
                 BigUint::from(1000000000000000000u64),
-                0u16,
+                0.0,
                 vec![swap_usdc_eth_univ4(), swap_eth_pepe_univ4()],
             );
 

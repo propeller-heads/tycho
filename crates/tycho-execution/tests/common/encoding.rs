@@ -109,7 +109,7 @@ pub fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.amount_out());
-    let max_slippage_bps: U256 = U256::from(solution.max_slippage_bps());
+    let max_slippage_bps: U256 = U256::from((solution.slippage() * 10_000.0).round() as u16);
     let native_addr = bytes_to_address(native_address)?;
     let router_eth = bytes_to_address(&ROUTER_ETH_ADDRESS)?;
     let given_token = bytes_to_address(solution.token_in())?;

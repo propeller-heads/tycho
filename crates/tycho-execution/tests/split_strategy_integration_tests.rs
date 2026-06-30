@@ -85,7 +85,7 @@ fn test_evm_split_swap_strategy_encoder() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
-        200u16,
+        0.02,
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -194,7 +194,7 @@ fn test_evm_split_input_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99574171").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_weth_pool1, swap_usdc_weth_pool2, swap_weth_usdc_pool2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -348,7 +348,7 @@ fn test_evm_split_output_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99025908").unwrap(),
-        200u16,
+        0.02,
         vec![swap_usdc_weth_v2, swap_weth_usdc_v3_pool1, swap_weth_usdc_v3_pool2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -492,7 +492,7 @@ fn test_evm_split_swap_strategy_with_fees() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1995860454").unwrap(),
-        200u16,
+        0.02,
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     );
 
