@@ -399,6 +399,101 @@ pub mod events {
         }
     }
     #[derive(Debug, Clone, PartialEq)]
+    pub struct FeeAdjustment {
+        pub old_fee: substreams::scalar::BigInt,
+        pub new_fee: substreams::scalar::BigInt,
+    }
+    impl FeeAdjustment {
+        const TOPIC_ID: [u8; 32] = [
+            12u8,
+            186u8,
+            135u8,
+            24u8,
+            144u8,
+            85u8,
+            211u8,
+            181u8,
+            171u8,
+            5u8,
+            201u8,
+            111u8,
+            189u8,
+            100u8,
+            27u8,
+            199u8,
+            102u8,
+            87u8,
+            108u8,
+            158u8,
+            124u8,
+            240u8,
+            209u8,
+            149u8,
+            189u8,
+            251u8,
+            88u8,
+            160u8,
+            198u8,
+            166u8,
+            223u8,
+            36u8,
+        ];
+        pub fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            if log.topics.len() != 1usize {
+                return false;
+            }
+            if log.data.len() != 64usize {
+                return false;
+            }
+            return log.topics.get(0).expect("bounds already checked").as_ref()
+                == Self::TOPIC_ID;
+        }
+        pub fn decode(
+            log: &substreams_ethereum::pb::eth::v2::Log,
+        ) -> Result<Self, String> {
+            let mut values = ethabi::decode(
+                    &[
+                        ethabi::ParamType::Uint(24usize),
+                        ethabi::ParamType::Uint(24usize),
+                    ],
+                    log.data.as_ref(),
+                )
+                .map_err(|e| format!("unable to decode log.data: {:?}", e))?;
+            values.reverse();
+            Ok(Self {
+                old_fee: {
+                    let mut v = [0 as u8; 32];
+                    values
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+                new_fee: {
+                    let mut v = [0 as u8; 32];
+                    values
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+            })
+        }
+    }
+    impl substreams_ethereum::Event for FeeAdjustment {
+        const NAME: &'static str = "FeeAdjustment";
+        fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            Self::match_log(log)
+        }
+        fn decode(log: &substreams_ethereum::pb::eth::v2::Log) -> Result<Self, String> {
+            Self::decode(log)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub struct Flash {
         pub sender: Vec<u8>,
         pub recipient: Vec<u8>,

@@ -65,17 +65,17 @@ pub struct Events {
 pub mod events {
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
     pub struct PoolEvent {
-        #[prost(uint64, tag="8")]
+        #[prost(uint64, tag="9")]
         pub log_ordinal: u64,
-        #[prost(bytes="vec", tag="9")]
-        pub pool_address: ::prost::alloc::vec::Vec<u8>,
         #[prost(bytes="vec", tag="10")]
-        pub token0: ::prost::alloc::vec::Vec<u8>,
+        pub pool_address: ::prost::alloc::vec::Vec<u8>,
         #[prost(bytes="vec", tag="11")]
+        pub token0: ::prost::alloc::vec::Vec<u8>,
+        #[prost(bytes="vec", tag="12")]
         pub token1: ::prost::alloc::vec::Vec<u8>,
-        #[prost(message, optional, tag="12")]
+        #[prost(message, optional, tag="13")]
         pub transaction: ::core::option::Option<::tycho_substreams::prelude::Transaction>,
-        #[prost(oneof="pool_event::Typ", tags="1, 2, 3, 4, 5, 6, 7")]
+        #[prost(oneof="pool_event::Typ", tags="1, 2, 3, 4, 5, 6, 7, 8")]
         pub typ: ::core::option::Option<pool_event::Typ>,
     }
     /// Nested message and enum types in `PoolEvent`.
@@ -143,6 +143,11 @@ pub mod events {
             #[prost(bytes="vec", tag="2")]
             pub amount_1: ::prost::alloc::vec::Vec<u8>,
         }
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct FeeAdjustment {
+            #[prost(bytes="vec", tag="1")]
+            pub new_fee: ::prost::alloc::vec::Vec<u8>,
+        }
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
         pub enum Typ {
             #[prost(message, tag="1")]
@@ -159,6 +164,8 @@ pub mod events {
             Flash(Flash),
             #[prost(message, tag="7")]
             CollectProtocol(CollectProtocol),
+            #[prost(message, tag="8")]
+            FeeAdjustment(FeeAdjustment),
         }
     }
 }

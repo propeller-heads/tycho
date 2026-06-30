@@ -5,7 +5,9 @@ use substreams_ethereum::{
 };
 
 use crate::{
-    abi::pool::events::{Burn, Collect, CollectProtocol, Flash, Initialize, Mint, Swap},
+    abi::pool::events::{
+        Burn, Collect, CollectProtocol, FeeAdjustment, Flash, Initialize, Mint, Swap,
+    },
     pb::ramses::v3::{
         events::{
             pool_event::{self, Typ},
@@ -74,6 +76,10 @@ fn maybe_pool_event(log: &Log, pool: Pool, tx: &TransactionTrace) -> Option<Pool
         Typ::CollectProtocol(pool_event::CollectProtocol {
             amount_0: cp.amount0.to_bytes_be().1,
             amount_1: cp.amount1.to_bytes_be().1,
+        })
+    } else if let Some(fee_adjustment) = FeeAdjustment::match_and_decode(log) {
+        Typ::FeeAdjustment(pool_event::FeeAdjustment {
+            new_fee: fee_adjustment.new_fee.to_bytes_be().1,
         })
     } else {
         return None;

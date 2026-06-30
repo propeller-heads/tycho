@@ -63,12 +63,13 @@ message Events {
       Swap swap = 5;
       Flash flash = 6;
       CollectProtocol collect_protocol = 7;
+      FeeAdjustment fee_adjustment = 8;
     }
-    uint64 log_ordinal = 8;
-    bytes pool_address = 9;
-    bytes token0 = 10;
-    bytes token1 = 11;
-    tycho.evm.v1.Transaction transaction = 12;
+    uint64 log_ordinal = 9;
+    bytes pool_address = 10;
+    bytes token0 = 11;
+    bytes token1 = 12;
+    tycho.evm.v1.Transaction transaction = 13;
 
     message Initialize {
       bytes sqrt_price = 1;
@@ -110,6 +111,10 @@ message Events {
     message CollectProtocol {
       bytes amount_0 = 1;
       bytes amount_1 = 2;
+    }
+
+    message FeeAdjustment {
+      bytes new_fee = 1;
     }
   }
 }

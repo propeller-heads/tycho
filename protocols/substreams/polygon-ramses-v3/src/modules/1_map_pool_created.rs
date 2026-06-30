@@ -6,7 +6,7 @@ use substreams_ethereum::pb::eth::v2::{self as eth};
 
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 
-use crate::abi::factory::events::{FeeAdjustment, PoolCreated};
+use crate::abi::factory::events::PoolCreated;
 
 use tycho_substreams::prelude::*;
 
@@ -16,16 +16,15 @@ pub fn map_pools_created(params: String, block: eth::Block) -> BlockEntityChange
     let factory_address = Address::from_str(&params).expect("Invalid factory address");
 
     get_new_pools(&block, &mut new_pools, factory_address);
-    get_fee_adjustments(&block, &mut new_pools, factory_address);
 
     BlockEntityChanges { block: None, changes: new_pools }
 }
 
 // Extract new pools from PoolCreated events.
 //
-// Unlike Uniswap V3, the Ramses pool fee is governance-mutable (see `get_fee_adjustments`), so
-// `fee` is emitted as an updatable entity attribute rather than a static one. `tick_spacing` is the
-// immutable key of the pool and stays static.
+// Unlike Uniswap V3, the Ramses pool fee is governance-mutable (the pool emits a `FeeAdjustment`
+// event, handled in `map_events`), so `fee` is emitted as an updatable entity attribute rather than
+// a static one. `tick_spacing` is the immutable key of the pool and stays static.
 fn get_new_pools(
     block: &eth::Block,
     new_pools: &mut Vec<TransactionEntityChanges>,
@@ -87,39 +86,5 @@ fn get_new_pools(
     eh.filter_by_address(vec![factory_address]);
 
     eh.on::<PoolCreated, _>(&mut on_pool_created);
-    eh.handle_events();
-}
-
-// Track governance fee changes. The factory emits `FeeAdjustment(pool, newFee)` (carrying the pool
-// address) whenever `setFee` is called, so we update the pool's `fee` attribute accordingly.
-fn get_fee_adjustments(
-    block: &eth::Block,
-    new_pools: &mut Vec<TransactionEntityChanges>,
-    factory_address: Address,
-) {
-    let mut on_fee_adjustment =
-        |event: FeeAdjustment, _tx: &eth::TransactionTrace, _log: &eth::Log| {
-            let tycho_tx: Transaction = _tx.into();
-
-            new_pools.push(TransactionEntityChanges {
-                tx: Some(tycho_tx),
-                entity_changes: vec![EntityChanges {
-                    component_id: event.pool.to_hex(),
-                    attributes: vec![Attribute {
-                        name: "fee".to_string(),
-                        value: event.new_fee.to_bytes_be().1,
-                        change: ChangeType::Update.into(),
-                    }],
-                }],
-                component_changes: vec![],
-                balance_changes: vec![],
-            })
-        };
-
-    let mut eh = EventHandler::new(block);
-
-    eh.filter_by_address(vec![factory_address]);
-
-    eh.on::<FeeAdjustment, _>(&mut on_fee_adjustment);
     eh.handle_events();
 }

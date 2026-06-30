@@ -118,6 +118,25 @@
   },
   {
     "type": "event",
+    "name": "FeeAdjustment",
+    "inputs": [
+      {
+        "name": "oldFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      },
+      {
+        "name": "newFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Flash",
     "inputs": [
       {

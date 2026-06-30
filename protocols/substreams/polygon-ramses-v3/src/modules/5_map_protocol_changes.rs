@@ -184,6 +184,11 @@ fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
                 change: ChangeType::Update.into(),
             },
         ],
+        Typ::FeeAdjustment(fee_adjustment) => vec![Attribute {
+            name: "fee".to_string(),
+            value: fee_adjustment.new_fee,
+            change: ChangeType::Update.into(),
+        }],
         _ => vec![],
     }
 }
