@@ -327,7 +327,8 @@ fn _split_swap_checked(
     if max_slippage_bps > MAX_SLIPPAGE_BPS {
         return Err(Error::revert("_split_swap_checked: max_slippage_bps too high"));
     }
-    let min_amount_out = expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
+    let min_amount_out =
+        expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -379,7 +380,15 @@ fn _split_swap_checked(
     )?;
 
     _settle_output(
-        state, vault, log, amount_out, min_amount_out, amount_in, token_in, token_out, receiver,
+        state,
+        vault,
+        log,
+        amount_out,
+        min_amount_out,
+        amount_in,
+        token_in,
+        token_out,
+        receiver,
     )?;
     Ok(())
 }
@@ -409,7 +418,8 @@ fn _single_swap(
     if max_slippage_bps > MAX_SLIPPAGE_BPS {
         return Err(Error::revert("_single_swap: max_slippage_bps too high"));
     }
-    let min_amount_out = expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
+    let min_amount_out =
+        expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -466,7 +476,15 @@ fn _single_swap(
     )?;
 
     _settle_output(
-        state, vault, log, amount_out, min_amount_out, amount_in, token_in, token_out, receiver,
+        state,
+        vault,
+        log,
+        amount_out,
+        min_amount_out,
+        amount_in,
+        token_in,
+        token_out,
+        receiver,
     )?;
     Ok(())
 }
@@ -496,7 +514,8 @@ fn _sequential_swap_checked(
     if max_slippage_bps > MAX_SLIPPAGE_BPS {
         return Err(Error::revert("_sequential_swap_checked: max_slippage_bps too high"));
     }
-    let min_amount_out = expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
+    let min_amount_out =
+        expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -539,7 +558,15 @@ fn _sequential_swap_checked(
     )?;
 
     _settle_output(
-        state, vault, log, amount_out, min_amount_out, amount_in, token_in, token_out, receiver,
+        state,
+        vault,
+        log,
+        amount_out,
+        min_amount_out,
+        amount_in,
+        token_in,
+        token_out,
+        receiver,
     )?;
     Ok(())
 }
