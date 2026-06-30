@@ -1,0 +1,128 @@
+specVersion: v0.1.0
+package:
+  name: "bsc_uniswap_v3_logs_only"
+  version: v0.1.2
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v3-logs-only"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - uniswap.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+  excludePaths:
+    - sf/ethereum
+    - google
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v3_logs_only.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 26324014
+    updatePolicy: set_if_not_exists
+    valueType: proto:uniswap.v3.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_events
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:uniswap.v3.Events
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - map: map_events
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    initialBlock: 26324014
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_ticks_changes
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - map: map_events
+    output:
+      type: proto:uniswap.v3.TickDeltas
+
+  - name: store_ticks_liquidity
+    kind: store
+    initialBlock: 26324014
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_ticks_changes
+
+  - name: store_pool_current_tick
+    kind: store
+    initialBlock: 26324014
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_events
+
+  - name: map_liquidity_changes
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - map: map_events
+      - store: store_pool_current_tick
+    output:
+      type: proto:uniswap.v3.LiquidityChanges
+
+  - name: store_liquidity
+    kind: store
+    initialBlock: 26324014
+    updatePolicy: set_sum
+    valueType: bigint
+    inputs:
+      - map: map_liquidity_changes
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - map: map_events
+      - map: map_balance_changes
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_ticks_changes
+      - store: store_ticks_liquidity
+        mode: deltas
+      - map: map_liquidity_changes
+      - store: store_liquidity
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: "dB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7"

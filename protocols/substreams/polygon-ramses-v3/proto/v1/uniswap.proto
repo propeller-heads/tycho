@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package uniswap.v3;
+
+message Pool {
+  bytes address = 1;
+  bytes token0 = 2;
+  bytes token1 = 3;
+  bytes created_tx_hash = 4;
+}
+
+// A struct describing a transaction.
+message Transaction {
+  // The transaction hash.
+  bytes hash = 1;
+  // The sender of the transaction.
+  bytes from = 2;
+  // The receiver of the transaction.
+  bytes to = 3;
+  // The transactions index within the block.
+  uint64 index = 4;
+}
+
+// A change to a pool's tick.
+message TickDelta {
+  // The address of the pool.
+  bytes pool_address = 1;
+  // The index of the tick.
+  int32 tick_index = 2;
+  // The liquidity net delta of this tick. Bigint encoded as signed little endian bytes.
+  bytes liquidity_net_delta = 3;
+  // Used to determine the order of the balance changes. Necessary for the balance store.
+  uint64 ordinal = 4;
+  Transaction transaction = 5;
+}
+
+// A group of TickDelta
+message TickDeltas {
+    repeated TickDelta deltas = 1;
+}
+
+// A change to a pool's liquidity.
+message LiquidityChange {
+  // The address of the pool.
+  bytes pool_address = 1;
+  // The liquidity changed amount. Bigint encoded as signed little endian bytes.
+  bytes value = 2;
+  // The type of update, can be absolute or delta.
+  LiquidityChangeType change_type = 3;
+  // Used to determine the order of the balance changes. Necessary for the balance store.
+  uint64 ordinal = 4;
+  Transaction transaction = 5;
+}
+
+// A group of LiquidityChange
+message LiquidityChanges {
+    repeated LiquidityChange changes = 1;
+}
+
+
+enum LiquidityChangeType {
+  DELTA = 0;
+  ABSOLUTE = 1;
+}
+
+message Events {
+  repeated PoolEvent pool_events = 3;
+
+  message PoolEvent {
+    oneof type {
+      Initialize initialize = 1;
+      Mint mint = 2;
+      Collect collect = 3;
+      Burn burn = 4;
+      Swap swap = 5;
+      Flash flash = 6;
+      SetFeeProtocol set_fee_protocol = 7;
+      CollectProtocol collect_protocol = 8;
+    }
+    uint64 log_ordinal = 100;
+    string pool_address = 102;
+    string token0 = 103;
+    string token1 = 104;
+    Transaction transaction = 105;
+
+    message Initialize {
+      // Unsigned
+      string sqrt_price = 1;
+      int32 tick = 2;
+    }
+
+    message Mint {
+      string sender = 1;
+      string owner = 2;
+      // Signed
+      int32 tick_lower = 3;
+      // Signed
+      int32 tick_upper = 4;
+      // Unsigned
+      string amount = 5;
+      // Unsigned
+      string amount_0 = 6;
+      // Unsigned
+      string amount_1 = 7;
+    }
+
+    message Collect {
+      string owner = 1;
+      string recipient = 2;
+      int32 tick_lower = 3;
+      int32 tick_upper = 4;
+      // Unsigned
+      string amount_0 = 5;
+      // Unsigned
+      string amount_1 = 6;
+    }
+
+    message Burn {
+      string owner = 1;
+      int32 tick_lower = 2;
+      int32 tick_upper = 3;
+      // Unsigned
+      string amount = 4;
+      // Unsigned
+      string amount_0 = 5;
+      // Unsigned
+      string amount_1 = 6;
+    }
+
+    message Swap {
+      string sender = 1;
+      string recipient = 2;
+      // Signed
+      string amount_0 = 3;
+      // Signed
+      string amount_1 = 4;
+      // Unsigned
+      string sqrt_price = 6;
+      // Unsigned
+      string liquidity = 7;
+      int32 tick = 8;
+    }
+
+    message Flash {
+      string sender = 1;
+      string recipient = 2;
+      // Unsigned
+      string amount_0 = 3;
+      // Unsigned
+      string amount_1 = 4;
+      // Unsigned
+      string paid_0 = 5;
+      // Unsigned
+      string paid_1 = 6;
+    }
+
+    message SetFeeProtocol {
+      // Unsigned
+      uint64 fee_protocol_0_old = 1;
+      // Unsigned
+      uint64 fee_protocol_1_old = 2;
+      // Unsigned
+      uint64 fee_protocol_0_new = 3;
+      // Unsigned
+      uint64 fee_protocol_1_new = 4;
+    }
+
+    message CollectProtocol {
+      string sender = 1;
+      string recipient = 2;
+      // Unsigned
+      string amount_0 = 3;
+      // Unsigned
+      string amount_1 = 4;
+    }
+  }
+}
