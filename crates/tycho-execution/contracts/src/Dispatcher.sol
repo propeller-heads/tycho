@@ -290,13 +290,22 @@ contract Dispatcher is TransferManager {
         address feeCalculator,
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
+        uint256 amountIn,
+        address tokenIn,
+        address tokenOut,
         uint32 clientFeeBps,
         address client
     ) internal view returns (FeeRecipient[] memory feeRecipients) {
         // slither-disable-next-line calls-loop
         feeRecipients = IFeeCalculator(feeCalculator)
             .calculateFee(
-                actualAmountOut, expectedAmountOut, clientFeeBps, client
+                actualAmountOut,
+                expectedAmountOut,
+                amountIn,
+                tokenIn,
+                tokenOut,
+                clientFeeBps,
+                client
             );
     }
 

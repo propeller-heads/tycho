@@ -91,6 +91,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *        (used for slippage surplus calculation)
      * @param expectedAmountOut Caller-supplied quoted amount out.
      *        Fees are calculated on this amount.
+     * @param amountIn The input amount of the swap
+     * @param tokenIn The input token address
+     * @param tokenOut The output token address
      * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to look up custom router fees
      *        and slippage share for and to receive fees.
@@ -101,6 +104,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     function calculateFee(
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
+        uint256 amountIn,
+        address tokenIn,
+        address tokenOut,
         uint32 clientFeeBps,
         address client
     ) external view returns (FeeRecipient[] memory feeRecipients) {

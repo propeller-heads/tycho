@@ -1264,6 +1264,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             _feeCalculator,
             actualAmountOut,
             expectedAmountOut,
+            0,
+            address(0),
+            address(0),
             clientFeeBps,
             client
         );
