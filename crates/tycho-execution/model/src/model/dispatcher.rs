@@ -170,9 +170,3 @@ pub fn _call_handle_callback_on_executor(
     Ok(())
 }
 
-/// Mirrors `Dispatcher._callMustInterceptOutput` in Solidity.
-///
-/// Delegates to `FeeCalculator.must_intercept_output`.
-pub fn _call_must_intercept_output(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
-    crate::model::fee_calculator::must_intercept_output(params, client_fee_bps)
-}

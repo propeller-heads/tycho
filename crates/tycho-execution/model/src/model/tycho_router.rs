@@ -6,9 +6,9 @@ use crate::{
     log::{Event, Log},
     math::checked_subtract,
     model::{
-        dispatcher::{_call_must_intercept_output, _call_swap_on_executor},
+        dispatcher::_call_swap_on_executor,
         executors::Executor,
-        fee_calculator::calculate_fee,
+        fee_calculator::{calculate_fee, must_intercept_output},
         transfer_manager::{_transfer_out, _tstore_transfer_from_info},
         vault::Vault,
     },
@@ -339,7 +339,7 @@ fn _split_swap_checked(
         0
     };
 
-    let must_intercept = _call_must_intercept_output(params, client_fee_bps)?;
+    let must_intercept = must_intercept_output(params, client_fee_bps)?;
 
     let final_receiver = determine_final_receiver(must_intercept, receiver);
 
@@ -430,7 +430,7 @@ fn _single_swap(
         0
     };
 
-    let must_intercept = _call_must_intercept_output(params, client_fee_bps)?;
+    let must_intercept = must_intercept_output(params, client_fee_bps)?;
 
     let final_receiver = determine_final_receiver(must_intercept, receiver);
 
@@ -526,7 +526,7 @@ fn _sequential_swap_checked(
         0
     };
 
-    let must_intercept = _call_must_intercept_output(params, client_fee_bps)?;
+    let must_intercept = must_intercept_output(params, client_fee_bps)?;
 
     let final_receiver = determine_final_receiver(must_intercept, receiver);
 
