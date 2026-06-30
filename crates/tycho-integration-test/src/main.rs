@@ -1364,8 +1364,8 @@ async fn process_state(
         );
         metrics::record_get_amount_out_duration(&component.protocol_system, duration_seconds);
 
-        // Sometimes the expected amount out might be zero (e.g. pool is depleted in one direction)
-        // Then execution will fail with TychoRouter__UndefinedMinAmountOut
+        // Sometimes the expected amount out might be zero (e.g. pool is depleted in one direction).
+        // Skip: passing amountOut=0 means effectiveMin=0, which makes the slippage check trivial.
         if expected_amount_out == BigUint::ZERO {
             continue;
         }
@@ -1625,7 +1625,7 @@ fn process_execution_result(
 
 /// Extract the error name from a revert reason string
 /// Examples:
-/// - "TychoRouter__NegativeSlippage(1000, 990)" -> "TychoRouter__NegativeSlippage"
+/// - "TychoRouter__SlippageExceeded(1000, 990)" -> "TychoRouter__SlippageExceeded"
 /// - "arithmetic underflow or overflow" -> "arithmetic underflow or overflow"
 /// - "Error(string): insufficient balance" -> "Error"
 fn extract_error_name(revert_reason: &str) -> String {
@@ -1649,7 +1649,7 @@ fn categorize_error(error_message: &str) -> &'static str {
     // We can add more categories here when we find new meaningful ones
     match error_message {
         e if e.contains("Couldn't find storage slot") => "Storage slot not found",
-        e if e.contains("TychoRouter__NegativeSlippage") => "TychoRouter__NegativeSlippage",
+        e if e.contains("TychoRouter__SlippageExceeded") => "TychoRouter__SlippageExceeded",
         e if e.contains("0xf7bf5832") => "Fee token", /* Decodes to TychoRouter__AmountOutNotFullyReceived */
         e if e.contains("UniswapV2: K") => "Fee token",
         e if e.contains("Insufficient balance for amount + tax") => "Fee token",

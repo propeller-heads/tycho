@@ -801,7 +801,8 @@ fn create_solution(
 /// This function is intended as **an illustrative example only** and supports only the method of
 /// interest of this quickstart. **Users must implement their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
-/// - Proper validation and setting of critical inputs such as `minAmountOut`.
+/// - Proper validation and setting of critical inputs such as `expectedAmountOut` and
+///   `maxSlippageBps`.
 fn encode_tycho_router_call(
     chain_id: u64,
     encoded_solution: EncodedSolution,

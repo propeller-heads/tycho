@@ -24,7 +24,7 @@ use crate::execution::{
 };
 
 const KNOWN_SIGNATURES: &[&str] =
-    &["Error(string)", "Panic(uint256)", "TychoRouter__NegativeSlippage(uint256,uint256)"];
+    &["Error(string)", "Panic(uint256)", "TychoRouter__SlippageExceeded(uint256,uint256)"];
 
 /// Represents a Solidity error signature
 ///
@@ -60,7 +60,7 @@ impl SolidityError {
     ///
     /// This ensures that we have as much information regarding the error as possible (for example,
     /// the values of the negative slippage as opposed to just the fact that there was
-    /// NegativeSlippage.
+    /// SlippageExceeded.
     pub fn decode_error_args(&self, data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
         // This is a simplified version. For full ABI decoding, you'd need alloy-sol-types
         let mut args = Vec::new();

@@ -58,23 +58,24 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// This function is intended as **an illustrative example only**. **Users must implement
 /// their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
-/// - Proper validation and setting of critical inputs such as `minAmountOut`.
+/// - Proper validation and setting of critical inputs such as `expectedAmountOut` and
+///   `maxSlippageBps`.
 /// - Signing of permit2 objects.
 ///
 /// While Tycho is responsible for encoding the swap paths themselves, the input arguments
 /// to the router's methods act as **guardrails** for on-chain execution safety.
 /// Thus, the user must **take responsibility** for ensuring correctness of all input parameters,
-/// including `minAmountOut`, `receiver`, and permit2 logic.
+/// including `expectedAmountOut`, `maxSlippageBps`, `receiver`, and permit2 logic.
 ///
-/// # Min Amount Out
+/// # Amount Out and Slippage
 ///
-/// The `minAmountOut` calculation used here is just an example.
+/// The `expectedAmountOut` and `maxSlippageBps` values used here are just an example.
 /// You should ideally:
 /// - Query an external service (e.g., DEX aggregators, oracle, off-chain price feed).
-/// - Use your own strategy to determine an accurate and safe minimum acceptable output amount.
+/// - Use your own strategy to determine an accurate and safe output and slippage tolerance.
 ///
-/// ⚠️ If `minAmountOut` is too low, your swap may be front-run or sandwiched, resulting in loss of
-/// funds.
+/// ⚠️ If `maxSlippageBps` is too high, your swap may be front-run or sandwiched, resulting in loss
+/// of funds.
 ///
 /// # Parameters
 /// - `encoded_solution`: The solution already encoded by Tycho.
@@ -85,9 +86,10 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// - `client_fee_bps`: Fee in fee units to be paid to the client (0-100_000_000, where 100_000_000
 ///   = 100%)
 /// - `client_fee_receiver`: Address to receive the client fee
-/// - `max_client_contribution`: Maximum amount the client is willing to pay out of pocket to
-///   subsidize this trade. This represents the maximum slippage the client will cover. If
-///   (min_amount_out - actual_swap_output) > max_client_contribution, the tx reverts.
+/// - `max_client_contribution`: Maximum amount the client is willing to contribute from their vault
+///   to top up the output if it falls below the slippage floor
+///   (`amount_out * (1 - max_slippage_bps / MAX_SLIPPAGE_BPS)`). If the shortfall exceeds this
+///   value, the tx reverts.
 ///
 /// # Returns
 /// A `Result<Transaction, EncodingError>` that either contains the full transaction data (to,
