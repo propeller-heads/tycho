@@ -118,7 +118,7 @@ fn main() {
         usdt_addr.clone(),
         BigUint::from_str("2_000_000000000000000000").unwrap(),
         BigUint::from_str("1_990_000000").unwrap(),
-        200u16,
+        0.02,
         vec![swap_dai_usdc, swap_usdc_usdt],
     );
 
@@ -130,7 +130,7 @@ fn main() {
 
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.amount_out());
-    let max_slippage_bps = U256::from(solution.max_slippage_bps());
+    let max_slippage_bps = U256::from((solution.slippage() * 10_000.0).round() as u16);
     let given_token = bytes_to_address(solution.token_in()).unwrap();
     let checked_token = bytes_to_address(solution.token_out()).unwrap();
     let receiver = bytes_to_address(solution.receiver()).unwrap();

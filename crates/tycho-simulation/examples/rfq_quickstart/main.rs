@@ -780,17 +780,6 @@ fn create_solution(
         .with_protocol_state(state)
         .with_estimated_amount_in(sell_amount.clone());
 
-    // Compute a minimum amount out
-    //
-    // # ⚠️ Important Responsibility Note
-    // For maximum security, in production code, this minimum amount out should be computed
-    // from a third-party source.
-    let slippage = 0.0025; // 0.25% slippage
-    let bps = BigUint::from(10_000u32);
-    let slippage_percent = BigUint::from((slippage * 10000.0) as u32);
-    let multiplier = &bps - slippage_percent;
-    let min_amount_out = (expected_amount * &multiplier) / &bps;
-
     // Then we create a solution object with the previous swap
     Solution::new(
         user_address.clone(),
@@ -798,8 +787,8 @@ fn create_solution(
         sell_token.address,
         buy_token.address,
         sell_amount,
-        min_amount_out,
-        0u16,
+        expected_amount,
+        0.0025, // 0.25% slippage
         vec![simple_swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2)
@@ -822,7 +811,7 @@ fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.amount_out());
-    let max_slippage_bps = solution.max_slippage_bps();
+    let max_slippage_bps = (solution.slippage() * 10_000.0).round() as u16;
     let given_token = Address::from_slice(solution.token_in());
     let checked_token = Address::from_slice(solution.token_out());
     let receiver = Address::from_slice(solution.receiver());
