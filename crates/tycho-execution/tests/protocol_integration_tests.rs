@@ -1476,6 +1476,7 @@ fn test_single_encoding_strategy_bopamm_weth_usdc() {
         token_out,
         BigUint::from_str("100000000000000000").unwrap(),
         BigUint::from(160_000_000_u64),
+        0.02,
         vec![swap],
     );
 
@@ -2705,6 +2706,7 @@ fn test_single_encoding_strategy_metric() {
         usdc_base,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
+        0.02,
         vec![swap],
     );
 
