@@ -826,15 +826,16 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             swap_.decodeSingleSwap();
 
         address client = clientFeeParams.clientFeeReceiver;
-        address finalReceiver = _determineFinalReceiver(
-            receiver, clientFeeParams.clientFeeBps, client
+        bool intercepting = _callMustInterceptOutput(
+            _feeCalculator, clientFeeParams.clientFeeBps, client
         );
 
         uint256 actualAmountOut = _callSwapOnExecutor(
-            executor, amountIn, protocolData, true, false, finalReceiver
+            executor, amountIn, protocolData, true, false,
+            intercepting ? address(this) : receiver
         );
 
-        if (finalReceiver == address(this)) {
+        if (intercepting) {
             amountOutAfterFees = _takeFees(
                 tokenOut,
                 actualAmountOut,
@@ -907,14 +908,15 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        address finalReceiver = _determineFinalReceiver(
-            receiver, clientFeeParams.clientFeeBps, client
+        bool intercepting = _callMustInterceptOutput(
+            _feeCalculator, clientFeeParams.clientFeeBps, client
         );
 
-        uint256 actualAmountOut =
-            _sequentialSwap(amountIn, swaps, finalReceiver);
+        uint256 actualAmountOut = _sequentialSwap(
+            amountIn, swaps, intercepting ? address(this) : receiver
+        );
 
-        if (finalReceiver == address(this)) {
+        if (intercepting) {
             amountOutAfterFees = _takeFees(
                 tokenOut,
                 actualAmountOut,
@@ -1353,20 +1355,6 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         } else {
             amount = amountOut;
         }
-    }
-
-    /**
-     * @dev Routes swap output through the router when fees must be taken,
-     *      or directly to receiver otherwise.
-     */
-    function _determineFinalReceiver(
-        address receiver,
-        uint32 clientFeeBps,
-        address client
-    ) internal view returns (address) {
-        return _callMustInterceptOutput(_feeCalculator, clientFeeBps, client)
-            ? address(this)
-            : receiver;
     }
 
     /**

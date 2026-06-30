@@ -16,8 +16,6 @@ import {FeeRecipient} from "../lib/FeeStructs.sol";
 contract TychoRouterFeesTest is TychoRouterTestSetup {
     event FeesTaken(address indexed token, FeeRecipient[] fees);
 
-    // TODO(ENG-6054): Rename skip_ → test once _takeFees is wired to
-    // the new _callCalculateFee signature.
     function testSingleSwapWithAllFeeTypes() public {
         // Set up fees: 1% router fee on output, 2% client fee, 10% router fee on client fee
         vm.startPrank(FEE_SETTER);
