@@ -886,4 +886,3 @@ fn _maybe_add_client_contribution(
         Ok(amount_out)
     }
 }
-
