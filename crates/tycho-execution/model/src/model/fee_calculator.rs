@@ -2,6 +2,7 @@
 use crate::{address::Address, error::Error, math::checked_subtract, params::Params};
 
 pub const MAX_BPS: i64 = 100_000_000;
+const MAX_BPS_SQUARED: i64 = 10_000_000_000_000_000;
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/9b0512c9580617224c7a0d7de781674a2cdc6b62/foundry/lib/FeeStructs.sol#L9>
 pub struct FeeRecipient {
@@ -131,7 +132,7 @@ fn _calculate_fee(
 
         if fee_info.router_fee_on_client_fee_bps > 0 {
             router_fee_on_client_fee =
-                client_fee_numerator * fee_info.router_fee_on_client_fee_bps / (MAX_BPS * MAX_BPS);
+                client_fee_numerator * fee_info.router_fee_on_client_fee_bps / MAX_BPS_SQUARED;
         }
 
         client_portion = checked_subtract(total_client_fee, router_fee_on_client_fee)?;
