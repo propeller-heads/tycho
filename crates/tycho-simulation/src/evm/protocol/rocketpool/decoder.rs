@@ -20,9 +20,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for RocketpoolState {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let get_u256 = |name: &str| -> Result<U256, InvalidSnapshotError> {
             snapshot
                 .state
@@ -55,7 +58,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for RocketpoolState {
             get_u256("deposit_assign_socialised_maximum")?,
             get_u256("megapool_queue_requested_total")?,
             get_u256("target_reth_collateral_rate")?,
-        ))
+        )
+        .with_component(component))
     }
 }
 

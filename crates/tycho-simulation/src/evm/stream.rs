@@ -119,7 +119,7 @@ use tycho_client::{
 };
 use tycho_common::{
     models::{token::Token, Chain},
-    simulation::protocol_sim::ProtocolSim,
+    simulation::swap::SwapQuoter,
     traits::TxDeltaIndexer,
     Bytes,
 };
@@ -284,7 +284,7 @@ impl ProtocolStreamBuilder {
         filter_fn: Option<fn(&ComponentWithState) -> bool>,
     ) -> Self
     where
-        T: ProtocolSim
+        T: SwapQuoter
             + TryFromWithBlock<ComponentWithState, BlockHeader, Error = InvalidSnapshotError>
             + Send
             + 'static,
@@ -338,7 +338,7 @@ impl ProtocolStreamBuilder {
         decoder_context: DecoderContext,
     ) -> Self
     where
-        T: ProtocolSim
+        T: SwapQuoter
             + TryFromWithBlock<ComponentWithState, BlockHeader, Error = InvalidSnapshotError>
             + Send
             + 'static,

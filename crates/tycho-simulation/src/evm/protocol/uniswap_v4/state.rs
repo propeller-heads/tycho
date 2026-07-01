@@ -1,18 +1,22 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
 use alloy::primitives::{Address, Sign, I256, U256};
 use num_bigint::BigUint;
-use num_traits::{CheckedSub, ToPrimitive, Zero};
+use num_traits::{CheckedSub, ToPrimitive};
 use revm::primitives::I128;
-use tracing::trace;
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{
             Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
+        },
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
         },
     },
     Bytes,
@@ -23,7 +27,7 @@ use crate::{
     evm::protocol::{
         clmm::clmm_swap_to_price,
         safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
+        u256_num::{biguint_to_u256, u256_to_biguint},
         uniswap_v4::hooks::{
             hook_handler::HookHandler,
             models::{
@@ -75,6 +79,7 @@ pub struct UniswapV4State {
     ticks: TickList,
     tick_spacing: i32,
     pub hook: Option<Box<dyn HookHandler>>,
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl_non_serializable_protocol!(UniswapV4State, "not supported due vm state deps");
@@ -164,7 +169,14 @@ impl UniswapV4State {
             ticks: tick_list,
             tick_spacing,
             hook: None,
+            component: None,
         })
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     fn swap(
@@ -511,159 +523,14 @@ impl ProtocolSim for UniswapV4State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let zero_for_one = token_in < token_out;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Negative,
+        let (amount_out, gas, new_state) = self.swap_core(
             U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
-
-        let mut amount_to_swap = amount_specified;
-        let mut lp_fee_override: Option<u32> = None;
-        let mut before_swap_gas = 0u64;
-        let mut after_swap_gas = 0u64;
-        let mut before_swap_delta = BeforeSwapDelta(I256::ZERO);
-        let mut storage_overwrites = None;
-
-        let token_in_address = Address::from_slice(&token_in.address);
-        let token_out_address = Address::from_slice(&token_out.address);
-
-        let state_context = StateContext {
-            currency_0: if zero_for_one { token_in_address } else { token_out_address },
-            currency_1: if zero_for_one { token_out_address } else { token_in_address },
-            fees: self.fees.clone(),
-            tick_spacing: self.tick_spacing,
-        };
-
-        let swap_params = SwapParams {
-            zero_for_one,
-            amount_specified: amount_to_swap,
-            sqrt_price_limit: self.sqrt_price,
-        };
-
-        // Check if hook is set and has before_swap permissions
-        if let Some(ref hook) = self.hook {
-            if has_permission(hook.address(), HookOptions::BeforeSwap) {
-                let before_swap_params = BeforeSwapParameters {
-                    context: state_context.clone(),
-                    sender: *EXTERNAL_ACCOUNT,
-                    swap_params: swap_params.clone(),
-                    hook_data: Bytes::new(),
-                };
-
-                let before_swap_result = hook
-                    .before_swap(before_swap_params, None, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "BeforeSwap hook simulation failed: {e:?}"
-                        ))
-                    })?;
-
-                before_swap_gas = before_swap_result.gas_estimate;
-                before_swap_delta = before_swap_result.result.amount_delta;
-                storage_overwrites = Some(before_swap_result.result.overwrites);
-
-                // Convert amountDelta to amountToSwap as per Uniswap V4 spec
-                // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/Hooks.sol#L270
-                if before_swap_delta.as_i256() != I256::ZERO {
-                    amount_to_swap += I256::from(before_swap_delta.get_specified_delta());
-                    if amount_to_swap > I256::ZERO {
-                        return Err(SimulationError::FatalError(
-                            "Hook delta exceeds swap amount".into(),
-                        ));
-                    }
-                }
-
-                // Set LP fee override if provided by hook
-                // The fee returned by beforeSwap may have the override flag (bit 22) set,
-                // which needs to be removed before using the fee value.
-                // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/LPFeeLibrary.sol
-                let hook_fee = before_swap_result
-                    .result
-                    .fee
-                    .to::<u32>();
-                if hook_fee != 0 {
-                    // Remove the override flag (bit 22) as per LPFeeLibrary.sol
-                    let cleaned_fee = lp_fee::remove_override_flag(hook_fee);
-
-                    // Validate the fee doesn't exceed MAX_LP_FEE (1,000,000 pips = 100%)
-                    if !lp_fee::is_valid(cleaned_fee) {
-                        return Err(SimulationError::FatalError(format!(
-                            "LP fee override {} exceeds maximum {} pips",
-                            cleaned_fee,
-                            lp_fee::MAX_LP_FEE
-                        )));
-                    }
-
-                    lp_fee_override = Some(cleaned_fee);
-                }
-            }
-        }
-
-        // Perform the swap with potential hook modifications
-        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
-
-        // Create BalanceDelta from swap result using the proper constructor
-        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
-
-        // Get deltas (change in the specified/given and unspecified/computed token balances after
-        // calling before swap)
-        let hook_delta_specified = before_swap_delta.get_specified_delta();
-        let mut hook_delta_unspecified = before_swap_delta.get_unspecified_delta();
-
-        if let Some(ref hook) = self.hook {
-            if has_permission(hook.address(), HookOptions::AfterSwap) {
-                let after_swap_params = AfterSwapParameters {
-                    context: state_context,
-                    sender: *EXTERNAL_ACCOUNT,
-                    swap_params,
-                    delta: swap_delta,
-                    hook_data: Bytes::new(),
-                };
-
-                let after_swap_result = hook
-                    .after_swap(after_swap_params, storage_overwrites, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "AfterSwap hook simulation failed: {e:?}"
-                        ))
-                    })?;
-                after_swap_gas = after_swap_result.gas_estimate;
-                hook_delta_unspecified += after_swap_result.result;
-            }
-        }
-
-        // Replicates the behaviour of the Hooks library wrapper of the afterSwap method:
-        // https://github.com/Uniswap/v4-core/blob/59d3ecf53afa9264a16bba0e38f4c5d2231f80bc/src/libraries/Hooks.sol
-        if (hook_delta_specified != I128::ZERO) || (hook_delta_unspecified != I128::ZERO) {
-            let hook_delta = if (amount_specified < I256::ZERO) == zero_for_one {
-                BalanceDelta::new(hook_delta_specified, hook_delta_unspecified)
-            } else {
-                BalanceDelta::new(hook_delta_unspecified, hook_delta_specified)
-            };
-            // This is a BalanceDelta subtraction
-            swap_delta = swap_delta - hook_delta
-        }
-
-        let amount_out = if (amount_specified < I256::ZERO) == zero_for_one {
-            swap_delta.amount1()
-        } else {
-            swap_delta.amount0()
-        };
-
-        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
-        let mut new_state = self.clone();
-        new_state.liquidity = result.liquidity;
-        new_state.tick = result.tick;
-        new_state.sqrt_price = result.sqrt_price;
-
-        // Add hook gas costs to baseline swap cost
-        let total_gas_used = result.gas_used + U256::from(before_swap_gas + after_swap_gas);
+            &token_in.address,
+            &token_out.address,
+        )?;
         Ok(GetAmountOutResult::new(
-            u256_to_biguint(U256::from(amount_out.abs())),
-            u256_to_biguint(total_gas_used),
+            u256_to_biguint(amount_out),
+            u256_to_biguint(gas),
             Box::new(new_state),
         ))
     }
@@ -673,136 +540,8 @@ impl ProtocolSim for UniswapV4State {
         token_in: Bytes,
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        if let Some(hook) = &self.hook {
-            // Check if pool has no liquidity & ticks -> hook manages liquidity
-            if self.liquidity == 0 && self.has_no_initialized_ticks() {
-                // If the hook has a get_amount_ranges entrypoint, call it and return (0, limits[1])
-                match hook.get_amount_ranges(token_in.clone(), token_out.clone()) {
-                    Ok(amount_ranges) => {
-                        return Ok((
-                            u256_to_biguint(amount_ranges.amount_in_range.1),
-                            u256_to_biguint(amount_ranges.amount_out_range.1),
-                        ))
-                    }
-                    // Check if hook get_amount_ranges is not implemented or the limits entrypoint
-                    // is not set for this hook
-                    Err(SimulationError::RecoverableError(msg))
-                        if msg.contains("not implemented") || msg.contains("not set") =>
-                    {
-                        // Hook manages liquidity but doesn't have get_amount_ranges
-                        // Use binary search to find limits by calling swap with increasing amounts
-                        return self.find_limits_experimentally(token_in, token_out);
-                        // Otherwise fall back to default implementation
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-
-        // If the pool has no liquidity, return zeros for both limits
-        if self.liquidity == 0 {
-            return Ok((BigUint::zero(), BigUint::zero()));
-        }
-
-        let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick;
-        let mut current_sqrt_price = self.sqrt_price;
-        let mut current_liquidity = self.liquidity;
-        let mut total_amount_in = U256::ZERO;
-        let mut total_amount_out = U256::ZERO;
-        let mut ticks_crossed: u64 = 0;
-
-        // Iterate through ticks in the direction of the swap
-        // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
-        while let Ok((tick, initialized)) = self
-            .ticks
-            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
-        {
-            // Cap iteration to prevent exceeding Ethereum's gas limit
-            if ticks_crossed >= MAX_TICKS_CROSSED {
-                break;
-            }
-            ticks_crossed += 1;
-
-            // Clamp the tick value to ensure it's within valid range
-            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
-
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
-
-            // Calculate the amount of tokens swapped when moving from current_sqrt_price to
-            // sqrt_price_next. Direction determines which token is being swapped in vs out
-            let (amount_in, amount_out) = if zero_for_one {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                (amount0, amount1)
-            } else {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                (amount1, amount0)
-            };
-
-            // Accumulate total amounts for this tick range
-            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
-            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
-
-            // If this tick is "initialized" (meaning its someone's position boundary), update the
-            // liquidity when crossing it
-            // For zero_for_one, liquidity is removed when crossing a tick
-            // For one_for_zero, liquidity is added when crossing a tick
-            if initialized {
-                let liquidity_raw = self
-                    .ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
-                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-
-                // Check if applying this liquidity delta would cause underflow
-                // If so, stop here rather than continuing with invalid state
-                match liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta) {
-                    Ok(new_liquidity) => {
-                        current_liquidity = new_liquidity;
-                    }
-                    Err(_) => {
-                        // Liquidity would underflow, stop iteration here
-                        // This represents the maximum liquidity we can actually use
-                        break;
-                    }
-                }
-            }
-
-            // Move to the next tick position
-            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
-            current_sqrt_price = sqrt_price_next;
-
-            // If we've consumed all liquidity, no point continuing the loop
-            if current_liquidity == 0 {
-                break;
-            }
-        }
-
-        Ok((u256_to_biguint(total_amount_in), u256_to_biguint(total_amount_out)))
+        let (max_in, max_out) = self.limits_core(&token_in, &token_out)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -974,12 +713,357 @@ impl ProtocolSim for UniswapV4State {
     }
 }
 
+impl UniswapV4State {
+    /// `U256`-native swap core shared by `get_amount_out` and `SwapQuoter::quote`. Replicates the
+    /// V4 swap path including before/after-swap hook handling. Returns `(amount_out, gas,
+    /// new_state)`.
+    fn swap_core(
+        &self,
+        amount_in: U256,
+        token_in_addr: &Bytes,
+        token_out_addr: &Bytes,
+    ) -> Result<(U256, U256, UniswapV4State), SimulationError> {
+        let zero_for_one = token_in_addr < token_out_addr;
+        let amount_specified = I256::checked_from_sign_and_abs(Sign::Negative, amount_in)
+            .ok_or_else(|| {
+                SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+            })?;
+
+        let mut amount_to_swap = amount_specified;
+        let mut lp_fee_override: Option<u32> = None;
+        let mut before_swap_gas = 0u64;
+        let mut after_swap_gas = 0u64;
+        let mut before_swap_delta = BeforeSwapDelta(I256::ZERO);
+        let mut storage_overwrites = None;
+
+        let token_in_address = Address::from_slice(token_in_addr);
+        let token_out_address = Address::from_slice(token_out_addr);
+
+        let state_context = StateContext {
+            currency_0: if zero_for_one { token_in_address } else { token_out_address },
+            currency_1: if zero_for_one { token_out_address } else { token_in_address },
+            fees: self.fees.clone(),
+            tick_spacing: self.tick_spacing,
+        };
+
+        let swap_params = SwapParams {
+            zero_for_one,
+            amount_specified: amount_to_swap,
+            sqrt_price_limit: self.sqrt_price,
+        };
+
+        if let Some(ref hook) = self.hook {
+            if has_permission(hook.address(), HookOptions::BeforeSwap) {
+                let before_swap_params = BeforeSwapParameters {
+                    context: state_context.clone(),
+                    sender: *EXTERNAL_ACCOUNT,
+                    swap_params: swap_params.clone(),
+                    hook_data: Bytes::new(),
+                };
+
+                let before_swap_result = hook
+                    .before_swap(before_swap_params, None, None)
+                    .map_err(|e| {
+                        SimulationError::FatalError(format!(
+                            "BeforeSwap hook simulation failed: {e:?}"
+                        ))
+                    })?;
+
+                before_swap_gas = before_swap_result.gas_estimate;
+                before_swap_delta = before_swap_result.result.amount_delta;
+                storage_overwrites = Some(before_swap_result.result.overwrites);
+
+                if before_swap_delta.as_i256() != I256::ZERO {
+                    amount_to_swap += I256::from(before_swap_delta.get_specified_delta());
+                    if amount_to_swap > I256::ZERO {
+                        return Err(SimulationError::FatalError(
+                            "Hook delta exceeds swap amount".into(),
+                        ));
+                    }
+                }
+
+                let hook_fee = before_swap_result
+                    .result
+                    .fee
+                    .to::<u32>();
+                if hook_fee != 0 {
+                    let cleaned_fee = lp_fee::remove_override_flag(hook_fee);
+                    if !lp_fee::is_valid(cleaned_fee) {
+                        return Err(SimulationError::FatalError(format!(
+                            "LP fee override {} exceeds maximum {} pips",
+                            cleaned_fee,
+                            lp_fee::MAX_LP_FEE
+                        )));
+                    }
+                    lp_fee_override = Some(cleaned_fee);
+                }
+            }
+        }
+
+        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
+
+        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
+
+        let hook_delta_specified = before_swap_delta.get_specified_delta();
+        let mut hook_delta_unspecified = before_swap_delta.get_unspecified_delta();
+
+        if let Some(ref hook) = self.hook {
+            if has_permission(hook.address(), HookOptions::AfterSwap) {
+                let after_swap_params = AfterSwapParameters {
+                    context: state_context,
+                    sender: *EXTERNAL_ACCOUNT,
+                    swap_params,
+                    delta: swap_delta,
+                    hook_data: Bytes::new(),
+                };
+
+                let after_swap_result = hook
+                    .after_swap(after_swap_params, storage_overwrites, None)
+                    .map_err(|e| {
+                        SimulationError::FatalError(format!(
+                            "AfterSwap hook simulation failed: {e:?}"
+                        ))
+                    })?;
+                after_swap_gas = after_swap_result.gas_estimate;
+                hook_delta_unspecified += after_swap_result.result;
+            }
+        }
+
+        if (hook_delta_specified != I128::ZERO) || (hook_delta_unspecified != I128::ZERO) {
+            let hook_delta = if (amount_specified < I256::ZERO) == zero_for_one {
+                BalanceDelta::new(hook_delta_specified, hook_delta_unspecified)
+            } else {
+                BalanceDelta::new(hook_delta_unspecified, hook_delta_specified)
+            };
+            swap_delta = swap_delta - hook_delta
+        }
+
+        let amount_out = if (amount_specified < I256::ZERO) == zero_for_one {
+            swap_delta.amount1()
+        } else {
+            swap_delta.amount0()
+        };
+
+        let mut new_state = self.clone();
+        new_state.liquidity = result.liquidity;
+        new_state.tick = result.tick;
+        new_state.sqrt_price = result.sqrt_price;
+
+        let total_gas_used = result.gas_used + U256::from(before_swap_gas + after_swap_gas);
+        Ok((U256::from(amount_out.abs()), total_gas_used, new_state))
+    }
+
+    /// `U256`-native limits core shared by `get_limits` and `SwapQuoter::swap_limits`.
+    fn limits_core(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<(U256, U256), SimulationError> {
+        if let Some(hook) = &self.hook {
+            if self.liquidity == 0 && self.has_no_initialized_ticks() {
+                match hook.get_amount_ranges(token_in.clone(), token_out.clone()) {
+                    Ok(amount_ranges) => {
+                        return Ok((
+                            amount_ranges.amount_in_range.1,
+                            amount_ranges.amount_out_range.1,
+                        ))
+                    }
+                    Err(SimulationError::RecoverableError(msg))
+                        if msg.contains("not implemented") || msg.contains("not set") =>
+                    {
+                        let (max_in, max_out) =
+                            self.find_limits_experimentally(token_in.clone(), token_out.clone())?;
+                        return Ok((biguint_to_u256(&max_in), biguint_to_u256(&max_out)));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        if self.liquidity == 0 {
+            return Ok((U256::ZERO, U256::ZERO));
+        }
+
+        let zero_for_one = token_in < token_out;
+        let mut current_tick = self.tick;
+        let mut current_sqrt_price = self.sqrt_price;
+        let mut current_liquidity = self.liquidity;
+        let mut total_amount_in = U256::ZERO;
+        let mut total_amount_out = U256::ZERO;
+        let mut ticks_crossed: u64 = 0;
+
+        while let Ok((tick, initialized)) = self
+            .ticks
+            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
+        {
+            if ticks_crossed >= MAX_TICKS_CROSSED {
+                break;
+            }
+            ticks_crossed += 1;
+
+            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
+            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+
+            let (amount_in, amount_out) = if zero_for_one {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                (amount0, amount1)
+            } else {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                (amount1, amount0)
+            };
+
+            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
+            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
+
+            if initialized {
+                let liquidity_raw = self
+                    .ticks
+                    .get_tick(next_tick)
+                    .unwrap()
+                    .net_liquidity;
+                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
+
+                match liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta) {
+                    Ok(new_liquidity) => {
+                        current_liquidity = new_liquidity;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
+            current_sqrt_price = sqrt_price_next;
+
+            if current_liquidity == 0 {
+                break;
+            }
+        }
+
+        Ok((total_amount_in, total_amount_out))
+    }
+}
+
+#[typetag::serde]
+impl SwapQuoter for UniswapV4State {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "UniswapV4State: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, params: QuoteParams) -> SimulationResult<SwapFee> {
+        // V4 fees are directional. Hook pools can override the fee per-swap (dynamic), which a
+        // static fee cannot represent, so we error for those (matching the legacy `todo!()`).
+        if self.hook.is_some() {
+            return Err(SimulationError::FatalError(
+                "UniswapV4State::fee is not available for hook pools (dynamic fee)".to_string(),
+            ));
+        }
+        let zero_for_one = params.token_in() < params.token_out();
+        let fee_pips = self
+            .fees
+            .calculate_swap_fees_pips(zero_for_one, None);
+        Ok(SwapFee::new(fee_pips as f64 / 1_000_000.0))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("UniswapV4State: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = ProtocolSim::spot_price(self, base.as_ref(), quote.as_ref())?;
+        Ok(MarginalPrice::new(price))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "UniswapV4State does not yet support exact-out (FixedOut) quoting".to_string(),
+                ))
+            }
+        };
+
+        let (amount_out, gas, new_state) =
+            self.swap_core(amount_in, params.token_in(), params.token_out())?;
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, gas.saturating_to::<u64>(), new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let (max_in, max_out) = self.limits_core(params.token_in(), params.token_out())?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "UniswapV4State::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, fs, path::Path, str::FromStr};
 
     use alloy::primitives::aliases::U24;
-    use num_traits::FromPrimitive;
+    use num_traits::{FromPrimitive, Zero};
     use rstest::rstest;
     use serde_json::Value;
     use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
@@ -1066,6 +1150,29 @@ mod tests {
     }
 
     #[test]
+    fn test_marginal_price_matches_spot_price() {
+        let token_x = token_x();
+        let token_y = token_y();
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![token_x.address.clone(), token_y.address.clone()];
+        let all_tokens = HashMap::from([
+            (token_x.address.clone(), token_x.clone()),
+            (token_y.address.clone(), token_y.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = create_basic_v4_test_pool().with_component(component);
+
+        for (base, quote) in [(&token_x, &token_y), (&token_y, &token_x)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
+        }
+    }
+
+    #[test]
     fn test_delta_transition() {
         let mut pool = UniswapV4State::new(
             1000,
@@ -1098,7 +1205,7 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+        ProtocolSim::delta_transition(&mut pool, delta, &HashMap::new(), &Balances::default())
             .unwrap();
 
         assert_eq!(pool.liquidity, 2000);
@@ -1512,7 +1619,31 @@ mod tests {
             .get_amount_out(BigUint::from_u64(2000000).unwrap(), &t0, &t1)
             .unwrap();
 
-        assert_eq!(out.amount, BigUint::from_str("436478419853848").unwrap())
+        assert_eq!(out.amount, BigUint::from_str("436478419853848").unwrap());
+
+        // SwapQuoter equivalence (no-hook pool)
+        let quote = usv4_state
+            .quote(
+                QuoteParams::fixed_in(
+                    &t0.address,
+                    &t1.address,
+                    biguint_to_u256(&BigUint::from_u64(2000000).unwrap()),
+                )
+                .unwrap()
+                .with_new_state(),
+            )
+            .unwrap();
+        assert_eq!(u256_to_biguint(quote.amount_out()), out.amount);
+        assert_eq!(BigUint::from(quote.gas()), out.gas);
+
+        let (legacy_in, legacy_out) = usv4_state
+            .get_limits(t0.address.clone(), t1.address.clone())
+            .unwrap();
+        let limits = usv4_state
+            .swap_limits(LimitsParams::new(&t0.address, &t1.address))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
     }
 
     #[test]

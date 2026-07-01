@@ -196,7 +196,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             state.spot_price(token_in, token_out)?;
         }
 
-        Ok(state)
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
+        Ok(state.with_component(component))
     }
 }
 

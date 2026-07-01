@@ -25,6 +25,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for ERC4626State {
         all_tokens: &HashMap<Bytes, Token>,
         decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
         let pool_address = Bytes::from_str(snapshot.component.id.as_str()).map_err(|e| {
             InvalidSnapshotError::ValueError(format!(
                 "Expected component id to be pool contract address: {e}"
@@ -63,6 +65,6 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for ERC4626State {
         .expect("Failed to create engine");
 
         let erc4626_state = vm::decode_from_vm(&pool_address, asset_token, share_token, engine)?;
-        Ok(erc4626_state)
+        Ok(erc4626_state.with_component(component))
     }
 }

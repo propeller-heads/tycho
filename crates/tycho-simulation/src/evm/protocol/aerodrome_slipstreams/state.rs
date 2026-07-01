@@ -1,16 +1,21 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::{Sign, I256, U256};
 use num_bigint::{BigInt, BigUint};
-use num_traits::{ToPrimitive, Zero};
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use tracing::{error, trace};
+use tracing::error;
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
@@ -61,7 +66,7 @@ const MAX_SWAP_GAS: u64 = 16_700_000;
 const MAX_TICKS_CROSSED: u64 =
     (MAX_SWAP_GAS - SWAP_BASE_GAS as u64) / TICK_CROSSING_GAS_COST as u64;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AerodromeSlipstreamsState {
     id: String,
     block_timestamp: u64,
@@ -75,7 +80,28 @@ pub struct AerodromeSlipstreamsState {
     ticks: TickList,
     observations: Observations,
     dfc: DynamicFeeConfig,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
+
+impl PartialEq for AerodromeSlipstreamsState {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id &&
+            self.block_timestamp == other.block_timestamp &&
+            self.liquidity == other.liquidity &&
+            self.sqrt_price == other.sqrt_price &&
+            self.observation_index == other.observation_index &&
+            self.observation_cardinality == other.observation_cardinality &&
+            self.default_fee == other.default_fee &&
+            self.tick_spacing == other.tick_spacing &&
+            self.tick == other.tick &&
+            self.ticks == other.ticks &&
+            self.observations == other.observations &&
+            self.dfc == other.dfc
+    }
+}
+
+impl Eq for AerodromeSlipstreamsState {}
 
 impl AerodromeSlipstreamsState {
     /// Creates a new instance of `AerodromeSlipstreamsState`.
@@ -123,7 +149,14 @@ impl AerodromeSlipstreamsState {
             ticks: tick_list,
             observations: Observations::new(observations),
             dfc,
+            component: None,
         })
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     fn get_fee(&self) -> Result<u32, SimulationError> {
@@ -299,6 +332,109 @@ impl AerodromeSlipstreamsState {
             sqrt_price_next
         }
     }
+
+    /// `U256`-native swap core shared by `get_amount_out` and `SwapQuoter::quote`.
+    fn swap_core(
+        &self,
+        amount_in: U256,
+        zero_for_one: bool,
+    ) -> Result<(U256, U256, AerodromeSlipstreamsState), SimulationError> {
+        let amount_specified = I256::checked_from_sign_and_abs(Sign::Positive, amount_in)
+            .ok_or_else(|| {
+                SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+            })?;
+
+        let result = self.swap(zero_for_one, amount_specified, None)?;
+
+        let mut new_state = self.clone();
+        new_state.liquidity = result.liquidity;
+        new_state.tick = result.tick;
+        new_state.sqrt_price = result.sqrt_price;
+
+        Ok((
+            result
+                .amount_calculated
+                .abs()
+                .into_raw(),
+            result.gas_used,
+            new_state,
+        ))
+    }
+
+    /// `U256`-native limits core shared by `get_limits` and `SwapQuoter::swap_limits`.
+    fn limits_core(&self, zero_for_one: bool) -> Result<(U256, U256), SimulationError> {
+        if self.liquidity == 0 {
+            return Ok((U256::ZERO, U256::ZERO));
+        }
+
+        let mut current_tick = self.tick;
+        let mut current_sqrt_price = self.sqrt_price;
+        let mut current_liquidity = self.liquidity;
+        let mut total_amount_in = U256::from(0u64);
+        let mut total_amount_out = U256::from(0u64);
+        let mut ticks_crossed: u64 = 0;
+
+        while let Ok((tick, initialized)) = self
+            .ticks
+            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
+        {
+            if ticks_crossed >= MAX_TICKS_CROSSED {
+                break;
+            }
+            ticks_crossed += 1;
+            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
+            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+
+            let (amount_in, amount_out) = if zero_for_one {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                (amount0, amount1)
+            } else {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                (amount1, amount0)
+            };
+
+            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
+            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
+
+            if initialized {
+                let liquidity_raw = self
+                    .ticks
+                    .get_tick(next_tick)
+                    .unwrap()
+                    .net_liquidity;
+                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
+                current_liquidity =
+                    liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta)?;
+            }
+
+            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
+            current_sqrt_price = sqrt_price_next;
+        }
+
+        Ok((total_amount_in, total_amount_out))
+    }
 }
 
 #[typetag::serde]
@@ -334,30 +470,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         token_b: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let zero_for_one = token_a < token_b;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Positive,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
-
-        let result = self.swap(zero_for_one, amount_specified, None)?;
-
-        trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
-        let mut new_state = self.clone();
-        new_state.liquidity = result.liquidity;
-        new_state.tick = result.tick;
-        new_state.sqrt_price = result.sqrt_price;
-
+        let (amount_out, gas, new_state) =
+            self.swap_core(U256::from_be_slice(&amount_in.to_bytes_be()), zero_for_one)?;
         Ok(GetAmountOutResult::new(
-            u256_to_biguint(
-                result
-                    .amount_calculated
-                    .abs()
-                    .into_raw(),
-            ),
-            u256_to_biguint(result.gas_used),
+            u256_to_biguint(amount_out),
+            u256_to_biguint(gas),
             Box::new(new_state),
         ))
     }
@@ -367,92 +484,8 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         token_in: Bytes,
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        // If the pool has no liquidity, return zeros for both limits
-        if self.liquidity == 0 {
-            return Ok((BigUint::zero(), BigUint::zero()));
-        }
-
-        let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick;
-        let mut current_sqrt_price = self.sqrt_price;
-        let mut current_liquidity = self.liquidity;
-        let mut total_amount_in = U256::from(0u64);
-        let mut total_amount_out = U256::from(0u64);
-
-        // Iterate through all ticks in the direction of the swap
-        // Continues until there is no more liquidity in the pool or no more ticks to process
-        let mut ticks_crossed: u64 = 0;
-        while let Ok((tick, initialized)) = self
-            .ticks
-            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
-        {
-            if ticks_crossed >= MAX_TICKS_CROSSED {
-                break;
-            }
-            ticks_crossed += 1;
-            // Clamp the tick value to ensure it's within valid range
-            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
-
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
-
-            // Calculate the amount of tokens swapped when moving from current_sqrt_price to
-            // sqrt_price_next. Direction determines which token is being swapped in vs out
-            let (amount_in, amount_out) = if zero_for_one {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                (amount0, amount1)
-            } else {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                (amount1, amount0)
-            };
-
-            // Accumulate total amounts for this tick range
-            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
-            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
-
-            // If this tick is "initialized" (meaning its someone's position boundary), update the
-            // liquidity when crossing it
-            // For zero_for_one, liquidity is removed when crossing a tick
-            // For one_for_zero, liquidity is added when crossing a tick
-            if initialized {
-                let liquidity_raw = self
-                    .ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
-                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-                current_liquidity =
-                    liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta)?;
-            }
-
-            // Move to the next tick position
-            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
-            current_sqrt_price = sqrt_price_next;
-        }
-
-        Ok((u256_to_biguint(total_amount_in), u256_to_biguint(total_amount_out)))
+        let (max_in, max_out) = self.limits_core(token_in < token_out)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -651,6 +684,96 @@ impl ProtocolSim for AerodromeSlipstreamsState {
     }
 }
 
+#[typetag::serde]
+impl SwapQuoter for AerodromeSlipstreamsState {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "AerodromeSlipstreamsState: component not set (decode did not populate it)"
+                    .to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(ProtocolSim::fee(self)))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("AerodromeSlipstreamsState: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let (base, quote) = (base.as_ref(), quote.as_ref());
+        let price = if base < quote {
+            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
+        } else {
+            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
+        };
+        Ok(MarginalPrice::new(add_fee_markup(price, self.get_fee()? as f64 / 1_000_000.0)))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in =
+            match params.amount() {
+                QuoteAmount::FixedIn(amount) => *amount,
+                QuoteAmount::FixedOut(_) => return Err(SimulationError::RecoverableError(
+                    "AerodromeSlipstreamsState does not yet support exact-out (FixedOut) quoting"
+                        .to_string(),
+                )),
+            };
+
+        let zero_for_one = params.token_in() < params.token_out();
+        let (amount_out, gas, new_state) = self.swap_core(amount_in, zero_for_one)?;
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, gas.saturating_to::<u64>(), new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let zero_for_one = params.token_in() < params.token_out();
+        let (max_in, max_out) = self.limits_core(zero_for_one)?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "AerodromeSlipstreamsState::query_swap is not yet wired (pending token plumbing)"
+                .to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Sign, I256, U256};
@@ -686,6 +809,69 @@ mod tests {
             DynamicFeeConfig::new(3000, 10_000, 1),
         )
         .expect("Failed to create pool")
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        use std::str::FromStr;
+
+        use approx::assert_ulps_eq;
+        use tycho_common::models::Chain;
+
+        let usdc = Token::new(
+            &Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
+            "USDC",
+            6,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![usdc.address.clone(), weth.address.clone()];
+        let all_tokens = HashMap::from([
+            (usdc.address.clone(), usdc.clone()),
+            (weth.address.clone(), weth.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let ticks = vec![TickInfo::new(-120, 0).unwrap(), TickInfo::new(120, 0).unwrap()];
+        let state = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            0,
+            1,
+            3000,
+            1,
+            0,
+            ticks,
+            vec![Observation::default()],
+            DynamicFeeConfig::new(3000, 10_000, 0),
+        )
+        .expect("Failed to create pool")
+        .with_component(component);
+
+        for (base, quote) in [(&usdc, &weth), (&weth, &usdc)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            assert_ulps_eq!(marginal.price(), spot);
+        }
     }
 
     #[test]
@@ -765,5 +951,49 @@ mod tests {
         let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1000u64)).unwrap();
         let result = pool.swap(true, amount, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+
+    #[test]
+    fn test_swap_quoter_matches_protocol_sim() {
+        use tycho_common::models::Chain;
+
+        use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint};
+
+        let pool = create_basic_test_pool();
+        let mk = |last: u8| {
+            let mut a = [0u8; 20];
+            a[19] = last;
+            Token::new(&Bytes::from(a), "T", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
+        };
+        let (t0, t1) = (mk(1), mk(2));
+
+        for (token_in, token_out) in [(&t0, &t1), (&t1, &t0)] {
+            let amount = BigUint::from(1_000_000_000_000_000u64);
+            let legacy = pool
+                .get_amount_out(amount.clone(), token_in, token_out)
+                .unwrap();
+            let quote = pool
+                .quote(
+                    QuoteParams::fixed_in(
+                        &token_in.address,
+                        &token_out.address,
+                        biguint_to_u256(&amount),
+                    )
+                    .unwrap()
+                    .with_new_state(),
+                )
+                .unwrap();
+            assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+            assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+
+            let (legacy_in, legacy_out) = pool
+                .get_limits(token_in.address.clone(), token_out.address.clone())
+                .unwrap();
+            let limits = pool
+                .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+                .unwrap();
+            assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+            assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
+        }
     }
 }

@@ -13,17 +13,22 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMess
 use tycho_common::{
     dto::{ChangeType, ProtocolStateDelta},
     models::{blockchain::BlockAggregatedChanges, token::Token, Chain},
-    simulation::protocol_sim::{Balances, ProtocolSim},
+    simulation::{
+        protocol_sim::Balances,
+        swap::{SwapQuoter, TransitionParams},
+    },
     Bytes,
 };
 #[cfg(test)]
 use {
     mockall::mock,
-    num_bigint::BigUint,
-    std::any::Any,
     tycho_common::simulation::{
-        errors::{SimulationError, TransitionError},
-        protocol_sim::GetAmountOutResult,
+        errors::TransitionError,
+        protocol_sim::ProtocolSim,
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteParams,
+            SimulationResult, Swap, SwapFee, SwapLimits, Transition,
+        },
     },
 };
 
@@ -51,7 +56,7 @@ pub enum StreamDecodeError {
 #[derive(Default)]
 struct DecoderState {
     tokens: HashMap<Bytes, Token>,
-    states: HashMap<String, Box<dyn ProtocolSim>>,
+    states: HashMap<String, Box<dyn SwapQuoter>>,
     components: HashMap<String, ProtocolComponent>,
     // maps contract address to the pools they affect
     contracts_map: HashMap<Bytes, HashSet<String>>,
@@ -66,7 +71,7 @@ struct DecoderState {
 }
 
 type DecodeFut =
-    Pin<Box<dyn Future<Output = Result<Box<dyn ProtocolSim>, InvalidSnapshotError>> + Send + Sync>>;
+    Pin<Box<dyn Future<Output = Result<Box<dyn SwapQuoter>, InvalidSnapshotError>> + Send + Sync>>;
 type AccountBalances = HashMap<Bytes, HashMap<Bytes, Bytes>>;
 type RegistryFn<H> = dyn Fn(ComponentWithState, H, AccountBalances, Arc<RwLock<DecoderState>>) -> DecodeFut
     + Send
@@ -155,7 +160,7 @@ where
     /// `UniswapV2State` decoder for use in the protocol stream.
     pub fn register_decoder_with_context<T>(&mut self, exchange: &str, context: DecoderContext)
     where
-        T: ProtocolSim
+        T: SwapQuoter
             + TryFromWithBlock<ComponentWithState, H, Error = InvalidSnapshotError>
             + Send
             + 'static,
@@ -176,7 +181,7 @@ where
                         &context,
                     )
                     .await
-                    .map(|c| Box::new(c) as Box<dyn ProtocolSim>)
+                    .map(|c| Box::new(c) as Box<dyn SwapQuoter>)
                 }) as DecodeFut
             },
         );
@@ -197,7 +202,7 @@ where
     /// `UniswapV2State` decoder for use in the protocol stream.
     pub fn register_decoder<T>(&mut self, exchange: &str)
     where
-        T: ProtocolSim
+        T: SwapQuoter
             + TryFromWithBlock<ComponentWithState, H, Error = InvalidSnapshotError>
             + Send
             + 'static,
@@ -961,7 +966,7 @@ where
         let current_block = header.block();
         let state_guard = self.state.read().await;
 
-        let mut updated_states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut updated_states: HashMap<String, Box<dyn SwapQuoter>> = HashMap::new();
 
         for deltas in pending_deltas.values() {
             let all_balances = Balances {
@@ -1022,16 +1027,16 @@ where
     fn apply_update(
         id: &String,
         update: ProtocolStateDelta,
-        updated_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
+        updated_states: &mut HashMap<String, Box<dyn SwapQuoter>>,
         state_guard: &RwLockReadGuard<'_, DecoderState>,
         all_balances: &Balances,
     ) -> Result<(), StreamDecodeError> {
         match updated_states.entry(id.clone()) {
             Entry::Occupied(mut entry) => {
                 // If state exists in updated_states, apply the delta to it
-                let state: &mut Box<dyn ProtocolSim> = entry.get_mut();
+                let state: &mut Box<dyn SwapQuoter> = entry.get_mut();
                 state
-                    .delta_transition(update, &state_guard.tokens, all_balances)
+                    .delta_transition(TransitionParams::new(update, &state_guard.tokens, all_balances))
                     .map_err(|e| {
                         error!(pool = id, error = ?e, "DeltaTransitionError");
                         StreamDecodeError::Fatal(format!("TransitionFailure: {e:?}"))
@@ -1044,7 +1049,7 @@ where
                     Some(stored_state) => {
                         let mut state = stored_state.clone();
                         state
-                            .delta_transition(update, &state_guard.tokens, all_balances)
+                            .delta_transition(TransitionParams::new(update, &state_guard.tokens, all_balances))
                             .map_err(|e| {
                                 error!(pool = id, error = ?e, "DeltaTransitionError");
                                 StreamDecodeError::Fatal(format!("TransitionFailure: {e:?}"))
@@ -1109,84 +1114,56 @@ fn create_proxy_token_account(
 #[cfg(test)]
 mock! {
     #[derive(Debug)]
-    pub ProtocolSim {
-        pub fn fee(&self) -> f64;
-        pub fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
-        pub fn get_amount_out(
-            &self,
-            amount_in: BigUint,
-            token_in: &Token,
-            token_out: &Token,
-        ) -> Result<GetAmountOutResult, SimulationError>;
-        pub fn get_limits(
-            &self,
-            sell_token: Bytes,
-            buy_token: Bytes,
-        ) -> Result<(BigUint, BigUint), SimulationError>;
-        pub fn delta_transition(
-            &mut self,
-            delta: ProtocolStateDelta,
-            tokens: &HashMap<Bytes, Token>,
-            balances: &Balances,
-        ) -> Result<(), TransitionError>;
-        pub fn clone_box(&self) -> Box<dyn ProtocolSim>;
-        pub fn eq(&self, other: &dyn ProtocolSim) -> bool;
+    pub SwapQuoterMock {
+        pub fn delta_transition(&mut self) -> Result<Transition, TransitionError>;
+        pub fn clone_box(&self) -> Box<dyn SwapQuoter>;
     }
 }
 
 #[cfg(test)]
-crate::impl_non_serializable_protocol!(MockProtocolSim, "test protocol");
+crate::impl_non_serializable_protocol!(MockSwapQuoterMock, "test protocol");
 
 #[cfg(test)]
-impl ProtocolSim for MockProtocolSim {
-    fn fee(&self) -> f64 {
-        self.fee()
-    }
-
-    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        self.spot_price(base, quote)
-    }
-
-    fn get_amount_out(
+impl SwapQuoter for MockSwapQuoterMock {
+    fn component(
         &self,
-        amount_in: BigUint,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<GetAmountOutResult, SimulationError> {
-        self.get_amount_out(amount_in, token_in, token_out)
+    ) -> SimulationResult<Arc<tycho_common::models::protocol::ProtocolComponent<Arc<Token>>>> {
+        unimplemented!("Not needed for this test")
     }
 
-    fn get_limits(
-        &self,
-        sell_token: Bytes,
-        buy_token: Bytes,
-    ) -> Result<(BigUint, BigUint), SimulationError> {
-        self.get_limits(sell_token, buy_token)
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        unimplemented!("Not needed for this test")
+    }
+
+    fn marginal_price(&self, _params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        unimplemented!("Not needed for this test")
+    }
+
+    fn quote(&self, _params: QuoteParams) -> SimulationResult<Quote> {
+        unimplemented!("Not needed for this test")
+    }
+
+    fn swap_limits(&self, _params: LimitsParams) -> SimulationResult<SwapLimits> {
+        unimplemented!("Not needed for this test")
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        unimplemented!("Not needed for this test")
     }
 
     fn delta_transition(
         &mut self,
-        delta: ProtocolStateDelta,
-        tokens: &HashMap<Bytes, Token>,
-        balances: &Balances,
-    ) -> Result<(), TransitionError> {
-        self.delta_transition(delta, tokens, balances)
+        _params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        self.delta_transition()
     }
 
-    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
         self.clone_box()
     }
 
-    fn as_any(&self) -> &dyn Any {
-        panic!("MockProtocolSim does not support as_any")
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        panic!("MockProtocolSim does not support as_any_mut")
-    }
-
-    fn eq(&self, other: &dyn ProtocolSim) -> bool {
-        self.eq(other)
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        unimplemented!("Not needed for this test")
     }
 
     fn typetag_name(&self) -> &'static str {
@@ -1204,6 +1181,7 @@ mod tests {
 
     use alloy::primitives::address;
     use mockall::predicate::*;
+    use num_bigint::BigUint;
     use rstest::*;
     use tycho_client::feed::BlockHeader;
     use tycho_common::{models::Chain, Bytes};
@@ -1337,22 +1315,22 @@ mod tests {
         let decoder = setup_decoder(true).await;
 
         // Create the mock instances
-        let mut mock_state = MockProtocolSim::new();
+        let mut mock_state = MockSwapQuoterMock::new();
 
         mock_state
             .expect_clone_box()
             .times(1)
             .returning(|| {
-                let mut cloned_mock_state = MockProtocolSim::new();
+                let mut cloned_mock_state = MockSwapQuoterMock::new();
                 // Expect `delta_transition` to be called once with any parameters
                 cloned_mock_state
                     .expect_delta_transition()
                     .times(1)
-                    .returning(|_, _, _| Ok(()));
+                    .returning(|| Ok(Transition::default()));
                 cloned_mock_state
                     .expect_clone_box()
                     .times(1)
-                    .returning(|| Box::new(MockProtocolSim::new()));
+                    .returning(|| Box::new(MockSwapQuoterMock::new()));
                 Box::new(cloned_mock_state)
             });
 
@@ -1364,7 +1342,7 @@ mod tests {
             .write()
             .await
             .states
-            .insert(pool_id.clone(), Box::new(mock_state) as Box<dyn ProtocolSim>);
+            .insert(pool_id.clone(), Box::new(mock_state) as Box<dyn SwapQuoter>);
         decoder
             .state
             .write()
@@ -1433,6 +1411,8 @@ mod tests {
             .states
             .get("0xc70d7fbd7fcccdf726e02fed78548b40dc52502b097c7a1ee7d995f4d4396134")
             .expect("Couldn't find target pool");
+        #[allow(deprecated)]
+        let pool_state = pool_state.to_protocol_sim();
         let amount_out = pool_state
             .get_amount_out(
                 BigUint::from_str("1000000000000000000").unwrap(),

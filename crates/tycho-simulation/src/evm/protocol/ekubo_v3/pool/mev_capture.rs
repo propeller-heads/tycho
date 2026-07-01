@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ekubo_sdk::{
     chain::evm::{
@@ -14,6 +17,7 @@ use ekubo_sdk::{
 use revm::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -31,6 +35,8 @@ const GAS_COST_OF_ONE_STATE_UPDATE: u64 = 16_418;
 pub struct MevCapturePool {
     imp: EvmMevCapturePool,
     swap_state: MevCapturePoolSwapState,
+    #[serde(skip)]
+    pub(crate) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 #[derive(Debug, Eq, Clone, Copy, Serialize, Deserialize)]
@@ -55,6 +61,7 @@ impl MevCapturePool {
                     active_tick: Some(tick),
                     last_tick: tick,
                 },
+                component: None,
             })
             .map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating MEVCapture pool: {err:?}"))
@@ -105,6 +112,7 @@ impl EkuboPool for MevCapturePool {
                         last_tick: self.swap_state.last_tick,
                         active_tick: None,
                     },
+                    component: self.component.clone(),
                 }
                 .into(),
             })
@@ -161,7 +169,7 @@ impl EkuboPool for MevCapturePool {
 }
 
 impl PartialEq for MevCapturePool {
-    fn eq(&self, &Self { ref imp, swap_state }: &Self) -> bool {
+    fn eq(&self, &Self { ref imp, swap_state, component: _ }: &Self) -> bool {
         self.imp.key() == imp.key() &&
             self.imp.concentrated_pool().ticks() == imp.concentrated_pool().ticks() &&
             self.swap_state == swap_state

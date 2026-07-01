@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use alloy::primitives::U256;
 use hex_literal::hex;
@@ -7,10 +7,15 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
@@ -26,7 +31,7 @@ pub const ETH_ADDRESS: [u8; 20] = hex!("EeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 pub const BASIS_POINT_SCALE: u64 = 10000;
 pub const BUCKET_UNIT_SCALE: u64 = 1_000_000_000_000;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EtherfiState {
     block_timestamp: u64,
     total_value_out_of_lp: U256,
@@ -35,7 +40,23 @@ pub struct EtherfiState {
     eth_amount_locked_for_withdrawl: Option<U256>,
     liquidity_pool_native_balance: Option<U256>,
     eth_redemption_info: Option<RedemptionInfo>,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
+
+impl PartialEq for EtherfiState {
+    fn eq(&self, other: &Self) -> bool {
+        self.block_timestamp == other.block_timestamp &&
+            self.total_value_out_of_lp == other.total_value_out_of_lp &&
+            self.total_value_in_lp == other.total_value_in_lp &&
+            self.total_shares == other.total_shares &&
+            self.eth_amount_locked_for_withdrawl == other.eth_amount_locked_for_withdrawl &&
+            self.liquidity_pool_native_balance == other.liquidity_pool_native_balance &&
+            self.eth_redemption_info == other.eth_redemption_info
+    }
+}
+
+impl Eq for EtherfiState {}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RedemptionInfo {
@@ -75,7 +96,14 @@ impl EtherfiState {
             eth_amount_locked_for_withdrawl,
             liquidity_pool_native_balance,
             eth_redemption_info,
+            component: None,
         }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     fn require_redemption_info(&self) -> Result<RedemptionInfo, SimulationError> {
@@ -122,6 +150,138 @@ impl EtherfiState {
         }
         let numerator = amount * self.total_shares;
         Ok(numerator + total_pooled_ether - U256::ONE / total_pooled_ether)
+    }
+
+    /// `U256`-native swap core shared by `get_amount_out` and `SwapQuoter::quote`. Returns
+    /// `(amount_out, gas, new_state)`; the post-swap state reflects the supported wrap/redeem
+    /// paths.
+    fn swap_core(
+        &self,
+        amount_in: U256,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<(U256, u64, EtherfiState), SimulationError> {
+        let mut new_state = self.clone();
+
+        if token_in.as_ref() == ETH_ADDRESS && token_out.as_ref() == EETH_ADDRESS {
+            // eth --> eeth
+            let amount_out = self.shares_for_amount(amount_in)?;
+            new_state.total_shares += amount_out;
+            new_state.total_value_in_lp += amount_in;
+            // LiquidityPool.deposit function gas used
+            return Ok((amount_out, 46_886, new_state));
+        }
+
+        if token_in.as_ref() == EETH_ADDRESS && token_out.as_ref() == ETH_ADDRESS {
+            // eeth --> eth
+            let liquidity_pool_native_balance = self.require_liquidity_balance()?;
+            let eth_amount_locked_for_withdrawl = self.require_eth_amount_locked_for_withdrawl()?;
+            let eth_redemption_info = self.require_redemption_info()?;
+            let liquid_eth_amount = liquidity_pool_native_balance - eth_amount_locked_for_withdrawl;
+            let low_watermark = mul_div(
+                self.total_value_in_lp + self.total_value_out_of_lp,
+                U256::from(eth_redemption_info.low_watermark_in_bps_of_tvl),
+                U256::from(BASIS_POINT_SCALE),
+            )?;
+            if liquid_eth_amount < low_watermark || liquid_eth_amount - low_watermark < amount_in {
+                return Err(SimulationError::FatalError("Exceeded total redeemable amount".into()));
+            } else {
+                // Enforce the rate-limit bucket before applying exit fees and balances.
+                let bucket_unit = convert_to_bucket_unit(amount_in, true)?;
+                let mut limit = eth_redemption_info
+                    .limit
+                    .refill(self.block_timestamp);
+                if limit.remaining < bucket_unit {
+                    return Err(SimulationError::FatalError("Exceeded rate limit".into()));
+                }
+                limit.remaining -= bucket_unit;
+                limit.last_refill = self.block_timestamp;
+                let mut updated_info = eth_redemption_info;
+                updated_info.limit = limit;
+                new_state.eth_redemption_info = Some(updated_info);
+            }
+            let eeth_shares = self.shares_for_amount(amount_in)?;
+            let eth_amount_out = self.amount_for_share(mul_div(
+                eeth_shares,
+                U256::from(BASIS_POINT_SCALE) - U256::from(eth_redemption_info.exit_fee_in_bps),
+                U256::from(BASIS_POINT_SCALE),
+            )?)?;
+            new_state.total_value_in_lp -= eth_amount_out;
+            new_state.total_shares -= self.shares_for_withdrawal_amount(eth_amount_out)?;
+            new_state.liquidity_pool_native_balance =
+                Some(liquidity_pool_native_balance - eth_amount_out);
+            // EtherFiRedemptionManager._redeemEEth function gas used
+            return Ok((eth_amount_out, 151_676, new_state));
+        }
+
+        if token_in.as_ref() == EETH_ADDRESS && token_out.as_ref() == WEETH_ADDRESS {
+            // eeth --> weeth
+            let amount_out = self.shares_for_amount(amount_in)?;
+            // weeth.wrap function gas used
+            return Ok((amount_out, 70_489, new_state));
+        }
+
+        if token_in.as_ref() == WEETH_ADDRESS && token_out.as_ref() == EETH_ADDRESS {
+            // weeth --> eeth
+            let amount_out = self.amount_for_share(amount_in)?;
+            // weeth.unwrap function gas used
+            return Ok((amount_out, 60_182, new_state));
+        }
+
+        Err(SimulationError::FatalError("unsupported swap".to_string()))
+    }
+
+    /// `U256`-native limits core shared by `get_limits` and `SwapQuoter::swap_limits`.
+    fn limits_core(
+        &self,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
+    ) -> Result<(U256, U256), SimulationError> {
+        if sell_token.as_ref() == WEETH_ADDRESS && buy_token.as_ref() == EETH_ADDRESS {
+            let max_weeth_amount = self.shares_for_amount(self.total_shares)?;
+            return Ok((max_weeth_amount, self.total_shares));
+        }
+
+        if sell_token.as_ref() == EETH_ADDRESS && buy_token.as_ref() == ETH_ADDRESS {
+            let liquidity_pool_native_balance = self.require_liquidity_balance()?;
+            let eth_amount_locked_for_withdrawl = self.require_eth_amount_locked_for_withdrawl()?;
+            let eth_redemption_info = self.require_redemption_info()?;
+            let liquid_eth_amount = liquidity_pool_native_balance - eth_amount_locked_for_withdrawl;
+            let low_watermark = mul_div(
+                self.total_value_in_lp + self.total_value_out_of_lp,
+                U256::from(eth_redemption_info.low_watermark_in_bps_of_tvl),
+                U256::from(BASIS_POINT_SCALE),
+            )?;
+            if liquid_eth_amount < low_watermark {
+                return Ok((liquid_eth_amount, U256::ZERO));
+            }
+            let mut max_eeth_amount = self.total_value_in_lp + self.total_value_out_of_lp;
+            let limit = eth_redemption_info
+                .limit
+                .refill(self.block_timestamp);
+            // Cap max sell amount by the rate-limit bucket, in wei.
+            let bucket_unit = convert_to_bucket_unit(max_eeth_amount, true)?;
+            if limit.remaining < bucket_unit {
+                max_eeth_amount = U256::from(limit.remaining) * U256::from(BUCKET_UNIT_SCALE);
+            }
+            let eeth_shares = self.shares_for_amount(max_eeth_amount)?;
+            let eth_amount_out = self.amount_for_share(mul_div(
+                eeth_shares,
+                U256::from(BASIS_POINT_SCALE) - U256::from(eth_redemption_info.exit_fee_in_bps),
+                U256::from(BASIS_POINT_SCALE),
+            )?)?;
+            return Ok((max_eeth_amount, eth_amount_out));
+        }
+
+        if sell_token.as_ref() == EETH_ADDRESS && buy_token.as_ref() == WEETH_ADDRESS {
+            return Ok((U256::MAX, U256::MAX));
+        }
+
+        if sell_token.as_ref() == ETH_ADDRESS && buy_token.as_ref() == EETH_ADDRESS {
+            return Ok((U256::MAX, U256::MAX));
+        }
+
+        Err(SimulationError::FatalError("unsupported swap".to_string()))
     }
 }
 
@@ -221,90 +381,14 @@ impl ProtocolSim for EtherfiState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let mut new_state = self.clone();
         let amount_in = biguint_to_u256(&amount_in);
-        if token_in.address.as_ref() == ETH_ADDRESS && token_out.address.as_ref() == EETH_ADDRESS {
-            // eth --> eeth
-            let amount_out = self.shares_for_amount(amount_in)?;
-            new_state.total_shares += amount_out;
-            new_state.total_value_in_lp += amount_in;
-            return Ok(GetAmountOutResult::new(
-                u256_to_biguint(amount_out),
-                BigUint::from(46_886u32), // LiquidityPool.deposit function gas used
-                Box::new(new_state),
-            ));
-        }
-
-        if token_in.address.as_ref() == EETH_ADDRESS && token_out.address.as_ref() == ETH_ADDRESS {
-            // eeth --> eth
-            let liquidity_pool_native_balance = self.require_liquidity_balance()?;
-            let eth_amount_locked_for_withdrawl = self.require_eth_amount_locked_for_withdrawl()?;
-            let eth_redemption_info = self.require_redemption_info()?;
-            let liquid_eth_amount = liquidity_pool_native_balance - eth_amount_locked_for_withdrawl;
-            let low_watermark = mul_div(
-                self.total_value_in_lp + self.total_value_out_of_lp,
-                U256::from(eth_redemption_info.low_watermark_in_bps_of_tvl),
-                U256::from(BASIS_POINT_SCALE),
-            )?;
-            if liquid_eth_amount < low_watermark || liquid_eth_amount - low_watermark < amount_in {
-                return Err(SimulationError::FatalError("Exceeded total redeemable amount".into()));
-            } else {
-                // Enforce the rate-limit bucket before applying exit fees and balances.
-                let bucket_unit = convert_to_bucket_unit(amount_in, true)?;
-                let mut limit = eth_redemption_info
-                    .limit
-                    .refill(self.block_timestamp);
-                if limit.remaining < bucket_unit {
-                    return Err(SimulationError::FatalError("Exceeded rate limit".into()));
-                }
-                limit.remaining -= bucket_unit;
-                limit.last_refill = self.block_timestamp;
-                let mut updated_info = eth_redemption_info;
-                updated_info.limit = limit;
-                new_state.eth_redemption_info = Some(updated_info);
-            }
-            let eeth_shares = self.shares_for_amount(amount_in)?;
-            let eth_amount_out = self.amount_for_share(mul_div(
-                eeth_shares,
-                U256::from(BASIS_POINT_SCALE) - U256::from(eth_redemption_info.exit_fee_in_bps),
-                U256::from(BASIS_POINT_SCALE),
-            )?)?;
-            new_state.total_value_in_lp -= eth_amount_out;
-            new_state.total_shares -= self.shares_for_withdrawal_amount(eth_amount_out)?;
-            new_state.liquidity_pool_native_balance =
-                Some(liquidity_pool_native_balance - eth_amount_out);
-            let amount_out = u256_to_biguint(eth_amount_out);
-            return Ok(GetAmountOutResult::new(
-                amount_out,
-                BigUint::from(151_676u32), /* EtherFiRedemptionManager._redeemEEth function gas
-                                            * used */
-                Box::new(new_state),
-            ));
-        }
-
-        if token_in.address.as_ref() == EETH_ADDRESS && token_out.address.as_ref() == WEETH_ADDRESS
-        {
-            // eeth --> weeth
-            let amount_out = u256_to_biguint(self.shares_for_amount(amount_in)?);
-            return Ok(GetAmountOutResult::new(
-                amount_out,
-                BigUint::from(70_489u32), // weeth.wrap function gas used
-                Box::new(new_state),
-            ));
-        }
-
-        if token_in.address.as_ref() == WEETH_ADDRESS && token_out.address.as_ref() == EETH_ADDRESS
-        {
-            // weeth --> eeth
-            let amount_out = u256_to_biguint(self.amount_for_share(amount_in)?);
-            return Ok(GetAmountOutResult::new(
-                amount_out,
-                BigUint::from(60_182u32), // weeth.unwrap function gas used
-                Box::new(new_state),
-            ));
-        }
-
-        Err(SimulationError::FatalError("unsupported swap".to_string()))
+        let (amount_out, gas, new_state) =
+            self.swap_core(amount_in, &token_in.address, &token_out.address)?;
+        Ok(GetAmountOutResult::new(
+            u256_to_biguint(amount_out),
+            BigUint::from(gas),
+            Box::new(new_state),
+        ))
     }
 
     fn get_limits(
@@ -312,52 +396,8 @@ impl ProtocolSim for EtherfiState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        if sell_token.as_ref() == WEETH_ADDRESS && buy_token.as_ref() == EETH_ADDRESS {
-            let max_weeth_amount = self.shares_for_amount(self.total_shares)?;
-            let max_eeth_amount = self.total_shares;
-            return Ok((u256_to_biguint(max_weeth_amount), u256_to_biguint(max_eeth_amount)));
-        }
-
-        if sell_token.as_ref() == EETH_ADDRESS && buy_token.as_ref() == ETH_ADDRESS {
-            let liquidity_pool_native_balance = self.require_liquidity_balance()?;
-            let eth_amount_locked_for_withdrawl = self.require_eth_amount_locked_for_withdrawl()?;
-            let eth_redemption_info = self.require_redemption_info()?;
-            let liquid_eth_amount = liquidity_pool_native_balance - eth_amount_locked_for_withdrawl;
-            let low_watermark = mul_div(
-                self.total_value_in_lp + self.total_value_out_of_lp,
-                U256::from(eth_redemption_info.low_watermark_in_bps_of_tvl),
-                U256::from(BASIS_POINT_SCALE),
-            )?;
-            if liquid_eth_amount < low_watermark {
-                return Ok((u256_to_biguint(liquid_eth_amount), BigUint::ZERO));
-            }
-            let mut max_eeth_amount = self.total_value_in_lp + self.total_value_out_of_lp;
-            let limit = eth_redemption_info
-                .limit
-                .refill(self.block_timestamp);
-            // Cap max sell amount by the rate-limit bucket, in wei.
-            let bucket_unit = convert_to_bucket_unit(max_eeth_amount, true)?;
-            if limit.remaining < bucket_unit {
-                max_eeth_amount = U256::from(limit.remaining) * U256::from(BUCKET_UNIT_SCALE);
-            }
-            let eeth_shares = self.shares_for_amount(max_eeth_amount)?;
-            let eth_amount_out = self.amount_for_share(mul_div(
-                eeth_shares,
-                U256::from(BASIS_POINT_SCALE) - U256::from(eth_redemption_info.exit_fee_in_bps),
-                U256::from(BASIS_POINT_SCALE),
-            )?)?;
-            return Ok((u256_to_biguint(max_eeth_amount), u256_to_biguint(eth_amount_out)));
-        }
-
-        if sell_token.as_ref() == EETH_ADDRESS && buy_token.as_ref() == WEETH_ADDRESS {
-            return Ok((u256_to_biguint(U256::MAX), u256_to_biguint(U256::MAX)));
-        }
-
-        if sell_token.as_ref() == ETH_ADDRESS && buy_token.as_ref() == EETH_ADDRESS {
-            return Ok((u256_to_biguint(U256::MAX), u256_to_biguint(U256::MAX)));
-        }
-
-        Err(SimulationError::FatalError("unsupported swap".to_string()))
+        let (max_in, max_out) = self.limits_core(&sell_token, &buy_token)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -473,6 +513,88 @@ impl ProtocolSim for EtherfiState {
     }
 }
 
+#[typetag::serde]
+impl SwapQuoter for EtherfiState {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "EtherfiState: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(0f64))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("EtherfiState: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = self.spot_price(base.as_ref(), quote.as_ref())?;
+        Ok(MarginalPrice::new(price))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "EtherfiState does not yet support exact-out (FixedOut) quoting".to_string(),
+                ))
+            }
+        };
+
+        let (amount_out, gas, new_state) =
+            self.swap_core(amount_in, params.token_in(), params.token_out())?;
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, gas, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let (max_in, max_out) = self.limits_core(params.token_in(), params.token_out())?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "EtherfiState::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +622,7 @@ mod tests {
                 exit_fee_in_bps: 30,
                 low_watermark_in_bps_of_tvl: 100,
             }),
+            component: None,
         }
     }
 
@@ -662,5 +785,86 @@ mod tests {
 
         assert_eq!(max_in, u256_to_biguint(max_weeth));
         assert_eq!(max_out, u256_to_biguint(state.total_shares));
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        use tycho_common::models::Chain;
+
+        let mk = |addr: [u8; 20]| {
+            Token::new(&Bytes::from(addr), "T", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
+        };
+        let eeth = mk(EETH_ADDRESS);
+        let weeth = mk(WEETH_ADDRESS);
+
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![eeth.address.clone(), weeth.address.clone()];
+        let all_tokens = HashMap::from([
+            (eeth.address.clone(), eeth.clone()),
+            (weeth.address.clone(), weeth.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = sample_state().with_component(component);
+
+        for (base, quote) in [(&eeth, &weeth), (&weeth, &eeth)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::wrap(true)]
+    #[case::unwrap(false)]
+    fn test_swap_quoter_matches_protocol_sim(#[case] wrap: bool) {
+        use std::str::FromStr;
+
+        use tycho_common::models::Chain;
+
+        let mk = |addr: [u8; 20]| {
+            Token::new(&Bytes::from(addr), "T", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
+        };
+        let state = sample_state();
+        let (token_in, token_out) = if wrap {
+            (mk(EETH_ADDRESS), mk(WEETH_ADDRESS))
+        } else {
+            (mk(WEETH_ADDRESS), mk(EETH_ADDRESS))
+        };
+
+        for amount in ["1000000000000000000", "5000000000000000000000"] {
+            let amount = BigUint::from_str(amount).unwrap();
+
+            let legacy = state
+                .get_amount_out(amount.clone(), &token_in, &token_out)
+                .unwrap();
+            let quote = state
+                .quote(
+                    QuoteParams::fixed_in(
+                        &token_in.address,
+                        &token_out.address,
+                        biguint_to_u256(&amount),
+                    )
+                    .unwrap()
+                    .with_new_state(),
+                )
+                .unwrap();
+
+            assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+            assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+        }
+
+        let weeth_addr = Bytes::from(WEETH_ADDRESS);
+        let eeth_addr = Bytes::from(EETH_ADDRESS);
+        let (legacy_in, legacy_out) = state
+            .get_limits(weeth_addr.clone(), eeth_addr.clone())
+            .unwrap();
+        let limits = state
+            .swap_limits(LimitsParams::new(&weeth_addr, &eeth_addr))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
     }
 }

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ekubo_sdk::{
     chain::evm::{
@@ -14,6 +17,7 @@ use ekubo_sdk::{
 use revm::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -27,6 +31,8 @@ const BASE_GAS_COST: u64 = 15_920;
 pub struct FullRangePool {
     imp: EvmFullRangePool,
     swap_state: FullRangePoolSwapState,
+    #[serde(skip)]
+    pub(crate) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +46,11 @@ impl FullRangePool {
         sdk_state: FullRangePoolState,
     ) -> Result<Self, InvalidSnapshotError> {
         EvmFullRangePool::new(key, sdk_state)
-            .map(|imp| Self { swap_state: FullRangePoolSwapState { sdk_state }, imp })
+            .map(|imp| Self {
+                swap_state: FullRangePoolSwapState { sdk_state },
+                imp,
+                component: None,
+            })
             .map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating full range pool: {err:?}"))
             })
@@ -79,6 +89,7 @@ impl EkuboPool for FullRangePool {
                 new_state: Self {
                     imp: self.imp.clone(),
                     swap_state: FullRangePoolSwapState { sdk_state: quote.state_after },
+                    component: self.component.clone(),
                 }
                 .into(),
             })
@@ -107,7 +118,7 @@ impl EkuboPool for FullRangePool {
 }
 
 impl PartialEq for FullRangePool {
-    fn eq(&self, &Self { ref imp, swap_state }: &Self) -> bool {
+    fn eq(&self, &Self { ref imp, swap_state, component: _ }: &Self) -> bool {
         self.imp.key() == imp.key() && self.swap_state == swap_state
     }
 }

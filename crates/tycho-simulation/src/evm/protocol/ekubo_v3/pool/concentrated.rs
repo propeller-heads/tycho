@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     convert::identity,
+    sync::Arc,
 };
 
 use ekubo_sdk::{
@@ -20,6 +21,7 @@ use num_traits::Zero;
 use revm::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -48,6 +50,8 @@ const GAS_COST_OF_ONE_EXTRA_MATH_ROUND: u64 = 4_076;
 pub struct ConcentratedPool {
     imp: EvmConcentratedPool,
     swap_state: ConcentratedPoolSwapState,
+    #[serde(skip)]
+    pub(crate) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Serialize, Deserialize)]
@@ -68,6 +72,7 @@ impl ConcentratedPool {
                 InvalidSnapshotError::ValueError(format!("creating concentrated pool: {err:?}"))
             })?,
             swap_state: ConcentratedPoolSwapState { sdk_state, active_tick: Some(tick) },
+            component: None,
         })
     }
 }
@@ -107,6 +112,7 @@ impl EkuboPool for ConcentratedPool {
                         sdk_state: quote.state_after,
                         active_tick: None,
                     },
+                    component: self.component.clone(),
                 }
                 .into(),
             })
@@ -145,7 +151,7 @@ impl EkuboPool for ConcentratedPool {
 }
 
 impl PartialEq for ConcentratedPool {
-    fn eq(&self, &Self { ref imp, swap_state }: &Self) -> bool {
+    fn eq(&self, &Self { ref imp, swap_state, component: _ }: &Self) -> bool {
         self.imp.key() == imp.key() &&
             self.imp.ticks() == imp.ticks() &&
             self.swap_state == swap_state

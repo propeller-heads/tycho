@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ekubo_sdk::{
     chain::evm::{
@@ -10,6 +13,7 @@ use ekubo_sdk::{
 use revm::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -27,6 +31,8 @@ const TRANSFER_FROM_USER_GAS_COST: u64 = 20_000;
 pub struct StableswapPool {
     imp: EvmStableswapPool,
     swap_state: StableswapPoolSwapState,
+    #[serde(skip)]
+    pub(crate) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +46,11 @@ impl StableswapPool {
         sdk_state: EvmStableswapPoolState,
     ) -> Result<Self, InvalidSnapshotError> {
         EvmStableswapPool::new(key, sdk_state)
-            .map(|imp| Self { swap_state: StableswapPoolSwapState { sdk_state }, imp })
+            .map(|imp| Self {
+                swap_state: StableswapPoolSwapState { sdk_state },
+                imp,
+                component: None,
+            })
             .map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating stableswap pool: {err:?}"))
             })
@@ -87,6 +97,7 @@ impl EkuboPool for StableswapPool {
                 new_state: Self {
                     imp: self.imp.clone(),
                     swap_state: StableswapPoolSwapState { sdk_state: quote.state_after },
+                    component: self.component.clone(),
                 }
                 .into(),
             })
@@ -115,7 +126,7 @@ impl EkuboPool for StableswapPool {
 }
 
 impl PartialEq for StableswapPool {
-    fn eq(&self, &Self { ref imp, swap_state }: &Self) -> bool {
+    fn eq(&self, &Self { ref imp, swap_state, component: _ }: &Self) -> bool {
         self.imp.key() == imp.key() && self.swap_state == swap_state
     }
 }

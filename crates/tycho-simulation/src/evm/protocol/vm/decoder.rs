@@ -39,6 +39,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
         let id = snapshot.component.id.clone();
         let tokens = snapshot.component.tokens.clone();
 
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         // Decode involved contracts
         let mut stateless_contracts = HashMap::new();
         let mut index = 0;
@@ -225,7 +228,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
 
         pool_state.set_spot_prices(all_tokens)?;
 
-        Ok(pool_state)
+        Ok(pool_state.with_component(component))
     }
 }
 

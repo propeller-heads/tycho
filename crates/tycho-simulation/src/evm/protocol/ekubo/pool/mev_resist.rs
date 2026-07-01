@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use evm_ekubo_sdk::{
     math::uint::U256,
@@ -13,6 +16,7 @@ use evm_ekubo_sdk::{
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -35,6 +39,9 @@ pub struct MevResistPool {
     last_tick: i32,
 
     active_tick: Option<i32>,
+
+    #[serde(skip)]
+    pub(in crate::evm::protocol::ekubo) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl PartialEq for MevResistPool {
@@ -86,6 +93,7 @@ impl MevResistPool {
             base_pool_state,
             last_tick: tick,
             active_tick: Some(tick),
+            component: None,
         })
     }
 }
@@ -143,6 +151,7 @@ impl EkuboPool for MevResistPool {
                 base_pool_state: quote.state_after.base_pool_state,
                 last_tick: self.last_tick,
                 active_tick: None,
+                component: self.component.clone(),
             }
             .into(),
         })

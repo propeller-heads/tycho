@@ -1,14 +1,20 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
+use alloy::primitives::U256;
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::{token::Token, Chain},
+    models::{protocol::ProtocolComponent as CommonProtocolComponent, token::Token, Chain},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
@@ -91,7 +97,7 @@ impl ProtocolSim for NativeWrapperState {
         self.validate_tokens(&token_in.address, &token_out.address)?;
         let is_wrapping = token_in.address == self.native_token.address;
         let gas = if is_wrapping { WRAP_GAS } else { UNWRAP_GAS };
-        Ok(GetAmountOutResult::new(amount_in, BigUint::from(gas), self.clone_box()))
+        Ok(GetAmountOutResult::new(amount_in, BigUint::from(gas), ProtocolSim::clone_box(self)))
     }
 
     fn get_limits(
@@ -134,6 +140,78 @@ impl ProtocolSim for NativeWrapperState {
     }
 }
 
+#[typetag::serde]
+impl SwapQuoter for NativeWrapperState {
+    fn component(&self) -> SimulationResult<Arc<CommonProtocolComponent<Arc<Token>>>> {
+        Err(SimulationError::FatalError(
+            "NativeWrapperState::component is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(0.0))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        self.validate_tokens(params.token_in(), params.token_out())?;
+        // 1:1 bridge: marginal price mirrors the legacy spot_price, which is always 1.0.
+        Ok(MarginalPrice::new(1.0))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "NativeWrapperState does not yet support exact-out (FixedOut) quoting"
+                        .to_string(),
+                ))
+            }
+        };
+
+        self.validate_tokens(params.token_in(), params.token_out())?;
+        let is_wrapping = params.token_in() == &self.native_token.address;
+        let gas = if is_wrapping { WRAP_GAS } else { UNWRAP_GAS };
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(self.clone()) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        // 1:1 bridge: amount_out == amount_in.
+        Ok(Quote::new(amount_in, gas, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        self.validate_tokens(params.token_in(), params.token_out())?;
+        Ok(SwapLimits::new(
+            Range::new(U256::ZERO, U256::from(u128::MAX))?,
+            Range::new(U256::ZERO, U256::from(u128::MAX))?,
+        ))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "NativeWrapperState::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        _params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,7 +230,65 @@ mod tests {
 
     #[test]
     fn test_fee_is_zero() {
-        assert_eq!(eth_state().fee(), 0.0);
+        assert_eq!(ProtocolSim::fee(&eth_state()), 0.0);
+    }
+
+    #[rstest::rstest]
+    #[case::wrap(true)]
+    #[case::unwrap(false)]
+    fn test_swap_quoter_matches_protocol_sim(#[case] wrap: bool) {
+        use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint};
+
+        let state = eth_state();
+        let (token_in, token_out) = if wrap {
+            (native_token(), wrapped_token())
+        } else {
+            (wrapped_token(), native_token())
+        };
+        let amount = BigUint::from(1_000_000_000_000_000_000u64);
+
+        let legacy = state
+            .get_amount_out(amount.clone(), &token_in, &token_out)
+            .unwrap();
+        let quote = state
+            .quote(
+                QuoteParams::fixed_in(
+                    &token_in.address,
+                    &token_out.address,
+                    biguint_to_u256(&amount),
+                )
+                .unwrap()
+                .with_new_state(),
+            )
+            .unwrap();
+        assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+        assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+
+        let (legacy_in, legacy_out) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        let limits = state
+            .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        use approx::assert_ulps_eq;
+
+        let state = eth_state();
+        let native = native_token();
+        let wrapped = wrapped_token();
+
+        for (base, quote) in [(&native, &wrapped), (&wrapped, &native)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            assert_ulps_eq!(marginal.price(), spot);
+        }
     }
 
     #[test]

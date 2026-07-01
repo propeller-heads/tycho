@@ -24,6 +24,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeV1State {
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
         let reserve0 = U256::from_be_slice(
             snapshot
                 .state
@@ -66,7 +68,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeV1State {
             .get(&snapshot.component.tokens[1])
             .ok_or_else(|| InvalidSnapshotError::ValueError("Token1 not found".to_string()))?;
 
-        Ok(Self::new(reserve0, reserve1, stable, fee, token0.decimals as u8, token1.decimals as u8))
+        Ok(Self::new(reserve0, reserve1, stable, fee, token0.decimals as u8, token1.decimals as u8)
+            .with_component(component))
     }
 }
 

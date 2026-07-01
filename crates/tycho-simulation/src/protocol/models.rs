@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use tycho_client::feed::{HeaderLike, SynchronizerState};
 use tycho_common::{
     models::{token::Token, Chain},
-    simulation::protocol_sim::ProtocolSim,
+    simulation::swap::SwapQuoter,
     Bytes,
 };
 
@@ -184,7 +184,7 @@ pub struct Update {
     /// VM-backed states that can't be serialized are silently skipped during
     /// serialization and will be absent after a roundtrip.
     #[serde(with = "crate::serde_helpers::protocol_states")]
-    pub states: HashMap<String, Box<dyn ProtocolSim>>,
+    pub states: HashMap<String, Box<dyn SwapQuoter>>,
     /// The new pairs that were added in this block
     pub new_pairs: HashMap<String, ProtocolComponent>,
     /// The pairs that were removed in this block
@@ -194,7 +194,7 @@ pub struct Update {
 impl Update {
     pub fn new(
         block_number: u64,
-        states: HashMap<String, Box<dyn ProtocolSim>>,
+        states: HashMap<String, Box<dyn SwapQuoter>>,
         new_pairs: HashMap<String, ProtocolComponent>,
     ) -> Self {
         Update {

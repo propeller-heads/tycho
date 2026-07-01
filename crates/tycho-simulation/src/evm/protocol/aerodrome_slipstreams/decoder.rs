@@ -26,9 +26,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         snapshot: ComponentWithState,
         block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let liq = snapshot
             .state
             .attributes
@@ -238,6 +241,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             observations,
             DynamicFeeConfig::new(dfc_base_fee, dfc_fee_cap, dfc_scaling_factor),
         )
+        .map(|state| state.with_component(component))
         .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
     }
 }

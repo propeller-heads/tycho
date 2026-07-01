@@ -4,7 +4,7 @@ use futures::{stream::select_all, StreamExt};
 use tycho_client::feed::{synchronizer::ComponentWithState, FeedMessage};
 use tycho_common::{
     models::token::Token,
-    simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
+    simulation::{errors::SimulationError, swap::SwapQuoter},
     Bytes,
 };
 
@@ -46,7 +46,7 @@ impl RFQStreamBuilder {
 
     pub fn add_client<T>(mut self, name: &str, provider: Box<dyn RFQClient>) -> Self
     where
-        T: ProtocolSim
+        T: SwapQuoter
             + TryFromWithBlock<ComponentWithState, TimestampHeader, Error = InvalidSnapshotError>
             + Send
             + 'static,
@@ -107,27 +107,29 @@ impl RFQStreamBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
     use async_trait::async_trait;
     use futures::stream::BoxStream;
-    use num_bigint::BigUint;
     use serde::{Deserialize, Serialize};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::IntervalStream;
     use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
     use tycho_common::{
-        dto::ProtocolStateDelta,
         models::{
             protocol::{GetAmountOutParams, ProtocolComponent, ProtocolComponentState},
             token::Token,
         },
         simulation::{
-            errors::{SimulationError, TransitionError},
+            errors::TransitionError,
             indicatively_priced::SignedQuote,
-            protocol_sim::{Balances, GetAmountOutResult},
+            protocol_sim::ProtocolSim,
+            swap::{
+                LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote,
+                QuoteParams, SimulationResult, Swap, SwapFee, SwapLimits, Transition,
+                TransitionParams,
+            },
         },
-        Bytes,
     };
 
     use super::*;
@@ -137,53 +139,43 @@ mod tests {
     pub struct DummyProtocol;
 
     #[typetag::serde]
-    impl ProtocolSim for DummyProtocol {
-        fn fee(&self) -> f64 {
+    impl SwapQuoter for DummyProtocol {
+        fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
             unimplemented!("Not needed for this test")
         }
 
-        fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
+        fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
             unimplemented!("Not needed for this test")
         }
 
-        fn get_amount_out(
-            &self,
-            _amount_in: BigUint,
-            _token_in: &Token,
-            _token_out: &Token,
-        ) -> Result<GetAmountOutResult, SimulationError> {
+        fn marginal_price(&self, _params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
             unimplemented!("Not needed for this test")
         }
 
-        fn get_limits(
-            &self,
-            _sell_token: Bytes,
-            _buy_token: Bytes,
-        ) -> Result<(BigUint, BigUint), SimulationError> {
+        fn quote(&self, _params: QuoteParams) -> SimulationResult<Quote> {
+            unimplemented!("Not needed for this test")
+        }
+
+        fn swap_limits(&self, _params: LimitsParams) -> SimulationResult<SwapLimits> {
+            unimplemented!("Not needed for this test")
+        }
+
+        fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
             unimplemented!("Not needed for this test")
         }
 
         fn delta_transition(
             &mut self,
-            _delta: ProtocolStateDelta,
-            _tokens: &HashMap<Bytes, Token>,
-            _balances: &Balances,
-        ) -> Result<(), TransitionError> {
+            _params: TransitionParams,
+        ) -> Result<Transition, TransitionError> {
             unimplemented!("Not needed for this test")
         }
 
-        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        fn clone_box(&self) -> Box<dyn SwapQuoter> {
             Box::new(self.clone())
         }
 
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
-        }
-        fn eq(&self, _other: &dyn ProtocolSim) -> bool {
+        fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
             unimplemented!("Not needed for this test")
         }
     }

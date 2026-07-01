@@ -1,5 +1,6 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
+use alloy::primitives::U256 as RuintU256;
 use lunarbase_pmm_math::{
     curve_pmm::{quote_x_to_y_with_multiplier, quote_y_to_x_with_multiplier},
     PoolParams, U256,
@@ -7,20 +8,26 @@ use lunarbase_pmm_math::{
 use num_bigint::BigUint;
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
 
 use super::decoder::apply_delta;
+use crate::evm::protocol::u256_num::biguint_to_u256 as biguint_to_ruint;
 
 pub type Address = [u8; 20];
 const DEFAULT_GAS: u64 = 180_000;
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LunarBaseTychoState {
     pub pool: Address,
     pub token_x: Address,
@@ -35,9 +42,37 @@ pub struct LunarBaseTychoState {
     pub block_delay: u64,
     pub paused: bool,
     pub head_block: u64,
+    #[serde(skip)]
+    pub(super) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
+impl PartialEq for LunarBaseTychoState {
+    fn eq(&self, other: &Self) -> bool {
+        self.pool == other.pool &&
+            self.token_x == other.token_x &&
+            self.token_y == other.token_y &&
+            self.anchor_price_x96 == other.anchor_price_x96 &&
+            self.fee_ask_x24 == other.fee_ask_x24 &&
+            self.fee_bid_x24 == other.fee_bid_x24 &&
+            self.latest_update_block == other.latest_update_block &&
+            self.reserve_x == other.reserve_x &&
+            self.reserve_y == other.reserve_y &&
+            self.concentration_k == other.concentration_k &&
+            self.block_delay == other.block_delay &&
+            self.paused == other.paused &&
+            self.head_block == other.head_block
+    }
+}
+
+impl Eq for LunarBaseTychoState {}
+
 impl LunarBaseTychoState {
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
+    }
+
     pub fn pool_params(&self) -> PoolParams {
         PoolParams {
             sqrt_price_x96: self.anchor_price_x96,
@@ -234,6 +269,100 @@ impl ProtocolSim for LunarBaseTychoState {
     }
 }
 
+#[typetag::serde]
+impl SwapQuoter for LunarBaseTychoState {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "LunarBaseTychoState: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(0.0))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("LunarBaseTychoState: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = self.spot_price(base.as_ref(), quote.as_ref())?;
+        Ok(MarginalPrice::new(price))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "LunarBaseTychoState does not yet support exact-out (FixedOut) quoting"
+                        .to_string(),
+                ))
+            }
+        };
+
+        let token_in = address_from_bytes(params.token_in().as_ref())?;
+        let token_out = address_from_bytes(params.token_out().as_ref())?;
+        // Bridge ruint U256 <-> lunarbase U256 via big-endian bytes (no heap allocation).
+        let amount_in_lb = U256::from_be_slice(&amount_in.to_be_bytes::<32>());
+        let (amount_out_lb, next_state) = self
+            .quote_exact_in(token_in, token_out, amount_in_lb)
+            .map_err(map_quote_error)?;
+        let amount_out = RuintU256::from_be_slice(&amount_out_lb.to_be_bytes::<32>());
+
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(next_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, DEFAULT_GAS, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let (max_in, max_out) =
+            ProtocolSim::get_limits(self, params.token_in().clone(), params.token_out().clone())?;
+        Ok(SwapLimits::new(
+            Range::new(RuintU256::ZERO, biguint_to_ruint(&max_in))?,
+            Range::new(RuintU256::ZERO, biguint_to_ruint(&max_out))?,
+        ))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "LunarBaseTychoState::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum QuoteError {
     Paused,
@@ -351,6 +480,7 @@ mod tests {
             block_delay: 2,
             paused: false,
             head_block: 100,
+            component: None,
         }
     }
 
@@ -381,5 +511,95 @@ mod tests {
             err,
             QuoteError::Stale { block_number: 102, latest_update_block: 100, block_delay: 2 }
         );
+    }
+
+    #[test]
+    fn test_swap_quoter_matches_protocol_sim() {
+        use tycho_common::models::Chain;
+
+        let state = state();
+        let mk = |a: [u8; 20]| {
+            Token::new(&Bytes::from(a), "T", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
+        };
+
+        for (token_in, token_out) in [(mk(addr(1)), mk(addr(2))), (mk(addr(2)), mk(addr(1)))] {
+            for amount in [1_000u64, 250_000u64] {
+                let amount = BigUint::from(amount);
+
+                let legacy = state
+                    .get_amount_out(amount.clone(), &token_in, &token_out)
+                    .unwrap();
+                let quote = state
+                    .quote(
+                        QuoteParams::fixed_in(
+                            &token_in.address,
+                            &token_out.address,
+                            biguint_to_ruint(&amount),
+                        )
+                        .unwrap()
+                        .with_new_state(),
+                    )
+                    .unwrap();
+
+                assert_eq!(ruint_to_biguint_local(quote.amount_out()), legacy.amount);
+                assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+            }
+
+            let (legacy_in, legacy_out) = state
+                .get_limits(token_in.address.clone(), token_out.address.clone())
+                .unwrap();
+            let limits = state
+                .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+                .unwrap();
+            assert_eq!(ruint_to_biguint_local(limits.range_in().upper()), legacy_in);
+            assert_eq!(ruint_to_biguint_local(limits.range_out().upper()), legacy_out);
+        }
+    }
+
+    fn ruint_to_biguint_local(value: RuintU256) -> BigUint {
+        BigUint::from_bytes_be(&value.to_be_bytes::<32>())
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        use tycho_common::models::Chain;
+
+        let state = state();
+        let tok_x = Token::new(
+            &Bytes::from(state.token_x.to_vec()),
+            "TX",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let tok_y = Token::new(
+            &Bytes::from(state.token_y.to_vec()),
+            "TY",
+            6,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![tok_x.address.clone(), tok_y.address.clone()];
+        let all_tokens = std::collections::HashMap::from([
+            (tok_x.address.clone(), tok_x.clone()),
+            (tok_y.address.clone(), tok_y.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = state.with_component(component);
+
+        for (base, quote) in [(&tok_x, &tok_y), (&tok_y, &tok_x)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
+        }
     }
 }

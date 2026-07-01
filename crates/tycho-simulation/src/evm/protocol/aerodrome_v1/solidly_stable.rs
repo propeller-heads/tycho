@@ -1,6 +1,5 @@
 use alloy::primitives::U256;
 use num_bigint::BigUint;
-use num_traits::Zero;
 use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::protocol::{
@@ -153,11 +152,23 @@ pub fn get_limits(
     decimals0: u8,
     decimals1: u8,
 ) -> Result<(BigUint, BigUint), SimulationError> {
+    let (amount_in, amount_out) =
+        get_limits_u256(sell_token < buy_token, reserve0, reserve1, decimals0, decimals1)?;
+    Ok((u256_to_biguint(amount_in), u256_to_biguint(amount_out)))
+}
+
+/// `U256`-native core of [`get_limits`]. Avoids the `BigUint` round-trip for the `SwapQuoter` path.
+pub fn get_limits_u256(
+    zero_for_one: bool,
+    reserve0: U256,
+    reserve1: U256,
+    decimals0: u8,
+    decimals1: u8,
+) -> Result<(U256, U256), SimulationError> {
     if reserve0.is_zero() || reserve1.is_zero() {
-        return Ok((BigUint::zero(), BigUint::zero()));
+        return Ok((U256::ZERO, U256::ZERO));
     }
 
-    let zero_for_one = sell_token < buy_token;
     let (reserve_in, reserve_out, decimals_in, decimals_out) = if zero_for_one {
         (reserve0, reserve1, decimals0, decimals1)
     } else {
@@ -183,7 +194,7 @@ pub fn get_limits(
     let amount_out_normalized = safe_sub_u256(reserve_out_normalized, y_new)?;
     let amount_out = safe_div_u256(safe_mul_u256(amount_out_normalized, decimals_out_scale)?, e18)?;
 
-    Ok((u256_to_biguint(amount_in_estimate), u256_to_biguint(amount_out)))
+    Ok((amount_in_estimate, amount_out))
 }
 
 #[cfg(test)]

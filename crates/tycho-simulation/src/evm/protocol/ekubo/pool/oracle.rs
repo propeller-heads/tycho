@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use evm_ekubo_sdk::{
     math::uint::U256,
@@ -10,6 +13,7 @@ use evm_ekubo_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -23,6 +27,9 @@ pub struct OraclePool {
     state: OraclePoolState,
 
     swapped_this_block: bool,
+
+    #[serde(skip)]
+    pub(in crate::evm::protocol::ekubo) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl PartialEq for OraclePool {
@@ -48,6 +55,7 @@ impl OraclePool {
             })?,
             state,
             swapped_this_block: false,
+            component: None,
         })
     }
 }
@@ -107,6 +115,7 @@ impl EkuboPool for OraclePool {
                 imp: self.imp.clone(),
                 state: quote.state_after,
                 swapped_this_block: true,
+                component: self.component.clone(),
             }
             .into(),
         })

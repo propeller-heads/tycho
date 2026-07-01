@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::identity,
+    sync::Arc,
 };
 
 use evm_ekubo_sdk::{
@@ -15,6 +16,7 @@ use evm_ekubo_sdk::{
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -30,6 +32,9 @@ pub struct BasePool {
     state: BasePoolState,
 
     active_tick: Option<i32>,
+
+    #[serde(skip)]
+    pub(in crate::evm::protocol::ekubo) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl PartialEq for BasePool {
@@ -75,6 +80,7 @@ impl BasePool {
             })?,
             state,
             active_tick: Some(tick),
+            component: None,
         })
     }
 
@@ -115,8 +121,13 @@ impl EkuboPool for BasePool {
 
         let state_after = quote.state_after;
 
-        let new_state =
-            Self { imp: self.imp.clone(), state: state_after, active_tick: None }.into();
+        let new_state = Self {
+            imp: self.imp.clone(),
+            state: state_after,
+            active_tick: None,
+            component: self.component.clone(),
+        }
+        .into();
 
         Ok(EkuboPoolQuote {
             consumed_amount: quote.consumed_amount,

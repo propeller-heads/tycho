@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, fmt::Debug, sync::Arc};
 
 use itertools::Itertools;
-use num_bigint::BigUint;
+use ruint::aliases::U256;
 
 use crate::{
     dto::ProtocolStateDelta,
@@ -9,7 +9,7 @@ use crate::{
     simulation::{
         errors::{SimulationError, TransitionError},
         indicatively_priced::IndicativelyPriced,
-        protocol_sim::{Balances, Price, ProtocolSim},
+        protocol_sim::{Balances, ProtocolSim},
     },
     Bytes,
 };
@@ -36,7 +36,7 @@ pub type TokenAddress = Bytes;
 /// params_with_context! {
 ///     pub struct MyParams {
 ///         token: TokenAddress,
-///         amount: BigUint,
+///         amount: U256,
 ///     }
 /// }
 /// ```
@@ -95,10 +95,10 @@ pub struct QuoteParams<'a>{
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum QuoteAmount {
-    FixedIn(BigUint),
-    FixedOut(BigUint),
+    FixedIn(U256),
+    FixedOut(U256),
 }
 
 impl<'a> QuoteParams<'a> {
@@ -111,7 +111,7 @@ impl<'a> QuoteParams<'a> {
     pub fn fixed_in(
         token_in: &'a TokenAddress,
         token_out: &'a TokenAddress,
-        amount: BigUint,
+        amount: U256,
     ) -> SimulationResult<Self> {
         if token_out == token_in {
             return Err(SimulationError::InvalidInput(
@@ -137,7 +137,7 @@ impl<'a> QuoteParams<'a> {
     pub fn fixed_out(
         token_in: &'a TokenAddress,
         token_out: &'a TokenAddress,
-        amount: BigUint,
+        amount: U256,
     ) -> SimulationResult<Self> {
         if token_out == token_in {
             return Err(SimulationError::InvalidInput(
@@ -293,8 +293,8 @@ impl MarginalPrice {
 /// Contains the expected output amount, gas cost, and optionally the new pool state
 /// if the quote was requested with state modification enabled.
 pub struct Quote {
-    amount_out: BigUint,
-    gas: BigUint,
+    amount_out: U256,
+    gas: u64,
     new_state: Option<Arc<dyn SwapQuoter>>,
 }
 
@@ -303,20 +303,21 @@ impl Quote {
     ///
     /// # Arguments
     /// * `amount_out` - The amount of output tokens that would be received
-    /// * `gas` - The estimated gas cost for executing this swap, excluding token transfers cost
+    /// * `gas` - The estimated gas cost for executing this swap, excluding token transfers cost.
+    ///   Saturates at `u64::MAX`.
     /// * `new_state` - The new pool state after the swap (if state modification was requested)
-    pub fn new(amount_out: BigUint, gas: BigUint, new_state: Option<Arc<dyn SwapQuoter>>) -> Self {
+    pub fn new(amount_out: U256, gas: u64, new_state: Option<Arc<dyn SwapQuoter>>) -> Self {
         Self { amount_out, gas, new_state }
     }
 
     /// Returns the amount of output tokens.
-    pub fn amount_out(&self) -> &BigUint {
-        &self.amount_out
+    pub fn amount_out(&self) -> U256 {
+        self.amount_out
     }
 
     /// Returns the estimated swap gas cost excluding including token transfer cost.
-    pub fn gas(&self) -> &BigUint {
-        &self.gas
+    pub fn gas(&self) -> u64 {
+        self.gas
     }
 
     /// Returns the new pool state after the swap, if available.
@@ -329,8 +330,8 @@ impl Quote {
 ///
 /// Used for specifying trading limits and constraints.
 pub struct Range {
-    lower: BigUint,
-    upper: BigUint,
+    lower: U256,
+    upper: U256,
 }
 
 impl Range {
@@ -342,7 +343,7 @@ impl Range {
     ///
     /// # Errors
     /// Returns `SimulationError::InvalidInput` if lower > upper.
-    pub fn new(lower: BigUint, upper: BigUint) -> SimulationResult<Self> {
+    pub fn new(lower: U256, upper: U256) -> SimulationResult<Self> {
         if lower > upper {
             return Err(SimulationError::InvalidInput(
                 "Invalid range! Argument lower > upper".to_string(),
@@ -353,13 +354,13 @@ impl Range {
     }
 
     /// Returns the lower bound.
-    pub fn lower(&self) -> &BigUint {
-        &self.lower
+    pub fn lower(&self) -> U256 {
+        self.lower
     }
 
     /// Returns the upper bound.
-    pub fn upper(&self) -> &BigUint {
-        &self.upper
+    pub fn upper(&self) -> U256 {
+        self.upper
     }
 }
 
@@ -446,6 +447,34 @@ impl Default for Transition {
     }
 }
 
+/// Represents a price as a fraction in the token_in -> token_out direction with units
+/// `[token_out/token_in]`.
+///
+/// A fraction is used so price precision is independent of the tokens' decimal precisions,
+/// allowing exact representation without floating-point error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Price {
+    /// The amount of token_out (what you receive), including token decimals.
+    pub numerator: U256,
+    /// The amount of token_in (what you pay), including token decimals.
+    pub denominator: U256,
+}
+
+impl Price {
+    /// Creates a new price.
+    ///
+    /// # Panics
+    /// Panics if `numerator` or `denominator` is zero, as neither represents a valid price.
+    pub fn new(numerator: U256, denominator: U256) -> Self {
+        if denominator == U256::ZERO {
+            panic!("Price denominator cannot be zero");
+        } else if numerator == U256::ZERO {
+            panic!("Price numerator cannot be zero");
+        }
+        Self { numerator, denominator }
+    }
+}
+
 /// Defines constraints for advanced quote calculations.
 ///
 /// These constraints allow sophisticated trading strategies by limiting swaps
@@ -465,9 +494,9 @@ pub enum SwapConstraint {
         /// limit price itself.
         tolerance: f64,
         /// The minimum amount of token_in that must be used for this trade.
-        min_amount_in: Option<BigUint>,
+        min_amount_in: Option<U256>,
         /// The maximum amount of token_in that can be used for this trade.
-        max_amount_in: Option<BigUint>,
+        max_amount_in: Option<U256>,
     },
 
     /// This mode will calculate the amount of token_in required to move the pool's marginal price
@@ -493,9 +522,9 @@ pub enum SwapConstraint {
         /// tolerance)]`.
         tolerance: f64,
         /// The lower bound for searching algorithms.
-        min_amount_in: Option<BigUint>,
+        min_amount_in: Option<U256>,
         /// The upper bound for searching algorithms.
-        max_amount_in: Option<BigUint>,
+        max_amount_in: Option<U256>,
     },
 }
 
@@ -541,7 +570,7 @@ impl SwapConstraint {
     ///
     /// # Returns
     /// The modified constraint with the lower bound applied.
-    pub fn with_lower_bound(mut self, lower: BigUint) -> SimulationResult<Self> {
+    pub fn with_lower_bound(mut self, lower: U256) -> SimulationResult<Self> {
         match &mut self {
             SwapConstraint::PoolTargetPrice { min_amount_in, .. } => {
                 *min_amount_in = Some(lower);
@@ -561,7 +590,7 @@ impl SwapConstraint {
     ///
     /// # Returns
     /// The modified constraint with the upper bound applied.
-    pub fn with_upper_bound(mut self, upper: BigUint) -> SimulationResult<Self> {
+    pub fn with_upper_bound(mut self, upper: U256) -> SimulationResult<Self> {
         match &mut self {
             SwapConstraint::PoolTargetPrice { max_amount_in, .. } => {
                 *max_amount_in = Some(upper);
@@ -621,9 +650,9 @@ impl<'a> QuerySwapParams<'a> {
 /// and price points traversed during calculation for optimization purposes.
 pub struct Swap {
     /// The amount of token_in sold to the component
-    amount_in: BigUint,
+    amount_in: U256,
     /// The amount of token_out bought from the component
-    amount_out: BigUint,
+    amount_out: U256,
     /// The new state of the component after the swap
     new_state: Option<Arc<dyn SwapQuoter>>,
     /// Optional price points that the pool was transitioned through while computing this swap.
@@ -636,12 +665,12 @@ pub struct Swap {
 ///
 /// Collected during iterative numerical search algorithms.
 /// These points can be reused as bounds for subsequent searches, improving convergence speed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PricePoint {
     /// The amount of token_in in atomic units (wei).
-    amount_in: BigUint,
+    amount_in: U256,
     /// The amount of token_out in atomic units (wei).
-    amount_out: BigUint,
+    amount_out: U256,
     /// The price in units of `[token_out/token_in]` scaled by decimals.
     ///
     /// Computed as `(amount_out / 10^token_out_decimals) / (amount_in / 10^token_in_decimals)`.
@@ -649,12 +678,12 @@ pub struct PricePoint {
 }
 
 impl PricePoint {
-    pub fn amount_in(&self) -> &BigUint {
-        &self.amount_in
+    pub fn amount_in(&self) -> U256 {
+        self.amount_in
     }
 
-    pub fn amount_out(&self) -> &BigUint {
-        &self.amount_out
+    pub fn amount_out(&self) -> U256 {
+        self.amount_out
     }
 
     pub fn price(&self) -> f64 {
@@ -671,8 +700,8 @@ impl Swap {
     /// * `new_state` - The new pool state after the swap (if calculated)
     /// * `price_points` - Optional price trajectory data for optimization
     pub fn new(
-        amount_in: BigUint,
-        amount_out: BigUint,
+        amount_in: U256,
+        amount_out: U256,
         new_state: Option<Arc<dyn SwapQuoter>>,
         price_points: Option<Vec<PricePoint>>,
     ) -> Self {
@@ -680,13 +709,13 @@ impl Swap {
     }
 
     /// Returns the amount of input tokens used.
-    pub fn amount_in(&self) -> &BigUint {
-        &self.amount_in
+    pub fn amount_in(&self) -> U256 {
+        self.amount_in
     }
 
     /// Returns the amount of output tokens received.
-    pub fn amount_out(&self) -> &BigUint {
-        &self.amount_out
+    pub fn amount_out(&self) -> U256 {
+        self.amount_out
     }
 
     /// Returns the new pool state after the swap, if calculated.
@@ -739,7 +768,13 @@ pub trait SwapQuoter: fmt::Debug + Send + Sync + 'static {
     /// - Inspecting the tokens and configuration exposed by the protocol
     /// - Deriving default [`quotable_pairs`](Self::quotable_pairs)
     /// - Identifying or grouping quoters by protocol metadata
-    fn component(&self) -> Arc<ProtocolComponent<Arc<Token>>>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component metadata is unavailable — for example a quoter
+    /// rehydrated from a serialized snapshot whose component has not been re-attached, or an
+    /// implementation that does not yet populate it.
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>>;
 
     /// Returns the set of **directed token pairs** for which this quoter can produce swap quotes.
     ///
@@ -769,14 +804,14 @@ pub trait SwapQuoter: fmt::Debug + Send + Sync + 'static {
     /// This method is primarily intended for routing, discovery, and validation logic,
     /// allowing callers to determine whether a quote request is meaningful before invoking
     /// [`quote()`](Self::quote).
-    fn quotable_pairs(&self) -> Vec<(Arc<Token>, Arc<Token>)> {
-        let component = self.component();
-        component
+    fn quotable_pairs(&self) -> SimulationResult<Vec<(Arc<Token>, Arc<Token>)>> {
+        let component = self.component()?;
+        Ok(component
             .tokens
             .iter()
             .permutations(2)
             .map(|token| (token[0].clone(), token[1].clone()))
-            .collect()
+            .collect())
     }
 
     /// Computes the protocol fee applicable to a prospective swap described by `params`.
@@ -1002,6 +1037,12 @@ pub trait SwapQuoter: fmt::Debug + Send + Sync + 'static {
 
     #[deprecated(note = "ProtocolSim is deprecated. This method will be removed in v1.0.0")]
     fn to_protocol_sim(&self) -> Box<dyn ProtocolSim>;
+}
+
+impl Clone for Box<dyn SwapQuoter> {
+    fn clone(&self) -> Box<dyn SwapQuoter> {
+        self.clone_box()
+    }
 }
 
 /// Testing extension trait for SwapQuoter implementations.

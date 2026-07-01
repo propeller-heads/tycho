@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use evm_ekubo_sdk::{
     math::uint::U256,
@@ -10,6 +13,7 @@ use evm_ekubo_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -21,6 +25,9 @@ use crate::protocol::errors::InvalidSnapshotError;
 pub struct FullRangePool {
     imp: quoting::full_range_pool::FullRangePool,
     state: FullRangePoolState,
+
+    #[serde(skip)]
+    pub(in crate::evm::protocol::ekubo) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl PartialEq for FullRangePool {
@@ -38,6 +45,7 @@ impl FullRangePool {
             imp: quoting::full_range_pool::FullRangePool::new(key, state).map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating full range pool: {err:?}"))
             })?,
+            component: None,
         })
     }
 
@@ -78,7 +86,12 @@ impl EkuboPool for FullRangePool {
             consumed_amount: quote.consumed_amount,
             calculated_amount: quote.calculated_amount,
             gas: Self::gas_costs(),
-            new_state: Self { imp: self.imp.clone(), state: quote.state_after }.into(),
+            new_state: Self {
+                imp: self.imp.clone(),
+                state: quote.state_after,
+                component: self.component.clone(),
+            }
+            .into(),
         })
     }
 

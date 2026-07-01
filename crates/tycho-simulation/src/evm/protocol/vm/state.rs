@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Debug},
     str::FromStr,
+    sync::Arc,
 };
 
 use alloy::primitives::{Address, U256};
@@ -13,10 +14,15 @@ use revm::DatabaseRef;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
@@ -74,6 +80,8 @@ where
     disable_overwrite_tokens: HashSet<Address>,
     /// Block context overrides applied to this pool's adapter simulations.
     block_overrides: Option<BlockEnvOverrides>,
+    /// The SwapQuoter component carrying the pool's `Arc<Token>`s. Populated during decode.
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl<D> Debug for EVMPoolState<D>
@@ -133,7 +141,14 @@ where
             adapter_contract,
             disable_overwrite_tokens,
             block_overrides,
+            component: None,
         }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     /// Ensures the pool supports the given capability
@@ -560,6 +575,74 @@ where
         merged
     }
 
+    /// `U256`-native swap core shared by `get_amount_out` and `SwapQuoter::quote`.
+    ///
+    /// Runs the adapter swap and applies the resulting storage changes to a fresh state. Returns
+    /// `(buy_amount, gas_used, new_state, exceeds_limit)`. Note: the post-swap **spot price cache**
+    /// is NOT refreshed here (that requires token decimals); callers that need it must refresh
+    /// separately. The exact-input quoting path does not rely on the cache.
+    fn swap_core(
+        &self,
+        sell_amount: U256,
+        sell_token_address: Address,
+        buy_token_address: Address,
+    ) -> Result<(U256, U256, EVMPoolState<D>, bool), SimulationError> {
+        let overwrites = self.get_overwrites(
+            vec![sell_token_address, buy_token_address],
+            *MAX_BALANCE / U256::from(100),
+        )?;
+        let (sell_amount_limit, _) = self.get_amount_limits(
+            vec![sell_token_address, buy_token_address],
+            Some(overwrites.clone()),
+        )?;
+        let (sell_amount_respecting_limit, sell_amount_exceeds_limit) = if self
+            .capabilities
+            .contains(&Capability::HardLimits) &&
+            sell_amount_limit < sell_amount
+        {
+            (sell_amount_limit, true)
+        } else {
+            (sell_amount, false)
+        };
+
+        let overwrites_with_sell_limit =
+            self.get_overwrites(vec![sell_token_address, buy_token_address], sell_amount_limit)?;
+        let complete_overwrites = self.merge(&overwrites, &overwrites_with_sell_limit);
+
+        let (trade, state_changes) = self.adapter_contract.swap(
+            &self.id,
+            sell_token_address,
+            buy_token_address,
+            false,
+            sell_amount_respecting_limit,
+            Some(complete_overwrites),
+            self.block_overrides.clone(),
+        )?;
+
+        let mut new_state = self.clone();
+
+        // Apply state changes to the new state
+        for (address, state_update) in state_changes {
+            if let Some(storage) = state_update.storage {
+                let block_overwrites = new_state
+                    .block_lasting_overwrites
+                    .entry(address)
+                    .or_default();
+                for (slot, value) in storage {
+                    let slot = U256::from_str(&slot.to_string()).map_err(|_| {
+                        SimulationError::FatalError("Failed to decode slot index".to_string())
+                    })?;
+                    let value = U256::from_str(&value.to_string()).map_err(|_| {
+                        SimulationError::FatalError("Failed to decode slot overwrite".to_string())
+                    })?;
+                    block_overwrites.insert(slot, value);
+                }
+            }
+        }
+
+        Ok((trade.received_amount, trade.gas_used, new_state, sell_amount_exceeds_limit))
+    }
+
     #[cfg(test)]
     pub fn get_involved_contracts(&self) -> HashSet<Address> {
         self.involved_contracts.clone()
@@ -645,81 +728,30 @@ where
         let sell_token_address = bytes_to_address(&token_in.address)?;
         let buy_token_address = bytes_to_address(&token_out.address)?;
         let sell_amount = U256::from_be_slice(&amount_in.to_bytes_be());
-        let overwrites = self.get_overwrites(
-            vec![sell_token_address, buy_token_address],
-            *MAX_BALANCE / U256::from(100),
-        )?;
-        let (sell_amount_limit, _) = self.get_amount_limits(
-            vec![sell_token_address, buy_token_address],
-            Some(overwrites.clone()),
-        )?;
-        let (sell_amount_respecting_limit, sell_amount_exceeds_limit) = if self
-            .capabilities
-            .contains(&Capability::HardLimits) &&
-            sell_amount_limit < sell_amount
-        {
-            (sell_amount_limit, true)
-        } else {
-            (sell_amount, false)
-        };
 
-        let overwrites_with_sell_limit =
-            self.get_overwrites(vec![sell_token_address, buy_token_address], sell_amount_limit)?;
-        let complete_overwrites = self.merge(&overwrites, &overwrites_with_sell_limit);
+        let (buy_amount, gas_used, mut new_state, sell_amount_exceeds_limit) =
+            self.swap_core(sell_amount, sell_token_address, buy_token_address)?;
 
-        let (trade, state_changes) = self.adapter_contract.swap(
-            &self.id,
-            sell_token_address,
-            buy_token_address,
-            false,
-            sell_amount_respecting_limit,
-            Some(complete_overwrites),
-            self.block_overrides.clone(),
-        )?;
-
-        let mut new_state = self.clone();
-
-        // Apply state changes to the new state
-        for (address, state_update) in state_changes {
-            if let Some(storage) = state_update.storage {
-                let block_overwrites = new_state
-                    .block_lasting_overwrites
-                    .entry(address)
-                    .or_default();
-                for (slot, value) in storage {
-                    let slot = U256::from_str(&slot.to_string()).map_err(|_| {
-                        SimulationError::FatalError("Failed to decode slot index".to_string())
-                    })?;
-                    let value = U256::from_str(&value.to_string()).map_err(|_| {
-                        SimulationError::FatalError("Failed to decode slot overwrite".to_string())
-                    })?;
-                    block_overwrites.insert(slot, value);
-                }
-            }
-        }
-
-        // Update spot prices
+        // Update spot prices (requires token decimals, so this stays out of `swap_core`).
         let tokens = HashMap::from([
             (token_in.address.clone(), token_in.clone()),
             (token_out.address.clone(), token_out.clone()),
         ]);
         let _ = new_state.set_spot_prices(&tokens);
 
-        let buy_amount = trade.received_amount;
-
         if sell_amount_exceeds_limit {
             return Err(SimulationError::InvalidInput(
-                format!("Sell amount exceeds limit {sell_amount_limit}"),
+                "Sell amount exceeds limit".to_string(),
                 Some(GetAmountOutResult::new(
                     u256_to_biguint(buy_amount),
-                    u256_to_biguint(trade.gas_used),
+                    u256_to_biguint(gas_used),
                     Box::new(new_state.clone()),
                 )),
             ));
         }
         Ok(GetAmountOutResult::new(
             u256_to_biguint(buy_amount),
-            u256_to_biguint(trade.gas_used),
+            u256_to_biguint(gas_used),
             Box::new(new_state.clone()),
         ))
     }
@@ -828,6 +860,111 @@ where
     /// Implemented manually because `typetag` macro not supports generics
     fn typetag_deserialize(&self) {
         // https://github.com/dtolnay/typetag/blob/21ae0d40c9f73443a20204ab4a134441355b52f7/impl/src/tagged_trait.rs#L140
+        unreachable!("Only to catch missing typetag attribute on impl blocks. Not called.")
+    }
+}
+
+#[typetag::serialize]
+impl<D> SwapQuoter for EVMPoolState<D>
+where
+    D: EngineDatabaseInterface + Clone + Debug + 'static,
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "EVMPoolState: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Err(SimulationError::FatalError(
+            "EVMPoolState::fee is not available for VM-backed pools".to_string(),
+        ))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("EVMPoolState: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = ProtocolSim::spot_price(self, base.as_ref(), quote.as_ref())?;
+        Ok(MarginalPrice::new(price))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "EVMPoolState does not yet support exact-out (FixedOut) quoting".to_string(),
+                ))
+            }
+        };
+
+        let sell_token_address = bytes_to_address(params.token_in())?;
+        let buy_token_address = bytes_to_address(params.token_out())?;
+        let (buy_amount, gas_used, new_state, exceeds_limit) =
+            self.swap_core(amount_in, sell_token_address, buy_token_address)?;
+
+        if exceeds_limit {
+            return Err(SimulationError::RecoverableError("Sell amount exceeds limit".to_string()));
+        }
+
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(buy_amount, gas_used.saturating_to::<u64>(), new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let sell_token = bytes_to_address(params.token_in())?;
+        let buy_token = bytes_to_address(params.token_out())?;
+        let overwrites =
+            self.get_overwrites(vec![sell_token, buy_token], *MAX_BALANCE / U256::from(100))?;
+        let (max_in, max_out) =
+            self.get_amount_limits(vec![sell_token, buy_token], Some(overwrites))?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "EVMPoolState::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    /// Implemented manually because `typetag` macro does not support generics.
+    fn typetag_deserialize(&self) {
         unreachable!("Only to catch missing typetag attribute on impl blocks. Not called.")
     }
 }
@@ -1205,6 +1342,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_marginal_price_matches_spot_price() {
+        let mut pool_state = setup_pool_state().await;
+        let all_tokens: HashMap<Bytes, Token> = vec![bal(), dai()]
+            .into_iter()
+            .map(|t| (t.address.clone(), t))
+            .collect();
+        pool_state
+            .set_spot_prices(&all_tokens)
+            .unwrap();
+
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![dai().address, bal().address];
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let pool_state = pool_state.with_component(component);
+
+        for (base, quote) in [(dai(), bal()), (bal(), dai())] {
+            let spot = ProtocolSim::spot_price(&pool_state, &base, &quote).unwrap();
+            let marginal = pool_state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
+        }
+    }
+
+    #[tokio::test]
     async fn test_set_spot_prices_without_capability() {
         // Tests set Spot Prices functions when the pool doesn't have PriceFunction capability
         let mut pool_state = setup_pool_state().await;
@@ -1395,9 +1558,13 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        pool_state
-            .delta_transition(delta, &HashMap::new(), &Balances::default())
-            .unwrap();
+        ProtocolSim::delta_transition(
+            &mut pool_state,
+            delta,
+            &HashMap::new(),
+            &Balances::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             pool_state.block_overrides,
@@ -1421,9 +1588,13 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        pool_state
-            .delta_transition(delta, &HashMap::new(), &Balances::default())
-            .unwrap();
+        ProtocolSim::delta_transition(
+            &mut pool_state,
+            delta,
+            &HashMap::new(),
+            &Balances::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             pool_state.block_overrides,

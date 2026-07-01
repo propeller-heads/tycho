@@ -1,6 +1,5 @@
 use alloy::primitives::{U256, U512};
 use num_bigint::BigUint;
-use num_traits::Zero;
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -101,11 +100,23 @@ pub fn cpmm_get_limits(
     reserve1: U256,
     fee_bps: u32,
 ) -> Result<(BigUint, BigUint), SimulationError> {
+    let (amount_in, amount_out) =
+        cpmm_get_limits_u256(sell_token < buy_token, reserve0, reserve1, fee_bps)?;
+    Ok((u256_to_biguint(amount_in), u256_to_biguint(amount_out)))
+}
+
+/// `U256`-native core of [`cpmm_get_limits`]. See that function for the derivation; this variant
+/// avoids the `BigUint` round-trip for the allocation-free `SwapQuoter` path.
+pub fn cpmm_get_limits_u256(
+    zero_for_one: bool,
+    reserve0: U256,
+    reserve1: U256,
+    fee_bps: u32,
+) -> Result<(U256, U256), SimulationError> {
     if reserve0 == U256::from(0u64) || reserve1 == U256::from(0u64) {
-        return Ok((BigUint::zero(), BigUint::zero()));
+        return Ok((U256::ZERO, U256::ZERO));
     }
 
-    let zero_for_one = sell_token < buy_token;
     let (reserve_in, reserve_out) =
         if zero_for_one { (reserve0, reserve1) } else { (reserve1, reserve0) };
 
@@ -122,7 +133,7 @@ pub fn cpmm_get_limits(
     let amount_out =
         mul_div(reserve_out, amount_in_with_fee, safe_add_u256(reserve_in, amount_in)?)?;
 
-    Ok((u256_to_biguint(amount_in), u256_to_biguint(amount_out)))
+    Ok((amount_in, amount_out))
 }
 
 pub fn cpmm_delta_transition(

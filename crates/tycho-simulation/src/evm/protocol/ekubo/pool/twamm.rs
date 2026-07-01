@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 #[cfg(not(test))]
 use std::time::SystemTime;
 
@@ -15,6 +18,7 @@ use itertools::Itertools;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -31,6 +35,9 @@ pub struct TwammPool {
     state: TwammPoolState,
 
     swapped_this_block: bool,
+
+    #[serde(skip)]
+    pub(in crate::evm::protocol::ekubo) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl PartialEq for TwammPool {
@@ -77,6 +84,7 @@ impl TwammPool {
             })?,
             state,
             swapped_this_block: false,
+            component: None,
         })
     }
 
@@ -142,6 +150,7 @@ impl EkuboPool for TwammPool {
                 imp: self.imp.clone(),
                 state: quote.state_after,
                 swapped_this_block: true,
+                component: self.component.clone(),
             }
             .into(),
         })

@@ -20,11 +20,13 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV2State {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
         let (reserve0, reserve1) = cpmm_try_from_with_header(snapshot)?;
-        Ok(Self::new(reserve0, reserve1))
+        Ok(Self::new(reserve0, reserve1).with_component(component))
     }
 }
 

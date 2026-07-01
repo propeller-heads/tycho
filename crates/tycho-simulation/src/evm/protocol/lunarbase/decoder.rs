@@ -28,12 +28,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseTychoState {
         snapshot: ComponentWithState,
         block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
         let mut state = decode_lunarbase_snapshot(&snapshot)?;
         state.head_block = block.number;
-        Ok(state)
+        Ok(state.with_component(component))
     }
 }
 
@@ -92,6 +94,7 @@ pub fn decode_lunarbase_snapshot(
         block_delay: u64::from(required_attr(attrs, attrs::BLOCK_DELAY)?.clone()),
         paused: decode_bool(attrs::PAUSED, required_attr(attrs, attrs::PAUSED)?)?,
         head_block: 0,
+        component: None,
     })
 }
 
@@ -183,6 +186,7 @@ mod tests {
             block_delay: 2,
             paused: false,
             head_block: 100,
+            component: None,
         }
     }
 

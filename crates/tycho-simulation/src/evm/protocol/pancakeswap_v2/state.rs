@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::U256;
 use num_bigint::BigUint;
@@ -6,12 +6,17 @@ use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{
             Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
+        },
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
         },
     },
     Bytes,
@@ -19,8 +24,8 @@ use tycho_common::{
 
 use crate::evm::protocol::{
     cpmm::protocol::{
-        cpmm_delta_transition, cpmm_fee, cpmm_get_amount_out, cpmm_get_limits, cpmm_spot_price,
-        cpmm_swap_to_price, ProtocolFee,
+        cpmm_delta_transition, cpmm_fee, cpmm_get_amount_out, cpmm_get_limits,
+        cpmm_get_limits_u256, cpmm_spot_price, cpmm_swap_to_price, ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::{biguint_to_u256, u256_to_biguint},
@@ -32,11 +37,21 @@ const PANCAKESWAP_V2_FEE: u32 = 25; // 0.25% fee
 const FEE_PRECISION: U256 = U256::from_limbs([10000, 0, 0, 0]);
 const FEE_NUMERATOR: U256 = U256::from_limbs([9975, 0, 0, 0]);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PancakeswapV2State {
     pub reserve0: U256,
     pub reserve1: U256,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
+
+impl PartialEq for PancakeswapV2State {
+    fn eq(&self, other: &Self) -> bool {
+        self.reserve0 == other.reserve0 && self.reserve1 == other.reserve1
+    }
+}
+
+impl Eq for PancakeswapV2State {}
 
 impl PancakeswapV2State {
     /// Creates a new instance of `PancakeswapV2State` with the given reserves.
@@ -46,7 +61,13 @@ impl PancakeswapV2State {
     /// * `reserve0` - Reserve of token 0.
     /// * `reserve1` - Reserve of token 1.
     pub fn new(reserve0: U256, reserve1: U256) -> Self {
-        PancakeswapV2State { reserve0, reserve1 }
+        PancakeswapV2State { reserve0, reserve1, component: None }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 }
 
@@ -58,7 +79,7 @@ impl ProtocolSim for PancakeswapV2State {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let price = cpmm_spot_price(base, quote, self.reserve0, self.reserve1)?;
-        Ok(add_fee_markup(price, self.fee()))
+        Ok(add_fee_markup(price, ProtocolSim::fee(self)))
     }
 
     fn get_amount_out(
@@ -163,10 +184,134 @@ impl ProtocolSim for PancakeswapV2State {
             let (other_reserve0, other_reserve1) = (other_state.reserve0, other_state.reserve1);
             self_reserve0 == other_reserve0 &&
                 self_reserve1 == other_reserve1 &&
-                self.fee() == other_state.fee()
+                ProtocolSim::fee(self) == ProtocolSim::fee(other_state)
         } else {
             false
         }
+    }
+}
+
+#[typetag::serde]
+impl SwapQuoter for PancakeswapV2State {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "PancakeswapV2State: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(cpmm_fee(PANCAKESWAP_V2_FEE)))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("PancakeswapV2State: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = cpmm_spot_price(base.as_ref(), quote.as_ref(), self.reserve0, self.reserve1)?;
+        Ok(MarginalPrice::new(add_fee_markup(price, ProtocolSim::fee(self))))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "PancakeswapV2State does not yet support exact-out (FixedOut) quoting"
+                        .to_string(),
+                ))
+            }
+        };
+
+        let zero_for_one = params.token_in() < params.token_out();
+        let (reserve_in, reserve_out) = if zero_for_one {
+            (self.reserve0, self.reserve1)
+        } else {
+            (self.reserve1, self.reserve0)
+        };
+        let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
+        let amount_out = cpmm_get_amount_out(amount_in, reserve_in, reserve_out, fee)?;
+
+        let new_state = if params.should_return_new_state() {
+            let mut new_state = self.clone();
+            if zero_for_one {
+                new_state.reserve0 = safe_add_u256(self.reserve0, amount_in)?;
+                new_state.reserve1 = safe_sub_u256(self.reserve1, amount_out)?;
+            } else {
+                new_state.reserve0 = safe_sub_u256(self.reserve0, amount_out)?;
+                new_state.reserve1 = safe_add_u256(self.reserve1, amount_in)?;
+            }
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+
+        Ok(Quote::new(amount_out, SWAP_BASE_GAS, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let zero_for_one = params.token_in() < params.token_out();
+        let (max_in, max_out) =
+            cpmm_get_limits_u256(zero_for_one, self.reserve0, self.reserve1, PANCAKESWAP_V2_FEE)?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, params: QuerySwapParams) -> SimulationResult<Swap> {
+        use tycho_common::simulation::swap::SwapConstraint as QuerySwapConstraint;
+        match params.swap_constraint() {
+            QuerySwapConstraint::PoolTargetPrice { target, .. } => {
+                let zero_for_one = params.token_in() < params.token_out();
+                let (reserve_in, reserve_out) = if zero_for_one {
+                    (self.reserve0, self.reserve1)
+                } else {
+                    (self.reserve1, self.reserve0)
+                };
+                let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
+                let legacy_price = tycho_common::simulation::protocol_sim::Price::new(
+                    u256_to_biguint(target.numerator),
+                    u256_to_biguint(target.denominator),
+                );
+                let (amount_in, _) = cpmm_swap_to_price(reserve_in, reserve_out, &legacy_price, fee)?;
+                if amount_in.is_zero() {
+                    return Ok(Swap::new(U256::ZERO, U256::ZERO, None, None));
+                }
+                let amount_in_u256 = biguint_to_u256(&amount_in);
+                let quote = self.quote(
+                    QuoteParams::fixed_in(params.token_in(), params.token_out(), amount_in_u256)?
+                        .with_new_state(),
+                )?;
+                Ok(Swap::new(amount_in_u256, quote.amount_out(), quote.new_state(), None))
+            }
+            QuerySwapConstraint::TradeLimitPrice { .. } => Err(SimulationError::RecoverableError(
+                "PancakeswapV2State does not support TradeLimitPrice constraint in query_swap"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        let (reserve0_mut, reserve1_mut) = (&mut self.reserve0, &mut self.reserve1);
+        cpmm_delta_transition(params.delta().clone(), reserve0_mut, reserve1_mut)?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
     }
 }
 
@@ -338,9 +483,113 @@ mod tests {
             U256::from_str("30314846538607556521556").unwrap(),
         );
 
-        let res = state.fee();
+        let res = ProtocolSim::fee(&state);
 
         assert_ulps_eq!(res, 0.0025); // 0.25% fee
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        let usdc = Token::new(
+            &Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
+            "USDC",
+            6,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![usdc.address.clone(), weth.address.clone()];
+        let all_tokens = HashMap::from([
+            (usdc.address.clone(), usdc.clone()),
+            (weth.address.clone(), weth.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = PancakeswapV2State::new(
+            U256::from_str("36925554990922").unwrap(),
+            U256::from_str("30314846538607556521556").unwrap(),
+        )
+        .with_component(component);
+
+        for (base, quote) in [(&usdc, &weth), (&weth, &usdc)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            assert_ulps_eq!(marginal.price(), spot);
+        }
+    }
+
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_swap_quoter_matches_protocol_sim(#[case] zero_for_one: bool) {
+        let state = PancakeswapV2State::new(
+            U256::from_str("6770398782322527849696614").unwrap(),
+            U256::from_str("5124813135806900540214").unwrap(),
+        );
+        let (token_in, token_out) =
+            if zero_for_one { (token_0(), token_1()) } else { (token_1(), token_0()) };
+
+        for amount in ["1000000000000000000", "250000000000000000000", "999999999999999"] {
+            let amount = BigUint::from_str(amount).unwrap();
+
+            let legacy = state
+                .get_amount_out(amount.clone(), &token_in, &token_out)
+                .unwrap();
+
+            let quote = state
+                .quote(
+                    QuoteParams::fixed_in(
+                        &token_in.address,
+                        &token_out.address,
+                        biguint_to_u256(&amount),
+                    )
+                    .unwrap()
+                    .with_new_state(),
+                )
+                .unwrap();
+
+            assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+            assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+
+            let legacy_new = legacy
+                .new_state
+                .as_any()
+                .downcast_ref::<PancakeswapV2State>()
+                .unwrap();
+            #[allow(deprecated)]
+            let quote_new = quote
+                .new_state()
+                .unwrap()
+                .to_protocol_sim();
+            let quote_new = quote_new
+                .as_any()
+                .downcast_ref::<PancakeswapV2State>()
+                .unwrap();
+            assert_eq!(quote_new.reserve0, legacy_new.reserve0);
+            assert_eq!(quote_new.reserve1, legacy_new.reserve1);
+        }
+
+        let (legacy_in, legacy_out) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        let limits = state
+            .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
     }
 
     #[test]
@@ -361,7 +610,8 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        let res = state.delta_transition(delta, &HashMap::new(), &Balances::default());
+        let res =
+            ProtocolSim::delta_transition(&mut state, delta, &HashMap::new(), &Balances::default());
 
         assert!(res.is_ok());
         assert_eq!(state.reserve0, U256::from_str("1500").unwrap());
@@ -384,7 +634,8 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        let res = state.delta_transition(delta, &HashMap::new(), &Balances::default());
+        let res =
+            ProtocolSim::delta_transition(&mut state, delta, &HashMap::new(), &Balances::default());
 
         assert!(res.is_err());
         match res {

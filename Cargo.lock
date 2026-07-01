@@ -9803,6 +9803,7 @@ dependencies = [
  "pretty_assertions",
  "rand 0.8.5",
  "rstest 0.24.0",
+ "ruint",
  "serde",
  "serde_json",
  "strum 0.25.0",

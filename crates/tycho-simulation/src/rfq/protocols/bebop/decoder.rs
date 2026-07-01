@@ -25,6 +25,9 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let state_attrs = snapshot.state.attributes;
 
         if snapshot.component.tokens.len() != 2 {
@@ -92,7 +95,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
                 InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
             })?;
 
-        Ok(BebopState { base_token, quote_token, price_data, client })
+        Ok(BebopState::new(base_token, quote_token, price_data, client).with_component(component))
     }
 }
 

@@ -1,14 +1,19 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::U256;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
@@ -35,7 +40,7 @@ const ASSIGN_DEPOSITS_BASE_GAS: u64 = 20_000;
 const GAS_PER_MEGAPOOL_ASSIGNMENT: u64 = 120_000;
 const BASE_WITHDRAWAL_GAS: u64 = 134_000;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RocketpoolState {
     pub reth_supply: U256,
     pub total_eth: U256,
@@ -60,6 +65,26 @@ pub struct RocketpoolState {
     /// Target rETH collateral rate (scaled by 1e18, e.g. 0.01e18 = 1%).
     /// On-chain: RocketDAOProtocolSettingsNetwork.getTargetRethCollateralRate()
     pub target_reth_collateral_rate: U256,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
+}
+
+impl PartialEq for RocketpoolState {
+    fn eq(&self, other: &Self) -> bool {
+        self.reth_supply == other.reth_supply &&
+            self.total_eth == other.total_eth &&
+            self.deposit_contract_balance == other.deposit_contract_balance &&
+            self.reth_contract_liquidity == other.reth_contract_liquidity &&
+            self.deposit_fee == other.deposit_fee &&
+            self.deposits_enabled == other.deposits_enabled &&
+            self.min_deposit_amount == other.min_deposit_amount &&
+            self.max_deposit_pool_size == other.max_deposit_pool_size &&
+            self.deposit_assigning_enabled == other.deposit_assigning_enabled &&
+            self.deposit_assign_maximum == other.deposit_assign_maximum &&
+            self.deposit_assign_socialised_maximum == other.deposit_assign_socialised_maximum &&
+            self.megapool_queue_requested_total == other.megapool_queue_requested_total &&
+            self.target_reth_collateral_rate == other.target_reth_collateral_rate
+    }
 }
 
 impl RocketpoolState {
@@ -93,7 +118,14 @@ impl RocketpoolState {
             deposit_assign_socialised_maximum,
             megapool_queue_requested_total,
             target_reth_collateral_rate,
+            component: None,
         }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     /// Calculates rETH amount out for a given ETH deposit amount.
@@ -216,44 +248,16 @@ impl RocketpoolState {
 
         (entries * full_deposit_value, entries.try_into().unwrap_or(u64::MAX))
     }
-}
 
-#[typetag::serde]
-impl ProtocolSim for RocketpoolState {
-    fn fee(&self) -> f64 {
-        unimplemented!("Rocketpool has asymmetric fees; use spot_price or get_amount_out instead")
-    }
-
-    fn spot_price(&self, _base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        // As we are computing the amount of quote needed to buy 1 base, we check the quote token.
-        let is_depositing_eth = RocketpoolState::is_depositing_eth(&quote.address);
-
-        // As the protocol has no slippage, we can use a fixed amount for spot price calculation.
-        // We compute how much base we get for 1 quote, then invert to get quote needed for 1 base.
-        let amount = U256::from(1e18);
-
-        let base_per_quote = if is_depositing_eth {
-            // base=rETH, quote=ETH: compute rETH for given ETH
-            self.assert_deposits_enabled()?;
-            self.get_reth_value(amount)?
-        } else {
-            // base=ETH, quote=rETH: compute ETH for given rETH
-            self.get_eth_value(amount)?
-        };
-
-        let base_per_quote = u256_to_f64(base_per_quote)? / 1e18;
-        // Invert to get how much quote needed to buy 1 base
-        Ok(1.0 / base_per_quote)
-    }
-
-    fn get_amount_out(
+    /// `U256`-native swap core shared by `get_amount_out` and `SwapQuoter::quote`. Returns
+    /// `(amount_out, gas, new_state)`. Only `token_in` matters: ETH in = deposit, rETH in =
+    /// withdrawal.
+    fn swap_core(
         &self,
-        amount_in: BigUint,
-        token_in: &Token,
-        _token_out: &Token,
-    ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
-        let is_depositing_eth = RocketpoolState::is_depositing_eth(&token_in.address);
+        amount_in: U256,
+        token_in: &Bytes,
+    ) -> Result<(U256, u64, RocketpoolState), SimulationError> {
+        let is_depositing_eth = RocketpoolState::is_depositing_eth(token_in);
 
         let amount_out = if is_depositing_eth {
             self.assert_deposits_enabled()?;
@@ -347,6 +351,63 @@ impl ProtocolSim for RocketpoolState {
         // liquidity in the rETH contract. Note that there has never been a situation during a
         // withdrawal when this was not the case, hence the simplified gas estimation.
 
+        Ok((amount_out, gas_used, new_state))
+    }
+
+    /// `U256`-native limits core shared by `get_limits` and `SwapQuoter::swap_limits`. Only
+    /// `sell_token` matters.
+    fn limits_core(&self, sell_token: &Bytes) -> Result<(U256, U256), SimulationError> {
+        if Self::is_depositing_eth(sell_token) {
+            // ETH -> rETH: max sell = max_deposit_capacity - deposit_contract_balance
+            let max_capacity = self.get_max_deposit_capacity()?;
+            let max_eth_sell = safe_sub_u256(max_capacity, self.deposit_contract_balance)?;
+            let max_reth_buy = self.get_reth_value(max_eth_sell)?;
+            Ok((max_eth_sell, max_reth_buy))
+        } else {
+            // rETH -> ETH: max buy = total available for withdrawal
+            let max_eth_buy = self.get_total_available_for_withdrawal()?;
+            let max_reth_sell = mul_div(max_eth_buy, self.reth_supply, self.total_eth)?;
+            Ok((max_reth_sell, max_eth_buy))
+        }
+    }
+}
+
+#[typetag::serde]
+impl ProtocolSim for RocketpoolState {
+    fn fee(&self) -> f64 {
+        unimplemented!("Rocketpool has asymmetric fees; use spot_price or get_amount_out instead")
+    }
+
+    fn spot_price(&self, _base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        // As we are computing the amount of quote needed to buy 1 base, we check the quote token.
+        let is_depositing_eth = RocketpoolState::is_depositing_eth(&quote.address);
+
+        // As the protocol has no slippage, we can use a fixed amount for spot price calculation.
+        // We compute how much base we get for 1 quote, then invert to get quote needed for 1 base.
+        let amount = U256::from(1e18);
+
+        let base_per_quote = if is_depositing_eth {
+            // base=rETH, quote=ETH: compute rETH for given ETH
+            self.assert_deposits_enabled()?;
+            self.get_reth_value(amount)?
+        } else {
+            // base=ETH, quote=rETH: compute ETH for given rETH
+            self.get_eth_value(amount)?
+        };
+
+        let base_per_quote = u256_to_f64(base_per_quote)? / 1e18;
+        // Invert to get how much quote needed to buy 1 base
+        Ok(1.0 / base_per_quote)
+    }
+
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        _token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        let amount_in = biguint_to_u256(&amount_in);
+        let (amount_out, gas_used, new_state) = self.swap_core(amount_in, &token_in.address)?;
         Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
             BigUint::from(gas_used),
@@ -359,20 +420,8 @@ impl ProtocolSim for RocketpoolState {
         sell_token: Bytes,
         _buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let is_depositing_eth = Self::is_depositing_eth(&sell_token);
-
-        if is_depositing_eth {
-            // ETH -> rETH: max sell = max_deposit_capacity - deposit_contract_balance
-            let max_capacity = self.get_max_deposit_capacity()?;
-            let max_eth_sell = safe_sub_u256(max_capacity, self.deposit_contract_balance)?;
-            let max_reth_buy = self.get_reth_value(max_eth_sell)?;
-            Ok((u256_to_biguint(max_eth_sell), u256_to_biguint(max_reth_buy)))
-        } else {
-            // rETH -> ETH: max buy = total available for withdrawal
-            let max_eth_buy = self.get_total_available_for_withdrawal()?;
-            let max_reth_sell = mul_div(max_eth_buy, self.reth_supply, self.total_eth)?;
-            Ok((u256_to_biguint(max_reth_sell), u256_to_biguint(max_eth_buy)))
-        }
+        let (max_in, max_out) = self.limits_core(&sell_token)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -462,6 +511,105 @@ impl ProtocolSim for RocketpoolState {
         params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
     ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
         crate::evm::query_pool_swap::query_pool_swap(self, params)
+    }
+}
+
+#[typetag::serde]
+impl SwapQuoter for RocketpoolState {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "RocketpoolState: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, params: QuoteParams) -> SimulationResult<SwapFee> {
+        // Rocketpool fees are asymmetric: a deposit (ETH -> rETH) charges `deposit_fee`, a
+        // withdrawal (rETH -> ETH) is free. The directional `QuoteParams` resolves the ambiguity
+        // that the legacy `ProtocolSim::fee` could not express.
+        if RocketpoolState::is_depositing_eth(params.token_in()) {
+            Ok(SwapFee::new(u256_to_f64(self.deposit_fee)? / DEPOSIT_FEE_BASE as f64))
+        } else {
+            Ok(SwapFee::new(0f64))
+        }
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("RocketpoolState: component not set".to_string())
+        })?;
+        let _base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+
+        // Mirrors `ProtocolSim::spot_price`: only the quote token decides the direction. We compute
+        // how much base 1 quote buys, then invert to get the quote needed to buy 1 base.
+        let is_depositing_eth = RocketpoolState::is_depositing_eth(&quote.address);
+        let amount = U256::from(1e18);
+        let base_per_quote = if is_depositing_eth {
+            self.assert_deposits_enabled()?;
+            self.get_reth_value(amount)?
+        } else {
+            self.get_eth_value(amount)?
+        };
+        let base_per_quote = u256_to_f64(base_per_quote)? / 1e18;
+        Ok(MarginalPrice::new(1.0 / base_per_quote))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "RocketpoolState does not yet support exact-out (FixedOut) quoting".to_string(),
+                ))
+            }
+        };
+
+        let (amount_out, gas, new_state) = self.swap_core(amount_in, params.token_in())?;
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, gas, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let (max_in, max_out) = self.limits_core(params.token_in())?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "RocketpoolState::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
     }
 }
 
@@ -644,8 +792,7 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        state
-            .delta_transition(delta, &HashMap::new(), &Balances::default())
+        ProtocolSim::delta_transition(&mut state, delta, &HashMap::new(), &Balances::default())
             .unwrap();
 
         assert_eq!(state.total_eth, U256::from(300u64));
@@ -672,8 +819,7 @@ mod tests {
             deleted_attributes: HashSet::new(),
         };
 
-        state
-            .delta_transition(delta, &HashMap::new(), &Balances::default())
+        ProtocolSim::delta_transition(&mut state, delta, &HashMap::new(), &Balances::default())
             .unwrap();
 
         assert_eq!(state.megapool_queue_requested_total, U256::from(1000u64));
@@ -738,9 +884,32 @@ mod tests {
     }
 
     #[test]
+    fn test_marginal_price_matches_spot_price() {
+        let eth = eth_token();
+        let reth = reth_token();
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![eth.address.clone(), reth.address.clone()];
+        let all_tokens = HashMap::from([
+            (eth.address.clone(), eth.clone()),
+            (reth.address.clone(), reth.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = create_state().with_component(component);
+
+        for (base, quote) in [(&eth, &reth), (&reth, &eth)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            assert_ulps_eq!(marginal.price(), spot);
+        }
+    }
+
+    #[test]
     fn test_fee_panics() {
         let state = create_state();
-        let result = std::panic::catch_unwind(|| state.fee());
+        let result = std::panic::catch_unwind(|| ProtocolSim::fee(&state));
         assert!(result.is_err());
     }
 
@@ -1301,5 +1470,61 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(new_state.deposit_contract_balance, state.deposit_contract_balance);
+    }
+
+    #[rstest]
+    #[case::deposit(true)]
+    #[case::withdraw(false)]
+    fn test_swap_quoter_matches_protocol_sim(#[case] deposit: bool) {
+        let state = create_state();
+        let (token_in, token_out) =
+            if deposit { (eth_token(), reth_token()) } else { (reth_token(), eth_token()) };
+
+        for amount in ["1000000000000000000", "10000000000000000000"] {
+            let amount = BigUint::from_str(amount).unwrap();
+
+            let legacy = state
+                .get_amount_out(amount.clone(), &token_in, &token_out)
+                .unwrap();
+            let quote = state
+                .quote(
+                    QuoteParams::fixed_in(
+                        &token_in.address,
+                        &token_out.address,
+                        biguint_to_u256(&amount),
+                    )
+                    .unwrap()
+                    .with_new_state(),
+                )
+                .unwrap();
+
+            assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+            assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+
+            let legacy_new = legacy
+                .new_state
+                .as_any()
+                .downcast_ref::<RocketpoolState>()
+                .unwrap();
+            #[allow(deprecated)]
+            let quote_new = quote
+                .new_state()
+                .unwrap()
+                .to_protocol_sim();
+            let quote_new = quote_new
+                .as_any()
+                .downcast_ref::<RocketpoolState>()
+                .unwrap();
+            assert_eq!(quote_new, legacy_new);
+        }
+
+        let (legacy_in, legacy_out) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        let limits = state
+            .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
     }
 }

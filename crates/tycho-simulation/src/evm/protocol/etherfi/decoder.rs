@@ -19,9 +19,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EtherfiState {
         snapshot: ComponentWithState,
         block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let total_value_out_of_lp = U256::from_be_slice(
             snapshot
                 .state
@@ -110,6 +113,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EtherfiState {
             eth_amount_locked_for_withdrawl,
             eth_redemption_info,
             liquidity_pool_native_balance,
-        ))
+        )
+        .with_component(component))
     }
 }

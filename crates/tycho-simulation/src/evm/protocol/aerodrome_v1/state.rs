@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::U256;
 use num_bigint::BigUint;
@@ -6,12 +6,17 @@ use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{
             Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
+        },
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
         },
     },
     Bytes,
@@ -19,9 +24,13 @@ use tycho_common::{
 
 use super::solidly_stable::{
     get_amount_out as solidly_stable_get_amount_out, get_limits as solidly_stable_get_limits,
+    get_limits_u256 as solidly_stable_get_limits_u256,
 };
 use crate::evm::protocol::{
-    cpmm::protocol::{cpmm_fee, cpmm_get_limits, cpmm_spot_price, cpmm_swap_to_price, ProtocolFee},
+    cpmm::protocol::{
+        cpmm_fee, cpmm_get_limits, cpmm_get_limits_u256, cpmm_spot_price, cpmm_swap_to_price,
+        ProtocolFee,
+    },
     safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
     u256_num::{biguint_to_u256, u256_to_biguint},
     utils::add_fee_markup,
@@ -33,7 +42,7 @@ const AERODROME_V1_STABLE_FEE_BPS: u32 = 5;
 const AERODROME_V1_VOLATILE_FEE_BPS: u32 = 30;
 const AERODROME_V1_ZERO_FEE_INDICATOR_BPS: u32 = 420;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AerodromeV1State {
     pub reserve0: U256,
     pub reserve1: U256,
@@ -41,7 +50,22 @@ pub struct AerodromeV1State {
     pub fee: u32,
     pub decimals0: u8,
     pub decimals1: u8,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
+
+impl PartialEq for AerodromeV1State {
+    fn eq(&self, other: &Self) -> bool {
+        self.reserve0 == other.reserve0 &&
+            self.reserve1 == other.reserve1 &&
+            self.stable == other.stable &&
+            self.fee == other.fee &&
+            self.decimals0 == other.decimals0 &&
+            self.decimals1 == other.decimals1
+    }
+}
+
+impl Eq for AerodromeV1State {}
 
 impl AerodromeV1State {
     /// Creates a new instance of `AerodromeV1State` with the given reserves and raw fee.
@@ -53,7 +77,13 @@ impl AerodromeV1State {
         decimals0: u8,
         decimals1: u8,
     ) -> Self {
-        Self { reserve0, reserve1, stable, fee, decimals0, decimals1 }
+        Self { reserve0, reserve1, stable, fee, decimals0, decimals1, component: None }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     fn default_fee_bps(&self) -> u32 {
@@ -118,6 +148,55 @@ impl AerodromeV1State {
 
         safe_div_u256(numerator, denominator)
     }
+
+    /// Applies a state delta (reserves and optional fee). Shared by the `ProtocolSim` and
+    /// `SwapQuoter` transition methods.
+    fn apply_delta(&mut self, delta: &ProtocolStateDelta) -> Result<(), TransitionError> {
+        if let Some(reserve0) = delta.updated_attributes.get("reserve0") {
+            self.reserve0 = U256::from_be_slice(reserve0);
+        }
+        if let Some(reserve1) = delta.updated_attributes.get("reserve1") {
+            self.reserve1 = U256::from_be_slice(reserve1);
+        }
+        if let Some(fee) = delta.updated_attributes.get("fee") {
+            self.fee = u32::from(fee.clone());
+            let resolved_fee_bps = self.resolved_fee_bps();
+            if resolved_fee_bps > FEE_PRECISION_BPS {
+                return Err(TransitionError::DecodeError(format!(
+                    "Invalid resolved fee value {}, expected <= {} bps",
+                    resolved_fee_bps, FEE_PRECISION_BPS
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Computes `amount_out` in `U256` for the given direction, handling both stable and volatile
+    /// pools. Shared core for `get_amount_out` and `SwapQuoter::quote`.
+    fn amount_out_u256(
+        &self,
+        amount_in: U256,
+        zero_for_one: bool,
+    ) -> Result<U256, SimulationError> {
+        if self.stable {
+            solidly_stable_get_amount_out(
+                amount_in,
+                zero_for_one,
+                self.reserve0,
+                self.reserve1,
+                self.resolved_fee_bps(),
+                self.decimals0,
+                self.decimals1,
+            )
+        } else {
+            let (reserve_in, reserve_out) = if zero_for_one {
+                (self.reserve0, self.reserve1)
+            } else {
+                (self.reserve1, self.reserve0)
+            };
+            self.volatile_get_amount_out(amount_in, reserve_in, reserve_out)
+        }
+    }
 }
 
 #[typetag::serde]
@@ -128,7 +207,7 @@ impl ProtocolSim for AerodromeV1State {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let price = cpmm_spot_price(base, quote, self.reserve0, self.reserve1)?;
-        Ok(add_fee_markup(price, self.fee()))
+        Ok(add_fee_markup(price, ProtocolSim::fee(self)))
     }
 
     fn get_amount_out(
@@ -139,24 +218,7 @@ impl ProtocolSim for AerodromeV1State {
     ) -> Result<GetAmountOutResult, SimulationError> {
         let amount_in = biguint_to_u256(&amount_in);
         let zero2one = token_in.address < token_out.address;
-        let amount_out = if self.stable {
-            solidly_stable_get_amount_out(
-                amount_in,
-                zero2one,
-                self.reserve0,
-                self.reserve1,
-                self.resolved_fee_bps(),
-                if zero2one { token_in.decimals as u8 } else { token_out.decimals as u8 },
-                if zero2one { token_out.decimals as u8 } else { token_in.decimals as u8 },
-            )?
-        } else {
-            let (reserve_in, reserve_out) = if zero2one {
-                (self.reserve0, self.reserve1)
-            } else {
-                (self.reserve1, self.reserve0)
-            };
-            self.volatile_get_amount_out(amount_in, reserve_in, reserve_out)?
-        };
+        let amount_out = self.amount_out_u256(amount_in, zero2one)?;
         let mut new_state = self.clone();
         let (reserve0_mut, reserve1_mut) = (&mut new_state.reserve0, &mut new_state.reserve1);
         if zero2one {
@@ -204,23 +266,7 @@ impl ProtocolSim for AerodromeV1State {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        if let Some(reserve0) = delta.updated_attributes.get("reserve0") {
-            self.reserve0 = U256::from_be_slice(reserve0);
-        }
-        if let Some(reserve1) = delta.updated_attributes.get("reserve1") {
-            self.reserve1 = U256::from_be_slice(reserve1);
-        }
-        if let Some(fee) = delta.updated_attributes.get("fee") {
-            self.fee = u32::from(fee.clone());
-            let resolved_fee_bps = self.resolved_fee_bps();
-            if resolved_fee_bps > FEE_PRECISION_BPS {
-                return Err(TransitionError::DecodeError(format!(
-                    "Invalid resolved fee value {}, expected <= {} bps",
-                    resolved_fee_bps, FEE_PRECISION_BPS
-                )));
-            }
-        }
-        Ok(())
+        self.apply_delta(&delta)
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
@@ -284,6 +330,141 @@ impl ProtocolSim for AerodromeV1State {
         } else {
             false
         }
+    }
+}
+
+#[typetag::serde]
+impl SwapQuoter for AerodromeV1State {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "AerodromeV1State: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(cpmm_fee(self.resolved_fee_bps())))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("AerodromeV1State: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = cpmm_spot_price(base.as_ref(), quote.as_ref(), self.reserve0, self.reserve1)?;
+        Ok(MarginalPrice::new(add_fee_markup(price, ProtocolSim::fee(self))))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "AerodromeV1State does not yet support exact-out (FixedOut) quoting"
+                        .to_string(),
+                ))
+            }
+        };
+
+        let zero_for_one = params.token_in() < params.token_out();
+        let amount_out = self.amount_out_u256(amount_in, zero_for_one)?;
+
+        let new_state = if params.should_return_new_state() {
+            let mut new_state = self.clone();
+            if zero_for_one {
+                new_state.reserve0 = safe_add_u256(self.reserve0, amount_in)?;
+                new_state.reserve1 = safe_sub_u256(self.reserve1, amount_out)?;
+            } else {
+                new_state.reserve0 = safe_sub_u256(self.reserve0, amount_out)?;
+                new_state.reserve1 = safe_add_u256(self.reserve1, amount_in)?;
+            }
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+
+        Ok(Quote::new(amount_out, 120_000, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let zero_for_one = params.token_in() < params.token_out();
+        let (max_in, max_out) = if self.stable {
+            solidly_stable_get_limits_u256(
+                zero_for_one,
+                self.reserve0,
+                self.reserve1,
+                self.decimals0,
+                self.decimals1,
+            )?
+        } else {
+            cpmm_get_limits_u256(
+                zero_for_one,
+                self.reserve0,
+                self.reserve1,
+                self.resolved_fee_bps(),
+            )?
+        };
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, params: QuerySwapParams) -> SimulationResult<Swap> {
+        use tycho_common::simulation::swap::SwapConstraint as QuerySwapConstraint;
+        match params.swap_constraint() {
+            QuerySwapConstraint::PoolTargetPrice { target, .. } => {
+                let zero_for_one = params.token_in() < params.token_out();
+                let (reserve_in, reserve_out) = if zero_for_one {
+                    (self.reserve0, self.reserve1)
+                } else {
+                    (self.reserve1, self.reserve0)
+                };
+                let legacy_price = tycho_common::simulation::protocol_sim::Price::new(
+                    u256_to_biguint(target.numerator),
+                    u256_to_biguint(target.denominator),
+                );
+                let (amount_in, _) = cpmm_swap_to_price(
+                    reserve_in,
+                    reserve_out,
+                    &legacy_price,
+                    self.protocol_fee()?,
+                )?;
+                if amount_in.is_zero() {
+                    return Ok(Swap::new(U256::ZERO, U256::ZERO, None, None));
+                }
+                let amount_in_u256 = biguint_to_u256(&amount_in);
+                let quote = self.quote(
+                    QuoteParams::fixed_in(params.token_in(), params.token_out(), amount_in_u256)?
+                        .with_new_state(),
+                )?;
+                Ok(Swap::new(amount_in_u256, quote.amount_out(), quote.new_state(), None))
+            }
+            QuerySwapConstraint::TradeLimitPrice { .. } => Err(SimulationError::RecoverableError(
+                "AerodromeV1State does not support TradeLimitPrice constraint in query_swap"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        self.apply_delta(params.delta())?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
     }
 }
 
@@ -516,5 +697,110 @@ mod tests {
             .expect("stable swap should succeed");
 
         assert_eq!(out.amount, BigUint::from(123_320_126u32));
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        use tycho_common::simulation::swap::{MarginalPriceParams, SwapQuoter};
+
+        let usdc = base_usdc();
+        let aero = base_aero();
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![usdc.address.clone(), aero.address.clone()];
+        let all_tokens = HashMap::from([
+            (usdc.address.clone(), usdc.clone()),
+            (aero.address.clone(), aero.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = AerodromeV1State::new(
+            U256::from_str("12130133468200").unwrap(),
+            U256::from_str("33517464576714176786208401").unwrap(),
+            false,
+            30,
+            6,
+            18,
+        )
+        .with_component(component);
+
+        for (base, quote) in [(&usdc, &aero), (&aero, &usdc)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::volatile_zero_for_one(false, true)]
+    #[case::volatile_one_for_zero(false, false)]
+    #[case::stable_zero_for_one(true, true)]
+    #[case::stable_one_for_zero(true, false)]
+    fn test_swap_quoter_matches_protocol_sim(#[case] stable: bool, #[case] zero_for_one: bool) {
+        use tycho_common::simulation::swap::{LimitsParams, QuoteParams, SwapQuoter};
+
+        use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint};
+
+        let fee = if stable { 5 } else { 30 };
+        let state = AerodromeV1State::new(
+            U256::from_str("2642455102346776307825").unwrap(),
+            U256::from_str("3320301880379841502303").unwrap(),
+            stable,
+            fee,
+            18,
+            18,
+        );
+        let (token_in, token_out) =
+            if zero_for_one { (token_0(), token_1()) } else { (token_1(), token_0()) };
+
+        for amount in ["1000000000000000000", "50000000000000000000"] {
+            let amount = BigUint::from_str(amount).unwrap();
+
+            let legacy = state
+                .get_amount_out(amount.clone(), &token_in, &token_out)
+                .unwrap();
+
+            let quote = state
+                .quote(
+                    QuoteParams::fixed_in(
+                        &token_in.address,
+                        &token_out.address,
+                        biguint_to_u256(&amount),
+                    )
+                    .unwrap()
+                    .with_new_state(),
+                )
+                .unwrap();
+
+            assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+            assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+
+            let legacy_new = legacy
+                .new_state
+                .as_any()
+                .downcast_ref::<AerodromeV1State>()
+                .unwrap();
+            #[allow(deprecated)]
+            let quote_new = quote
+                .new_state()
+                .unwrap()
+                .to_protocol_sim();
+            let quote_new = quote_new
+                .as_any()
+                .downcast_ref::<AerodromeV1State>()
+                .unwrap();
+            assert_eq!(quote_new.reserve0, legacy_new.reserve0);
+            assert_eq!(quote_new.reserve1, legacy_new.reserve1);
+        }
+
+        let (legacy_in, legacy_out) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        let limits = state
+            .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
     }
 }

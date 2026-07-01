@@ -24,6 +24,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
         all_tokens: &HashMap<Bytes, Token>,
         decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&value.component, all_tokens)?;
         let pool_address = Bytes::from_str(value.component.id.as_str()).map_err(|e| {
             InvalidSnapshotError::ValueError(format!(
                 "Expected component id to be pool contract address: {e}"
@@ -76,6 +78,6 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
         let state =
             vm::decode_from_vm(&pool_address, token0, token1, resolver_address.as_ref(), engine)?;
 
-        Ok(state)
+        Ok(state.with_component(component))
     }
 }

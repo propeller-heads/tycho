@@ -78,6 +78,7 @@ mod tests {
             block_delay: 2,
             paused: false,
             head_block: 100,
+            component: None,
         }
     }
 
@@ -138,11 +139,17 @@ mod tests {
     #[tokio::test]
     async fn try_from_with_block_uses_header_as_head_block() {
         let expected = state();
+        let token_x = token(expected.token_x, "TX", 18);
+        let token_y = token(expected.token_y, "TY", 6);
+        let all_tokens = HashMap::from([
+            (token_x.address.clone(), token_x.clone()),
+            (token_y.address.clone(), token_y.clone()),
+        ]);
         let decoded = LunarBaseTychoState::try_from_with_header(
             snapshot(expected.clone()),
             BlockHeader { number: 101, partial_block_index: Some(3), ..Default::default() },
             &HashMap::new(),
-            &HashMap::new(),
+            &all_tokens,
             &DecoderContext::new(),
         )
         .await
@@ -191,6 +198,7 @@ mod tests {
             block_delay: 2,
             paused: false,
             head_block: 46_498_514,
+            component: None,
         };
 
         let eth_token = token(native, "ETH", 18);

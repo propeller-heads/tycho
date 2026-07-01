@@ -1,23 +1,35 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
+use alloy::primitives::U256;
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, Pow, ToPrimitive};
+use num_traits::{FromPrimitive, Pow};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::{protocol::GetAmountOutParams, token::Token},
+    models::{
+        protocol::{GetAmountOutParams, ProtocolComponent},
+        token::Token,
+    },
     simulation::{
         errors::{SimulationError, TransitionError},
         indicatively_priced::{IndicativelyPriced, SignedQuote},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
 
-use crate::rfq::{
-    client::RFQClient,
-    protocols::bebop::{client::BebopClient, models::BebopPriceData},
+use crate::{
+    evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+    rfq::{
+        client::RFQClient,
+        protocols::bebop::{client::BebopClient, models::BebopPriceData},
+    },
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -26,6 +38,8 @@ pub struct BebopState {
     pub quote_token: Token,
     pub price_data: BebopPriceData,
     pub client: BebopClient,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 impl fmt::Debug for BebopState {
@@ -44,7 +58,107 @@ impl BebopState {
         price_data: BebopPriceData,
         client: BebopClient,
     ) -> Self {
-        BebopState { base_token, quote_token, price_data, client }
+        BebopState { base_token, quote_token, price_data, client, component: None }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
+    }
+
+    /// `U256`-native quote core shared by `get_amount_out` and `SwapQuoter::quote`. Returns
+    /// `(amount_out, gas, incomplete)`.
+    fn quote_core(
+        &self,
+        amount_in: U256,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<(U256, u64, bool), SimulationError> {
+        let sell_base = if token_in == &self.base_token.address &&
+            token_out == &self.quote_token.address
+        {
+            true
+        } else if token_in == &self.quote_token.address && token_out == &self.base_token.address {
+            false
+        } else {
+            return Err(SimulationError::RecoverableError(format!(
+                "Invalid token addresses: {token_in}, {token_out}"
+            )));
+        };
+
+        let price_levels = if sell_base {
+            self.price_data.get_bids()
+        } else {
+            self.price_data
+                .get_asks()
+                .iter()
+                .map(|(price, size)| (1.0 / price, price * size))
+                .collect()
+        };
+        if price_levels.is_empty() {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        }
+
+        let (token_in_decimals, token_out_decimals) = if sell_base {
+            (self.base_token.decimals, self.quote_token.decimals)
+        } else {
+            (self.quote_token.decimals, self.base_token.decimals)
+        };
+
+        let amount_in = u256_to_f64(amount_in)? / 10f64.powi(token_in_decimals as i32);
+        let (amount_out, remaining_amount_in) = self
+            .price_data
+            .get_amount_out_from_levels(amount_in, price_levels);
+        let amount_out = BigUint::from_f64(amount_out * 10f64.powi(token_out_decimals as i32))
+            .ok_or_else(|| {
+                SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
+            })?;
+
+        Ok((biguint_to_u256(&amount_out), 70_000, remaining_amount_in > 0.0))
+    }
+
+    /// `U256`-native limits core shared by `get_limits` and `SwapQuoter::swap_limits`.
+    fn limits_core(
+        &self,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
+    ) -> Result<(U256, U256), SimulationError> {
+        let (sell_decimals, buy_decimals, price_levels) = if sell_token == &self.base_token.address &&
+            buy_token == &self.quote_token.address
+        {
+            (self.base_token.decimals, self.quote_token.decimals, self.price_data.get_bids())
+        } else if buy_token == &self.base_token.address && sell_token == &self.quote_token.address {
+            (self.quote_token.decimals, self.base_token.decimals, self.price_data.get_asks())
+        } else {
+            return Err(SimulationError::RecoverableError(format!(
+                "Invalid token addresses: {sell_token}, {buy_token}"
+            )));
+        };
+
+        if price_levels.is_empty() {
+            return Ok((U256::ZERO, U256::ZERO));
+        }
+
+        let total_base_amount: f64 = price_levels
+            .iter()
+            .map(|(_, amount)| amount)
+            .sum();
+        let total_quote_amount: f64 = price_levels
+            .iter()
+            .map(|(price, amount)| price * amount)
+            .sum();
+
+        let (total_sell_amount, total_buy_amount) =
+            if sell_token == &self.base_token.address && buy_token == &self.quote_token.address {
+                (total_base_amount, total_quote_amount)
+            } else {
+                (total_quote_amount, total_base_amount)
+            };
+
+        let sell_limit = U256::from((total_sell_amount * 10_f64.pow(sell_decimals as f64)) as u128);
+        let buy_limit = U256::from((total_buy_amount * 10_f64.pow(buy_decimals as f64)) as u128);
+        Ok((sell_limit, buy_limit))
     }
 }
 
@@ -100,52 +214,19 @@ impl ProtocolSim for BebopState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let sell_base = if token_in == &self.base_token && token_out == &self.quote_token {
-            true
-        } else if token_in == &self.quote_token && token_out == &self.base_token {
-            false
-        } else {
-            return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {}, {}",
-                token_in.address, token_out.address
-            )));
-        };
-        // if sell base is true -> use bids
-        // if sell base is false -> use asks AND amount is in quote token so the levels need to be
-        // adjusted
-        let price_levels = if sell_base {
-            self.price_data.get_bids()
-        } else {
-            self.price_data
-                .get_asks()
-                .iter()
-                .map(|(price, size)| (1.0 / price, price * size))
-                .collect()
-        };
-
-        if price_levels.is_empty() {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
-        }
-
-        let amount_in = amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".into())
-        })? / 10f64.powi(token_in.decimals as i32);
-        let (amount_out, remaining_amount_in) = self
-            .price_data
-            .get_amount_out_from_levels(amount_in, price_levels);
+        let (amount_out, gas, incomplete) =
+            self.quote_core(biguint_to_u256(&amount_in), &token_in.address, &token_out.address)?;
         let res = GetAmountOutResult {
-            amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
-                .ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
-                })?,
-            gas: BigUint::from(70_000u64), // Rough gas estimation
-            new_state: self.clone_box(),   // The state doesn't change after a swap
+            amount: u256_to_biguint(amount_out),
+            gas: BigUint::from(gas),
+            new_state: ProtocolSim::clone_box(self), // The state doesn't change after a swap
         };
 
-        if remaining_amount_in > 0.0 {
+        if incomplete {
             return Err(SimulationError::InvalidInput(
-                format!("Pool has not enough liquidity to support complete swap. input amount: {amount_in}, consumed amount: {}", amount_in-remaining_amount_in),
-                Some(res)));
+                "Pool has not enough liquidity to support complete swap".to_string(),
+                Some(res),
+            ));
         }
 
         Ok(res)
@@ -156,46 +237,8 @@ impl ProtocolSim for BebopState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        // If selling BASE for QUOTE, we need to look at [BASE/QUOTE].bids
-        // If buying BASE with QUOTE, we need to look at [BASE/QUOTE].asks
-        let (sell_decimals, buy_decimals, price_levels) = if sell_token == self.base_token.address &&
-            buy_token == self.quote_token.address
-        {
-            (self.base_token.decimals, self.quote_token.decimals, self.price_data.get_bids())
-        } else if buy_token == self.base_token.address && sell_token == self.quote_token.address {
-            (self.quote_token.decimals, self.base_token.decimals, self.price_data.get_asks())
-        } else {
-            return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {sell_token}, {buy_token}"
-            )));
-        };
-
-        // If there are no price levels, return 0 for both limits
-        if price_levels.is_empty() {
-            return Ok((BigUint::from(0u64), BigUint::from(0u64)));
-        }
-
-        let total_base_amount: f64 = price_levels
-            .iter()
-            .map(|(_, amount)| amount)
-            .sum();
-        let total_quote_amount: f64 = price_levels
-            .iter()
-            .map(|(price, amount)| price * amount)
-            .sum();
-
-        let (total_sell_amount, total_buy_amount) =
-            if sell_token == self.base_token.address && buy_token == self.quote_token.address {
-                (total_base_amount, total_quote_amount)
-            } else {
-                (total_quote_amount, total_base_amount)
-            };
-
-        let sell_limit =
-            BigUint::from((total_sell_amount * 10_f64.pow(sell_decimals as f64)) as u128);
-        let buy_limit = BigUint::from((total_buy_amount * 10_f64.pow(buy_decimals as f64)) as u128);
-
-        Ok((sell_limit, buy_limit))
+        let (sell_limit, buy_limit) = self.limits_core(&sell_token, &buy_token)?;
+        Ok((u256_to_biguint(sell_limit), u256_to_biguint(buy_limit)))
     }
 
     fn delta_transition(
@@ -234,6 +277,91 @@ impl ProtocolSim for BebopState {
 
     fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
         Ok(self)
+    }
+}
+
+#[typetag::serde]
+impl SwapQuoter for BebopState {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "BebopState: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(0.0))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("BebopState: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = self.spot_price(base.as_ref(), quote.as_ref())?;
+        Ok(MarginalPrice::new(price))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "BebopState does not yet support exact-out (FixedOut) quoting".to_string(),
+                ))
+            }
+        };
+
+        let (amount_out, gas, incomplete) =
+            self.quote_core(amount_in, params.token_in(), params.token_out())?;
+        if incomplete {
+            return Err(SimulationError::RecoverableError(
+                "Pool has not enough liquidity to support complete swap".to_string(),
+            ));
+        }
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(self.clone()) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, gas, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let (max_in, max_out) = self.limits_core(params.token_in(), params.token_out())?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "BebopState::query_swap is not supported for RFQ quotes".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        _params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        Err(TransitionError::DecodeError("Not implemented".into()))
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
+        Ok(self)
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
     }
 }
 
@@ -324,6 +452,30 @@ mod tests {
                 asks: vec![65100.0f32, 1.0f32, 65150.0f32, 2.5f32, 65200.0f32, 1.5f32],
             },
             client: empty_bebop_client(),
+            component: None,
+        }
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        let wbtc = wbtc();
+        let usdc = usdc();
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![wbtc.address.clone(), usdc.address.clone()];
+        let all_tokens = std::collections::HashMap::from([
+            (wbtc.address.clone(), wbtc.clone()),
+            (usdc.address.clone(), usdc.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = create_test_bebop_state().with_component(component);
+
+        for (base, quote) in [(&wbtc, &usdc), (&usdc, &wbtc)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
         }
     }
 

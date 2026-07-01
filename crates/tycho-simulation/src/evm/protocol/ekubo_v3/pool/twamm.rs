@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use alloy::eips::merge::SLOT_DURATION_SECS;
 use ekubo_sdk::{
@@ -15,6 +18,7 @@ use ekubo_sdk::{
 use revm::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -38,6 +42,8 @@ const GAS_COST_OF_CROSSING_ONE_VIRTUAL_ORDER_DELTA: u64 = 19_980;
 pub struct TwammPool {
     imp: EvmTwammPool,
     swap_state: TwammPoolSwapState,
+    #[serde(skip)]
+    pub(crate) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
@@ -75,6 +81,7 @@ impl TwammPool {
             .map(|imp| Self {
                 imp,
                 swap_state: TwammPoolSwapState { sdk_state, swapped_this_block: false },
+                component: None,
             })
             .map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating TWAMM pool: {err:?}"))
@@ -133,6 +140,7 @@ impl EkuboPool for TwammPool {
                         sdk_state: quote.state_after,
                         swapped_this_block: true,
                     },
+                    component: self.component.clone(),
                 }
                 .into(),
             })
@@ -251,7 +259,7 @@ impl EkuboPool for TwammPool {
 }
 
 impl PartialEq for TwammPool {
-    fn eq(&self, &Self { ref imp, swap_state }: &Self) -> bool {
+    fn eq(&self, &Self { ref imp, swap_state, component: _ }: &Self) -> bool {
         self.imp.key() == imp.key() &&
             self.imp.sale_rate_deltas() == imp.sale_rate_deltas() &&
             self.swap_state == swap_state

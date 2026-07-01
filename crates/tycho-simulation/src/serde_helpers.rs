@@ -68,7 +68,7 @@ pub mod hex_bytes_option {
     }
 }
 
-/// Serde helpers for `HashMap<String, Box<dyn ProtocolSim>>`.
+/// Serde helpers for `HashMap<String, Box<dyn SwapQuoter>>`.
 ///
 /// Some `ProtocolSim` implementations (VM-backed states) return errors from
 /// their `Serialize` impl. This module provides a custom serializer that
@@ -78,12 +78,12 @@ pub mod protocol_states {
 
     use serde::{ser::SerializeMap, Deserialize, Deserializer, Serializer};
     use tracing::{debug, warn};
-    use tycho_common::simulation::protocol_sim::ProtocolSim;
+    use tycho_common::simulation::swap::SwapQuoter;
 
-    /// Serializes a map of `ProtocolSim` trait objects, skipping entries
+    /// Serializes a map of `SwapQuoter` trait objects, skipping entries
     /// whose `Serialize` impl returns an error (e.g., VM-backed states).
     pub fn serialize<S>(
-        states: &HashMap<String, Box<dyn ProtocolSim>>,
+        states: &HashMap<String, Box<dyn SwapQuoter>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -110,11 +110,11 @@ pub mod protocol_states {
     /// absent from the data, so default deserialization works.
     pub fn deserialize<'de, D>(
         deserializer: D,
-    ) -> Result<HashMap<String, Box<dyn ProtocolSim>>, D::Error>
+    ) -> Result<HashMap<String, Box<dyn SwapQuoter>>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        HashMap::<String, Box<dyn ProtocolSim>>::deserialize(deserializer)
+        HashMap::<String, Box<dyn SwapQuoter>>::deserialize(deserializer)
     }
 }
 
@@ -154,7 +154,7 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
     use serde_json;
-    use tycho_common::simulation::protocol_sim::ProtocolSim;
+    use tycho_common::simulation::swap::SwapQuoter;
 
     use super::*;
     use crate::protocol::models::Update;
@@ -206,7 +206,7 @@ mod tests {
 
         use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
 
-        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut states: HashMap<String, Box<dyn SwapQuoter>> = HashMap::new();
         states.insert(
             "pool_a".to_string(),
             Box::new(UniswapV2State::new(U256::from(1000), U256::from(2000))),
@@ -235,7 +235,7 @@ mod tests {
             uniswap_v4::state::{UniswapV4Fees, UniswapV4State},
         };
 
-        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut states: HashMap<String, Box<dyn SwapQuoter>> = HashMap::new();
         states.insert(
             "serializable".to_string(),
             Box::new(UniswapV2State::new(U256::from(1000), U256::from(2000))),
@@ -267,7 +267,7 @@ mod tests {
 
         use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
 
-        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut states: HashMap<String, Box<dyn SwapQuoter>> = HashMap::new();
         states.insert(
             "pool_x".to_string(),
             Box::new(UniswapV2State::new(U256::from(100), U256::from(200))),
@@ -280,7 +280,7 @@ mod tests {
         #[derive(Serialize)]
         struct Wrapper {
             #[serde(with = "protocol_states")]
-            states: HashMap<String, Box<dyn ProtocolSim>>,
+            states: HashMap<String, Box<dyn SwapQuoter>>,
         }
 
         let wrapper = Wrapper { states };

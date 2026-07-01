@@ -23,9 +23,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for VelodromeSlipstreamsS
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let liquidity = u128::from(
             snapshot
                 .state
@@ -134,6 +137,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for VelodromeSlipstreamsS
             tick,
             ticks,
         )
+        .map(|state| state.with_component(component))
         .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
     }
 }

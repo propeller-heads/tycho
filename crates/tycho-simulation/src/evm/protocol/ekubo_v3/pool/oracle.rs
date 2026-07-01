@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ekubo_sdk::{
     chain::evm::{
@@ -14,6 +17,7 @@ use ekubo_sdk::{
 use revm::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::errors::{SimulationError, TransitionError},
     Bytes,
 };
@@ -30,6 +34,8 @@ const GAS_COST_OF_UPDATING_SNAPSHOT: u64 = 9_709;
 pub struct OraclePool {
     imp: EvmOraclePool,
     swap_state: OraclePoolSwapState,
+    #[serde(skip)]
+    pub(crate) component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
@@ -57,6 +63,7 @@ impl OraclePool {
                 sdk_state: full_range_sdk_state,
                 swapped_this_block: false,
             },
+            component: None,
         })
         .map_err(|err| InvalidSnapshotError::ValueError(format!("creating oracle pool: {err:?}")))
     }
@@ -102,6 +109,7 @@ impl EkuboPool for OraclePool {
                         sdk_state: quote.state_after.full_range_pool_state,
                         swapped_this_block: true,
                     },
+                    component: self.component.clone(),
                 }
                 .into(),
             })
@@ -135,7 +143,7 @@ impl EkuboPool for OraclePool {
 }
 
 impl PartialEq for OraclePool {
-    fn eq(&self, &Self { ref imp, swap_state }: &Self) -> bool {
+    fn eq(&self, &Self { ref imp, swap_state, component: _ }: &Self) -> bool {
         self.imp.key() == imp.key() && self.swap_state == swap_state
     }
 }

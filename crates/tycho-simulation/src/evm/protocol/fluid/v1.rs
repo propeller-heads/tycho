@@ -11,6 +11,7 @@
 use std::{
     any::Any,
     collections::HashMap,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,10 +23,15 @@ use thiserror::Error;
 use tracing::trace;
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::token::Token,
+    models::{protocol::ProtocolComponent, token::Token},
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::{
+            LimitsParams, MarginalPrice, MarginalPriceParams, QuerySwapParams, Quote, QuoteAmount,
+            QuoteParams, Range, SimulationResult, Swap, SwapFee, SwapLimits, SwapQuoter,
+            Transition, TransitionParams,
+        },
     },
     Bytes,
 };
@@ -55,7 +61,7 @@ mod constant {
     pub const RESERVES_RESOLVER: &[u8] = &hex!("0xc93876c0eed99645dd53937b25433e311881a27c");
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FluidV1 {
     pool_address: Bytes,
     token0: Token,
@@ -68,6 +74,24 @@ pub struct FluidV1 {
     sync_time: u64,
     pool_reserve0: U256,
     pool_reserve1: U256,
+    #[serde(skip)]
+    component: Option<Arc<ProtocolComponent<Arc<Token>>>>,
+}
+
+impl PartialEq for FluidV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.pool_address == other.pool_address &&
+            self.token0 == other.token0 &&
+            self.token1 == other.token1 &&
+            self.collateral_reserves == other.collateral_reserves &&
+            self.debt_reserves == other.debt_reserves &&
+            self.dex_limits == other.dex_limits &&
+            self.center_price == other.center_price &&
+            self.fee == other.fee &&
+            self.sync_time == other.sync_time &&
+            self.pool_reserve0 == other.pool_reserve0 &&
+            self.pool_reserve1 == other.pool_reserve1
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,7 +198,14 @@ impl FluidV1 {
             sync_time,
             pool_reserve0,
             pool_reserve1,
+            component: None,
         }
+    }
+
+    /// Attaches the `SwapQuoter` component (carrying the pool's `Arc<Token>`s) to this state.
+    pub fn with_component(mut self, component: Arc<ProtocolComponent<Arc<Token>>>) -> Self {
+        self.component = Some(component);
+        self
     }
 
     fn normalize_native_address(address: &Bytes) -> &[u8] {
@@ -183,6 +214,132 @@ impl FluidV1 {
         } else {
             address
         }
+    }
+
+    /// `U256`-native swap core shared by `get_amount_out` and `SwapQuoter::quote`. Decimals are
+    /// derived from the stored tokens, so only the input token address is needed. Returns
+    /// `(amount_out, gas, new_state)`.
+    fn swap_core(
+        &self,
+        amount_in: U256,
+        token_in: &Bytes,
+    ) -> Result<(U256, u64, FluidV1), SimulationError> {
+        if amount_in.is_zero() {
+            return Ok((U256::ZERO, 155433, self.clone()));
+        }
+        let zero2one = self.token0.address == *token_in;
+        let (token_in_decimals, token_out_decimals) = if zero2one {
+            (self.token0.decimals, self.token1.decimals)
+        } else {
+            (self.token1.decimals, self.token0.decimals)
+        };
+
+        let fee = amount_in * self.fee / constant::SIX_DECIMALS;
+        let amount_in_after_fee = amount_in - fee;
+        let amount_in_adjusted = to_adjusted_amount(amount_in_after_fee, token_in_decimals as i64);
+
+        if amount_in_adjusted < constant::SIX_DECIMALS ||
+            amount_in_after_fee < constant::TWO_DECIMALS
+        {
+            return Err(SwapError::InvalidAmountIn.into());
+        }
+        let mut new_col_reserves = self.collateral_reserves.clone();
+        let mut new_debt_reserves = self.debt_reserves.clone();
+        let mut new_limits = self.dex_limits.clone();
+
+        let amount_out = swap_in_adjusted(
+            zero2one,
+            amount_in_adjusted,
+            &mut new_col_reserves,
+            &mut new_debt_reserves,
+            token_out_decimals as i64,
+            &mut new_limits,
+            self.center_price,
+            self.sync_time,
+        )?;
+
+        let reserve = if zero2one { self.pool_reserve1 } else { self.pool_reserve0 };
+        if amount_out > reserve {
+            return Err(SwapError::InsufficientReserve.into());
+        }
+
+        let new_state = Self {
+            pool_address: self.pool_address.clone(),
+            token0: self.token0.clone(),
+            token1: self.token1.clone(),
+            collateral_reserves: new_col_reserves,
+            debt_reserves: new_debt_reserves,
+            dex_limits: new_limits,
+            center_price: self.center_price,
+            fee: self.fee,
+            sync_time: self.sync_time,
+            pool_reserve0: self.pool_reserve0,
+            pool_reserve1: self.pool_reserve1,
+            component: self.component.clone(),
+        };
+        Ok((amount_out, 155433, new_state))
+    }
+
+    /// `U256`-native limits core shared by `get_limits` and `SwapQuoter::swap_limits`.
+    fn limits_core(&self, sell_token: &Bytes) -> Result<(U256, U256), SimulationError> {
+        let zero2one = *sell_token == self.token0.address;
+
+        let (upper_bound_out, out_decimals, in_decimals) = if zero2one {
+            (
+                to_adjusted_amount(
+                    self.dex_limits
+                        .withdrawable_token0
+                        .available +
+                        self.dex_limits
+                            .borrowable_token0
+                            .available,
+                    self.token0.decimals as i64,
+                ),
+                self.token1.decimals,
+                self.token0.decimals,
+            )
+        } else {
+            (
+                to_adjusted_amount(
+                    self.dex_limits
+                        .withdrawable_token1
+                        .available +
+                        self.dex_limits
+                            .borrowable_token1
+                            .available,
+                    self.token1.decimals as i64,
+                ),
+                self.token0.decimals,
+                self.token1.decimals,
+            )
+        };
+        if upper_bound_out == U256::ZERO {
+            trace!("Upper bound is zero for {}", self.pool_address);
+            return Ok((U256::ZERO, U256::ZERO));
+        }
+        let delta = U256::from(10).pow(U256::from(2));
+        let (max_valid, res) = find_max_valid_u256(upper_bound_out, delta, |amount| {
+            let mut col_clone = self.collateral_reserves.clone();
+            let mut debt_clone = self.debt_reserves.clone();
+            let mut limits_clone = self.dex_limits.clone();
+            swap_in_adjusted(
+                zero2one,
+                amount,
+                &mut col_clone,
+                &mut debt_clone,
+                out_decimals as i64,
+                &mut limits_clone,
+                self.center_price,
+                self.sync_time,
+            )
+        });
+        Ok((
+            from_adjusted_amount(max_valid, in_decimals as i64),
+            res.unwrap_or_else(|| {
+                trace!("All evaluations errored during limit search for {}", self.pool_address);
+                U256::ZERO
+            }),
+        ))
     }
 }
 
@@ -222,144 +379,31 @@ impl ProtocolSim for FluidV1 {
         let oriented_price_f64 =
             if base.address == self.token0.address { price_f64 } else { 1.0 / price_f64 };
 
-        Ok(add_fee_markup(oriented_price_f64, self.fee()))
+        Ok(add_fee_markup(oriented_price_f64, ProtocolSim::fee(self)))
     }
 
     fn get_amount_out(
         &self,
         amount_in: BigUint,
         token_in: &Token,
-        token_out: &Token,
+        _token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        if amount_in == BigUint::from(0u32) {
-            return Ok(GetAmountOutResult {
-                amount: BigUint::from(0u32),
-                gas: BigUint::from(155433u32),
-                new_state: Box::new(self.clone()),
-            });
-        }
-        let zero2one = self.token0.address == token_in.address;
-
-        let (token_in_decimals, token_out_decimals) = (token_in.decimals, token_out.decimals);
-
-        let amount_in = biguint_to_u256(&amount_in);
-        let fee = amount_in * self.fee / constant::SIX_DECIMALS;
-
-        let amount_in_after_fee = amount_in - fee;
-        let amount_in_adjusted = to_adjusted_amount(amount_in_after_fee, token_in_decimals as i64);
-
-        if amount_in_adjusted < constant::SIX_DECIMALS ||
-            amount_in_after_fee < constant::TWO_DECIMALS
-        {
-            return Err(SwapError::InvalidAmountIn.into());
-        }
-        let mut new_col_reserves = self.collateral_reserves.clone();
-        let mut new_debt_reserves = self.debt_reserves.clone();
-        let mut new_limits = self.dex_limits.clone();
-
-        let amount_out = swap_in_adjusted(
-            zero2one,
-            amount_in_adjusted,
-            &mut new_col_reserves,
-            &mut new_debt_reserves,
-            token_out_decimals as i64,
-            &mut new_limits,
-            self.center_price,
-            self.sync_time,
-        )?;
-
-        let reserve = if zero2one { self.pool_reserve1 } else { self.pool_reserve0 };
-        if amount_out > reserve {
-            return Err(SwapError::InsufficientReserve.into());
-        }
-
-        let result = GetAmountOutResult::new(
+        let (amount_out, gas, new_state) =
+            self.swap_core(biguint_to_u256(&amount_in), &token_in.address)?;
+        Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
-            155433.to_biguint().expect("infallible"),
-            Box::new(Self {
-                pool_address: self.pool_address.clone(),
-                token0: self.token0.clone(),
-                token1: self.token1.clone(),
-                collateral_reserves: new_col_reserves,
-                debt_reserves: new_debt_reserves,
-                dex_limits: new_limits,
-                center_price: self.center_price,
-                fee: self.fee,
-                sync_time: self.sync_time,
-                pool_reserve0: self.pool_reserve0,
-                pool_reserve1: self.pool_reserve1,
-            }),
-        );
-        Ok(result)
+            gas.to_biguint().expect("infallible"),
+            Box::new(new_state),
+        ))
     }
 
     fn get_limits(
         &self,
         sell_token: Bytes,
-        buy_token: Bytes,
+        _buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let zero2one = sell_token == self.token0.address;
-
-        let (upper_bound_out, out_decimals, in_decimals) = if zero2one {
-            (
-                to_adjusted_amount(
-                    self.dex_limits
-                        .withdrawable_token0
-                        .available +
-                        self.dex_limits
-                            .borrowable_token0
-                            .available,
-                    self.token0.decimals as i64,
-                ),
-                self.token1.decimals,
-                self.token0.decimals,
-            )
-        } else {
-            (
-                to_adjusted_amount(
-                    self.dex_limits
-                        .withdrawable_token1
-                        .available +
-                        self.dex_limits
-                            .borrowable_token1
-                            .available,
-                    self.token1.decimals as i64,
-                ),
-                self.token0.decimals,
-                self.token1.decimals,
-            )
-        };
-        if upper_bound_out == U256::ZERO {
-            trace!("Upper bound is zero for {}", self.pool_address);
-            return Ok((BigUint::ZERO, BigUint::ZERO));
-        }
-        let delta = U256::from(10).pow(U256::from(2));
-        let (max_valid, res) = find_max_valid_u256(upper_bound_out, delta, |amount| {
-            let mut col_clone = self.collateral_reserves.clone();
-            let mut debt_clone = self.debt_reserves.clone();
-            let mut limits_clone = self.dex_limits.clone();
-            swap_in_adjusted(
-                zero2one,
-                amount,
-                &mut col_clone,
-                &mut debt_clone,
-                out_decimals as i64,
-                &mut limits_clone,
-                self.center_price,
-                self.sync_time,
-            )
-        });
-        Ok((
-            u256_to_biguint(from_adjusted_amount(max_valid, in_decimals as i64)),
-            u256_to_biguint(res.unwrap_or_else(|| {
-                trace!(
-                    "All evaluations errored during limit search for {} -> {}",
-                    sell_token,
-                    buy_token
-                );
-                U256::ZERO
-            })),
-        ))
+        let (max_in, max_out) = self.limits_core(&sell_token)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -433,6 +477,87 @@ impl ProtocolSim for FluidV1 {
         params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
     ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
         crate::evm::query_pool_swap::query_pool_swap(self, params)
+    }
+}
+
+#[typetag::serde]
+impl SwapQuoter for FluidV1 {
+    fn component(&self) -> SimulationResult<Arc<ProtocolComponent<Arc<Token>>>> {
+        self.component.clone().ok_or_else(|| {
+            SimulationError::FatalError(
+                "FluidV1: component not set (decode did not populate it)".to_string(),
+            )
+        })
+    }
+
+    fn fee(&self, _params: QuoteParams) -> SimulationResult<SwapFee> {
+        Ok(SwapFee::new(ProtocolSim::fee(self)))
+    }
+
+    fn marginal_price(&self, params: MarginalPriceParams) -> SimulationResult<MarginalPrice> {
+        let component = self.component.as_ref().ok_or_else(|| {
+            SimulationError::FatalError("FluidV1: component not set".to_string())
+        })?;
+        let base = component
+            .get_token(params.token_in())
+            .ok_or_else(|| SimulationError::FatalError("token_in not in component".to_string()))?;
+        let quote = component
+            .get_token(params.token_out())
+            .ok_or_else(|| SimulationError::FatalError("token_out not in component".to_string()))?;
+        let price = ProtocolSim::spot_price(self, base.as_ref(), quote.as_ref())?;
+        Ok(MarginalPrice::new(price))
+    }
+
+    fn quote(&self, params: QuoteParams) -> SimulationResult<Quote> {
+        let amount_in = match params.amount() {
+            QuoteAmount::FixedIn(amount) => *amount,
+            QuoteAmount::FixedOut(_) => {
+                return Err(SimulationError::RecoverableError(
+                    "FluidV1 does not yet support exact-out (FixedOut) quoting".to_string(),
+                ))
+            }
+        };
+
+        let (amount_out, gas, new_state) = self.swap_core(amount_in, params.token_in())?;
+        let new_state = if params.should_return_new_state() {
+            Some(Arc::new(new_state) as Arc<dyn SwapQuoter>)
+        } else {
+            None
+        };
+        Ok(Quote::new(amount_out, gas, new_state))
+    }
+
+    fn swap_limits(&self, params: LimitsParams) -> SimulationResult<SwapLimits> {
+        let (max_in, max_out) = self.limits_core(params.token_in())?;
+        Ok(SwapLimits::new(Range::new(U256::ZERO, max_in)?, Range::new(U256::ZERO, max_out)?))
+    }
+
+    fn query_swap(&self, _params: QuerySwapParams) -> SimulationResult<Swap> {
+        Err(SimulationError::FatalError(
+            "FluidV1::query_swap is not yet wired (pending token plumbing)".to_string(),
+        ))
+    }
+
+    fn delta_transition(
+        &mut self,
+        params: TransitionParams,
+    ) -> Result<Transition, TransitionError> {
+        ProtocolSim::delta_transition(
+            self,
+            params.delta().clone(),
+            params.tokens(),
+            params.balances(),
+        )?;
+        Ok(Transition::default())
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapQuoter> {
+        Box::new(self.clone())
+    }
+
+    #[allow(deprecated)]
+    fn to_protocol_sim(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
     }
 }
 
@@ -1294,6 +1419,29 @@ mod test {
                 10,
         );
         (wsteth, eth, pool)
+    }
+
+    #[test]
+    fn test_marginal_price_matches_spot_price() {
+        let (wsteth, eth, pool) = setup_fluid_pool(U256::from_str("1000000000000000000").unwrap());
+
+        let mut dto = tycho_common::models::protocol::ProtocolComponent::default();
+        dto.tokens = vec![wsteth.address.clone(), eth.address.clone()];
+        let all_tokens = std::collections::HashMap::from([
+            (wsteth.address.clone(), wsteth.clone()),
+            (eth.address.clone(), eth.clone()),
+        ]);
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&dto, &all_tokens).unwrap();
+        let state = pool.with_component(component);
+
+        for (base, quote) in [(&wsteth, &eth), (&eth, &wsteth)] {
+            let spot = state.spot_price(base, quote).unwrap();
+            let marginal = state
+                .marginal_price(MarginalPriceParams::new(&base.address, &quote.address))
+                .unwrap();
+            approx::assert_ulps_eq!(marginal.price(), spot);
+        }
     }
 
     fn limits_wide() -> DexLimits {
@@ -2810,5 +2958,45 @@ mod test {
             .unwrap();
 
         assert!(max_amount_in < max_amount_onchain_test);
+    }
+
+    #[rstest::rstest]
+    #[case::zero2one(true)]
+    #[case::one2zero(false)]
+    fn test_swap_quoter_matches_protocol_sim(#[case] zero2one: bool) {
+        let (wsteth, eth, pool) = wsteth_eth_pool_23526115();
+        let (token_in, token_out) =
+            if zero2one { (wsteth.clone(), eth.clone()) } else { (eth, wsteth) };
+
+        for amount in ["100000000000000", "5000000000000000000"] {
+            let amount = BigUint::from_str_radix(amount, 10).unwrap();
+
+            let legacy = pool
+                .get_amount_out(amount.clone(), &token_in, &token_out)
+                .unwrap();
+            let quote = pool
+                .quote(
+                    QuoteParams::fixed_in(
+                        &token_in.address,
+                        &token_out.address,
+                        biguint_to_u256(&amount),
+                    )
+                    .unwrap()
+                    .with_new_state(),
+                )
+                .unwrap();
+
+            assert_eq!(u256_to_biguint(quote.amount_out()), legacy.amount);
+            assert_eq!(BigUint::from(quote.gas()), legacy.gas);
+        }
+
+        let (legacy_in, legacy_out) = pool
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        let limits = pool
+            .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+            .unwrap();
+        assert_eq!(u256_to_biguint(limits.range_in().upper()), legacy_in);
+        assert_eq!(u256_to_biguint(limits.range_out().upper()), legacy_out);
     }
 }

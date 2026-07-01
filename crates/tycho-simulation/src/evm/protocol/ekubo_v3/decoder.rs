@@ -67,9 +67,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let static_attrs = snapshot.component.static_attributes;
         let state_attrs = snapshot.state.attributes;
 
@@ -146,7 +149,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
         let ext_type = extension_type_from_attributes_or_address(&static_attrs, extension)?;
 
-        Ok(match ext_type {
+        let state = match ext_type {
             ExtensionType::NoSwapCallPoints => match pool_type_config {
                 EvmPoolTypeConfig::FullRange(pool_type_config) => {
                     Self::FullRange(FullRangePool::new(
@@ -254,7 +257,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     tick,
                 )?)
             }
-        })
+        };
+
+        Ok(state.with_component(component))
     }
 }
 

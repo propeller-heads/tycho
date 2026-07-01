@@ -24,6 +24,9 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceState {
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component =
+            crate::evm::protocol::build_swap_quoter_component(&snapshot.component, all_tokens)?;
+
         let state_attrs = snapshot.state.attributes;
 
         if snapshot.component.tokens.len() != 2 {
@@ -76,7 +79,8 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceState {
                 ))
             })?;
 
-        Ok(LiquoriceState::new(base_token, quote_token, prices_by_mm, client))
+        Ok(LiquoriceState::new(base_token, quote_token, prices_by_mm, client)
+            .with_component(component))
     }
 }
 
