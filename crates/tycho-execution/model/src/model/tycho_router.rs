@@ -611,11 +611,11 @@ fn _settle_output(
         }
     }
 
+    vault._finalize_balances(state, state.msg_sender(), token_in, amount_in)?;
+
     if amount_out < min_amount_out {
         return Err(Error::revert("_settle_output: slippage exceeded"));
     }
-
-    vault._finalize_balances(state, state.msg_sender(), token_in, amount_in)?;
 
     Ok(amount_out)
 }
