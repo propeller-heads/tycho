@@ -24,7 +24,7 @@ import {Dispatcher} from "./Dispatcher.sol";
 import {LibSwap} from "../lib/LibSwap.sol";
 import {TransferManager} from "./TransferManager.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 
 //                                         ✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷
 //                                   ✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷
@@ -756,14 +756,15 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
         if (intercepting) {
             amountOutAfterFees = _takeFees(
-                tokenOut,
-                actualAmountOut,
-                expectedAmountOut,
-                amountIn,
-                tokenIn,
-                tokenOut,
-                clientFeeParams.clientFeeBps,
-                client
+                FeeInput({
+                    actualAmountOut: actualAmountOut,
+                    expectedAmountOut: expectedAmountOut,
+                    amountIn: amountIn,
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    clientFeeBps: clientFeeParams.clientFeeBps,
+                    client: client
+                })
             );
         } else {
             amountOutAfterFees = actualAmountOut;
@@ -827,33 +828,36 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             (expectedAmountOut * (MAX_SLIPPAGE_BPS - maxSlippageBps))
                 / MAX_SLIPPAGE_BPS;
 
-        (address executor, bytes calldata protocolData) =
-            swap_.decodeSingleSwap();
-
         address client = clientFeeParams.clientFeeReceiver;
         bool intercepting = _callMustInterceptOutput(
             _feeCalculator, clientFeeParams.clientFeeBps, client
         );
 
-        uint256 actualAmountOut = _callSwapOnExecutor(
-            executor,
-            amountIn,
-            protocolData,
-            true,
-            false,
-            intercepting ? address(this) : receiver
-        );
+        uint256 actualAmountOut;
+        {
+            (address executor, bytes calldata protocolData) =
+                swap_.decodeSingleSwap();
+            actualAmountOut = _callSwapOnExecutor(
+                executor,
+                amountIn,
+                protocolData,
+                true,
+                false,
+                intercepting ? address(this) : receiver
+            );
+        }
 
         if (intercepting) {
             amountOutAfterFees = _takeFees(
-                tokenOut,
-                actualAmountOut,
-                expectedAmountOut,
-                amountIn,
-                tokenIn,
-                tokenOut,
-                clientFeeParams.clientFeeBps,
-                client
+                FeeInput({
+                    actualAmountOut: actualAmountOut,
+                    expectedAmountOut: expectedAmountOut,
+                    amountIn: amountIn,
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    clientFeeBps: clientFeeParams.clientFeeBps,
+                    client: client
+                })
             );
         } else {
             amountOutAfterFees = actualAmountOut;
@@ -931,14 +935,15 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
         if (intercepting) {
             amountOutAfterFees = _takeFees(
-                tokenOut,
-                actualAmountOut,
-                expectedAmountOut,
-                amountIn,
-                tokenIn,
-                tokenOut,
-                clientFeeParams.clientFeeBps,
-                client
+                FeeInput({
+                    actualAmountOut: actualAmountOut,
+                    expectedAmountOut: expectedAmountOut,
+                    amountIn: amountIn,
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    clientFeeBps: clientFeeParams.clientFeeBps,
+                    client: client
+                })
             );
         } else {
             amountOutAfterFees = actualAmountOut;
@@ -1254,38 +1259,16 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @notice Calculates and takes fees using the FeeCalculator contract
-     * @param token The token address for which fees are being taken
-     * @param actualAmountOut The actual amount received from the swap
-     * @param expectedAmountOut The off-chain quoted amount
-     * @param amountIn The input amount for the swap
-     * @param tokenIn The input token address
-     * @param tokenOut The output token address
-     * @param clientFeeBps Client fee in basis points
-     * @param client Address to receive client fees
-     * @return amountOutAfterFees The amount remaining after all fee deductions
+     * @notice Calculates and takes fees using the FeeCalculator
+     * @param f Fee calculation inputs (amounts, tokens, client)
+     * @return amountOutAfterFees Amount remaining after fee deductions
      */
-    function _takeFees(
-        address token,
-        uint256 actualAmountOut,
-        uint256 expectedAmountOut,
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint32 clientFeeBps,
-        address client
-    ) internal returns (uint256 amountOutAfterFees) {
-        FeeRecipient[] memory fees = _callCalculateFee(
-            _feeCalculator,
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            tokenIn,
-            tokenOut,
-            clientFeeBps,
-            client
-        );
-        amountOutAfterFees = actualAmountOut;
+    function _takeFees(FeeInput memory f)
+        internal
+        returns (uint256 amountOutAfterFees)
+    {
+        FeeRecipient[] memory fees = _callCalculateFee(_feeCalculator, f);
+        amountOutAfterFees = f.actualAmountOut;
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
@@ -1294,13 +1277,15 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 // due to incorrect or malicious encoding. Updating the delta
                 // accounting without funds will result in an additional negative
                 // delta, and cause the _finalizeBalances method to revert.
-                _updateDeltaAccounting(token, -int256(fees[i].feeAmount));
-                _creditVaultForFees(fees[i].recipient, token, fees[i].feeAmount);
+                _updateDeltaAccounting(f.tokenOut, -int256(fees[i].feeAmount));
+                _creditVaultForFees(
+                    fees[i].recipient, f.tokenOut, fees[i].feeAmount
+                );
                 amountOutAfterFees -= fees[i].feeAmount;
             }
         }
         if (fees.length > 0) {
-            emit FeesTaken(token, fees);
+            emit FeesTaken(f.tokenOut, fees);
         }
     }
 

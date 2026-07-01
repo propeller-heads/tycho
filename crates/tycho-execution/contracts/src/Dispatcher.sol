@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {IFeeCalculator} from "@interfaces/IFeeCalculator.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {TransferManager} from "./TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
@@ -286,26 +286,21 @@ contract Dispatcher is TransferManager {
         }
     }
 
-    function _callCalculateFee(
-        address feeCalculator,
-        uint256 actualAmountOut,
-        uint256 expectedAmountOut,
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint32 clientFeeBps,
-        address client
-    ) internal view returns (FeeRecipient[] memory feeRecipients) {
+    function _callCalculateFee(address feeCalculator, FeeInput memory f)
+        internal
+        view
+        returns (FeeRecipient[] memory feeRecipients)
+    {
         // slither-disable-next-line calls-loop
         feeRecipients = IFeeCalculator(feeCalculator)
             .calculateFee(
-                actualAmountOut,
-                expectedAmountOut,
-                amountIn,
-                tokenIn,
-                tokenOut,
-                clientFeeBps,
-                client
+                f.actualAmountOut,
+                f.expectedAmountOut,
+                f.amountIn,
+                f.tokenIn,
+                f.tokenOut,
+                f.clientFeeBps,
+                f.client
             );
     }
 
