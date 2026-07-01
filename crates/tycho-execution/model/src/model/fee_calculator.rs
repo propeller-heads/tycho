@@ -185,6 +185,8 @@ fn _merge_fee_recipients(
 
     // fees[0] = router fees, slippage[0] = router slippage
     // fees[1] = client fees, slippage[1] = client slippage
+    debug_assert!(fees.len() == 2, "expected exactly 2 fee recipients (router, client)");
+    debug_assert!(slippage.len() == 2, "expected exactly 2 slippage recipients (router, client)");
     fees[0].fee_amount += slippage[0].fee_amount;
     fees[1].fee_amount += slippage[1].fee_amount;
 
