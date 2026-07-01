@@ -271,7 +271,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__SlippageExceeded.selector,
+                TychoRouter__NegativeSlippage.selector,
                 2018817438608734439722, // actual amountOut
                 minAmountOut
             )
@@ -377,7 +377,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         uint256 minAmountOut = 2020 * 1e18;
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__SlippageExceeded.selector,
+                TychoRouter__NegativeSlippage.selector,
                 2018817438608734439722, // actual amountOut
                 minAmountOut
             )
@@ -640,7 +640,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         // but the pool sends nothing.
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__SlippageExceeded.selector, uint256(0), uint256(1)
+                TychoRouter__NegativeSlippage.selector, uint256(0), uint256(1)
             )
         );
         tychoRouter.singleSwap(
@@ -738,7 +738,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         // TychoRouter reverts.
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__SlippageExceeded.selector,
+                TychoRouter__NegativeSlippage.selector,
                 101047859502984652937820276907,
                 106000000000000000000000000000
             )
@@ -814,7 +814,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         // Swap should revert.
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoRouter__SlippageExceeded.selector,
+                TychoRouter__NegativeSlippage.selector,
                 // 107508473722887877019425641400 + 0.94 * expected client contribution
                 107970508423373272621165538484,
                 108000000000000000000000000000
