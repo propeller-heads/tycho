@@ -74,17 +74,20 @@ contract EtherfiAdapterTest is Test, ISwapAdapterTypes {
             // bound was too loose.
             vm.assume(specifiedAmount < limits[1] && specifiedAmount > 100);
             uint256 requiredEeth = weEth.getEETHByWeETH(specifiedAmount);
-            vm.assume(requiredEeth < limits[0]);
+            /// Request extra eETH to cover share-based rounding
+            /// losses during transfer.
+            uint256 fundingAmount = requiredEeth + 10;
+            vm.assume(fundingAmount < limits[0]);
 
             /// @dev workaround for eETH "deal", as standard ERC20 does not
-            /// work(balance is shares)
+            /// work(balance is shares).
             deal(address(adapter), type(uint256).max);
             adapter.swap(
                 pair,
                 address(address(0)),
                 address(eEth_),
                 OrderSide.Buy,
-                requiredEeth
+                fundingAmount
             );
 
             eEth_.approve(address(adapter), type(uint256).max);
