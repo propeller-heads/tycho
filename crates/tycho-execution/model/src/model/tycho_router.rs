@@ -318,8 +318,8 @@ fn _split_swap_checked(
     if amount_in == 0 {
         return Err(Error::revert("_split_swap_checked: amount_in == 0"));
     }
-    if receiver == Address::Zero {
-        return Err(Error::revert("_split_swap_checked: receiver == address(0)"));
+    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
+        return Err(Error::revert("_split_swap_checked: address(0)"));
     }
     if expected_amount_out == 0 {
         return Err(Error::revert("_split_swap_checked: expected_amount_out == 0"));
@@ -341,7 +341,7 @@ fn _split_swap_checked(
 
     let must_intercept = must_intercept_output(params, client_fee_bps)?;
 
-    let final_receiver = determine_final_receiver(must_intercept, receiver);
+    let final_receiver = if must_intercept { Address::Router } else { receiver };
 
     let actual_amount_out = _split_swap(
         params,
@@ -409,8 +409,8 @@ fn _single_swap(
     if amount_in == 0 {
         return Err(Error::revert("_single_swap: amount_in == 0"));
     }
-    if receiver == Address::Zero {
-        return Err(Error::revert("_single_swap: receiver == address(0)"));
+    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
+        return Err(Error::revert("_single_swap: address(0)"));
     }
     if expected_amount_out == 0 {
         return Err(Error::revert("_single_swap: expected_amount_out == 0"));
@@ -432,7 +432,7 @@ fn _single_swap(
 
     let must_intercept = must_intercept_output(params, client_fee_bps)?;
 
-    let final_receiver = determine_final_receiver(must_intercept, receiver);
+    let final_receiver = if must_intercept { Address::Router } else { receiver };
 
     let swap_index = 0;
     let executor = params.request(ParamKey::Executor { swap_index }, Executor::VARIANTS)?;
@@ -505,8 +505,8 @@ fn _sequential_swap_checked(
     if amount_in == 0 {
         return Err(Error::revert("_sequential_swap_checked: amount_in == 0"));
     }
-    if receiver == Address::Zero {
-        return Err(Error::revert("_sequential_swap_checked: receiver == address(0)"));
+    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
+        return Err(Error::revert("_sequential_swap_checked: address(0)"));
     }
     if expected_amount_out == 0 {
         return Err(Error::revert("_sequential_swap_checked: expected_amount_out == 0"));
@@ -528,7 +528,7 @@ fn _sequential_swap_checked(
 
     let must_intercept = must_intercept_output(params, client_fee_bps)?;
 
-    let final_receiver = determine_final_receiver(must_intercept, receiver);
+    let final_receiver = if must_intercept { Address::Router } else { receiver };
 
     let actual_amount_out = _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
 
@@ -687,7 +687,7 @@ fn _split_swap(
             amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
         }
         remaining_amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
-        remaining_amounts[usize::try_from(token_in_index).unwrap()] -= current_amount_out;
+        remaining_amounts[usize::try_from(token_in_index).unwrap()] -= current_amount_in;
     }
     Ok(if is_cyclical {
         cyclic_swap_amount_out
@@ -887,7 +887,3 @@ fn _maybe_add_client_contribution(
     }
 }
 
-/// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L1125>
-fn determine_final_receiver(must_intercept: bool, receiver: Address) -> Address {
-    if must_intercept { Address::Router } else { receiver }
-}
