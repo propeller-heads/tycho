@@ -759,6 +759,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 tokenOut,
                 actualAmountOut,
                 expectedAmountOut,
+                amountIn,
+                tokenIn,
+                tokenOut,
                 clientFeeParams.clientFeeBps,
                 client
             );
@@ -846,6 +849,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 tokenOut,
                 actualAmountOut,
                 expectedAmountOut,
+                amountIn,
+                tokenIn,
+                tokenOut,
                 clientFeeParams.clientFeeBps,
                 client
             );
@@ -928,6 +934,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 tokenOut,
                 actualAmountOut,
                 expectedAmountOut,
+                amountIn,
+                tokenIn,
+                tokenOut,
                 clientFeeParams.clientFeeBps,
                 client
             );
@@ -1249,6 +1258,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param token The token address for which fees are being taken
      * @param actualAmountOut The actual amount received from the swap
      * @param expectedAmountOut The off-chain quoted amount
+     * @param amountIn The input amount for the swap
+     * @param tokenIn The input token address
+     * @param tokenOut The output token address
      * @param clientFeeBps Client fee in basis points
      * @param client Address to receive client fees
      * @return amountOutAfterFees The amount remaining after all fee deductions
@@ -1257,6 +1269,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address token,
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
+        uint256 amountIn,
+        address tokenIn,
+        address tokenOut,
         uint32 clientFeeBps,
         address client
     ) internal returns (uint256 amountOutAfterFees) {
@@ -1264,9 +1279,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             _feeCalculator,
             actualAmountOut,
             expectedAmountOut,
-            0,
-            address(0),
-            address(0),
+            amountIn,
+            tokenIn,
+            tokenOut,
             clientFeeBps,
             client
         );
