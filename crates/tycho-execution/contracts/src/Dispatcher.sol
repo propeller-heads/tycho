@@ -286,7 +286,7 @@ contract Dispatcher is TransferManager {
         }
     }
 
-    function _callCalculateFee(address feeCalculator, FeeInput memory f)
+    function _callCalculateFee(address feeCalculator, FeeInput memory feeInput)
         internal
         view
         returns (FeeRecipient[] memory feeRecipients)
@@ -294,13 +294,13 @@ contract Dispatcher is TransferManager {
         // slither-disable-next-line calls-loop
         feeRecipients = IFeeCalculator(feeCalculator)
             .calculateFee(
-                f.actualAmountOut,
-                f.expectedAmountOut,
-                f.amountIn,
-                f.tokenIn,
-                f.tokenOut,
-                f.clientFeeBps,
-                f.client
+                feeInput.actualAmountOut,
+                feeInput.expectedAmountOut,
+                feeInput.amountIn,
+                feeInput.tokenIn,
+                feeInput.tokenOut,
+                feeInput.clientFeeBps,
+                feeInput.client
             );
     }
 

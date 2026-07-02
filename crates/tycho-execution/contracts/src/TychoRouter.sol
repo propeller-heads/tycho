@@ -1263,12 +1263,12 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param f Fee calculation inputs (amounts, tokens, client)
      * @return amountOutAfterFees Amount remaining after fee deductions
      */
-    function _takeFees(FeeInput memory f)
+    function _takeFees(FeeInput memory feeInput)
         internal
         returns (uint256 amountOutAfterFees)
     {
-        FeeRecipient[] memory fees = _callCalculateFee(_feeCalculator, f);
-        amountOutAfterFees = f.actualAmountOut;
+        FeeRecipient[] memory fees = _callCalculateFee(_feeCalculator, feeInput);
+        amountOutAfterFees = feeInput.actualAmountOut;
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
@@ -1277,15 +1277,17 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 // due to incorrect or malicious encoding. Updating the delta
                 // accounting without funds will result in an additional negative
                 // delta, and cause the _finalizeBalances method to revert.
-                _updateDeltaAccounting(f.tokenOut, -int256(fees[i].feeAmount));
+                _updateDeltaAccounting(
+                    feeInput.tokenOut, -int256(fees[i].feeAmount)
+                );
                 _creditVaultForFees(
-                    fees[i].recipient, f.tokenOut, fees[i].feeAmount
+                    fees[i].recipient, feeInput.tokenOut, fees[i].feeAmount
                 );
                 amountOutAfterFees -= fees[i].feeAmount;
             }
         }
         if (fees.length > 0) {
-            emit FeesTaken(f.tokenOut, fees);
+            emit FeesTaken(feeInput.tokenOut, fees);
         }
     }
 
