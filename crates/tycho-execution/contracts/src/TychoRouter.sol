@@ -1342,6 +1342,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                 // output transfer has been performed yet, or the user has specified the
                 // receiver to be the router in order to rebalance their vault.
                 _updateDeltaAccounting(tokenOut, int256(requiredContribution));
+                // slither-disable-next-line incorrect-equality
             } else if (outputDelta == 0) {
                 if (receiver == address(this)) {
                     _creditVault(msg.sender, tokenOut, requiredContribution);
