@@ -88,9 +88,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
      * @param actualAmountOut The actual amount received from the swap
-     *        (used for slippage surplus calculation)
-     * @param expectedAmountOut Caller-supplied quoted amount out.
-     *        Fees are calculated on this amount.
+     * @param expectedAmountOut Caller-supplied quoted amount out
      * @param amountIn The input amount of the swap
      * @param tokenIn The input token address
      * @param tokenOut The output token address
