@@ -90,8 +90,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @param actualAmountOut The actual amount received from the swap
      * @param expectedAmountOut Caller-supplied quoted amount out
      * @param amountIn The input amount of the swap
-     * @param tokenIn The input token address
-     * @param tokenOut The output token address
+     * @param tokenIn The swap's input token address
+     * @param tokenOut The swap's output token address
      * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to look up custom router fees
      *        and slippage share for and to receive fees.
