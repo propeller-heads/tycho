@@ -72,7 +72,8 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// The `expectedAmountOut` and `maxSlippageBps` values used here are just an example.
 /// You should ideally:
 /// - Query an external service (e.g., DEX aggregators, oracle, off-chain price feed).
-/// - Use your own strategy to determine an accurate and safe output and slippage tolerance.
+/// - Use your own strategy to determine an accurate and safe expected output and slippage
+///   tolerance.
 ///
 /// ⚠️ If `maxSlippageBps` is too high, your swap may be front-run or sandwiched, resulting in loss
 /// of funds.
