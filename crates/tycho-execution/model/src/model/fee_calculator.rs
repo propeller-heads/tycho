@@ -74,6 +74,9 @@ pub fn calculate_fee(
     actual_amount_out: i64,
     expected_amount_out: i64,
     client_fee_bps: i64,
+    _token_in: Address,
+    _token_out: Address,
+    _amount_in: i64,
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
 

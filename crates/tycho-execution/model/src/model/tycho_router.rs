@@ -752,7 +752,15 @@ fn _take_fees(
     expected_amount_out: i64,
     client_fee_bps: i64,
 ) -> Result<i64, Error> {
-    let fees = calculate_fee(params, actual_amount_out, expected_amount_out, client_fee_bps)?;
+    let fees = calculate_fee(
+        params,
+        actual_amount_out,
+        expected_amount_out,
+        client_fee_bps,
+        Address::Zero,
+        Address::Zero,
+        0,
+    )?;
 
     let mut total_fees = 0i64;
     for fee in &fees {
