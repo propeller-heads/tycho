@@ -1260,7 +1260,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
     /**
      * @notice Calculates and takes fees using the FeeCalculator
-     * @param f Fee calculation inputs (amounts, tokens, client)
+     * @param feeInput Fee calculation inputs (amounts, tokens, client)
      * @return amountOutAfterFees Amount remaining after fee deductions
      */
     function _takeFees(FeeInput memory feeInput)
