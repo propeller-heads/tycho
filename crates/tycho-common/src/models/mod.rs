@@ -210,22 +210,27 @@ fn native_pol(chain: Chain) -> Token {
     )
 }
 
-/// Looks up a custom chain's config in the registry. Panicking here is an unreachable invariant
-/// guard: a [`CustomChainId`] is only minted after registry validation and the registry is
-/// set-once, so a missing entry signals an internal bug rather than bad input.
-fn resolve_custom<'a>(
+/// Looks up a custom chain's config in the registry, returning [`ChainConfigError::UnknownChain`]
+/// when it is absent.
+fn try_resolve_custom<'a>(
     id: &CustomChainId,
     registry: &'a ChainConfigRegistry,
-) -> &'a CustomChainConfig {
+) -> Result<&'a CustomChainConfig, ChainConfigError> {
     registry
         .get(id.as_str())
-        .unwrap_or_else(|| {
-            panic!(
-                "no configuration registered for custom chain '{}'; Chain::Custom is validated \
-                 against the registry at construction, so this is an internal invariant violation",
-                id.as_str()
-            )
-        })
+        .ok_or_else(|| ChainConfigError::UnknownChain(id.as_str().to_owned()))
+}
+
+/// Unwraps a registry lookup that cannot fail for a validly-constructed `Chain::Custom`: a
+/// [`CustomChainId`] is only minted after registry validation and the registry is set-once, so a
+/// missing entry is an internal invariant violation rather than bad input.
+fn expect_registered<T>(result: Result<T, ChainConfigError>) -> T {
+    result.unwrap_or_else(|e| {
+        panic!(
+            "internal invariant violation resolving custom chain config: {e}; Chain::Custom is \
+             validated against the set-once chain registry at construction"
+        )
+    })
 }
 
 fn native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
@@ -268,8 +273,17 @@ fn wrapped_native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
 }
 
 impl Chain {
+    /// Returns the numeric chain id. Panics if a custom chain has no registered config — an
+    /// unreachable invariant for a validly-constructed `Chain::Custom`; use [`Chain::try_id`] for a
+    /// non-panicking variant.
     pub fn id(&self) -> u64 {
-        match self {
+        expect_registered(self.try_id())
+    }
+
+    /// Returns the numeric chain id, or [`ChainConfigError::UnknownChain`] when a custom chain has
+    /// no registered config.
+    pub fn try_id(&self) -> Result<u64, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => 1,
             Chain::ZkSync => 324,
             Chain::Arbitrum => 42161,
@@ -278,8 +292,8 @@ impl Chain {
             Chain::Bsc => 56,
             Chain::Unichain => 130,
             Chain::Polygon => 137,
-            Chain::Custom(name) => resolve_custom(name, chain_registry()).chain_id,
-        }
+            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
+        })
     }
 
     /// Returns a default TVL threshold in native token units for the given tier.
@@ -288,8 +302,20 @@ impl Chain {
     /// Native token prices used: ETH ~$2,000, POL ~$0.10, BNB ~$630.
     /// These prices are volatile, and used as a reference. They should not be updated often,
     /// unless big price movements occour, making an update necessary.
+    ///
+    /// Panics if a custom chain has no registered config; use [`Chain::try_default_tvl_threshold`]
+    /// for a non-panicking variant.
     pub fn default_tvl_threshold(&self, tier: TvlThresholdTier) -> f64 {
-        match (self, tier) {
+        expect_registered(self.try_default_tvl_threshold(tier))
+    }
+
+    /// Like [`Chain::default_tvl_threshold`] but returns [`ChainConfigError::UnknownChain`] when a
+    /// custom chain has no registered config.
+    pub fn try_default_tvl_threshold(
+        &self,
+        tier: TvlThresholdTier,
+    ) -> Result<f64, ChainConfigError> {
+        Ok(match (self, tier) {
             // ETH-native chains: 10 ETH ≈ $20K, 100 ETH ≈ $200K.
             // Starknet uses ETH-denominated TVL in Tycho (STRK tracked separately).
             (
@@ -319,22 +345,29 @@ impl Chain {
             (Chain::Bsc, TvlThresholdTier::Low) => 32.0,
             (Chain::Bsc, TvlThresholdTier::Medium) => 320.0,
 
-            (Chain::Custom(name), TvlThresholdTier::Low) => {
-                resolve_custom(name, chain_registry())
+            (Chain::Custom(id), TvlThresholdTier::Low) => {
+                try_resolve_custom(id, chain_registry())?
                     .default_tvl_thresholds
                     .low
             }
-            (Chain::Custom(name), TvlThresholdTier::Medium) => {
-                resolve_custom(name, chain_registry())
+            (Chain::Custom(id), TvlThresholdTier::Medium) => {
+                try_resolve_custom(id, chain_registry())?
                     .default_tvl_thresholds
                     .medium
             }
-        }
+        })
     }
 
-    /// Returns the native token for the chain.
+    /// Returns the native token for the chain. Panics if a custom chain has no registered config;
+    /// use [`Chain::try_native_token`] for a non-panicking variant.
     pub fn native_token(&self) -> Token {
-        match self {
+        expect_registered(self.try_native_token())
+    }
+
+    /// Like [`Chain::native_token`] but returns [`ChainConfigError::UnknownChain`] when a custom
+    /// chain has no registered config.
+    pub fn try_native_token(&self) -> Result<Token, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => native_eth(Chain::Ethereum),
             // It was decided that STRK token will be tracked as a dedicated AccountBalance on
             // Starknet accounts and ETH balances will be tracked as a native balance.
@@ -345,13 +378,20 @@ impl Chain {
             Chain::Bsc => native_bsc(Chain::Bsc),
             Chain::Unichain => native_eth(Chain::Unichain),
             Chain::Polygon => native_pol(Chain::Polygon),
-            Chain::Custom(name) => native_custom(*self, resolve_custom(name, chain_registry())),
-        }
+            Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
+        })
     }
 
-    /// Returns the wrapped native token for the chain.
+    /// Returns the wrapped native token for the chain. Panics if a custom chain has no registered
+    /// config; use [`Chain::try_wrapped_native_token`] for a non-panicking variant.
     pub fn wrapped_native_token(&self) -> Token {
-        match self {
+        expect_registered(self.try_wrapped_native_token())
+    }
+
+    /// Like [`Chain::wrapped_native_token`] but returns [`ChainConfigError::UnknownChain`] when a
+    /// custom chain has no registered config.
+    pub fn try_wrapped_native_token(&self) -> Result<Token, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => {
                 wrapped_native_eth(Chain::Ethereum, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
             }
@@ -377,15 +417,22 @@ impl Chain {
             Chain::Polygon => {
                 wrapped_native_pol(Chain::Polygon, "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
             }
-            Chain::Custom(name) => {
-                wrapped_native_custom(*self, resolve_custom(name, chain_registry()))
+            Chain::Custom(id) => {
+                wrapped_native_custom(*self, try_resolve_custom(id, chain_registry())?)
             }
-        }
+        })
     }
 
-    /// Returns the expected block time in seconds for the chain.
+    /// Returns the expected block time in seconds for the chain. Panics if a custom chain has no
+    /// registered config; use [`Chain::try_block_time_secs`] for a non-panicking variant.
     pub fn block_time_secs(&self) -> u64 {
-        match self {
+        expect_registered(self.try_block_time_secs())
+    }
+
+    /// Like [`Chain::block_time_secs`] but returns [`ChainConfigError::UnknownChain`] when a custom
+    /// chain has no registered config.
+    pub fn try_block_time_secs(&self) -> Result<u64, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => 12,
             Chain::Starknet => 2,
             Chain::ZkSync => 3,
@@ -394,8 +441,8 @@ impl Chain {
             Chain::Bsc => 1,
             Chain::Unichain => 1,
             Chain::Polygon => 2,
-            Chain::Custom(name) => resolve_custom(name, chain_registry()).block_time_secs,
-        }
+            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
+        })
     }
 }
 
@@ -629,6 +676,37 @@ mod tests {
     fn test_from_dto_unregistered_custom_panics() {
         let dto_chain = dto::Chain::Custom(ArrayString::from("nope").unwrap());
         let _: Chain = dto_chain.into();
+    }
+
+    #[test]
+    fn test_try_accessors_ok_for_registered_custom() {
+        init_test_registry();
+        let chain = Chain::custom("testchain").unwrap();
+        assert_eq!(chain.try_id().unwrap(), 9999);
+        assert_eq!(chain.try_block_time_secs().unwrap(), 5);
+        assert_eq!(
+            chain
+                .try_default_tvl_threshold(TvlThresholdTier::Low)
+                .unwrap(),
+            50.0
+        );
+        assert_eq!(chain.try_native_token().unwrap().symbol, "TST");
+        assert_eq!(
+            chain
+                .try_wrapped_native_token()
+                .unwrap()
+                .symbol,
+            "WTST"
+        );
+    }
+
+    #[test]
+    fn test_try_accessors_err_for_unregistered_custom() {
+        // A `CustomChainId` that bypassed registry validation (only reachable via direct
+        // deserialization) surfaces as an error rather than a panic through the `try_*` accessors.
+        let ghost: Chain = serde_json::from_str(r#"{"custom":"ghostchain"}"#).unwrap();
+        assert_eq!(ghost.try_id(), Err(ChainConfigError::UnknownChain("ghostchain".to_owned())));
+        assert!(ghost.try_native_token().is_err());
     }
 
     #[test]
