@@ -108,7 +108,10 @@ impl From<models::Chain> for Chain {
             models::Chain::Bsc => Chain::Bsc,
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
-            models::Chain::Custom(name) => Chain::Custom(name),
+            models::Chain::Custom(id) => Chain::Custom(
+                ArrayString::from(id.as_str())
+                    .expect("custom chain name is already within 32 bytes"),
+            ),
         }
     }
 }

@@ -154,6 +154,35 @@ impl DeepSizeOf for CustomChainConfig {
     }
 }
 
+/// Name of a custom chain, guaranteed at construction time to have a matching config in the chain
+/// registry. The inner name is private, so a `CustomChainId` — and therefore a `Chain::Custom` —
+/// can only be minted through the crate's validating constructors (`Chain::custom`,
+/// `Chain::from_str`, `From<dto::Chain>`), never fabricated directly. Serializes transparently as
+/// the bare chain name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CustomChainId(ArrayString<32>);
+
+impl CustomChainId {
+    /// Builds an id after confirming `name` is registered, returning
+    /// [`ChainConfigError::UnknownChain`] when it is absent and [`ChainConfigError::NameTooLong`]
+    /// when it exceeds 32 bytes.
+    pub(crate) fn checked(
+        name: &str,
+        registry: &ChainConfigRegistry,
+    ) -> Result<Self, ChainConfigError> {
+        if !registry.contains(name) {
+            return Err(ChainConfigError::UnknownChain(name.to_owned()));
+        }
+        ArrayString::from(name)
+            .map(Self)
+            .map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// TVL threshold tiers for chain-aware filtering defaults.
 ///
 /// TVL is denominated in each chain's native token. Since native tokens have different USD values,

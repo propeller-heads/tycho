@@ -7,9 +7,9 @@ pub mod token;
 
 use std::{collections::HashMap, fmt::Display, str::FromStr};
 
-use arrayvec::ArrayString;
 use chain_config::{
-    chain_registry, ChainConfigError, ChainConfigRegistry, CustomChainConfig, TvlThresholdTier,
+    chain_registry, ChainConfigError, ChainConfigRegistry, CustomChainConfig, CustomChainId,
+    TvlThresholdTier,
 };
 use deepsize::DeepSizeOf;
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
-    Custom(ArrayString<32>),
+    Custom(CustomChainId),
 }
 
 impl DeepSizeOf for Chain {
@@ -99,12 +99,11 @@ impl Chain {
         }
     }
 
-    /// Builds a custom-chain identity from its name. Does not validate against the registry;
-    /// callers that need validation should go through [`Chain::from_str`].
+    /// Builds a custom-chain identity, validating that `name` has a config in the chain registry.
+    /// Returns [`ChainConfigError::UnknownChain`] when it is absent so typos never silently become
+    /// custom chains.
     pub fn custom(name: &str) -> Result<Self, ChainConfigError> {
-        ArrayString::from(name)
-            .map(Chain::Custom)
-            .map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))
+        CustomChainId::checked(name, chain_registry()).map(Chain::Custom)
     }
 }
 
@@ -118,11 +117,7 @@ impl FromStr for Chain {
         if let Some(chain) = Self::builtin_from_str(s) {
             return Ok(chain);
         }
-        if chain_registry().contains(s) {
-            Self::custom(s)
-        } else {
-            Err(ChainConfigError::UnknownChain(s.to_owned()))
-        }
+        Self::custom(s)
     }
 }
 
@@ -153,7 +148,13 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Bsc => Chain::Bsc,
             dto::Chain::Unichain => Chain::Unichain,
             dto::Chain::Polygon => Chain::Polygon,
-            dto::Chain::Custom(name) => Chain::Custom(name),
+            dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
+                panic!(
+                    "received custom chain '{name}' with no registered config: {e}; install it via \
+                     the chain config file (TYCHO_CHAIN_CONFIG, default ./chains.yaml) or \
+                     init_chain_registry before decoding wire data"
+                )
+            }),
         }
     }
 }
@@ -209,17 +210,20 @@ fn native_pol(chain: Chain) -> Token {
     )
 }
 
-/// Looks up a custom chain's config in the registry, panicking with guidance when it is missing.
+/// Looks up a custom chain's config in the registry. Panicking here is an unreachable invariant
+/// guard: a [`CustomChainId`] is only minted after registry validation and the registry is
+/// set-once, so a missing entry signals an internal bug rather than bad input.
 fn resolve_custom<'a>(
-    name: &ArrayString<32>,
+    id: &CustomChainId,
     registry: &'a ChainConfigRegistry,
 ) -> &'a CustomChainConfig {
     registry
-        .get(name.as_str())
+        .get(id.as_str())
         .unwrap_or_else(|| {
             panic!(
-                "no configuration registered for custom chain '{name}'; provide it via the chain \
-             config file (TYCHO_CHAIN_CONFIG, default ./chains.yaml) or init_chain_registry"
+                "no configuration registered for custom chain '{}'; Chain::Custom is validated \
+                 against the registry at construction, so this is an internal invariant violation",
+                id.as_str()
             )
         })
 }
@@ -559,6 +563,8 @@ pub enum MergeError {
 // registry; under a shared-process runner they would contend over the same global.
 #[cfg(test)]
 mod tests {
+    use arrayvec::ArrayString;
+
     use super::{
         chain_config::{
             init_chain_registry, ChainAddress, ChainConfigError, ChainTokenConfig, TvlThresholds,
@@ -587,6 +593,7 @@ mod tests {
 
     #[test]
     fn test_custom_chain_display() {
+        init_test_registry();
         assert_eq!(
             Chain::custom("testchain")
                 .unwrap()
@@ -599,6 +606,29 @@ mod tests {
     fn test_from_str_custom_returns_err() {
         assert!("custom".parse::<Chain>().is_err());
         assert!("unknown".parse::<Chain>().is_err());
+    }
+
+    #[test]
+    fn test_custom_unregistered_returns_err() {
+        init_test_registry();
+        assert_eq!(Chain::custom("nope"), Err(ChainConfigError::UnknownChain("nope".to_owned())));
+    }
+
+    #[test]
+    fn test_from_dto_registered_custom_roundtrips() {
+        init_test_registry();
+        let dto_chain: dto::Chain = Chain::custom("testchain")
+            .unwrap()
+            .into();
+        let chain: Chain = dto_chain.into();
+        assert_eq!(chain.id(), 9999);
+    }
+
+    #[test]
+    #[should_panic(expected = "no registered config")]
+    fn test_from_dto_unregistered_custom_panics() {
+        let dto_chain = dto::Chain::Custom(ArrayString::from("nope").unwrap());
+        let _: Chain = dto_chain.into();
     }
 
     #[test]
