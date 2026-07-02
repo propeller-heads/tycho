@@ -62,6 +62,23 @@ pub type ProtocolSystem = String;
 /// Entry point id literal type to uniquely identify an entry point.
 pub type EntryPointId = String;
 
+/// A blockchain Tycho indexes or simulates over.
+///
+/// Built-in chains are first-class variants: their config (id, native token, block time, TVL
+/// tiers) is compile-time and total, so they never fail to resolve. `Custom` is the escape hatch
+/// for a chain a self-hoster runs without upstreaming a variant — its config lives in the
+/// process-wide registry (see [`chain_config`]) rather than in the enum.
+///
+/// `Custom` wraps a [`CustomChainId`] whose inner name is private, so a `Chain::Custom` can only be
+/// built through the crate's registry-validating constructors ([`Chain::custom`],
+/// [`Chain::from_str`], `From<dto::Chain>`) — it cannot be fabricated directly. Because the
+/// registry is set-once, a validated `Chain::Custom` stays resolvable for its whole lifetime, so
+/// the config accessors only panic on an unreachable invariant; [`Chain::try_id`] and its siblings
+/// expose non-panicking variants. The one reachable failure is decoding wire data for a chain the
+/// local registry lacks (`From<dto::Chain>`), which panics at the decode boundary.
+///
+/// Prefer adding a first-class variant for any chain Tycho officially supports; reserve `Custom`
+/// for the self-host case. Full rationale in the custom-chain decision record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Chain {
@@ -74,6 +91,7 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
     Custom(CustomChainId),
 }
 
