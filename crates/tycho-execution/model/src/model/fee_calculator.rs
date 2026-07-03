@@ -130,12 +130,13 @@ fn _calculate_fee(
     let mut client_portion = 0;
 
     if client_fee_bps > 0 {
-        let client_fee_numerator = fee_base * client_fee_bps;
-        let total_client_fee = client_fee_numerator / MAX_BPS;
+        let client_fee_numerator = fee_base as i128 * client_fee_bps as i128;
+        let total_client_fee = (client_fee_numerator / MAX_BPS as i128) as i64;
 
         if fee_info.router_fee_on_client_fee_bps > 0 {
-            router_fee_on_client_fee =
-                client_fee_numerator * fee_info.router_fee_on_client_fee_bps / MAX_BPS_SQUARED;
+            router_fee_on_client_fee = (client_fee_numerator *
+                fee_info.router_fee_on_client_fee_bps as i128 /
+                MAX_BPS_SQUARED as i128) as i64;
         }
 
         client_portion = checked_subtract(total_client_fee, router_fee_on_client_fee)?;
@@ -144,7 +145,8 @@ fn _calculate_fee(
     let mut total_router_fee = router_fee_on_client_fee;
 
     if fee_info.router_fee_on_output_bps > 0 {
-        total_router_fee += fee_base * fee_info.router_fee_on_output_bps / MAX_BPS;
+        total_router_fee +=
+            (fee_base as i128 * fee_info.router_fee_on_output_bps as i128 / MAX_BPS as i128) as i64;
     }
 
     Ok(vec![
@@ -167,7 +169,8 @@ fn _calculate_positive_slippage(
     }
 
     let surplus = actual_amount_out - expected_amount_out;
-    let client_cut = surplus * fee_info.client_slippage_share_bps / MAX_BPS;
+    let client_cut =
+        (surplus as i128 * fee_info.client_slippage_share_bps as i128 / MAX_BPS as i128) as i64;
     let router_cut = surplus - client_cut;
 
     vec![
