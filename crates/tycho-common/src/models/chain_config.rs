@@ -154,6 +154,35 @@ impl DeepSizeOf for CustomChainConfig {
     }
 }
 
+/// Name of a custom chain, guaranteed at construction time to have a matching config in the chain
+/// registry. The inner name is private, so a `CustomChainId` — and therefore a `Chain::Custom` —
+/// can only be minted through the crate's validating constructors (`Chain::custom`,
+/// `Chain::from_str`, `From<dto::Chain>`), never fabricated directly. Serializes transparently as
+/// the bare chain name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CustomChainId(ArrayString<32>);
+
+impl CustomChainId {
+    /// Builds an id after confirming `name` is registered, returning
+    /// [`ChainConfigError::UnknownChain`] when it is absent and [`ChainConfigError::NameTooLong`]
+    /// when it exceeds 32 bytes.
+    pub(crate) fn checked(
+        name: &str,
+        registry: &ChainConfigRegistry,
+    ) -> Result<Self, ChainConfigError> {
+        if !registry.contains(name) {
+            return Err(ChainConfigError::UnknownChain(name.to_owned()));
+        }
+        ArrayString::from(name)
+            .map(Self)
+            .map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// TVL threshold tiers for chain-aware filtering defaults.
 ///
 /// TVL is denominated in each chain's native token. Since native tokens have different USD values,
@@ -170,10 +199,10 @@ pub enum TvlThresholdTier {
 /// Env var overriding the path the registry reads custom-chain config from.
 const CHAIN_CONFIG_ENV: &str = "TYCHO_CHAIN_CONFIG";
 /// Default path used when `TYCHO_CHAIN_CONFIG` is unset.
-const DEFAULT_CHAIN_CONFIG_PATH: &str = "./chain.yaml";
+const DEFAULT_CHAIN_CONFIG_PATH: &str = "./chains.yaml";
 
-/// On-disk shape of the custom-chain config file: a top-level `chains:` list. Matches the
-/// `chains:` section of the indexer's extractor config, so a consumer can point
+/// On-disk shape of the custom-chain config file: a top-level `chains:` list. This is the format of
+/// the indexer's `chains.yaml` (its `--chain-config` file), so a consumer can point
 /// `TYCHO_CHAIN_CONFIG` at the same file the indexer uses.
 #[derive(Debug, Default, Deserialize)]
 struct ChainConfigFile {
@@ -184,9 +213,9 @@ struct ChainConfigFile {
 /// Resolves the full configuration of custom chains by name.
 ///
 /// Built-in chains are resolved without this registry; it only holds user-defined chains loaded
-/// from a YAML source. Build it explicitly via [`ChainConfigRegistry::from_configs`] (e.g. the
-/// indexer reusing its `chains:` config) or [`ChainConfigRegistry::load_default`], then install it
-/// as the process-wide registry with [`init_chain_registry`].
+/// from a YAML source. Build it explicitly via [`ChainConfigRegistry::from_configs`],
+/// [`ChainConfigRegistry::from_yaml_file`], or [`ChainConfigRegistry::load_default`], then install
+/// it as the process-wide registry with [`init_chain_registry`].
 #[derive(Debug, Default, Clone)]
 pub struct ChainConfigRegistry {
     custom: HashMap<String, CustomChainConfig>,
@@ -217,7 +246,7 @@ impl ChainConfigRegistry {
         Ok(Self { custom })
     }
 
-    /// Reads custom chain configs from `TYCHO_CHAIN_CONFIG` (default `./chain.yaml`).
+    /// Reads custom chain configs from `TYCHO_CHAIN_CONFIG` (default `./chains.yaml`).
     ///
     /// Returns an empty registry when the file is absent, so runs on built-in chains need no config
     /// file. Returns an error if the file exists but cannot be read or parsed, leaving it to the

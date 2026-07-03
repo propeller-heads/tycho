@@ -130,7 +130,9 @@ impl BebopClient {
         if !price_data.bids.is_empty() {
             let bids_pairs: Vec<(f32, f32)> = price_data
                 .bids
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| (chunk[0], chunk[1]))
                 .collect();
             let bids_json = serde_json::to_string(&bids_pairs).unwrap_or_default();
@@ -139,7 +141,9 @@ impl BebopClient {
         if !price_data.asks.is_empty() {
             let asks_pairs: Vec<(f32, f32)> = price_data
                 .asks
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| (chunk[0], chunk[1]))
                 .collect();
             let asks_json = serde_json::to_string(&asks_pairs).unwrap_or_default();
