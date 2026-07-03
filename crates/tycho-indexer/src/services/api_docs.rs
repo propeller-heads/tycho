@@ -10,7 +10,7 @@ use tycho_common::{
         TracedEntryPointRequestBody, TracedEntryPointRequestResponse, TracingParams, TracingResult,
         VersionParam,
     },
-    models::{ChainTokenConfig, CustomChainConfig, TvlThresholds},
+    models::chain_config::{ChainTokenConfig, CustomChainConfig, TvlThresholds},
 };
 use utoipa::{
     openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},

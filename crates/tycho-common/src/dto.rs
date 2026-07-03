@@ -21,7 +21,10 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    models::{self, Address, Balance, Code, ComponentId, CustomChainConfig, StoreKey, StoreVal},
+    models::{
+        self, chain_config::CustomChainConfig, Address, Balance, Code, ComponentId, StoreKey,
+        StoreVal,
+    },
     serde_primitives::{
         hex_bytes, hex_bytes_option, hex_hashmap_key, hex_hashmap_key_value, hex_hashmap_value,
     },
@@ -46,7 +49,7 @@ pub enum Chain {
     Custom(CustomChainConfig),
 }
 
-pub use models::TvlThresholdTier;
+pub use models::chain_config::TvlThresholdTier;
 
 impl Chain {
     /// Returns a default TVL threshold in native token units for the given tier.
