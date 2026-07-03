@@ -38,6 +38,7 @@ Configure the stack through `docker/.env`. The compose file reads it for both th
 <tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest block data the indexer retains.</td></tr>
 <tr><td><code>TYCHO_IMAGE</code></td><td>indexer</td><td>Yes</td><td>—</td><td>tycho-indexer image tag.</td></tr>
 <tr><td><code>EXTRACTORS_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/extractors.yaml</code></td><td>Path to the extractors config inside the container.</td></tr>
+<tr><td><code>CHAIN_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/chains.yaml</code></td><td>Path to the custom-chains config inside the container. Only needed to index a non-built-in chain.</td></tr>
 <tr><td><code>TYCHO_PROTOCOL_SDK_PATH</code></td><td>indexer</td><td>No</td><td><code>../tycho-protocol-sdk</code></td><td>Host tycho-protocol-sdk checkout, mounted read-only.</td></tr>
 <tr><td><code>SUBSTREAMS_API_TOKEN</code></td><td>indexer</td><td>No</td><td><code>readme</code></td><td>Auth token for a hosted Substreams endpoint; unused self-hosted.</td></tr>
 <tr><td><code>TRACE_RPC_URL</code></td><td>indexer</td><td>For DCI</td><td><code>readme</code> (placeholder)</td><td>Trace-capable RPC for dynamic contract indexing.</td></tr>
@@ -59,7 +60,7 @@ START_BLOCK=24542000
 # Self-hosted Firehose, reachable by its docker service name
 SUBSTREAMS_ENDPOINT=http://substreams-endpoint:10016
 
-# Custom chain — declared under `chains:` in extractors.yaml (see below)
+# Custom chain — defined in chains.yaml (see below)
 CHAINS=tempo
 
 RETENTION_HORIZON=2000-01-01T00:00:00
@@ -71,13 +72,13 @@ OTLP_EXPORTER_ENDPOINT=
 
 ### Writing your extractors.yaml
 
-Copy <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/extractors.example.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/extractors.example.yaml</code></a> to `crates/tycho-indexer/extractors.yaml` and edit it — the compose file mounts `extractors.yaml` into the container at `/opt/tycho-indexer/extractors.yaml`. The example file documents every field, including the optional `chains:` section. Each entry under `extractors:` configures one protocol:
+Edit <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/extractors.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/extractors.yaml</code></a> — the compose file mounts it into the container at `/opt/tycho-indexer/extractors.yaml`. Each entry under `extractors:` configures one protocol:
 
 ```yaml
 extractors:
   uniswap_v3:
     name: "uniswap_v3"
-    chain: "ethereum"
+    chain: "tempo"
     implementation_type: "Custom"
     sync_batch_size: 1000
     start_block: 12369621
@@ -90,7 +91,7 @@ extractors:
 
 <table><thead><tr><th width="220">Field</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>name</code></td><td>Unique extractor name; also the protocol system name exposed over the RPC.</td></tr>
-<tr><td><code>chain</code></td><td>Chain this extractor runs on — a built-in chain name, or a custom chain you declare under <code>chains:</code> below. The indexer rejects an unknown chain name at startup.</td></tr>
+<tr><td><code>chain</code></td><td>Chain this extractor runs on — a built-in chain name, or a custom chain defined in <code>chains.yaml</code> (see below). The indexer rejects an unknown chain name at startup.</td></tr>
 <tr><td><code>implementation_type</code></td><td><code>Custom</code> for native substreams that emit Tycho protocol messages directly, or <code>Vm</code> for protocols simulated through the tycho-protocol-sdk.</td></tr>
 <tr><td><code>sync_batch_size</code></td><td>Number of blocks the indexer requests per Substreams batch.</td></tr>
 <tr><td><code>start_block</code></td><td>Block at which the protocol was deployed; the indexer starts streaming here.</td></tr>
@@ -101,7 +102,7 @@ extractors:
 
 ### Declaring a custom chain
 
-Built-in chains (`ethereum`, `base`, `unichain`, …) need no extra config. To index a chain Tycho does not know, declare it in a top-level `chains:` section of the same file. Each extractor's `chain:` field resolves against these entries, and `CHAINS` names the active one. The indexer reads this section directly and fails fast at startup if an extractor references a chain that is neither built-in nor declared here.
+Built-in chains (`ethereum`, `base`, `unichain`, …) need no extra config. To index a chain Tycho does not know, define it in a separate `chains.yaml` file. Copy <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/chains.example.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/chains.example.yaml</code></a> to `crates/tycho-indexer/chains.yaml` and edit it — the compose file mounts it into the container at `/opt/tycho-indexer/chains.yaml`, and the indexer reads it via `CHAIN_CONFIG` (the `--chain-config` flag). Each extractor's `chain:` field and `CHAINS` resolve against these entries; the indexer fails fast at startup if an extractor references a chain that is neither built-in nor defined here.
 
 ```yaml
 chains:
