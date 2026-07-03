@@ -114,9 +114,18 @@ fn seed_new_books(
                     });
                 }
                 // Re-listing: this token's live book (seeded with `balanceOf(maker)` above) has
-                // replaced an older book. Drain the superseded book's asset balance by the same
-                // amount so the maker's inventory is not double-counted across both books. USDC
-                // is intentionally excluded (it is shared across every book by design).
+                // replaced an older book. Drain the superseded book by the same amount so the
+                // maker's inventory is not double-counted across both books. USDC is excluded (it
+                // is shared across every book by design).
+                //
+                // Invariant: the superseded book's accumulated asset balance equals
+                // `balanceOf(maker)` at this block — it was the token's live book and tracked the
+                // maker's holdings until now, so `-balanceOf(maker)` nets it to zero. The balance
+                // store is additive and cannot be read back here (module graph cycle), so an exact
+                // drain isn't possible. The invariant only breaks if the maker's balance moves in
+                // this very block (its own Transfer is skipped via `seeded_tokens`) or the maker is
+                // rotated in the same block; both leave a small residual on the now-paused,
+                // unrouted book. Neither has occurred for this venue.
                 let Some(new_asset_id) = new_asset_id else { continue };
                 for old_id in superseded_books_for_token(token, new_asset_id, components_store) {
                     balance_deltas.push(BalanceDelta {

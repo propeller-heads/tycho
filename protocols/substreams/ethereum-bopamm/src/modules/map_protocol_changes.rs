@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use itertools::Itertools;
@@ -14,7 +14,8 @@ use tycho_substreams::{
 use crate::{
     common::{
         asset_token, committed_updates, component_id, enumerate_books, is_zero,
-        superseded_books_for_token, u64_from_word_padded, PAUSED_TOPIC, UNPAUSED_TOPIC,
+        superseded_book_ids, superseded_books_for_token, u64_from_word_padded, PAUSED_TOPIC,
+        UNPAUSED_TOPIC,
     },
     config::DeploymentConfig,
 };
@@ -135,7 +136,7 @@ fn pause_superseded_books(
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
     for tx_component in &grouped_components.tx_components {
-        let tx = tx_component.tx.as_ref().unwrap();
+        let Some(tx) = tx_component.tx.as_ref() else { continue };
         for component in &tx_component.components {
             let Some(asset_id) = component
                 .get_attribute_value("asset_id")
@@ -277,6 +278,9 @@ fn extract_maker_changes(
 
 /// Reflects settlement `Paused`/`Unpaused` events onto every book (the venue is paused as a
 /// whole). Paused books should not be routed through until unpaused.
+///
+/// A global `Unpaused` never resurrects a superseded book: those are dead markets that revert
+/// `StaleUpdate` and must stay paused regardless of the venue-wide pause state.
 fn extract_pause_state(
     block: &eth::v2::Block,
     config: &DeploymentConfig,
@@ -285,6 +289,7 @@ fn extract_pause_state(
 ) {
     // Computed lazily on the first pause/unpause log so blocks without one do nothing.
     let mut books: Option<Vec<String>> = None;
+    let mut superseded: Option<HashSet<String>> = None;
     for log in block.logs() {
         if log.address() != config.settlement.as_slice() {
             continue;
@@ -301,11 +306,17 @@ fn extract_pause_state(
         if books.is_empty() {
             continue;
         }
+        let superseded =
+            superseded.get_or_insert_with(|| superseded_book_ids(components_store, &config.usdc));
         let tx: Transaction = log.receipt.transaction.into();
         let builder = transaction_changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx));
         for book in books.iter() {
+            // Keep superseded (dead) books paused across a global unpause.
+            if !paused && superseded.contains(book) {
+                continue;
+            }
             builder.change_component_pause_state(book, paused);
         }
     }
