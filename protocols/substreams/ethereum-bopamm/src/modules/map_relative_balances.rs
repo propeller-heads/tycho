@@ -12,7 +12,10 @@ use tycho_substreams::{
 };
 
 use crate::{
-    common::{address_from_word, books_for_token, weth_event_delta},
+    common::{
+        address_from_word, books_for_token, superseded_books_for_token, u64_from_word_padded,
+        weth_event_delta,
+    },
     config::DeploymentConfig,
 };
 
@@ -91,6 +94,9 @@ fn seed_new_books(
     for tx_components in &new_components.tx_components {
         let Some(tx) = &tx_components.tx else { continue };
         for component in &tx_components.components {
+            let new_asset_id = component
+                .get_attribute_value("asset_id")
+                .and_then(|b| u64_from_word_padded(&b));
             for token in &component.tokens {
                 if token.as_slice() == config.usdc.as_slice() {
                     continue;
@@ -105,6 +111,23 @@ fn seed_new_books(
                         token: token.clone(),
                         delta: balance.to_signed_bytes_be(),
                         component_id: comp_id.into_bytes(),
+                    });
+                }
+                // Re-listing: this token's live book (seeded with `balanceOf(maker)` above) has
+                // replaced an older book. Drain the superseded book's asset balance by the same
+                // amount so the maker's inventory is not double-counted across both books. USDC
+                // is intentionally excluded (it is shared across every book by design).
+                let Some(new_asset_id) = new_asset_id else { continue };
+                for old_id in superseded_books_for_token(token, new_asset_id, components_store) {
+                    balance_deltas.push(BalanceDelta {
+                        ord: tx.index,
+                        tx: Some(tx.clone()),
+                        token: token.clone(),
+                        delta: balance
+                            .clone()
+                            .neg()
+                            .to_signed_bytes_be(),
+                        component_id: old_id.into_bytes(),
                     });
                 }
             }

@@ -13,7 +13,8 @@ use tycho_substreams::{
 
 use crate::{
     common::{
-        committed_updates, component_id, enumerate_books, is_zero, PAUSED_TOPIC, UNPAUSED_TOPIC,
+        asset_token, committed_updates, component_id, enumerate_books, is_zero,
+        superseded_books_for_token, u64_from_word_padded, PAUSED_TOPIC, UNPAUSED_TOPIC,
     },
     config::DeploymentConfig,
 };
@@ -38,6 +39,12 @@ pub fn map_protocol_changes(
         .and_then(|m| hex::decode(m).ok());
 
     add_new_components(&grouped_components, maker.as_deref(), &mut transaction_changes);
+    pause_superseded_books(
+        &grouped_components,
+        &config,
+        &components_store,
+        &mut transaction_changes,
+    );
 
     aggregate_balances_changes(balance_store, deltas)
         .into_iter()
@@ -110,6 +117,43 @@ fn add_new_components(
                 component_id: component.id.clone(),
                 attributes,
             });
+        }
+    }
+}
+
+/// Pauses books that a newly created book has superseded.
+///
+/// BopAMM re-lists an asset under a fresh asset id rather than delisting the old book, so a
+/// token's previous book keeps its last committed (now stale) quote. Left active it would surface
+/// a dead market — and revert `StaleUpdate()` once its registry lane is cleared. When a
+/// replacement book is created, mark the older book(s) for the same token paused so consumers
+/// stop routing through them. Runs only on the block a replacement is created (rare).
+fn pause_superseded_books(
+    grouped_components: &BlockTransactionProtocolComponents,
+    config: &DeploymentConfig,
+    components_store: &StoreGetProto<ProtocolComponent>,
+    transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
+) {
+    for tx_component in &grouped_components.tx_components {
+        let tx = tx_component.tx.as_ref().unwrap();
+        for component in &tx_component.components {
+            let Some(asset_id) = component
+                .get_attribute_value("asset_id")
+                .and_then(|b| u64_from_word_padded(&b))
+            else {
+                continue;
+            };
+            let Some(asset) = asset_token(component, &config.usdc) else { continue };
+            let superseded = superseded_books_for_token(&asset, asset_id, components_store);
+            if superseded.is_empty() {
+                continue;
+            }
+            let builder = transaction_changes
+                .entry(tx.index)
+                .or_insert_with(|| TransactionChangesBuilder::new(tx));
+            for old_id in superseded {
+                builder.change_component_pause_state(&old_id, true);
+            }
         }
     }
 }
