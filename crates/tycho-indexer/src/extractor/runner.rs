@@ -520,16 +520,16 @@ impl ExtractorConfig {
         }
     }
 
-    /// The chain this extractor runs on, as parsed from config. Custom chains are accepted as bare
-    /// names here and validated against the registry separately.
+    /// The chain this extractor runs on, as resolved from config against the custom-chain registry
+    /// at parse time.
     pub fn chain(&self) -> Chain {
         self.chain
     }
 }
 
-/// Deserializes a chain from a bare name. Built-in names map to their variant; any other name
-/// becomes a [`Chain::Custom`], to be validated against the custom-chain registry after parsing
-/// (the registry is built from the same config file and so does not exist yet at this point).
+/// Deserializes a chain from a bare name. Built-in names map to their variant; any other name is
+/// resolved via [`Chain::custom`] against the process-wide custom-chain registry, so an unknown
+/// name fails here. The registry must be installed (from `chains.yaml`) before parsing.
 fn deserialize_chain<'de, D>(deserializer: D) -> Result<Chain, D::Error>
 where
     D: serde::Deserializer<'de>,

@@ -86,21 +86,6 @@ impl ExtractorConfigs {
         let config: ExtractorConfigs = serde_yaml::from_str(&contents)?;
         Ok(config)
     }
-
-    /// Validates that every extractor's custom chain is defined in the custom-chain registry,
-    /// mirroring how `--chains` is resolved. Built-in chains always pass; unknown custom names fail
-    /// fast with guidance to add them to the [chains] config section.
-    fn validate_extractor_chains(
-        &self,
-        registry: &ChainConfigRegistry,
-    ) -> Result<(), ExtractionError> {
-        for cfg in self.extractors.values() {
-            if let Chain::Custom(name) = cfg.chain() {
-                resolve_chain(name.as_str(), registry)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Loads custom chains from `path` (empty registry if the file is absent) and installs it as the
@@ -267,6 +252,10 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
 
             info!("Starting Tycho");
             debug!("{} CPUs detected", num_cpus::get());
+            // Install the custom-chain registry before parsing extractors, so an extractor's
+            // `chain` field resolves against it at parse time.
+            init_chains(&index_args.chain_config)?;
+
             let extractors_config = ExtractorConfigs::from_yaml(&index_args.extractors_config)
                 .map_err(|e| {
                     ExtractionError::Setup(format!("Failed to load extractors.yaml. {e}"))
@@ -276,10 +265,6 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .retention_horizon
                 .parse()
                 .expect("Failed to parse retention horizon");
-
-            init_chains(&index_args.chain_config)?;
-
-            extractors_config.validate_extractor_chains(&chain_registry)?;
 
             let chains = index_args
                 .chains
@@ -758,126 +743,6 @@ mod tests {
             18
         )
         .is_err());
-    }
-
-    #[test]
-    fn test_resolve_custom_chain_from_yaml() {
-        let yaml = r#"
-extractors: {}
-chains:
-  - name: mychain
-    chain_id: 99999
-    block_time_secs: 2
-    native:
-      address: "0x0000000000000000000000000000000000000000"
-      symbol: "ETH"
-      decimals: 18
-    wrapped_native:
-      address: "0x4200000000000000000000000000000000000006"
-      symbol: "WETH"
-      decimals: 18
-    default_tvl_thresholds:
-      low: 1000
-      medium: 10000
-"#;
-        let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
-        let registry = ChainConfigRegistry::from_configs(config.chains.clone());
-        let chain = resolve_chain("mychain", &registry).expect("resolve failed");
-        assert_eq!(chain, Chain::custom("mychain").unwrap());
-        let cfg = registry
-            .get("mychain")
-            .expect("config present");
-
-        let expected_native =
-            ChainTokenConfig::try_new("0x0000000000000000000000000000000000000000", "ETH", 18)
-                .unwrap();
-        let expected_wrapped =
-            ChainTokenConfig::try_new("0x4200000000000000000000000000000000000006", "WETH", 18)
-                .unwrap();
-        let expected_cfg = CustomChainConfig::try_new(
-            "mychain",
-            99999,
-            2,
-            expected_native,
-            expected_wrapped,
-            TvlThresholds::new(1000.0, 10000.0),
-        )
-        .unwrap();
-        assert_eq!(cfg, &expected_cfg);
-    }
-
-    #[test]
-    fn test_validate_extractor_chains() {
-        let yaml = r#"
-extractors:
-  tempo_extractor:
-    name: tempo_extractor
-    chain: tempo
-    implementation_type: Custom
-    sync_batch_size: 1000
-    start_block: 0
-    protocol_types: []
-    spkg: tempo.spkg
-    module_name: map_changes
-  eth_extractor:
-    name: eth_extractor
-    chain: ethereum
-    implementation_type: Custom
-    sync_batch_size: 1000
-    start_block: 0
-    protocol_types: []
-    spkg: eth.spkg
-    module_name: map_changes
-chains:
-  - name: tempo
-    chain_id: 42069
-    block_time_secs: 2
-    native:
-      address: "0x0000000000000000000000000000000000000000"
-      symbol: "ETH"
-      decimals: 18
-    wrapped_native:
-      address: "0x4200000000000000000000000000000000000006"
-      symbol: "WETH"
-      decimals: 18
-    default_tvl_thresholds:
-      low: 1000
-      medium: 10000
-"#;
-        let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
-
-        // The bare chain name is resolved at parse time by `deserialize_chain`.
-        assert_eq!(config.extractors["tempo_extractor"].chain(), Chain::custom("tempo").unwrap());
-        assert_eq!(config.extractors["eth_extractor"].chain(), Chain::Ethereum);
-
-        let registry = ChainConfigRegistry::from_configs(config.chains.clone());
-        config
-            .validate_extractor_chains(&registry)
-            .expect("validation failed");
-    }
-
-    #[test]
-    fn test_validate_extractor_chains_unknown_fails() {
-        let yaml = r#"
-extractors:
-  bad_extractor:
-    name: bad_extractor
-    chain: notachain
-    implementation_type: Custom
-    sync_batch_size: 1000
-    start_block: 0
-    protocol_types: []
-    spkg: bad.spkg
-    module_name: map_changes
-chains: []
-"#;
-        let config: ExtractorConfigs = serde_yaml::from_str(yaml).expect("yaml parse failed");
-        let registry = ChainConfigRegistry::from_configs(config.chains.clone());
-
-        let err = config
-            .validate_extractor_chains(&registry)
-            .unwrap_err();
-        assert!(matches!(err, ExtractionError::Setup(msg) if msg.contains("notachain")));
     }
 }
 
