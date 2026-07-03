@@ -252,6 +252,10 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
 
             info!("Starting Tycho");
             debug!("{} CPUs detected", num_cpus::get());
+            // Install the custom-chain registry before parsing extractors, so an extractor's
+            // `chain` field resolves against it at parse time.
+            init_chains(&index_args.chain_config)?;
+
             let extractors_config = ExtractorConfigs::from_yaml(&index_args.extractors_config)
                 .map_err(|e| {
                     ExtractionError::Setup(format!("Failed to load extractors.yaml. {e}"))
@@ -261,8 +265,6 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .retention_horizon
                 .parse()
                 .expect("Failed to parse retention horizon");
-
-            init_chains(&index_args.chain_config)?;
 
             let chains = index_args
                 .chains
