@@ -81,7 +81,7 @@ services:
       - "service=tycho-indexer"
       - "version=0.76.0"
     entrypoint: [ "/usr/wait-for-postgres.sh", "db" ]
-    command: [ "/opt/tycho-indexer/tycho-indexer", "--endpoint", "https://mainnet.eth.streamingfast.io:443", "index", "--retention-horizon", "2099-07-23T00:00:00"]
+    command: [ "/opt/tycho-indexer/tycho-indexer", "--endpoint", "${SUBSTREAMS_ENDPOINT:-https://mainnet.eth.streamingfast.io:443}", "index", "--chains", "${CHAINS:-ethereum}", "--retention-horizon", "2099-07-23T00:00:00"]
 
 volumes:
   postgres_data:
