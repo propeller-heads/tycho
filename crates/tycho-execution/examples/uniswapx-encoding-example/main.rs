@@ -130,7 +130,7 @@ fn main() {
 
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.amount_out());
-    let max_slippage_bps = U256::from((solution.slippage() * 10_000.0).round() as u16);
+    let slippage_tolerance_bps = U256::from((solution.slippage() * 10_000.0).round() as u16);
     let given_token = bytes_to_address(solution.token_in()).unwrap();
     let checked_token = bytes_to_address(solution.token_out()).unwrap();
     let receiver = bytes_to_address(solution.receiver()).unwrap();
@@ -142,7 +142,7 @@ fn main() {
         given_token,
         checked_token,
         amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
         client_fee_params,
         encoded_solution.swaps(),

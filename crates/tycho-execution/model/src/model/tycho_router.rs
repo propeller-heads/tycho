@@ -28,7 +28,7 @@ pub fn split_swap(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -44,7 +44,7 @@ pub fn split_swap(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         n_tokens,
         receiver,
     )
@@ -60,7 +60,7 @@ pub fn split_swap_using_vault(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -75,7 +75,7 @@ pub fn split_swap_using_vault(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         n_tokens,
         receiver,
     )
@@ -91,7 +91,7 @@ pub fn split_swap_permit2(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -109,7 +109,7 @@ pub fn split_swap_permit2(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         n_tokens,
         receiver,
     )
@@ -125,7 +125,7 @@ pub fn sequential_swap(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _update_native_delta_accounting(params, state, vault, log, amount_in)?;
@@ -140,7 +140,7 @@ pub fn sequential_swap(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
     )
 }
@@ -155,7 +155,7 @@ pub fn sequential_swap_using_vault(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _tstore_transfer_from_info(state, token_in, amount_in, false, true);
@@ -169,7 +169,7 @@ pub fn sequential_swap_using_vault(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
     )
 }
@@ -184,7 +184,7 @@ pub fn sequential_swap_permit2(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if token_in != Address::NativeETH {
@@ -201,7 +201,7 @@ pub fn sequential_swap_permit2(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
     )
 }
@@ -216,7 +216,7 @@ pub fn single_swap(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _update_native_delta_accounting(params, state, vault, log, amount_in)?;
@@ -235,7 +235,7 @@ pub fn single_swap(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
     )
 }
@@ -250,7 +250,7 @@ pub fn single_swap_using_vault(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     _tstore_transfer_from_info(state, token_in, amount_in, false, true);
@@ -264,7 +264,7 @@ pub fn single_swap_using_vault(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
     )
 }
@@ -279,7 +279,7 @@ pub fn single_swap_permit2(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if token_in != Address::NativeETH {
@@ -296,7 +296,7 @@ pub fn single_swap_permit2(
         token_in,
         token_out,
         expected_amount_out,
-        max_slippage_bps,
+        slippage_tolerance_bps,
         receiver,
     )
 }
@@ -311,7 +311,7 @@ fn _split_swap_checked(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
@@ -324,11 +324,11 @@ fn _split_swap_checked(
     if expected_amount_out == 0 {
         return Err(Error::revert("_split_swap_checked: expected_amount_out == 0"));
     }
-    if max_slippage_bps >= MAX_SLIPPAGE_BPS {
-        return Err(Error::revert("_split_swap_checked: max_slippage_bps too high"));
+    if slippage_tolerance_bps >= MAX_SLIPPAGE_BPS {
+        return Err(Error::revert("_split_swap_checked: slippage_tolerance_bps too high"));
     }
     let min_amount_out =
-        expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
+        expected_amount_out * (MAX_SLIPPAGE_BPS - slippage_tolerance_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -403,7 +403,7 @@ fn _single_swap(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if amount_in == 0 {
@@ -415,11 +415,11 @@ fn _single_swap(
     if expected_amount_out == 0 {
         return Err(Error::revert("_single_swap: expected_amount_out == 0"));
     }
-    if max_slippage_bps >= MAX_SLIPPAGE_BPS {
-        return Err(Error::revert("_single_swap: max_slippage_bps too high"));
+    if slippage_tolerance_bps >= MAX_SLIPPAGE_BPS {
+        return Err(Error::revert("_single_swap: slippage_tolerance_bps too high"));
     }
     let min_amount_out =
-        expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
+        expected_amount_out * (MAX_SLIPPAGE_BPS - slippage_tolerance_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -499,7 +499,7 @@ fn _sequential_swap_checked(
     token_in: Address,
     token_out: Address,
     expected_amount_out: i64,
-    max_slippage_bps: i64,
+    slippage_tolerance_bps: i64,
     receiver: Address,
 ) -> Result<(), Error> {
     if amount_in == 0 {
@@ -511,11 +511,11 @@ fn _sequential_swap_checked(
     if expected_amount_out == 0 {
         return Err(Error::revert("_sequential_swap_checked: expected_amount_out == 0"));
     }
-    if max_slippage_bps >= MAX_SLIPPAGE_BPS {
-        return Err(Error::revert("_sequential_swap_checked: max_slippage_bps too high"));
+    if slippage_tolerance_bps >= MAX_SLIPPAGE_BPS {
+        return Err(Error::revert("_sequential_swap_checked: slippage_tolerance_bps too high"));
     }
     let min_amount_out =
-        expected_amount_out * (MAX_SLIPPAGE_BPS - max_slippage_bps) / MAX_SLIPPAGE_BPS;
+        expected_amount_out * (MAX_SLIPPAGE_BPS - slippage_tolerance_bps) / MAX_SLIPPAGE_BPS;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
