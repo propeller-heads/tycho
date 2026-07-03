@@ -19,8 +19,14 @@ The `substreams-endpoint` profile is a single-machine deployment: every Firehose
 ## Prerequisites
 
 - <a href="https://docs.docker.com/get-docker/" target="_blank" rel="noopener noreferrer">Docker</a> and Docker Compose.
+- The `tycho-indexer` image, built locally. From the repo root, build it and tag it to match `TYCHO_IMAGE`:
+
+  ```bash
+  docker build -f docker/tycho-indexer.Dockerfile -t tycho-indexer:local .
+  ```
+
 - An EVM JSON-RPC endpoint for your chain. The poller fetches every block from it, so prefer a low-latency node — RPC latency directly caps the fetch rate.
-- A compiled Substreams package (`.spkg`) for each protocol you want to index. Place it under `docker/substreams/`; the compose file mounts that directory into the indexer at `/opt/tycho-indexer/substreams/`.
+- A compiled Substreams package (`.spkg`) for **each protocol you want to index, built for your chain**. A chain Tycho has never indexed has no ready-made package, so you build one — see [Building a Substreams package for your chain](#building-a-substreams-package). Place each `.spkg` under `docker/substreams/`; the compose file mounts that directory into the indexer at `/opt/tycho-indexer/substreams/`.
 - Optionally, a local <a href="https://github.com/propeller-heads/tycho-protocol-sdk" target="_blank" rel="noopener noreferrer">tycho-protocol-sdk</a> checkout if you index VM-based protocols (see [Pointing to a local tycho-protocol-sdk checkout](#pointing-to-a-local-tycho-protocol-sdk-checkout)).
 
 ## Configuration
@@ -34,8 +40,8 @@ Configure the stack through `docker/.env`. The compose file reads it for both th
 <tr><td><code>START_BLOCK</code></td><td>poller</td><td>No</td><td><code>0</code></td><td>First block the poller fetches.</td></tr>
 <tr><td><code>CHAIN_NAME</code></td><td>poller</td><td>No</td><td><code>mainnet</code></td><td>Chain name the Firehose advertises (<code>--advertise-chain-name</code>).</td></tr>
 <tr><td><code>SUBSTREAMS_ENDPOINT</code></td><td>indexer</td><td>Yes</td><td><code>https://mainnet.eth.streamingfast.io:443</code></td><td>Substreams tier1 gRPC. Self-hosted: <code>http://substreams-endpoint:10016</code>.</td></tr>
-<tr><td><code>CHAINS</code></td><td>indexer</td><td>No</td><td><code>ethereum</code></td><td>Active chain to index. The indexer uses only the first value (multichain is not yet supported). Name a built-in chain, or a custom chain you declare under <code>chains:</code> in the extractors config (see below).</td></tr>
-<tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest block data the indexer retains.</td></tr>
+<tr><td><code>CHAINS</code></td><td>indexer</td><td>No</td><td><code>ethereum</code></td><td>Active chain to index. The indexer uses only the first value (multichain is not yet supported). Name a built-in chain, or a custom chain you declare in <code>chains.yaml</code> (see below).</td></tr>
+<tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest version history the indexer keeps. <strong>Set this to a recent date when backfilling historical blocks</strong> — see <a href="#retention-horizon-when-backfilling-history">the warning below</a>. The default keeps all history and does not work for a from-scratch historical backfill.</td></tr>
 <tr><td><code>TYCHO_IMAGE</code></td><td>indexer</td><td>Yes</td><td>—</td><td>tycho-indexer image tag.</td></tr>
 <tr><td><code>EXTRACTORS_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/extractors.yaml</code></td><td>Path to the extractors config inside the container.</td></tr>
 <tr><td><code>CHAIN_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/chains.yaml</code></td><td>Path to the custom-chains config inside the container. Only needed to index a non-built-in chain.</td></tr>
@@ -63,7 +69,8 @@ SUBSTREAMS_ENDPOINT=http://substreams-endpoint:10016
 # Custom chain — defined in chains.yaml (see below)
 CHAINS=tempo
 
-RETENTION_HORIZON=2000-01-01T00:00:00
+# Backfilling history: keep this recent, not the 2000-01-01 default (see the warning under "Running the stack")
+RETENTION_HORIZON=2026-07-01T00:00:00
 SUBSTREAMS_API_TOKEN=local
 AUTH_API_KEY=local-dev-key
 RUST_LOG=info
@@ -73,6 +80,11 @@ OTLP_EXPORTER_ENDPOINT=
 ### Writing your extractors.yaml
 
 Edit <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/extractors.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/extractors.yaml</code></a> — the compose file mounts it into the container at `/opt/tycho-indexer/extractors.yaml`. Each entry under `extractors:` configures one protocol:
+
+{% hint style="warning" %}
+The indexer builds **every** entry in this file at startup and fails if any referenced `.spkg` is missing. The shipped file lists Ethereum protocols whose packages are not in `docker/substreams/`. Replace them with only the extractors for the chain and protocols you are indexing, each pointing at a `.spkg` you have placed under `docker/substreams/`.
+{% endhint %}
+
 
 ```yaml
 extractors:
@@ -131,6 +143,30 @@ chains:
 <tr><td><code>default_tvl_thresholds</code></td><td>TVL gates in native-token units (<code>low</code>, <code>medium</code>) for component tracking.</td></tr>
 </tbody></table>
 
+### Building a Substreams package
+
+Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>, one directory per <code>{chain}-{protocol}</code>. The WASM logic is chain-agnostic — a package pins the chain-specific factory address and start block through its manifest. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one.
+
+To index a Uniswap-V2-style DEX on a new chain, reuse the `ethereum-uniswap-v2` module and add a manifest for your chain:
+
+1. Copy an existing manifest, e.g. `protocols/substreams/ethereum-uniswap-v2/ethereum-uniswap-v2.yaml`, to `<chain>-<dex>.yaml` in the same directory.
+2. Edit the copy: set the package `name`/`version`, set every module's `initialBlock` to the DEX factory's deployment block, and set the `params` line to `factory_address=<your factory>&protocol_type_name=<your pool type>`.
+3. Build the WASM and pack the package:
+
+   ```bash
+   cd protocols/substreams/ethereum-uniswap-v2
+   make build          # cargo build --target wasm32-unknown-unknown --release
+   substreams pack <chain>-<dex>.yaml
+   ```
+
+4. Copy the resulting `.spkg` into `docker/substreams/`, then point your extractor's `spkg:` field at it.
+
+Pool detection is event-based — the module filters `PairCreated` by the factory address and tracks `Sync` events — so any standard Uniswap-V2 fork works with only the factory address and start block changed. Other protocols (Uniswap V3/V4, Balancer, Curve, …) have their own module directories under `protocols/substreams/`; follow the same pattern with the manifest for that protocol.
+
+{% hint style="info" %}
+`substreams pack` may warn that `network` is not set. This is harmless for the self-hosted stack — the Firehose advertises the chain through `CHAIN_NAME`, not the package.
+{% endhint %}
+
 ### Pointing to a local tycho-protocol-sdk checkout
 
 `Vm` extractors run protocol logic from the tycho-protocol-sdk. The compose file mounts a host checkout into the container read-only:
@@ -152,6 +188,18 @@ docker compose --profile substreams-endpoint up
 
 On a cold start the poller begins at `START_BLOCK` and streams forward. The indexer only commits a block once it sits behind the finality horizon, so expect a delay before committed state appears — on a fresh chain the first cold start takes a while to reach the deployment block of your protocols.
 
+### Retention horizon when backfilling history
+
+{% hint style="danger" %}
+When you index a chain from a deployment block that is more than about a month old, **set `RETENTION_HORIZON` to a recent date** (for example, one day ago). The default `2000-01-01T00:00:00` keeps the full version history, and the indexer crashes on the first state update it writes for a historical block:
+
+```
+duplicate key value violates unique constraint "component_balance_default_unique_pk"
+```
+
+pg_partman partitions the `component_balance`, `protocol_state`, and `contract_storage` tables by day on `valid_to`, keeping a one-month retention window. During a historical backfill, a superseded version carries a `valid_to` older than any existing partition, so it lands in the default partition and violates its uniqueness constraint. A recent `RETENTION_HORIZON` drops those old versions before the indexer writes them, while still indexing the current state of every component in full.
+{% endhint %}
+
 ### Resuming after a restart
 
 Both halves of the stack resume on their own:
@@ -160,6 +208,16 @@ Both halves of the stack resume on their own:
 - The indexer resumes from the cursor stored in its Postgres database.
 
 `docker compose --profile substreams-endpoint down` followed by `up` **without `-v`** preserves both the Firehose data volume and the database, so the stack picks up where it left off. Passing `-v` deletes the volumes and forces a full cold start.
+
+{% hint style="warning" %}
+When you switch the chain you index (change `CHAIN_NAME`, `START_BLOCK`, or `CHAINS`), bring the stack down **with `-v`** first:
+
+```bash
+docker compose --profile substreams-endpoint down -v
+```
+
+The Firehose data volume is chain-specific. Reusing it for a different chain makes the Firehose advertise a first-streamable block from the previous chain, and the indexer fails with `initial block N smaller than first streamable block M`.
+{% endhint %}
 
 ### Connecting to a hosted endpoint instead
 
