@@ -57,6 +57,7 @@ services:
     env_file:
       - .env
     environment:
+      AUTH_API_KEY: ${AUTH_API_KEY:-dummy}
       SUBSTREAMS_API_TOKEN: ${SUBSTREAMS_API_TOKEN:-readme}
       RPC_URL: ${RPC_URL:-readme}
       TRACE_RPC_URL: ${TRACE_RPC_URL:-readme}
