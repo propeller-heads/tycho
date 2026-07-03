@@ -137,7 +137,8 @@ pub struct Solution {
     /// effective min = amount_out * (1 - slippage).
     #[serde(with = "biguint_string")]
     amount_out: BigUint,
-    /// Maximum slippage as a fraction (0.0–1.0, where 0.0025 = 0.25%).
+    /// Maximum slippage as a fraction [0.0, 1.0). The router rejects 1.0 (100%).
+    /// Example: 0.0025 = 0.25%.
     slippage: f64,
     /// List of swaps to fulfill the solution.
     swaps: Vec<Swap>,
