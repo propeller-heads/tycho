@@ -86,7 +86,7 @@ Three fee layers, deducted from swap output:
 1. **Client fee** (EIP-712 signed): Passed per-swap via `ClientFeeParams` struct
    containing `clientFeeBps`, `clientFeeReceiver`, `maxClientContribution`, `deadline`, and `clientSignature`. The
    client signs a `ClientFee` typehash that covers both the fee params **and** the full swap
-   intent (`amountIn`, `tokenIn`, `tokenOut`, `expectedAmountOut`, `maxSlippageBps`, `receiver`, `swap`); the router verifies the EIP-712
+   intent (`amountIn`, `tokenIn`, `tokenOut`, `expectedAmountOut`, `slippageToleranceBps`, `receiver`, `swap`); the router verifies the EIP-712
    signature on-chain before applying any fee. Binding the signature to swap data (including the encoded swap bytes)
    prevents cross-swap replay attacks. The `clientFeeReceiver` address doubles as the client
    identifier. `maxClientContribution` caps how much positive slippage the client absorbs (prevents the client from
@@ -301,10 +301,10 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 
 When writing code that calls TychoRouter swap functions:
 
-- **Always set `expectedAmountOut` and `maxSlippageBps`** accurately. `expectedAmountOut` is your
-  quoted output; `maxSlippageBps` bounds how far below it the actual output can fall before the tx
+- **Always set `expectedAmountOut` and `slippageToleranceBps`** accurately. `expectedAmountOut` is your
+  quoted output; `slippageToleranceBps` bounds how far below it the actual output can fall before the tx
   reverts. Example: 1000 USDC quoted, 5% slippage → `expectedAmountOut = 1000 * 10**6`,
-  `maxSlippageBps = 500`. Setting `maxSlippageBps` too high may result in a sandwiched swap.
+  `slippageToleranceBps = 500`. Setting `slippageToleranceBps` too high may result in a sandwiched swap.
 - **Verify the price data** used for `expectedAmountOut` against at least one independent source.
   Incorrect price data may set the slippage floor too low.
 - **Never approve infinite allowances**, including Permit2. Set Permit2 allowance and deadline as low as practical.

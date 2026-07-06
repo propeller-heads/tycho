@@ -47,7 +47,7 @@ pub struct ClientFeeParams {
     /// Address that identifies the client and receives any client fee.
     client_fee_receiver: Bytes,
     /// Maximum amount the client will contribute from their vault if the output falls below the
-    /// slippage floor (`amount_out * (1 - max_slippage_bps / MAX_SLIPPAGE_BPS)`).
+    /// slippage floor (`amount_out * (1 - slippage_tolerance_bps / MAX_SLIPPAGE_BPS)`).
     #[serde(with = "biguint_string")]
     max_client_contribution: BigUint,
     /// Deadline for the fee signature as a unix timestamp.
