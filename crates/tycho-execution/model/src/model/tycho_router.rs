@@ -687,7 +687,10 @@ fn _split_swap(
             amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
         }
         remaining_amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
-        remaining_amounts[usize::try_from(token_in_index).unwrap()] -= current_amount_in;
+        remaining_amounts[usize::try_from(token_in_index).unwrap()] = checked_subtract(
+            remaining_amounts[usize::try_from(token_in_index).unwrap()],
+            current_amount_in,
+        )?;
     }
     Ok(if is_cyclical {
         cyclic_swap_amount_out
