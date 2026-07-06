@@ -55,6 +55,7 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    Flare,
 }
 
 pub use models::TvlThresholdTier;
@@ -99,6 +100,7 @@ impl From<models::Chain> for Chain {
             models::Chain::Bsc => Chain::Bsc,
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
+            models::Chain::Flare => Chain::Flare,
         }
     }
 }

@@ -102,7 +102,7 @@ impl SwapEncoderRegistry {
         config: Option<HashMap<String, String>>,
     ) -> Result<Box<dyn SwapEncoder>, EncodingError> {
         match protocol_system {
-            "uniswap_v2" | "sushiswap_v2" | "pancakeswap_v2" | "quickswap_v2" => {
+            "uniswap_v2" | "sushiswap_v2" | "pancakeswap_v2" | "quickswap_v2" | "blazeswap_v2" => {
                 Ok(Box::new(UniswapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "aerodrome_v1" => {
@@ -111,7 +111,7 @@ impl SwapEncoderRegistry {
             "vm:balancer_v2" => {
                 Ok(Box::new(BalancerV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "uniswap_v3" | "pancakeswap_v3" => {
+            "uniswap_v3" | "pancakeswap_v3" | "sparkdex_v3" | "enosys_v3" => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "uniswap_v4" => {
