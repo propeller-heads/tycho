@@ -79,8 +79,6 @@ services:
       - ../crates/tycho-indexer/extractors.yaml:/opt/tycho-indexer/extractors.yaml
       - ../crates/tycho-indexer/chains.yaml:/opt/tycho-indexer/chains.yaml
       - ./substreams/:/opt/tycho-indexer/substreams/
-      # Path to a local tycho-protocol-sdk checkout; override with TYCHO_PROTOCOL_SDK_PATH
-      - ${TYCHO_PROTOCOL_SDK_PATH:-../tycho-protocol-sdk}/substreams:/opt/tycho-indexer/substreams-sdk:ro
     # Configure logging driver for better log collection
     logging:
       driver: "json-file"
