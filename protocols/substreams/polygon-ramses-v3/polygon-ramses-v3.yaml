@@ -29,7 +29,7 @@ binaries:
 modules:
   - name: map_pools_created
     kind: map
-    initialBlock: 82177771
+    initialBlock: 82221683 # First PoolCreated event
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
