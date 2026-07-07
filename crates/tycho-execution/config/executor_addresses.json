@@ -20,7 +20,8 @@
     "native_wrapper": "0x8FD892DD5F8E153fe15cc3A7567E18ed6f7b1E0A",
     "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
     "vm:liquidityparty": "0x1F8b52899DCf1Be69eaFc754cA3E099Ff15F03aE",
-    "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e"
+    "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
+    "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -40,7 +41,7 @@
     "uniswap_v4": "0x3AE67e7DCFa6c5aB36DA9dE3B67B7496956E0874",
     "velodrome_slipstreams": "0xd9Ee40C6895De968b41b96253970B48Fe852e5eF",
     "vm:curve": "0x685733eDB7654e540aB537eabC28b554646b69d0",
-    "native_wrapper": "0x50905E0f94350f9e533Cd275667AFC728265960D"
+    "native_wrapper": "0x32Ed490Fb53cc66C3cBDdC74aB8B7088F11d6289"
   },
   "arbitrum": {
     "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",

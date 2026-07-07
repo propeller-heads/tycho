@@ -31,6 +31,7 @@ use substreams_ethereum::{
 use substreams_helper::event_handler::EventHandler;
 use tycho_substreams::{
     abi::{erc20, weth},
+    attributes::json_serialize_address_list,
     balances::aggregate_balances_changes,
     contract::extract_contract_changes_builder,
     prelude::*,
@@ -60,6 +61,14 @@ fn get_new_pairs(
                 config.trader_vault.as_slice(),
                 config.registry_address.as_slice(),
             ])
+            // FermiSwap does not emit token contract storage, so its tokens are self-contained
+            // proxies in the shared simulation DB. Flag them so simulation handles their transfers
+            // locally instead of binding them to an implementation another VM protocol indexed for
+            // the same token.
+            .with_attributes(&[(
+                "self_contained_tokens",
+                json_serialize_address_list(&[event.base_asset.clone(), event.quote_asset.clone()]),
+            )])
             .as_swap_type("fermiswap_pool", ImplementationType::Vm);
 
         new_pair_changes.push(TransactionEntityChanges {

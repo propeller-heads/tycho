@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_fermiswap"
-  version: v0.1.0
+  version: v0.1.1
 
 protobuf:
   files:

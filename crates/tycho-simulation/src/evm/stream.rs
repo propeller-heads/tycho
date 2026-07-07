@@ -127,6 +127,7 @@ use tycho_common::{
 use crate::{
     evm::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
+        override_stream::{self, StateOverrideProvider},
         pending::PendingBlockProcessor,
         protocol::{
             native_wrapper::state::NativeWrapperState,
@@ -140,7 +141,7 @@ use crate::{
     utils::default_blocklist,
 };
 
-const EXCHANGES_REQUIRING_FILTER: [&str; 2] = ["vm:balancer_v2", "vm:curve"];
+const EXCHANGES_REQUIRING_FILTER: [&str; 4] = ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3"];
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum StreamEndPolicy {
@@ -234,6 +235,13 @@ pub struct ProtocolStreamBuilder {
     /// Receiver half of the trigger channel. Held here until `build()` / `build_with_pending()`
     /// transfers ownership to the gating task. `Some` iff step-control mode is active.
     step_trigger_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    /// State-override providers explicitly registered by the consumer, keyed by `protocol_system`.
+    /// These take precedence over the built-in default registry and are installed onto the decoder
+    /// at build time.
+    override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
+    /// Names of all exchanges registered on the builder, used to decide which built-in override
+    /// providers to auto-register at build time.
+    registered_exchanges: HashSet<String>,
 }
 
 impl ProtocolStreamBuilder {
@@ -254,6 +262,8 @@ impl ProtocolStreamBuilder {
             pending_indexers: HashMap::new(),
             step_peek_tx: None,
             step_trigger_rx: None,
+            override_providers: HashMap::new(),
+            registered_exchanges: HashSet::new(),
         }
     }
 
@@ -292,6 +302,8 @@ impl ProtocolStreamBuilder {
         self.stream_builder = self
             .stream_builder
             .exchange(name, filter);
+        self.registered_exchanges
+            .insert(name.to_string());
         self.decoder.register_decoder::<T>(name);
         if let Some(predicate) = filter_fn {
             self.decoder
@@ -346,6 +358,8 @@ impl ProtocolStreamBuilder {
         self.stream_builder = self
             .stream_builder
             .exchange(name, filter);
+        self.registered_exchanges
+            .insert(name.to_string());
         self.decoder
             .register_decoder_with_context::<T>(name, decoder_context);
         if let Some(predicate) = filter_fn {
@@ -636,6 +650,42 @@ impl ProtocolStreamBuilder {
         });
     }
 
+    /// Registers `provider` as the live override source for `protocol_system`.
+    ///
+    /// Explicit registrations take precedence over the built-in default registry, so this is how
+    /// you swap a venue (e.g. `vm:bopamm`) onto a different provider. Registering the same provider
+    /// for several protocols is cheap — it is shared via `Arc`, not duplicated.
+    pub fn with_override_provider(
+        mut self,
+        protocol_system: impl Into<String>,
+        provider: Arc<dyn StateOverrideProvider>,
+    ) -> Self {
+        self.override_providers
+            .insert(protocol_system.into(), provider);
+        self
+    }
+
+    /// Installs override providers onto the decoder before the stream is built.
+    ///
+    /// Explicit consumer registrations win; the built-in default registry (see
+    /// [`default_override_providers`](crate::evm::override_stream::default_override_providers))
+    /// then fills every remaining protocol it can serve.
+    fn install_override_providers(&mut self) {
+        let explicit = std::mem::take(&mut self.override_providers);
+        // Protocols eligible for a built-in default provider: registered exchanges not explicitly
+        // overridden by the consumer.
+        let uncovered = self
+            .registered_exchanges
+            .clone()
+            .into_iter()
+            .filter(|exchange| !explicit.contains_key(exchange));
+        let defaults = override_stream::default_override_providers(uncovered);
+        for (protocol_system, provider) in defaults.into_iter().chain(explicit) {
+            self.decoder
+                .set_override_provider(protocol_system, provider);
+        }
+    }
+
     /// Builds the confirmed protocol stream and a [`PendingBlockProcessor`] that stays
     /// in sync with it automatically.
     ///
@@ -648,7 +698,7 @@ impl ProtocolStreamBuilder {
     /// Call [`generate_pending_update`](PendingBlockProcessor::generate_pending_update) to
     /// simulate a candidate bundle; it drains the channel automatically before computing.
     pub async fn build_with_pending(
-        self,
+        mut self,
     ) -> Result<
         (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
         StreamError,
@@ -656,6 +706,7 @@ impl ProtocolStreamBuilder {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
 
@@ -724,11 +775,12 @@ impl ProtocolStreamBuilder {
     /// See the module-level docs for details on stream behavior and emitted messages.
     /// This method applies all builder settings and starts the stream.
     pub async fn build(
-        self,
+        mut self,
     ) -> Result<impl Stream<Item = Result<Update, StreamDecodeError>>, StreamError> {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
         let chain = self.chain;

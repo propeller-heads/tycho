@@ -1,5 +1,10 @@
+use std::collections::HashMap;
+
 use tracing::{debug, info};
 use tycho_client::feed::synchronizer::ComponentWithState;
+use tycho_common::Bytes;
+
+pub use crate::evm::protocol::ekubo_v3::filter_fn as ekubo_v3_extension_filter;
 
 /// Filters out pools that DCI currently fails to find some accounts for
 pub fn balancer_v2_pool_filter(component: &ComponentWithState) -> bool {
@@ -93,6 +98,54 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
     true
 }
 
+/// Filters `vm:curve` components to those the hybrid `CurveState` can quote correctly.
+///
+/// Excludes pools with rate-bearing or rebasing coins. Such a coin prices through a per-block rate
+/// (an oracle, an ERC4626 vault, or an in-place rebase exposed via `stored_rates`) whose source is
+/// an external contract that is not part of the indexed pool state. The hybrid reads that rate via
+/// VM getters against the locally indexed storage, so it gets a stale or default value and the
+/// quote drifts from the on-chain swap (observed up to ~30% on oracle-rate NG pools). Supporting
+/// these requires DCI on the rate source in the substreams.
+///
+/// Detection uses the substreams' static markers:
+/// - `rebase_tokens` — non-empty list of rebasing coins (e.g. stETH, ETHx).
+/// - `asset_types` — per-coin Curve NG asset type encoded as a hex int; any non-zero entry (oracle
+///   / rebasing / ERC4626) is unsupported. Standard coins encode as `"0x"` / `"0x00"`.
+pub fn curve_filter(component: &ComponentWithState) -> bool {
+    let attrs = &component.component.static_attributes;
+    if attr_json_list_non_empty(attrs, "rebase_tokens") || asset_types_has_non_standard(attrs) {
+        debug!(
+            "Filtering out curve pool {} with rate-bearing/rebasing coins (unsupported by hybrid)",
+            component.component.id
+        );
+        return false;
+    }
+    true
+}
+
+/// Parse a static attribute whose value is the UTF-8 bytes of a JSON array of strings.
+fn attr_json_list(attrs: &HashMap<String, Bytes>, key: &str) -> Option<Vec<String>> {
+    let text = std::str::from_utf8(attrs.get(key)?.as_ref()).ok()?;
+    serde_json::from_str::<Vec<String>>(text).ok()
+}
+
+/// True when `key` is a present, non-empty JSON list (the substreams only emits `rebase_tokens`
+/// when at least one coin rebases).
+fn attr_json_list_non_empty(attrs: &HashMap<String, Bytes>, key: &str) -> bool {
+    attr_json_list(attrs, key).is_some_and(|list| !list.is_empty())
+}
+
+/// True when `asset_types` contains any non-standard coin. Each entry is a hex-encoded integer
+/// (`"0x"`/`"0x00"` = standard; `"0x01"` oracle, `"0x02"` rebasing, `"0x03"` ERC4626).
+fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
+    attr_json_list(attrs, "asset_types").is_some_and(|types| {
+        types.iter().any(|entry| {
+            let digits = entry.trim_start_matches("0x");
+            digits.chars().any(|c| c != '0')
+        })
+    })
+}
+
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
     const UNSUPPORTED_POOLS: [&str; 4] = [
         "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
@@ -110,4 +163,46 @@ pub fn erc4626_filter(component: &ComponentWithState) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, Bytes> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Bytes::from(v.as_bytes().to_vec())))
+            .collect()
+    }
+
+    #[test]
+    fn curve_keeps_standard_pool() {
+        // 3pool-style: no rate markers.
+        assert!(!asset_types_has_non_standard(&attrs(&[])));
+        assert!(!attr_json_list_non_empty(&attrs(&[]), "rebase_tokens"));
+        // An all-standard NG pool emits asset_types but every entry is zero.
+        assert!(!asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x00","0x00"]"#)])));
+    }
+
+    #[test]
+    fn curve_excludes_oracle_asset_type() {
+        // apyUSD/apxUSD: coin 0 is an oracle rate token.
+        assert!(asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x01","0x00"]"#)])));
+        // ERC4626 (0x03) and rebasing (0x02) asset types are also non-standard.
+        assert!(asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x00","0x03"]"#)])));
+    }
+
+    #[test]
+    fn curve_excludes_rebase_tokens() {
+        // ETH/ETHx and legacy stETH expose a non-empty rebase_tokens list.
+        let m = attrs(&[("rebase_tokens", r#"["0xa35b1b31ce002fbf2058d22f30f95d405200a15b"]"#)]);
+        assert!(attr_json_list_non_empty(&m, "rebase_tokens"));
+    }
+
+    #[test]
+    fn curve_zero_encoded_as_empty_hex_is_standard() {
+        // BigInt 0 serializes to "0x" (empty bytes); must count as standard.
+        assert!(!asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x","0x"]"#)])));
+    }
 }

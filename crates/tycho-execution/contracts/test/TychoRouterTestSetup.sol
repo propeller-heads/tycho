@@ -9,6 +9,7 @@ import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
+import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
 import {
     LiquidityPartyExecutor
 } from "../src/executors/LiquidityPartyExecutor.sol";
@@ -125,6 +126,7 @@ contract TychoRouterTestSetup is
     AerodromeV1Executor public aerodromeV1Executor;
     FermiSwapExecutor public fermiSwapExecutor;
     MetricExecutor public metricExecutor;
+    BopAMMExecutor public bopAMMExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -244,8 +246,9 @@ contract TychoRouterTestSetup is
         aerodromeV1Executor = new AerodromeV1Executor();
         fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
         metricExecutor = new MetricExecutor(METRIC_ORACLE);
+        bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
 
-        address[] memory executors = new address[](23);
+        address[] memory executors = new address[](24);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -269,6 +272,7 @@ contract TychoRouterTestSetup is
         executors[20] = address(aerodromeV1Executor);
         executors[21] = address(fermiSwapExecutor);
         executors[22] = address(metricExecutor);
+        executors[23] = address(bopAMMExecutor);
         return executors;
     }
 

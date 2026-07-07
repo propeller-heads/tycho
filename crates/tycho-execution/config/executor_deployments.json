@@ -60,7 +60,15 @@
       "contract": "FermiSwapExecutor",
       "args": ["0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e"]
     },
-    "vm:liquidityparty": { "contract": "LiquidityPartyExecutor", "args": [] }
+    "vm:liquidityparty": { "contract": "LiquidityPartyExecutor", "args": [] },
+    "vm:bopamm": {
+      "contract": "BopAMMExecutor",
+      "args": ["0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    }
   },
   "base": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
@@ -124,6 +132,10 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
     }
   },
   "polygon": {
@@ -139,6 +151,10 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
     }
   },
   "bsc": {
@@ -155,6 +171,10 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
     }
   }
 }

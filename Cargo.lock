@@ -6577,7 +6577,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "alloy",
  "clap",
@@ -9379,7 +9379,7 @@ dependencies = [
 
 [[package]]
 name = "tycho"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -9390,7 +9390,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "async-trait",
  "backoff",
@@ -9424,7 +9424,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9456,7 +9456,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9480,7 +9480,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9503,7 +9503,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "actix",
  "actix-cors",
@@ -9572,7 +9572,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -9598,12 +9598,13 @@ dependencies = [
 
 [[package]]
 name = "tycho-protobuf"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "chrono",
  "num-bigint",
  "num-traits",
  "prost 0.11.9",
+ "rstest 0.24.0",
  "thiserror 1.0.69",
  "tracing",
  "tycho-common",
@@ -9621,10 +9622,11 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "alloy",
  "alloy-chains",
+ "alloy-primitives 1.5.7",
  "anyhow",
  "approx",
  "async-stream",
@@ -9679,7 +9681,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9703,7 +9705,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.318.1"
+version = "0.324.0"
 dependencies = [
  "alloy",
  "alloy-chains",

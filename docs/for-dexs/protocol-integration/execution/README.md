@@ -210,6 +210,19 @@ TychoRouter calls executors via `delegatecall`, so executor code runs within Tyc
 * **`handleCallback`'s `data` argument** contains raw ABI-encoded calldata that the executor must decode manually.
 * **`handleCallback`'s return value** must be raw ABI-encoded return data that the executor encodes manually.
 
+## Security Model
+
+Tycho maintains a Rust <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-execution/model" target="_blank" rel="noopener noreferrer">security model</a> of TychoRouter that simulates many swap-parameter combinations to find inputs that let a caller drain the router's assets. The model mirrors the router's Solidity logic and reports suspicious outcomes. During the V3 security assessment it surfaced several critical vulnerabilities, all of which the team fixed before launch. Adding new executors keeps this coverage up to date.
+
+The model only covers executors that give the caller control over the called pool contract — for example, executors where the caller supplies the pool address. These executors present the highest risk and are the easiest to model. If your executor falls into this category, add it to the model so the simulation covers it.
+
+To add your executor, edit <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/model/src/model/executors.rs" target="_blank" rel="noopener noreferrer">`model/src/model/executors.rs`</a>:
+
+1. Add a variant to the `Executor` enum and to the `Executor::VARIANTS` array.
+2. Implement the executor's behavior in the `get_transfer_data`, `swap`, and `funds_expected_address` match arms, mirroring your Solidity executor. For callback-based protocols, also implement `get_callback_transfer_data` and `handle_callback`.
+
+Run the model with `cargo run --release` from the `model` crate (release mode is required — it is very slow otherwise). Run `cargo doc --open` for the full model documentation.
+
 ## Testing
 
 Each new integration must be thoroughly tested in both Rust and Solidity. This includes:

@@ -97,6 +97,21 @@ impl TokenProxyOverwriteFactory {
             .insert(has_approval_index, U256::from(1)); // true in Solidity
     }
 
+    /// Marks `owner` as having custom approvals, without granting a specific allowance.
+    ///
+    /// `transferFrom` from this owner is then handled by the proxy's local balance bookkeeping
+    /// instead of delegating to the implementation. The proxy's approval system is disabled by
+    /// default, so the local branch does not check a per-spender amount — only this flag is needed.
+    pub(crate) fn set_has_custom_approval(&mut self, owner: Address) {
+        let has_approval_index = get_storage_slot_index_at_key(
+            owner,
+            *HAS_CUSTOM_APPROVAL_MAPPING_POSITION,
+            self.compiler,
+        );
+        self.overwrites
+            .insert(has_approval_index, U256::from(1)); // true in Solidity
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_total_supply(&mut self, supply: U256) {
         self.overwrites

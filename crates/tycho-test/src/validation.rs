@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use alloy::{
     hex,
@@ -170,9 +170,18 @@ pub trait Validator: ProtocolSim {
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
 }
 
-/// Batch validation for multiple components across any protocol types
+/// Maximum number of times the whole validation batch is retried when the RPC reports the queried
+/// block is not yet available. The node can lag behind Tycho (especially on fast chains like Base),
+/// and load-balanced endpoints may route a retry to a backend that has already synced the block.
+/// Matches the swap-simulation retry budget (~100s worst case).
+const BLOCK_NOT_FOUND_MAX_RETRIES: u32 = 20;
+
+/// Batch validation for multiple components across any protocol types.
 ///
-/// This function validates multiple components in a single batched RPC request.
+/// Validates multiple components in a single batched RPC request. When the RPC reports the queried
+/// block is not yet available (the node lags behind Tycho), the whole batch is retried with
+/// exponential backoff up to [`BLOCK_NOT_FOUND_MAX_RETRIES`] times rather than surfacing spurious
+/// validation failures.
 ///
 /// # Arguments
 ///
@@ -186,6 +195,36 @@ pub trait Validator: ProtocolSim {
 /// Each result is `Ok(true)` if validation passed, `Ok(false)` if it failed,
 /// or `Err` if there was an error.
 pub async fn batch_validate_components(
+    rpc_url: &str,
+    components: &[(&dyn Validator, ComponentId)],
+    block_id: BlockId,
+) -> Vec<Result<bool, Box<dyn std::error::Error + Send + Sync>>> {
+    let mut backoff = Duration::from_millis(1000);
+    let mut attempt = 0;
+    loop {
+        let results = validate_batch_once(rpc_url, components, block_id).await;
+
+        // All calls in the batch share one block_id against one backend, so a lagging node fails
+        // them all with "block not found". Retry the whole batch — a fresh client each attempt may
+        // hit an already-synced backend — rather than recording spurious validation failures.
+        let block_lagging = results
+            .iter()
+            .any(|result| match result {
+                Err(e) => crate::is_block_not_found(&e.to_string()),
+                Ok(_) => false,
+            });
+
+        if !block_lagging || attempt >= BLOCK_NOT_FOUND_MAX_RETRIES {
+            return results;
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(5));
+        attempt += 1;
+    }
+}
+
+async fn validate_batch_once(
     rpc_url: &str,
     components: &[(&dyn Validator, ComponentId)],
     block_id: BlockId,

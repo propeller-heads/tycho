@@ -2,7 +2,7 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
-            ekubo::state::EkuboState, fluid::FluidV1, lunarbase::LunarBaseTychoState,
+            ekubo::state::EkuboState, fluid::FluidV1, lunarbase::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State, ramses_v3::state::RamsesV3State,
             rocketpool::state::RocketpoolState, uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State, uniswap_v4::state::UniswapV4State,
@@ -77,7 +77,7 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
-        "lunarbase" => stream_builder.exchange_with_decoder_context::<LunarBaseTychoState>(
+        "lunarbase" => stream_builder.exchange_with_decoder_context::<LunarBaseState>(
             protocol_system,
             tvl_filter,
             None,

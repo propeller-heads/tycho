@@ -46,6 +46,7 @@ use tycho_test::{
         models::{TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction, tenderly,
     },
+    is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
     validation::{batch_validate_components, get_validator, Validator},
 };
@@ -900,6 +901,17 @@ async fn process_update(
                     }
                 }
                 Err(e) => {
+                    if is_block_not_found(&e.to_string()) {
+                        // The RPC node still lags behind Tycho after the batch-validation retries
+                        // exhausted: the block genuinely isn't available yet. This is infra
+                        // latency, not a state mismatch, so skip it rather than polluting the
+                        // validation-failure metric.
+                        warn!(
+                            component_id = %component_id,
+                            "Skipping validation: RPC block not yet available after retries"
+                        );
+                        continue;
+                    }
                     error!(
                         component_id = %component_id,
                         error = %e,

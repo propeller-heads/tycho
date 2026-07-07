@@ -289,6 +289,11 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 5. Add Rust encoder in `src/encoding/evm/swap_encoder/` and register in `swap_encoder_registry.rs`
 6. Add integration tests in both `contracts/test/protocols/` and `tests/`
 7. Add test setup in `contracts/test/TychoRouterTestSetup.sol`
+8. If the executor gives the caller control over the called pool contract (e.g. the caller supplies the pool
+   address), model it in the security model (`model/src/model/executors.rs`): add a variant to the `Executor` enum
+   and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
+   `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
+   Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
 
 ## Security
 

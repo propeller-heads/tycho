@@ -1,0 +1,26 @@
+# information about the author helps us reach out in case of issues.
+author:
+  name: PropellerHeads
+  email: thales@propellerheads.xyz
+
+# Protocol Constants
+constants:
+  # The expected average gas cost of a swap
+  protocol_gas: 120000
+  # Minimum capabilities we can expect, individual pools may extend these
+  capabilities:
+    - SellSide
+    - PriceFunction
+    - ConstantPrice
+    - HardLimits
+
+# The file containing the adapter contract
+contract: BopAMMAdapter.sol
+
+# Deployment instances used to generate chain specific bytecode.
+instances:
+  - chain:
+      name: mainnet
+      id: 1
+    arguments:
+      - "0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca" # BopAmmV2 settlement
