@@ -27,7 +27,6 @@ The `substreams-endpoint` profile is a single-machine deployment: every Firehose
 
 - An EVM JSON-RPC endpoint for your chain. The poller fetches every block from it, so prefer a low-latency node — RPC latency directly caps the fetch rate.
 - A compiled Substreams package (`.spkg`) for **each protocol you want to index, built for your chain**. A chain Tycho has never indexed has no ready-made package, so you build one — see [Building a Substreams package for your chain](#building-a-substreams-package). Place each `.spkg` under `docker/substreams/`; the compose file mounts that directory into the indexer at `/opt/tycho-indexer/substreams/`.
-- Optionally, a local <a href="https://github.com/propeller-heads/tycho-protocol-sdk" target="_blank" rel="noopener noreferrer">tycho-protocol-sdk</a> checkout if you index VM-based protocols (see [Pointing to a local tycho-protocol-sdk checkout](#pointing-to-a-local-tycho-protocol-sdk-checkout)).
 
 ## Configuration
 
@@ -37,15 +36,14 @@ Configure the stack through `docker/.env`. The compose file reads it for both th
 
 <table><thead><tr><th width="220">Variable</th><th width="120">Service</th><th width="90">Required</th><th width="180">Default</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>RPC_URL</code></td><td>poller + indexer</td><td>Yes</td><td>—</td><td>EVM JSON-RPC endpoint. The poller fetches blocks from it; the indexer reads token metadata from it.</td></tr>
+<tr><td><code>SUBSTREAMS_ENDPOINT</code></td><td>indexer</td><td>Yes</td><td><code>https://mainnet.eth.streamingfast.io:443</code></td><td>Substreams tier1 gRPC. Self-hosted: <code>http://substreams-endpoint:10016</code>.</td></tr>
+<tr><td><code>TYCHO_IMAGE</code></td><td>indexer</td><td>Yes</td><td>—</td><td>tycho-indexer image tag.</td></tr>
 <tr><td><code>START_BLOCK</code></td><td>poller</td><td>No</td><td><code>0</code></td><td>First block the poller fetches.</td></tr>
 <tr><td><code>CHAIN_NAME</code></td><td>poller</td><td>No</td><td><code>mainnet</code></td><td>Chain name the Firehose advertises (<code>--advertise-chain-name</code>).</td></tr>
-<tr><td><code>SUBSTREAMS_ENDPOINT</code></td><td>indexer</td><td>Yes</td><td><code>https://mainnet.eth.streamingfast.io:443</code></td><td>Substreams tier1 gRPC. Self-hosted: <code>http://substreams-endpoint:10016</code>.</td></tr>
 <tr><td><code>CHAINS</code></td><td>indexer</td><td>No</td><td><code>ethereum</code></td><td>Active chain to index. The indexer uses only the first value (multichain is not yet supported). Name a built-in chain, or a custom chain you declare in <code>chains.yaml</code> (see below).</td></tr>
-<tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest version history the indexer keeps. <strong>Set this to a recent date when backfilling historical blocks</strong> — see <a href="#retention-horizon-when-backfilling-history">the warning below</a>. The default keeps all history and does not work for a from-scratch historical backfill.</td></tr>
-<tr><td><code>TYCHO_IMAGE</code></td><td>indexer</td><td>Yes</td><td>—</td><td>tycho-indexer image tag.</td></tr>
+<tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest version history the indexer keeps. Use a <strong>future</strong> date to keep no historical state (recommended) — see <a href="#retention-horizon">the note below</a>. The <code>2000-01-01</code> default keeps all history and fails a from-scratch historical backfill.</td></tr>
 <tr><td><code>EXTRACTORS_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/extractors.yaml</code></td><td>Path to the extractors config inside the container.</td></tr>
 <tr><td><code>CHAIN_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/chains.yaml</code></td><td>Path to the custom-chains config inside the container. Only needed to index a non-built-in chain.</td></tr>
-<tr><td><code>TYCHO_PROTOCOL_SDK_PATH</code></td><td>indexer</td><td>No</td><td><code>../tycho-protocol-sdk</code></td><td>Host tycho-protocol-sdk checkout, mounted read-only.</td></tr>
 <tr><td><code>SUBSTREAMS_API_TOKEN</code></td><td>indexer</td><td>No</td><td><code>readme</code></td><td>Auth token for a hosted Substreams endpoint; unused self-hosted.</td></tr>
 <tr><td><code>TRACE_RPC_URL</code></td><td>indexer</td><td>For DCI</td><td><code>readme</code> (placeholder)</td><td>Trace-capable RPC for dynamic contract indexing.</td></tr>
 <tr><td><code>OTLP_EXPORTER_ENDPOINT</code></td><td>indexer</td><td>No</td><td>empty (disabled)</td><td>OpenTelemetry collector. Set <code>http://lgtm:4317</code> with the <code>observability</code> profile.</td></tr>
@@ -69,8 +67,8 @@ SUBSTREAMS_ENDPOINT=http://substreams-endpoint:10016
 # Custom chain — defined in chains.yaml (see below)
 CHAINS=tempo
 
-# Backfilling history: keep this recent, not the 2000-01-01 default (see the warning under "Running the stack")
-RETENTION_HORIZON=2026-07-01T00:00:00
+# Keep no historical state (recommended); the 2000-01-01 default keeps all history and breaks a from-scratch backfill (see "Retention horizon")
+RETENTION_HORIZON=2100-01-01T00:00:00
 SUBSTREAMS_API_TOKEN=local
 AUTH_API_KEY=local-dev-key
 RUST_LOG=info
@@ -104,8 +102,8 @@ extractors:
 <table><thead><tr><th width="220">Field</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>name</code></td><td>Unique extractor name; also the protocol system name exposed over the RPC.</td></tr>
 <tr><td><code>chain</code></td><td>Chain this extractor runs on — a built-in chain name, or a custom chain defined in <code>chains.yaml</code> (see below). The indexer rejects an unknown chain name at startup.</td></tr>
-<tr><td><code>implementation_type</code></td><td><code>Custom</code> for native substreams that emit Tycho protocol messages directly, or <code>Vm</code> for protocols simulated through the tycho-protocol-sdk.</td></tr>
-<tr><td><code>sync_batch_size</code></td><td>Number of blocks the indexer requests per Substreams batch.</td></tr>
+<tr><td><code>implementation_type</code></td><td><code>Custom</code> for natively integrated protocols — the Substreams emits protocol attributes and the pool maths are implemented natively in tycho-simulation. <code>Vm</code> for protocols whose full contract state is indexed and whose logic runs in a local VM inside tycho-simulation. The indexer stores this as metadata; downstream consumers (e.g. tycho-simulation) act on it.</td></tr>
+<tr><td><code>sync_batch_size</code></td><td>How many blocks the indexer buffers before flushing them to Postgres in a single write, during the initial catch-up sync. Substreams delivers messages as a continuous stream — this only tunes DB write batching while syncing.</td></tr>
 <tr><td><code>start_block</code></td><td>Block at which the protocol was deployed; the indexer starts streaming here.</td></tr>
 <tr><td><code>spkg</code></td><td>Path to the compiled <code>.spkg</code>, relative to <code>/opt/tycho-indexer/</code> (i.e. under <code>docker/substreams/</code>).</td></tr>
 <tr><td><code>module_name</code></td><td>Substreams output module to consume (e.g. <code>map_protocol_changes</code>).</td></tr>
@@ -140,42 +138,30 @@ chains:
 <tr><td><code>block_time_secs</code></td><td>Average block time in seconds.</td></tr>
 <tr><td><code>native</code></td><td>Native gas token: <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
 <tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
-<tr><td><code>default_tvl_thresholds</code></td><td>TVL gates in native-token units (<code>low</code>, <code>medium</code>) for component tracking.</td></tr>
+<tr><td><code>default_tvl_thresholds</code></td><td>Liquidity gates in <strong>native-token units</strong> (e.g. ETH), read by downstream consumers (solvers, tycho-simulation) to decide which components to track — not by the indexer. Size <code>low</code>/<code>medium</code> to the USD floor you want at the native token's price; the Ethereum defaults target roughly $20k / $200k.</td></tr>
 </tbody></table>
 
 ### Building a Substreams package
 
-Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>, one directory per <code>{chain}-{protocol}</code>. The WASM logic is chain-agnostic — a package pins the chain-specific factory address and start block through its manifest. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one.
+Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>ethereum-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one.
 
 To index a Uniswap-V2-style DEX on a new chain, reuse the `ethereum-uniswap-v2` module and add a manifest for your chain:
 
 1. Copy an existing manifest, e.g. `protocols/substreams/ethereum-uniswap-v2/ethereum-uniswap-v2.yaml`, to `<chain>-<dex>.yaml` in the same directory.
 2. Edit the copy: set the package `name`/`version`, set every module's `initialBlock` to the DEX factory's deployment block, and set the `params` line to `factory_address=<your factory>&protocol_type_name=<your pool type>`.
-3. Build the WASM and pack the package:
+3. Build the WASM and pack the package (some protocols build with `--profile substreams` instead of `--release` — check that protocol's `Makefile` or `README`):
 
    ```bash
    cd protocols/substreams/ethereum-uniswap-v2
-   make build          # cargo build --target wasm32-unknown-unknown --release
+   cargo build --target wasm32-unknown-unknown --release
    substreams pack <chain>-<dex>.yaml
    ```
 
 4. Copy the resulting `.spkg` into `docker/substreams/`, then point your extractor's `spkg:` field at it.
 
-Pool detection is event-based — the module filters `PairCreated` by the factory address and tracks `Sync` events — so any standard Uniswap-V2 fork works with only the factory address and start block changed. Other protocols (Uniswap V3/V4, Balancer, Curve, …) have their own module directories under `protocols/substreams/`; follow the same pattern with the manifest for that protocol.
-
 {% hint style="info" %}
 `substreams pack` may warn that `network` is not set. This is harmless for the self-hosted stack — the Firehose advertises the chain through `CHAIN_NAME`, not the package.
 {% endhint %}
-
-### Pointing to a local tycho-protocol-sdk checkout
-
-`Vm` extractors run protocol logic from the tycho-protocol-sdk. The compose file mounts a host checkout into the container read-only:
-
-```
-${TYCHO_PROTOCOL_SDK_PATH:-../tycho-protocol-sdk}/substreams → /opt/tycho-indexer/substreams-sdk:ro
-```
-
-Set `TYCHO_PROTOCOL_SDK_PATH` in `docker/.env` to your checkout if it lives somewhere other than `../tycho-protocol-sdk`. If you index only `Custom` extractors, leave the default — the mount stays unused.
 
 ## Running the stack
 
@@ -188,16 +174,18 @@ docker compose --profile substreams-endpoint up
 
 On a cold start the poller begins at `START_BLOCK` and streams forward. The indexer only commits a block once it sits behind the finality horizon, so expect a delay before committed state appears — on a fresh chain the first cold start takes a while to reach the deployment block of your protocols.
 
-### Retention horizon when backfilling history
+### Retention horizon
 
 {% hint style="danger" %}
-When you index a chain from a deployment block that is more than about a month old, **set `RETENTION_HORIZON` to a recent date** (for example, one day ago). The default `2000-01-01T00:00:00` keeps the full version history, and the indexer crashes on the first state update it writes for a historical block:
+Set `RETENTION_HORIZON` to a **future** date (the example uses `2100-01-01T00:00:00`) so the indexer keeps no historical state — only the current state of every component. This is the simplest setup and sidesteps a partition crash during backfill.
+
+The `2000-01-01T00:00:00` default keeps the full version history. When you then backfill a chain from a deployment block more than about a month old, the indexer crashes on the first historical state update it writes:
 
 ```
 duplicate key value violates unique constraint "component_balance_default_unique_pk"
 ```
 
-pg_partman partitions the `component_balance`, `protocol_state`, and `contract_storage` tables by day on `valid_to`, keeping a one-month retention window. During a historical backfill, a superseded version carries a `valid_to` older than any existing partition, so it lands in the default partition and violates its uniqueness constraint. A recent `RETENTION_HORIZON` drops those old versions before the indexer writes them, while still indexing the current state of every component in full.
+pg_partman partitions the `component_balance`, `protocol_state`, and `contract_storage` tables by day on `valid_to`, keeping a one-month retention window. A superseded historical version carries a `valid_to` older than any existing partition, so it lands in the default partition and violates its uniqueness constraint. A future `RETENTION_HORIZON` drops those old versions before they are written. Use a recent date instead only if you genuinely need a short window of version history.
 {% endhint %}
 
 ### Resuming after a restart
@@ -259,10 +247,10 @@ For dashboards, logs, and traces, enable the `observability` profile alongside `
 
 ## Troubleshooting
 
-- **Blocks look years old.** If the poller's block `age` field reads years instead of seconds, `RPC_URL` points at the wrong chain or a stale node. Confirm the endpoint serves your chain and is fully synced.
+- **Blocks look years old.** The poller logs an `age` for each block it fetches — wall-clock time minus the block's timestamp. In a healthy stream `age` is seconds; if it reads years, `RPC_URL` points at the wrong chain or a stale node. Confirm the endpoint serves your chain and is fully synced.
 - **Firehose never becomes healthy.** A hub bootstrap deadlock leaves the stack waiting indefinitely. Stop the stack and bring it back up; on restart the poller resumes from stored one-block files instead of bootstrapping from scratch.
-- **Corrupt Substreams state cache.** If tier2 fails to produce segments after an unclean shutdown, clear the cached state and restart: remove `/data/substreams-states/` inside the `firehose-data` volume, then `up` again.
-- **Cold start takes a long time.** A fresh chain must fetch and merge every block from `START_BLOCK` before your protocols' deployment blocks appear. This is expected — set `START_BLOCK` close to your earliest protocol `start_block` to avoid fetching irrelevant history.
+- **Corrupt Substreams state cache.** After an unclean shutdown, tier2 can fail to produce new state segments: its logs show repeated errors and the indexer's committed block height stops advancing even though the poller keeps fetching. Clear the cached state and restart — remove `/data/substreams-states/` inside the `firehose-data` volume, then `up` again.
+- **Cold start takes a long time.** `START_BLOCK` is the Firehose poller's start block (where it begins fetching from the RPC), separate from each extractor's `start_block`. A fresh chain must fetch and merge every block from `START_BLOCK` before your protocols' deployment blocks appear. Set `START_BLOCK` at or just below your earliest protocol `start_block` so the poller skips irrelevant history.
 
 ## Performance tuning
 
