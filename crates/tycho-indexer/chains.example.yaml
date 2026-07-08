@@ -3,8 +3,11 @@
 #
 # This file defines custom (non-built-in) chains by name so that an extractor's `chain: <name>` (in
 # extractors.yaml) and the `--chains <name>` flag resolve to a full chain config. Built-in chains
-# (ethereum, base, unichain, …) need no entry here. Other tooling (e.g. tycho-execution) can point
-# the `TYCHO_CHAIN_CONFIG` env var at this same file to share the definitions.
+# (ethereum, base, unichain, …) need no entry here.
+#
+# Consumers (tycho-simulation, tycho-client, tycho-execution) resolve custom chains the same way:
+# set the `TYCHO_CHAIN_CONFIG` env var to this file's path and they load the identical definitions
+# the indexer uses. Leave it unset and they resolve only built-in chains.
 
 chains:
   - name: tempo                       # the value used as `chain:` on extractors and in `--chains`

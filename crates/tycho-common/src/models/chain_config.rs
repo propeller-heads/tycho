@@ -196,10 +196,9 @@ pub enum TvlThresholdTier {
     Medium,
 }
 
-/// Env var overriding the path the registry reads custom-chain config from.
+/// Env var holding the path the registry reads custom-chain config from. Unset means "no custom
+/// chains"; there is no default path, so loading never depends on the current working directory.
 const CHAIN_CONFIG_ENV: &str = "TYCHO_CHAIN_CONFIG";
-/// Default path used when `TYCHO_CHAIN_CONFIG` is unset.
-const DEFAULT_CHAIN_CONFIG_PATH: &str = "./chains.yaml";
 
 /// On-disk shape of the custom-chain config file: a top-level `chains:` list. This is the format of
 /// the indexer's `chains.yaml` (its `--chain-config` file), so a consumer can point
@@ -246,19 +245,34 @@ impl ChainConfigRegistry {
         Ok(Self { custom })
     }
 
-    /// Reads custom chain configs from `TYCHO_CHAIN_CONFIG` (default `./chains.yaml`).
+    /// Reads custom chain configs from the path in `TYCHO_CHAIN_CONFIG`.
     ///
-    /// Returns an empty registry when the file is absent, so runs on built-in chains need no config
-    /// file. Returns an error if the file exists but cannot be read or parsed, leaving it to the
-    /// caller to decide how to react. Install the result with [`init_chain_registry`] to make it
-    /// the process-wide registry.
+    /// Returns an empty registry when the env var is unset, so runs on built-in chains need no
+    /// config. When it is set, the file is loaded as-is: a missing, unreadable, or malformed file
+    /// is an error (the operator asked for a config, so a broken one is a mistake, not "no custom
+    /// chains"), leaving the caller to decide how to react. Install the result with
+    /// [`init_chain_registry`] to make it the process-wide registry.
     pub fn load_default() -> Result<Self, ChainConfigError> {
-        let path = std::env::var(CHAIN_CONFIG_ENV)
-            .unwrap_or_else(|_| DEFAULT_CHAIN_CONFIG_PATH.to_owned());
-        if !std::path::Path::new(&path).exists() {
+        let Ok(path) = std::env::var(CHAIN_CONFIG_ENV) else {
             return Ok(Self::empty());
-        }
+        };
         Self::from_yaml_file(&path)
+    }
+
+    /// Like [`load_default`](Self::load_default) but never fails: a broken `TYCHO_CHAIN_CONFIG`
+    /// (missing, unreadable, or malformed file) is logged and degrades to an empty registry rather
+    /// than aborting. Used by [`chain_registry`] to lazily initialise the process-wide registry, so
+    /// a consumer only needs to set `TYCHO_CHAIN_CONFIG` — no explicit init call. Call
+    /// [`load_default`](Self::load_default) directly when you need to react to the error.
+    pub fn load_default_or_empty() -> Self {
+        Self::load_default().unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "failed to load custom chain config from TYCHO_CHAIN_CONFIG; falling back to an \
+                 empty registry"
+            );
+            Self::empty()
+        })
     }
 
     /// Parses a registry from a YAML file with a top-level `chains:` list.
@@ -290,11 +304,14 @@ static CHAIN_REGISTRY: OnceLock<ChainConfigRegistry> = OnceLock::new();
 
 /// Returns the process-wide chain config registry.
 ///
-/// Defaults to an empty registry — only built-in chains resolve — unless one was installed with
-/// [`init_chain_registry`]. This never reads from disk; load custom chains explicitly via
-/// [`ChainConfigRegistry::load_default`] and install them before first access.
+/// On first access, lazily initialises itself from `TYCHO_CHAIN_CONFIG` via
+/// [`ChainConfigRegistry::load_default_or_empty`] — so a consumer that wants custom chains only
+/// needs to set that env var, no explicit init call. A run with the env var unset resolves
+/// built-in chains from an empty registry. Install a registry explicitly with
+/// [`init_chain_registry`] before first access to override the lazy load (e.g. the indexer
+/// building one from its own config).
 pub fn chain_registry() -> &'static ChainConfigRegistry {
-    CHAIN_REGISTRY.get_or_init(ChainConfigRegistry::empty)
+    CHAIN_REGISTRY.get_or_init(ChainConfigRegistry::load_default_or_empty)
 }
 
 /// Installs the process-wide chain config registry explicitly, before any call to
@@ -375,6 +392,53 @@ chains:
     fn empty_chains_list_parses_to_empty_registry() {
         let registry = ChainConfigRegistry::from_yaml_str("chains: []").unwrap();
         assert!(!registry.contains("anything"));
+    }
+
+    // These tests mutate the process-global `TYCHO_CHAIN_CONFIG` env var; they rely on nextest
+    // running each test in its own process (repo convention). Under plain `cargo test` they would
+    // race on the shared env.
+    #[test]
+    fn load_default_returns_empty_when_env_unset() {
+        std::env::remove_var(CHAIN_CONFIG_ENV);
+        assert!(!ChainConfigRegistry::load_default()
+            .unwrap()
+            .contains("anything"));
+    }
+
+    #[test]
+    fn load_default_errors_when_env_points_at_missing_file() {
+        let missing = format!(
+            "{}/tycho-chain-config-missing-{}.yaml",
+            std::env::temp_dir().display(),
+            std::process::id()
+        );
+        std::env::set_var(CHAIN_CONFIG_ENV, &missing);
+        assert!(matches!(ChainConfigRegistry::load_default(), Err(ChainConfigError::Io(_))));
+    }
+
+    #[test]
+    fn chain_registry_lazy_loads_from_env() {
+        let path = format!(
+            "{}/tycho-lazy-chain-{}.yaml",
+            std::env::temp_dir().display(),
+            std::process::id()
+        );
+        std::fs::write(&path, SAMPLE_YAML).unwrap();
+        std::env::set_var(CHAIN_CONFIG_ENV, &path);
+        // No explicit init_chain_registry — first access lazily loads from the env path.
+        assert!(chain_registry().contains("testchain"));
+    }
+
+    #[test]
+    fn load_default_or_empty_degrades_to_empty_on_missing_file() {
+        let missing = format!(
+            "{}/tycho-chain-config-degrade-{}.yaml",
+            std::env::temp_dir().display(),
+            std::process::id()
+        );
+        std::env::set_var(CHAIN_CONFIG_ENV, &missing);
+        // A broken config must not panic here; it degrades to an empty registry.
+        assert!(!ChainConfigRegistry::load_default_or_empty().contains("anything"));
     }
 
     #[test]
