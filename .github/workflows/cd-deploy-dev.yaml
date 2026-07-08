@@ -31,6 +31,7 @@ on:
           - ethereum-tycho-indexer
           - ethereum-tycho-indexer-new-protocol
           - base-tycho-indexer
+          - bsc-tycho-indexer
           - unichain-tycho-indexer
       cargo_profile:
         description: >
