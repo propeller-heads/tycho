@@ -95,6 +95,25 @@ extractors:
     spkg: "substreams/ethereum-uniswap-v4/ethereum-uniswap-v4-v0.2.1.spkg"
     module_name: "map_protocol_changes"
 
+  # Ethereum Uniswap V4 hooks: indexes all swap-hooked pools on Ethereum; the
+  # terminal module chains the euler, angstrom and NFTX enrichments, tagging NFTX
+  # pools with hook_identifier=nftx_v1 so the hooks DCI and GenericVMHookHandler
+  # can simulate them.
+  uniswap_v4_hooks_ethereum:
+    name: "uniswap_v4_hooks"
+    chain: "ethereum"
+    implementation_type: "Custom"
+    sync_batch_size: 1000
+    start_block: 21688329
+    protocol_types:
+      - name: "uniswap_v4_pool"
+        financial_type: "Swap"
+    spkg: "substreams/ethereum-uniswap-v4/with-hooks/ethereum-uniswap-v4-with-hooks-v0.9.0.spkg"
+    module_name: "map_nftx_enriched_protocol_changes"
+    dci_plugin:
+      type: "uniswap_v4_hooks"
+      pool_manager_address: "0x000000000004444c5dc75cB358380D2e3dE08A90"
+
   ekubo_v2:
     name: "ekubo_v2"
     chain: "ethereum"

@@ -1,0 +1,32 @@
+substreams_yaml_path: ./ethereum-uniswap-v4-with-hooks.yaml
+# The balance check does not support vault-like contracts such as the Uniswap V4
+# PoolManager (a single contract holds the reserves of every pool).
+skip_balance_check: true
+protocol_type_names:
+  - "uniswap_v4_pool"
+protocol_system: "uniswap_v4_hooks"
+module_name: "map_nftx_enriched_protocol_changes"
+initialized_accounts:
+  - "0x000000000004444c5dc75cB358380D2e3dE08A90" # Uniswap V4 PoolManager
+  - "0xd2094b5cDB1a12b6274e4A4D3a252cD94C51EFcC" # NFTXV4Hook
+tests:
+  # Real Ethereum-mainnet NFTX pool (flETH / CollectionToken), verified against the
+  # PoolManager Initialize log at block 25438812. The block range also covers swaps
+  # at blocks 25438814-25438838. The component is emitted by the shared with-hooks
+  # pipeline and tagged hook_identifier=nftx_v1 by the enrichment module.
+  - name: test_nftx_pool_creation
+    start_block: 25438812
+    stop_block: 25438840
+    expected_components:
+      - id: "0x709a1cfa2a4b27238c669ce82277c47282f13620171459bbe764d8967e72867c"
+        tokens:
+          - "0x000000000bb1f9944965c64066d10038a84f9af2" # flETH
+          - "0x47e59e2ff346fb686fe42afe75e1f16c81650fe0" # CollectionToken
+        static_attributes:
+          tick_spacing: "0x3c" # 60
+          hooks: "0xd2094b5cdb1a12b6274e4a4d3a252cd94c51efcc"
+          key_lp_fee: "0x00800000" # dynamic-fee flag
+          hook_identifier: "0x6e6674785f7631" # nftx_v1
+        creation_tx: "0x5e510ed23b7623caca7a66a217356e1cca79533d374fe8cd7bc8efe4b262e64e"
+        skip_simulation: false
+        skip_execution: true
