@@ -59,7 +59,7 @@ TYCHO_IMAGE=tycho-indexer:local
 RPC_URL=https://rpc.tempo.xyz
 TRACE_RPC_URL=https://rpc.tempo.xyz
 CHAIN_NAME=tempo
-START_BLOCK=24542000
+START_BLOCK=6455886
 
 # Self-hosted Firehose, reachable by its docker service name
 SUBSTREAMS_ENDPOINT=http://substreams-endpoint:10016
@@ -70,9 +70,6 @@ CHAINS=tempo
 # Keep no historical state (recommended); the 2000-01-01 default keeps all history and breaks a from-scratch backfill (see "Retention horizon")
 RETENTION_HORIZON=2100-01-01T00:00:00
 SUBSTREAMS_API_TOKEN=local
-AUTH_API_KEY=local-dev-key
-RUST_LOG=info
-OTLP_EXPORTER_ENDPOINT=
 ```
 
 ### Writing your extractors.yaml
@@ -91,11 +88,11 @@ extractors:
     chain: "tempo"
     implementation_type: "Custom"
     sync_batch_size: 1000
-    start_block: 12369621
+    start_block: 6455886
     protocol_types:
       - name: "uniswap_v3_pool"
         financial_type: "Swap"
-    spkg: "substreams/ethereum-uniswap-v3/ethereum-uniswap-v3-logs-only-0.1.1.spkg"
+    spkg: "substreams/tempo-uniswap-v3-v0.1.0.spkg"
     module_name: "map_protocol_changes"
 ```
 
@@ -247,9 +244,6 @@ For dashboards, logs, and traces, enable the `observability` profile alongside `
 
 ## Troubleshooting
 
-- **Blocks look years old.** The poller logs an `age` for each block it fetches — wall-clock time minus the block's timestamp. In a healthy stream `age` is seconds; if it reads years, `RPC_URL` points at the wrong chain or a stale node. Confirm the endpoint serves your chain and is fully synced.
-- **Firehose never becomes healthy.** A hub bootstrap deadlock leaves the stack waiting indefinitely. Stop the stack and bring it back up; on restart the poller resumes from stored one-block files instead of bootstrapping from scratch.
-- **Corrupt Substreams state cache.** After an unclean shutdown, tier2 can fail to produce new state segments: its logs show repeated errors and the indexer's committed block height stops advancing even though the poller keeps fetching. Clear the cached state and restart — remove `/data/substreams-states/` inside the `firehose-data` volume, then `up` again.
 - **Cold start takes a long time.** `START_BLOCK` is the Firehose poller's start block (where it begins fetching from the RPC), separate from each extractor's `start_block`. A fresh chain must fetch and merge every block from `START_BLOCK` before your protocols' deployment blocks appear. Set `START_BLOCK` at or just below your earliest protocol `start_block` so the poller skips irrelevant history.
 
 ## Performance tuning
