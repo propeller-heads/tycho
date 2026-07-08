@@ -16,6 +16,9 @@ pub mod map_euler_enriched_protocol_changes;
 #[path = "4_map_angstrom_enriched_block_changes.rs"]
 pub mod map_angstrom_enriched_block_changes;
 
+#[path = "4_map_flaunch_enriched_protocol_changes.rs"]
+pub mod map_flaunch_enriched_protocol_changes;
+
 #[path = "5_map_protocol_changes.rs"]
 pub mod map_protocol_changes;
 

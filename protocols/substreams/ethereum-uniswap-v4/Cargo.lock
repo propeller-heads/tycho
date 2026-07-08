@@ -272,21 +272,14 @@ dependencies = [
 name = "ethereum-uniswap-v4-no-hooks"
 version = "0.4.1"
 dependencies = [
- "anyhow",
  "ethabi 18.0.0",
  "ethereum-uniswap-v4-shared",
  "getrandom 0.2.16",
  "hex",
- "hex-literal 0.4.1",
- "itertools 0.13.0",
- "num-bigint",
- "prost 0.11.9",
  "rstest",
  "substreams",
- "substreams-entity-change",
  "substreams-ethereum",
  "substreams-helper",
- "tiny-keccak",
  "tycho-substreams",
 ]
 
@@ -298,22 +291,19 @@ dependencies = [
  "ethabi 18.0.0",
  "getrandom 0.2.16",
  "hex",
- "hex-literal 0.4.1",
  "itertools 0.13.0",
  "num-bigint",
  "prost 0.11.9",
  "rstest",
  "substreams",
- "substreams-entity-change",
  "substreams-ethereum",
  "substreams-helper",
- "tiny-keccak",
  "tycho-substreams",
 ]
 
 [[package]]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -321,17 +311,13 @@ dependencies = [
  "getrandom 0.2.16",
  "hex",
  "hex-literal 0.4.1",
- "itertools 0.13.0",
- "num-bigint",
  "prost 0.11.9",
  "rstest",
  "serde",
  "serde_qs",
  "substreams",
- "substreams-entity-change",
  "substreams-ethereum",
  "substreams-helper",
- "tiny-keccak",
  "tycho-substreams",
 ]
 
