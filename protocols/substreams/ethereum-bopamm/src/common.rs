@@ -178,6 +178,37 @@ fn superseded_books_from(
         .collect()
 }
 
+/// Component id of the book that currently holds a token's inventory before a newer book replaces
+/// it: the highest asset id below `new_asset_id` that backs `asset_token`, or `None` if this is the
+/// token's first book.
+///
+/// Only this book carries a non-zero accumulated balance. Every book below it was already drained
+/// to zero when its own replacement was created, so draining the whole superseded set (rather than
+/// just this one) would push those already-emptied books negative.
+pub fn previous_live_book_for_token(
+    asset_token: &[u8],
+    new_asset_id: u64,
+    store: &StoreGetProto<ProtocolComponent>,
+) -> Option<String> {
+    previous_live_book_from(asset_token, new_asset_id, |i| store.get_last(format!("book:{i}")))
+}
+
+/// Testable core of [`previous_live_book_for_token`] over a probe of asset id -> component.
+fn previous_live_book_from(
+    asset_token: &[u8],
+    new_asset_id: u64,
+    probe: impl Fn(u64) -> Option<ProtocolComponent>,
+) -> Option<String> {
+    (0..new_asset_id).rev().find_map(|i| {
+        let component = probe(i)?;
+        component
+            .tokens
+            .iter()
+            .any(|t| t.as_slice() == asset_token)
+            .then_some(component.id)
+    })
+}
+
 /// Component ids of every book a higher-id book has superseded across the venue.
 ///
 /// A token is backed by exactly one live book — the highest asset id, since BopAMM re-lists an
@@ -471,6 +502,30 @@ mod tests {
         assert_eq!(superseded_books_from(&weth, 2, probe), vec![component_id(&SETTLEMENT, 0)]);
         // The WBTC book is the first for its token: it supersedes nothing.
         assert!(superseded_books_from(&wbtc, 1, probe).is_empty());
+    }
+
+    #[test]
+    fn previous_live_book_returns_only_the_most_recent_superseded_book() {
+        let usdc = hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let wbtc = hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap();
+        // WETH re-listed twice: book 0 -> book 2 -> book 5. book 1 = WBTC.
+        let probe = |i: u64| match i {
+            0 => Some(book_component(0, &weth, &usdc)),
+            1 => Some(book_component(1, &wbtc, &usdc)),
+            2 => Some(book_component(2, &weth, &usdc)),
+            5 => Some(book_component(5, &weth, &usdc)),
+            _ => None,
+        };
+        // Creating book 5 must drain only book 2 (the live book holding the balance), never book 0
+        // which was already drained to zero when book 2 replaced it.
+        assert_eq!(previous_live_book_from(&weth, 5, probe), Some(component_id(&SETTLEMENT, 2)));
+        // Creating book 2 drains book 0.
+        assert_eq!(previous_live_book_from(&weth, 2, probe), Some(component_id(&SETTLEMENT, 0)));
+        // The token's first book supersedes nothing.
+        assert_eq!(previous_live_book_from(&weth, 0, probe), None);
+        // WBTC's only book has no predecessor.
+        assert_eq!(previous_live_book_from(&wbtc, 1, probe), None);
     }
 
     #[test]
