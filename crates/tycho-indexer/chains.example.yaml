@@ -6,7 +6,7 @@
 # (ethereum, base, unichain, …) need no entry here.
 #
 # Consumers (tycho-simulation, tycho-client, tycho-execution) resolve custom chains the same way:
-# set the `TYCHO_CHAIN_CONFIG` env var to this file's path and they load the identical definitions
+# set the `CUSTOM_CHAINS_CONFIG` env var to this file's path and they load the identical definitions
 # the indexer uses. Leave it unset and they resolve only built-in chains.
 
 chains:

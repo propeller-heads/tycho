@@ -164,7 +164,7 @@ pub struct IndexArgs {
     pub extractors_config: String,
 
     /// Custom chains configuration file
-    #[clap(long, env, default_value = "./chains.yaml")]
+    #[clap(long, env = "CUSTOM_CHAINS_CONFIG", default_value = "./chains.yaml")]
     pub chain_config: String,
 
     /// A comma separated list of blockchains to index on
@@ -190,7 +190,7 @@ pub struct RunSpkgArgs {
     pub chain: String,
 
     /// Custom chains configuration file
-    #[clap(long, env, default_value = "./chains.yaml")]
+    #[clap(long, env = "CUSTOM_CHAINS_CONFIG", default_value = "./chains.yaml")]
     pub chain_config: String,
 
     #[clap(flatten)]

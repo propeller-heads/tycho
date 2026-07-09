@@ -71,7 +71,7 @@ services:
       # Override to use a chain-specific extractors file, e.g. ./extractors-tempo.yaml
       EXTRACTORS_CONFIG: ${EXTRACTORS_CONFIG:-/opt/tycho-indexer/extractors.yaml}
       # Custom-chain definitions; empty by default so built-in chains need no config.
-      CHAIN_CONFIG: ${CHAIN_CONFIG:-/opt/tycho-indexer/chains.yaml}
+      CUSTOM_CHAINS_CONFIG: ${CUSTOM_CHAINS_CONFIG:-/opt/tycho-indexer/chains.yaml}
     ports:
       - "4242:4242"
     volumes:

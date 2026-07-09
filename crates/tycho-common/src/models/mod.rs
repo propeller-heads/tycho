@@ -171,7 +171,7 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
                 panic!(
                     "received custom chain '{name}' with no registered config: {e}; install it via \
-                     the chain config file (TYCHO_CHAIN_CONFIG, default ./chains.yaml) or \
+                     the chain config file (CUSTOM_CHAINS_CONFIG, default ./chains.yaml) or \
                      init_chain_registry before decoding wire data"
                 )
             }),
