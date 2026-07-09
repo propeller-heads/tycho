@@ -81,6 +81,7 @@ pub type EntryPointId = String;
 /// for the self-host case. Full rationale in the custom-chain decision record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Chain {
     #[default]
     Ethereum,
