@@ -132,6 +132,7 @@ use crate::{
         protocol::{
             filters::uniswap_v4_non_angstrom_hook_pool_filter,
             native_wrapper::state::NativeWrapperState,
+            registry::{self, ComponentFilterFn},
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
     },
@@ -398,6 +399,51 @@ impl ProtocolStreamBuilder {
         }
 
         self
+    }
+
+    /// Registers `name` using the canonical state type and default filter from the
+    /// [protocol registry](crate::evm::protocol::registry).
+    ///
+    /// Passing `Some(filter_fn)` overrides the registry's default filter for this
+    /// protocol; `None` keeps the default (which may itself be `None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::SetUpError`] if `name` is not a known protocol. See
+    /// [`registry::supported_protocols`] for the valid names.
+    pub fn exchange_by_name(
+        self,
+        name: &str,
+        filter: ComponentFilter,
+        filter_fn: Option<ComponentFilterFn>,
+    ) -> Result<Self, StreamError> {
+        let Some(entry) = registry::entry(name) else {
+            return Err(StreamError::SetUpError(format!(
+                "Unknown protocol '{name}'; supported protocols: {}",
+                registry::supported_protocols().join(", ")
+            )));
+        };
+        let filter_fn = filter_fn.or(entry.default_filter);
+        Ok((entry.register)(self, name, filter, filter_fn))
+    }
+
+    /// Registers every protocol in `names` via [`Self::exchange_by_name`] with no
+    /// filter overrides, sharing one [`ComponentFilter`].
+    ///
+    /// Duplicate names overwrite earlier registrations (matching `exchange`'s insert semantics).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::SetUpError`] on the first unknown name.
+    pub fn exchanges_by_name<S: AsRef<str>>(
+        mut self,
+        names: &[S],
+        filter: ComponentFilter,
+    ) -> Result<Self, StreamError> {
+        for name in names {
+            self = self.exchange_by_name(name.as_ref(), filter.clone(), None)?;
+        }
+        Ok(self)
     }
 
     /// Sets the block time interval for the stream.
@@ -920,7 +966,10 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::protocol::models::Update;
+    use crate::{
+        evm::protocol::{filters::balancer_v2_pool_filter, registry::ComponentFilterFn},
+        protocol::models::Update,
+    };
 
     fn empty_update(block: u64) -> Update {
         Update::new(block, HashMap::new(), HashMap::new())
@@ -1038,5 +1087,81 @@ mod tests {
             .expect("stream ended unexpectedly");
 
         assert!(update.is_ok(), "decoded update should be Ok, got: {:?}", update);
+    }
+
+    fn test_builder() -> ProtocolStreamBuilder {
+        ProtocolStreamBuilder::new("localhost:4242", Chain::Ethereum)
+    }
+
+    fn tvl_filter() -> ComponentFilter {
+        ComponentFilter::with_tvl_range(5.0, 10.0)
+    }
+
+    #[test]
+    fn test_exchange_by_name_registers_decoder_and_default_filter() {
+        let builder = test_builder()
+            .exchange_by_name("vm:balancer_v2", tvl_filter(), None)
+            .expect("known protocol registers");
+        assert!(builder
+            .get_decoder()
+            .has_decoder("vm:balancer_v2"));
+        let installed = builder
+            .get_decoder()
+            .registered_filter("vm:balancer_v2")
+            .expect("default filter installed");
+        assert!(std::ptr::fn_addr_eq(installed, balancer_v2_pool_filter as ComponentFilterFn));
+    }
+
+    #[test]
+    fn test_exchange_by_name_filter_override_wins() {
+        fn reject_all(_: &ComponentWithState) -> bool {
+            false
+        }
+        let builder = test_builder()
+            .exchange_by_name("vm:balancer_v2", tvl_filter(), Some(reject_all))
+            .expect("known protocol registers");
+        let installed = builder
+            .get_decoder()
+            .registered_filter("vm:balancer_v2")
+            .expect("override filter installed");
+        assert!(std::ptr::fn_addr_eq(installed, reject_all as ComponentFilterFn));
+    }
+
+    #[test]
+    fn test_exchange_by_name_no_default_filter_installs_none() {
+        let builder = test_builder()
+            .exchange_by_name("uniswap_v2", tvl_filter(), None)
+            .expect("known protocol registers");
+        assert!(builder
+            .get_decoder()
+            .has_decoder("uniswap_v2"));
+        assert!(builder
+            .get_decoder()
+            .registered_filter("uniswap_v2")
+            .is_none());
+    }
+
+    #[test]
+    fn test_exchange_by_name_unknown_protocol_errors() {
+        let err = test_builder()
+            .exchange_by_name("vm:blancer_v2", tvl_filter(), None)
+            .err()
+            .expect("unknown protocol must error");
+        let message = err.to_string();
+        assert!(message.contains("vm:blancer_v2"), "error names the protocol: {message}");
+        assert!(message.contains("uniswap_v2"), "error lists supported protocols: {message}");
+    }
+
+    #[test]
+    fn test_exchanges_by_name_registers_all() {
+        let builder = test_builder()
+            .exchanges_by_name(&["uniswap_v2", "ekubo_v3"], tvl_filter())
+            .expect("all known protocols register");
+        assert!(builder
+            .get_decoder()
+            .has_decoder("uniswap_v2"));
+        assert!(builder
+            .get_decoder()
+            .has_decoder("ekubo_v3"));
     }
 }

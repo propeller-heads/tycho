@@ -13,6 +13,7 @@ pub mod fluid;
 pub mod lunarbase;
 pub mod native_wrapper;
 pub mod pancakeswap_v2;
+pub mod registry;
 pub mod rocketpool;
 pub mod safe_math;
 pub mod u256_num;

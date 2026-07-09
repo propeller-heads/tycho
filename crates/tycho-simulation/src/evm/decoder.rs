@@ -270,6 +270,20 @@ where
             .insert(exchange.to_string(), predicate);
     }
 
+    /// Returns true if a decoder is registered for `exchange`. Test support.
+    #[cfg(test)]
+    pub(crate) fn has_decoder(&self, exchange: &str) -> bool {
+        self.registry.contains_key(exchange)
+    }
+
+    /// Returns the client-side filter registered for `exchange`, if any. Test support.
+    #[cfg(test)]
+    pub(crate) fn registered_filter(&self, exchange: &str) -> Option<FilterFn> {
+        self.inclusion_filters
+            .get(exchange)
+            .copied()
+    }
+
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
     /// components
     pub async fn decode(&self, msg: &FeedMessage<H>) -> Result<Update, StreamDecodeError> {
