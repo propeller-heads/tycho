@@ -35,13 +35,15 @@ pub mod chain_state;
 mod dynamic_contract_indexer;
 pub mod models;
 pub mod post_processors;
-pub mod protobuf_deserialisation;
 pub mod protocol_cache;
 pub mod protocol_extractor;
 pub mod reorg_buffer;
 pub mod runner;
 pub mod token_analysis_cron;
 mod u256_num;
+
+#[cfg(test)]
+mod protobuf_conversion_tests;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ExtractionError {
@@ -73,6 +75,15 @@ pub enum ExtractionError {
     AccountExtractionError(String),
     #[error("DCI cache error: {0}")]
     DCICacheError(#[from] DCICacheError),
+}
+
+impl From<tycho_protobuf::error::DecodeError> for ExtractionError {
+    fn from(e: tycho_protobuf::error::DecodeError) -> Self {
+        match e {
+            tycho_protobuf::error::DecodeError::Empty => Self::Empty,
+            tycho_protobuf::error::DecodeError::Decode(msg) => Self::DecodeError(msg),
+        }
+    }
 }
 
 #[derive(Error, Debug)]

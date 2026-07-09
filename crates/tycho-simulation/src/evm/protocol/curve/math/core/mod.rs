@@ -1,0 +1,12 @@
+pub mod stableswap_alend;
+pub mod stableswap_meta;
+pub mod stableswap_ng;
+pub mod stableswap_steth;
+pub mod stableswap_v0;
+pub mod stableswap_v1;
+pub mod stableswap_v2;
+pub mod tricrypto_ng;
+pub mod tricrypto_v1;
+pub mod twocrypto_ng;
+pub mod twocrypto_stable;
+pub mod twocrypto_v1;

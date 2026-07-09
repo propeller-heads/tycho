@@ -55,7 +55,7 @@ impl SwapEncoder for BebopSwapEncoder {
             .ok_or_else(|| {
                 EncodingError::FatalError("protocol_state is required for Bebop".to_string())
             })?;
-        let (partial_fill_offset, original_filled_taker_amount, bebop_calldata) = {
+        let (target, partial_fill_offset, original_filled_taker_amount, bebop_calldata) = {
             let indicatively_priced_state = protocol_state
                 .as_indicatively_priced()
                 .map_err(|e| {
@@ -102,8 +102,15 @@ impl SwapEncoder for BebopSwapEncoder {
                 .ok_or(EncodingError::FatalError(
                     "Bebop quote must have a partial_fill_offset attribute".to_string(),
                 ))?;
+            let target = signed_quote
+                .quote_attributes
+                .get("tx_to")
+                .ok_or(EncodingError::FatalError(
+                    "Bebop quote must have a tx_to attribute".to_string(),
+                ))?;
             let original_filled_taker_amount = biguint_to_u256(&signed_quote.amount_out);
             (
+                bytes_to_address(target)?,
                 // we are only interested in the last byte to get a u8
                 partial_fill_offset[partial_fill_offset.len() - 1],
                 original_filled_taker_amount,
@@ -112,11 +119,12 @@ impl SwapEncoder for BebopSwapEncoder {
         };
 
         // Encode packed data for the executor
-        // Format: token_in | token_out | partial_fill_offset |
-        //         original_filled_taker_amount | approval_needed | bebop_calldata
+        // Format: token_in | token_out | target | partial_fill_offset |
+        //         original_filled_taker_amount | bebop_calldata
         let args = (
             token_in,
             token_out,
+            target,
             partial_fill_offset.to_be_bytes(),
             original_filled_taker_amount.to_be_bytes::<32>(),
             &bebop_calldata[..],
@@ -153,6 +161,7 @@ mod tests {
         // 3000 USDC -> 1 WETH using a mocked RFQ state to get a quote
         let bebop_calldata = Bytes::from_str("0x123456").unwrap();
         let partial_fill_offset = 12u64;
+        let target = Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap();
         let quote_amount_out = BigUint::from_str("1000000000000000000").unwrap();
 
         let bebop_component = ProtocolComponent {
@@ -172,6 +181,7 @@ mod tests {
                             .to_vec(),
                     ),
                 ),
+                ("tx_to".to_string(), target.clone()),
             ]),
         };
 
@@ -210,6 +220,8 @@ mod tests {
             "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
             // token out
             "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            // target (settlement or router)
+            "bbbbbbb520d69a9775e85b458c58c648259fad5f",
             // partiall filled offset
             "0c",
             //  original taker amount

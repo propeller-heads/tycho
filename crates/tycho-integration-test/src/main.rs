@@ -1,3 +1,4 @@
+mod fee_fetcher;
 mod metrics;
 mod statistics;
 mod stream_processor;
@@ -28,6 +29,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
 use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
+use tycho_execution::encoding::evm::get_router_address;
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
@@ -44,11 +46,13 @@ use tycho_test::{
         models::{TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction, tenderly,
     },
+    is_block_not_found,
     token_prices::{cap_amount_to_eth_value, load_token_prices},
     validation::{batch_validate_components, get_validator, Validator},
 };
 
 use crate::{
+    fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
         protocol_stream_processor::ProtocolStreamProcessor,
@@ -81,6 +85,11 @@ struct Cli {
     #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
+    /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
+    /// dev instance (e.g. http://127.0.0.1:4242).
+    #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
+    no_tls: bool,
+
     /// Disable on-chain protocols
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
@@ -88,6 +97,10 @@ struct Cli {
     /// Disable RFQ protocols
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
+
+    /// Run PAMM RFQ protocols.
+    #[arg(long, default_value_t = true)]
+    run_pamm_protocols: bool,
 
     /// Port for the Prometheus metrics server
     #[arg(long, default_value_t = 9898)]
@@ -163,10 +176,6 @@ struct Cli {
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     #[arg(long, default_value_t = 30)]
     stale_threshold_secs: u64,
-
-    /// Router fee on output in bps (defaults to 10 bps)
-    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..))]
-    router_fee: u16,
 
     /// Disable on-chain swap execution validation (RPC simulation only, no swap encoding or
     /// execution). Useful for diagnosing stream latency without execution overhead.
@@ -287,11 +296,25 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
 
+    // Read the router fee on output from the on-chain FeeCalculator once at start-up. Slippage is
+    // computed after backing this fee out of the simulated amount out, so a stale or wrong fee
+    // would skew every slippage result.
+    let router_address = get_router_address(&chain)
+        .map_err(|e| miette!("No Tycho router address configured for chain {chain:?}: {e}"))?;
+    let router_fee = fetch_router_fee_on_output(&rpc_tools.provider, router_address)
+        .await
+        .wrap_err("Failed to read router fee on output from the on-chain FeeCalculator")?;
+    info!(
+        numerator = router_fee.numerator(),
+        denominator = router_fee.denominator(),
+        "Loaded router fee on output from on-chain FeeCalculator"
+    );
+
     // Load tokens from Tycho
     info!(%cli.tycho_url, "Loading tokens...");
     let all_tokens = load_all_tokens(
         &cli.tycho_url,
-        false,
+        cli.no_tls,
         Some(cli.tycho_api_key.as_str()),
         true,
         chain,
@@ -326,6 +349,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.tvl_buffer_ratio,
             cli.protocols.clone(),
             cli.partial_blocks,
+            cli.no_tls,
         ) {
             protocol_handle = Some(
                 protocol_stream_processor
@@ -335,18 +359,19 @@ async fn run(cli: Cli) -> miette::Result<()> {
         }
     }
     if !cli.disable_rfq {
-        if let Ok(rfq_stream_processor) = RFQStreamProcessor::new(
+        let rfq_stream_processor = RFQStreamProcessor::new(
             chain,
             tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
-        ) {
-            rfq_handle = Some(
-                rfq_stream_processor
-                    .run_stream(&all_tokens, rfq_tx)
-                    .await?,
-            );
-        }
+            cli.run_pamm_protocols,
+        )
+        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        rfq_handle = Some(
+            rfq_stream_processor
+                .run_stream(&all_tokens, rfq_tx)
+                .await?,
+        );
     }
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
@@ -491,7 +516,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -528,7 +553,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire RFQ permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -684,6 +709,7 @@ async fn process_update(
     tycho_state: Arc<RwLock<TychoState>>,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
     token_prices: SharedTokenPrices,
+    router_fee: RouterFeeOnOutput,
     update: &StreamUpdate,
 ) -> miette::Result<()> {
     info!(
@@ -881,6 +907,17 @@ async fn process_update(
                     }
                 }
                 Err(e) => {
+                    if is_block_not_found(&e.to_string()) {
+                        // The RPC node still lags behind Tycho after the batch-validation retries
+                        // exhausted: the block genuinely isn't available yet. This is infra
+                        // latency, not a state mismatch, so skip it rather than polluting the
+                        // validation-failure metric.
+                        warn!(
+                            component_id = %component_id,
+                            "Skipping validation: RPC block not yet available after retries"
+                        );
+                        continue;
+                    }
                     error!(
                         component_id = %component_id,
                         error = %e,
@@ -1006,7 +1043,7 @@ async fn process_update(
             &mut n_reverts,
             &mut n_failures,
             statistics.clone(),
-            cli.router_fee,
+            router_fee,
         );
 
         // Record statistics
@@ -1420,7 +1457,7 @@ fn process_execution_result(
     n_reverts: &mut i32,
     n_failures: &mut i32,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
-    router_fee: u16,
+    router_fee: RouterFeeOnOutput,
 ) {
     match result {
         TychoExecutionResult::Success {
@@ -1438,12 +1475,13 @@ fn process_execution_result(
 
             metrics::record_simulation_execution_success(&execution_info.protocol_system);
 
-            // Remove the router fee from the expected simulated amount out.
-            let simulated_amount_out_without_fee = execution_info
-                .expected_amount_out
-                .clone() -
-                (execution_info.expected_amount_out * BigUint::from(router_fee)) /
-                    BigUint::from(10000u64);
+            // Remove the router fee from the expected simulated amount out. The on-chain router
+            // deducts this fee from the swap output, so the simulated amount out (which is
+            // fee-free) must be reduced by the same fraction before comparing against the
+            // executed amount.
+            let simulated_amount_out_without_fee = &execution_info.expected_amount_out -
+                (&execution_info.expected_amount_out * BigUint::from(router_fee.numerator())) /
+                    BigUint::from(router_fee.denominator());
 
             // Calculate slippage: positive = simulated > expected, negative = simulated <
             // expected

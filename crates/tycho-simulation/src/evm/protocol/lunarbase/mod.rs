@@ -5,12 +5,12 @@ use crate::evm::decoder::TychoStreamDecoder;
 mod decoder;
 pub mod state;
 
-pub use state::LunarBaseTychoState;
+pub use state::LunarBaseState;
 
 pub const PROTOCOL_SYSTEM: &str = "lunarbase";
 
 pub fn register_lunarbase_decoder(decoder: &mut TychoStreamDecoder<BlockHeader>) {
-    decoder.register_decoder::<LunarBaseTychoState>(PROTOCOL_SYSTEM);
+    decoder.register_decoder::<LunarBaseState>(PROTOCOL_SYSTEM);
 }
 
 #[cfg(test)]
@@ -29,7 +29,7 @@ mod tests {
     use super::{
         decoder::{decode_lunarbase_snapshot, encode_state},
         register_lunarbase_decoder,
-        state::{Address, LunarBaseTychoState},
+        state::{Address, LunarBaseState},
         PROTOCOL_SYSTEM,
     };
     use crate::{
@@ -63,8 +63,8 @@ mod tests {
         )
     }
 
-    fn state() -> LunarBaseTychoState {
-        LunarBaseTychoState {
+    fn state() -> LunarBaseState {
+        LunarBaseState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),
@@ -81,7 +81,7 @@ mod tests {
         }
     }
 
-    fn snapshot(state: LunarBaseTychoState) -> ComponentWithState {
+    fn snapshot(state: LunarBaseState) -> ComponentWithState {
         let component_id = component_id(state.pool);
         ComponentWithState {
             state: ResponseProtocolState {
@@ -138,7 +138,7 @@ mod tests {
     #[tokio::test]
     async fn try_from_with_block_uses_header_as_head_block() {
         let expected = state();
-        let decoded = LunarBaseTychoState::try_from_with_header(
+        let decoded = LunarBaseState::try_from_with_header(
             snapshot(expected.clone()),
             BlockHeader { number: 101, partial_block_index: Some(3), ..Default::default() },
             &HashMap::new(),
@@ -177,7 +177,7 @@ mod tests {
     fn live_base_pool_quote_smoke_test() {
         let native = addr(0);
         let usdc = address("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
-        let state = LunarBaseTychoState {
+        let state = LunarBaseState {
             pool: address("0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"),
             token_x: native,
             token_y: usdc,
@@ -202,7 +202,7 @@ mod tests {
         let next = quote
             .new_state
             .as_any()
-            .downcast_ref::<LunarBaseTychoState>()
+            .downcast_ref::<LunarBaseState>()
             .unwrap();
 
         assert!(quote.amount > BigUint::ZERO);

@@ -1,0 +1,24 @@
+[package]
+name = "tycho-protobuf"
+version.workspace = true
+edition.workspace = true
+description = "Protobuf type definitions and conversions for the Tycho indexing protocol"
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[dependencies]
+prost = "0.11"
+thiserror.workspace = true
+tycho-common.workspace = true
+chrono.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+

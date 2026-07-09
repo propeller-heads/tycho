@@ -7,7 +7,7 @@ use std::{
 
 use alloy::primitives::{Address, U256};
 use thiserror::Error;
-use tokio::sync::{RwLock, RwLockReadGuard};
+use tokio::sync::{watch, RwLock, RwLockReadGuard};
 use tracing::{debug, error, info, warn};
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMessage, HeaderLike};
 use tycho_common::{
@@ -30,6 +30,7 @@ use {
 use crate::{
     evm::{
         engine_db::{update_engine, SHARED_TYCHO_DB},
+        override_stream::{OverrideSnapshot, StateOverrideProvider},
         protocol::{
             utils::bytes_to_address,
             vm::{constants::ERC20_PROXY_BYTECODE, erc20_token::IMPLEMENTATION_SLOT},
@@ -68,7 +69,13 @@ struct DecoderState {
 type DecodeFut =
     Pin<Box<dyn Future<Output = Result<Box<dyn ProtocolSim>, InvalidSnapshotError>> + Send + Sync>>;
 type AccountBalances = HashMap<Bytes, HashMap<Bytes, Bytes>>;
-type RegistryFn<H> = dyn Fn(ComponentWithState, H, AccountBalances, Arc<RwLock<DecoderState>>) -> DecodeFut
+type RegistryFn<H> = dyn Fn(
+        ComponentWithState,
+        H,
+        AccountBalances,
+        Arc<RwLock<DecoderState>>,
+        Option<watch::Receiver<OverrideSnapshot>>,
+    ) -> DecodeFut
     + Send
     + Sync;
 type FilterFn = fn(&ComponentWithState) -> bool;
@@ -94,6 +101,9 @@ where
     min_token_quality: u32,
     registry: HashMap<String, Box<RegistryFn<H>>>,
     inclusion_filters: HashMap<String, FilterFn>,
+    /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
+    /// its provider at creation time and reads fresh overrides on every simulation.
+    override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
 }
 
 impl<H> Default for TychoStreamDecoder<H>
@@ -103,6 +113,15 @@ where
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Curve migrated from the generic VM adapter (`EVMPoolState`) to the native [`CurveState`]
+/// decoder. Returns true when `vm:curve` is registered with any other type — i.e. the deprecated
+/// VM-adapter path, still supported for a few releases before removal.
+fn is_deprecated_curve_registration<T: 'static>(exchange: &str) -> bool {
+    exchange == "vm:curve" &&
+        std::any::type_name::<T>() !=
+            std::any::type_name::<crate::evm::protocol::curve::CurveState>()
 }
 
 impl<H> TychoStreamDecoder<H>
@@ -116,7 +135,22 @@ where
             min_token_quality: 100,
             registry: HashMap::new(),
             inclusion_filters: HashMap::new(),
+            override_providers: HashMap::new(),
         }
+    }
+
+    /// Registers `provider` as the live override source for `protocol_system`.
+    ///
+    /// Pools of that protocol subscribe to it at creation time, so overrides apply from the first
+    /// simulation onward. A later call for the same `protocol_system` replaces the previous
+    /// provider.
+    pub fn set_override_provider(
+        &mut self,
+        protocol_system: String,
+        provider: Arc<dyn StateOverrideProvider>,
+    ) {
+        self.override_providers
+            .insert(protocol_system, provider);
     }
 
     /// Provides token metadata used to decode startup snapshots and initialize protocol states.
@@ -160,12 +194,22 @@ where
             + Send
             + 'static,
     {
+        if is_deprecated_curve_registration::<T>(exchange) {
+            warn!(
+                registered_type = std::any::type_name::<T>(),
+                "Registering \"vm:curve\" with the generic VM adapter is deprecated; register the \
+                 native `CurveState` decoder instead (`exchange::<CurveState>(\"vm:curve\", ...)`). \
+                 The VM-adapter path still works but will be removed in a future release."
+            );
+        }
         let decoder = Box::new(
             move |component: ComponentWithState,
                   header: H,
                   account_balances: AccountBalances,
-                  state: Arc<RwLock<DecoderState>>| {
-                let context = context.clone();
+                  state: Arc<RwLock<DecoderState>>,
+                  live_override: Option<watch::Receiver<OverrideSnapshot>>| {
+                let mut context = context.clone();
+                context.live_override = live_override;
                 Box::pin(async move {
                     let guard = state.read().await;
                     T::try_from_with_header(
@@ -575,11 +619,16 @@ where
 
                     // Construct state from snapshot
                     if let Some(state_decode_f) = self.registry.get(protocol.as_str()) {
+                        let live_override = self
+                            .override_providers
+                            .get(protocol.as_str())
+                            .and_then(|provider| provider.subscribe(protocol.as_str()));
                         match state_decode_f(
                             snapshot,
                             header.clone(),
                             account_balances.clone(),
                             self.state.clone(),
+                            live_override,
                         )
                         .await
                         {
@@ -1209,7 +1258,17 @@ mod tests {
     use tycho_common::{models::Chain, Bytes};
 
     use super::*;
-    use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+    use crate::evm::protocol::{curve::CurveState, uniswap_v2::state::UniswapV2State};
+
+    #[test]
+    fn curve_vm_adapter_registration_flagged_deprecated() {
+        // The native decoder is the supported path — not flagged.
+        assert!(!is_deprecated_curve_registration::<CurveState>("vm:curve"));
+        // Any other type for vm:curve is the deprecated VM-adapter path.
+        assert!(is_deprecated_curve_registration::<UniswapV2State>("vm:curve"));
+        // Other exchanges are unaffected.
+        assert!(!is_deprecated_curve_registration::<UniswapV2State>("uniswap_v2"));
+    }
 
     async fn setup_decoder(set_tokens: bool) -> TychoStreamDecoder<BlockHeader> {
         let mut decoder = TychoStreamDecoder::new();

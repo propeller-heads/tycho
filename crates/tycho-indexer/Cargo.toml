@@ -84,7 +84,7 @@ opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
 rand.workspace = true
 serde_yaml = "0.9.32"
 tracing-opentelemetry = { version = "0.23", default-features = false }
-tycho-substreams = "0.6.0"
+tycho-protobuf.workspace = true
 utoipa = { version = "4.2.0", features = ["chrono"] }
 utoipa-swagger-ui = { version = "6.0.0", features = ["actix-web"] }
 tikv-jemallocator = { version = "0.6", features = ["profiling"], optional = true }

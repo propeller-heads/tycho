@@ -74,6 +74,14 @@ pub fn map_protocol_changes(
                 &event,
                 block.number,
             ));
+            for balance_change in lunarbase::indexed::balance_changes_for_event(
+                &component_id,
+                &pool.token_x,
+                &pool.token_y,
+                &event,
+            ) {
+                builder.add_balance_change(&balance_change);
+            }
         }
     }
 

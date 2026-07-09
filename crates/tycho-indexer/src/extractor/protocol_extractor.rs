@@ -34,14 +34,13 @@ use tycho_common::{
     traits::TokenPreProcessor,
     Bytes,
 };
+use tycho_protobuf::{convert::TryFromMessage, pb::tycho::evm::v1 as tycho_pb};
 use tycho_storage::postgres::cache::CachedGateway;
-use tycho_substreams::pb::tycho::evm::v1 as tycho_substreams;
 
 use crate::{
     extractor::{
         chain_state::ChainState,
         models::BlockChanges,
-        protobuf_deserialisation::TryFromMessage,
         protocol_cache::{ProtocolDataCache, ProtocolMemoryCache},
         reorg_buffer::ReorgBuffer,
         BlockUpdateWithCursor, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
@@ -912,7 +911,7 @@ where
             })?;
         let msg = {
             let msg = if data.type_url.ends_with("BlockChanges") {
-                let raw_msg = tycho_substreams::BlockChanges::decode(data.value.as_slice())?;
+                let raw_msg = tycho_pb::BlockChanges::decode(data.value.as_slice())?;
                 trace!(?raw_msg, "Received BlockChanges message");
                 BlockChanges::try_from_message((
                     raw_msg,
@@ -923,6 +922,7 @@ where
                     inp.final_block_height,
                     inp.partial_index,
                 ))
+                .map_err(ExtractionError::from)
             } else {
                 return Err(ExtractionError::DecodeError(format!(
                     "Unknown message type: {}",
@@ -2131,7 +2131,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges {
+                tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -2145,7 +2145,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges {
+                tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(2)),
                     ..Default::default()
                 },
@@ -2191,7 +2191,7 @@ mod test {
 
         let scoped = |n: u64, fin: u64| {
             pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges {
+                tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(n)),
                     ..Default::default()
                 },
@@ -2421,7 +2421,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges { block: Some(block_1), ..Default::default() },
+                tycho_pb::BlockChanges { block: Some(block_1), ..Default::default() },
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1),
             ))
@@ -2432,7 +2432,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges { block: Some(block_2), ..Default::default() },
+                tycho_pb::BlockChanges { block: Some(block_2), ..Default::default() },
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(2),
             ))
@@ -2455,7 +2455,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges { block: Some(block_3), ..Default::default() },
+                tycho_pb::BlockChanges { block: Some(block_3), ..Default::default() },
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(2),
             ))
@@ -3040,7 +3040,7 @@ mod test {
         // Block 1
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges {
+                tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3093,7 +3093,7 @@ mod test {
         // ── Block 1: empty anchor ──
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges {
+                tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3203,7 +3203,7 @@ mod test {
         // ── Block 1: empty anchor ──
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_substreams::BlockChanges {
+                tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3297,7 +3297,7 @@ mod test {
     // value in the remaining buffer. The expected behavior is to emit a deletion for the attribute.
     #[tokio::test]
     async fn test_revert_new_attribute_on_non_finalized_component() {
-        use ::tycho_substreams::pb::tycho::evm::v1::{
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
             Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
             ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
         };
@@ -3664,19 +3664,19 @@ mod test_serial_db {
     }
 
     fn native_pool_creation() -> BlockChanges {
-        BlockChanges::new_with_tokens(
-            "native:test".to_owned(),
-            Chain::Ethereum,
-            Block::new(
+        BlockChanges {
+            extractor: "native:test".to_owned(),
+            chain: Chain::Ethereum,
+            block: Block::new(
                 0,
                 Chain::Ethereum,
                 NATIVE_BLOCK_HASH_0.parse().unwrap(),
                 NATIVE_BLOCK_HASH_0.parse().unwrap(),
                 "2020-01-01T01:00:00".parse().unwrap(),
             ),
-            0,
-            false,
-            HashMap::from([
+            finalized_block_height: 0,
+            revert: false,
+            new_tokens: HashMap::from([
                 (
                     Bytes::from_str(USDC_ADDRESS).unwrap(),
                     Token::new(
@@ -3702,7 +3702,7 @@ mod test_serial_db {
                     ),
                 ),
             ]),
-            vec![TxWithChanges {
+            txs_with_update: vec![TxWithChanges {
                 tx: fixtures::create_transaction(fixtures::HASH_256_0, NATIVE_BLOCK_HASH_0, 10),
                 protocol_components: HashMap::from([(
                     "pool".to_string(),
@@ -3724,7 +3724,8 @@ mod test_serial_db {
                 )]),
                 ..Default::default()
             }],
-        )
+            ..Default::default()
+        }
     }
 
     fn vm_account(at_version: u64) -> Account {
@@ -4446,8 +4447,8 @@ mod test_serial_db {
                 .into_iter()
                 .map(|version| {
                     pb_fixtures::pb_block_scoped_data(
-                        tycho_substreams::BlockChanges {
-                            block: Some(tycho_substreams::Block {
+                        tycho_pb::BlockChanges {
+                            block: Some(tycho_pb::Block {
                                 number: version,
                                 hash: Bytes::from(version)
                                     .lpad(32, 0)
@@ -4507,8 +4508,8 @@ mod test_serial_db {
             // New block #4 should have the same timestamp as block #3.
             extractor
                 .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                    tycho_substreams::BlockChanges {
-                        block: Some(tycho_substreams::Block {
+                    tycho_pb::BlockChanges {
+                        block: Some(tycho_pb::Block {
                             number: 4,
                             hash: Bytes::from(4_u64).lpad(32, 0).to_vec(),
                             parent_hash: Bytes::from(3_u64).lpad(32, 0).to_vec(),

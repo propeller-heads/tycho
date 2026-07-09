@@ -685,8 +685,8 @@ pub mod fixtures {
 
     use prost::Message;
     use tycho_common::{models::protocol::ProtocolComponentStateDelta, Bytes};
+    use tycho_protobuf::pb::tycho::evm::v1::*;
     use tycho_storage::postgres::db_fixtures::yesterday_midnight;
-    use tycho_substreams::pb::tycho::evm::v1::*;
 
     use crate::extractor::models::fixtures::HASH_256_0;
 

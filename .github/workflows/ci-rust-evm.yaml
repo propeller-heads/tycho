@@ -52,6 +52,9 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Runs fork code (cargo build/test) with RPC secrets in scope; gate fork PRs
+    # behind required-reviewer approval. Internal-branch PRs run without approval.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:

@@ -139,6 +139,7 @@ where
 }
 
 use crate::{
+    client_metadata::CLIENT_METADATA_HEADER,
     feed::synchronizer::{ComponentWithState, Snapshot},
     TYCHO_SERVER_VERSION,
 };
@@ -1231,6 +1232,8 @@ pub struct HttpRPCClientOptions {
     /// Enable compression for requests (default: true)
     /// When enabled, adds Accept-Encoding: zstd header
     pub compression: bool,
+    /// Pre-serialized `X-Tycho-Client-Metadata` header value. `None` sends no header.
+    pub client_metadata_header: Option<String>,
 }
 
 impl Default for HttpRPCClientOptions {
@@ -1242,7 +1245,7 @@ impl Default for HttpRPCClientOptions {
 impl HttpRPCClientOptions {
     /// Create new options with default values (compression enabled)
     pub fn new() -> Self {
-        Self { auth_key: None, compression: true }
+        Self { auth_key: None, compression: true, client_metadata_header: None }
     }
 
     /// Set the authentication key
@@ -1254,6 +1257,12 @@ impl HttpRPCClientOptions {
     /// Set whether to enable compression (default: true)
     pub fn with_compression(mut self, compression: bool) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Set the pre-serialized client-metadata header value. `None` sends no header.
+    pub fn with_client_metadata_header(mut self, header: Option<String>) -> Self {
+        self.client_metadata_header = header;
         self
     }
 }
@@ -1291,6 +1300,18 @@ impl HttpRPCClient {
             })?;
             auth_value.set_sensitive(true);
             headers.insert(header::AUTHORIZATION, auth_value);
+        }
+
+        // Add generic client metadata if one is given. Pre-validated by the serializer, but mirror
+        // the auth pattern so any residual formatting error surfaces as a FormatRequest error.
+        if let Some(metadata) = options
+            .client_metadata_header
+            .as_deref()
+        {
+            let value = header::HeaderValue::from_str(metadata).map_err(|e| {
+                RPCError::FormatRequest(format!("Invalid client metadata format: {e}"))
+            })?;
+            headers.insert(header::HeaderName::from_static(CLIENT_METADATA_HEADER), value);
         }
 
         let mut client_builder = ClientBuilder::new()
@@ -2095,6 +2116,58 @@ mod tests {
             hex::decode("5c06b7c5b3d910fd33bc2229846f9ddaf91d584d9b196e16636901ac3a77077e")
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_client_metadata_header_sent_when_set() {
+        let mut server = Server::new_async().await;
+        let expected_ua = format!("tycho-client-{}", env!("CARGO_PKG_VERSION"));
+        let mock = server
+            .mock("POST", "/v1/contract_state")
+            .match_header(CLIENT_METADATA_HEADER, "fynd_version=0.57.0;preset=best")
+            .match_header("user-agent", expected_ua.as_str())
+            .with_body(GET_CONTRACT_STATE_RESP)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = HttpRPCClient::new(
+            server.url().as_str(),
+            HttpRPCClientOptions::default()
+                .with_client_metadata_header(Some("fynd_version=0.57.0;preset=best".to_string())),
+        )
+        .expect("create client");
+
+        client
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .await
+            .expect("get state");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_no_client_metadata_header_when_unset() {
+        let mut server = Server::new_async().await;
+        let expected_ua = format!("tycho-client-{}", env!("CARGO_PKG_VERSION"));
+        let mock = server
+            .mock("POST", "/v1/contract_state")
+            .match_header(CLIENT_METADATA_HEADER, mockito::Matcher::Missing)
+            .match_header("user-agent", expected_ua.as_str())
+            .with_body(GET_CONTRACT_STATE_RESP)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+
+        client
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .await
+            .expect("get state");
+
+        mock.assert_async().await;
     }
 
     #[tokio::test]

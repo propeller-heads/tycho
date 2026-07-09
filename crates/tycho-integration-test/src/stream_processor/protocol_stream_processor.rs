@@ -17,12 +17,16 @@ use tycho_simulation::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             cowamm::state::CowAMMState,
+            curve::CurveState,
             ekubo::state::EkuboState,
-            ekubo_v3::{self, state::EkuboV3State},
+            ekubo_v3::state::EkuboV3State,
             erc4626::state::ERC4626State,
-            filters::{balancer_v2_pool_filter, erc4626_filter, fluid_v1_paused_pools_filter},
+            filters::{
+                balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter, erc4626_filter,
+                fluid_v1_paused_pools_filter,
+            },
             fluid::FluidV1,
-            lunarbase::LunarBaseTychoState,
+            lunarbase::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
             rocketpool::state::RocketpoolState,
             uniswap_v2::state::UniswapV2State,
@@ -46,9 +50,11 @@ pub struct ProtocolStreamProcessor {
     tvl_buffer_ratio: f64,
     protocols: Option<Vec<String>>,
     partial_blocks: bool,
+    no_tls: bool,
 }
 
 impl ProtocolStreamProcessor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         tycho_url: String,
@@ -57,6 +63,7 @@ impl ProtocolStreamProcessor {
         tvl_buffer_ratio: f64,
         protocols: Option<Vec<String>>,
         partial_blocks: bool,
+        no_tls: bool,
     ) -> miette::Result<Self> {
         Ok(Self {
             chain,
@@ -66,6 +73,7 @@ impl ProtocolStreamProcessor {
             tvl_buffer_ratio,
             protocols,
             partial_blocks,
+            no_tls,
         })
     }
 
@@ -159,6 +167,7 @@ impl ProtocolStreamProcessor {
         let infinite_sync_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(3));
         protocol_stream
             .auth_key(Some(self.tycho_api_key.clone()))
+            .no_tls(self.no_tls)
             .skip_state_decode_failures(true)
             .startup_timeout(Duration::from_secs(1000))
             .websocket_retry_config(&infinite_ws_retries)
@@ -192,6 +201,7 @@ impl ProtocolStreamProcessor {
                 "rocketpool".to_string(),
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
+                "vm:bopamm".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -285,14 +295,14 @@ impl ProtocolStreamProcessor {
                 stream = stream.exchange::<EkuboV3State>(
                     "ekubo_v3",
                     tvl_filter.clone(),
-                    Some(ekubo_v3::filter_fn),
+                    Some(ekubo_v3_extension_filter),
                 );
             }
             "vm:curve" => {
-                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
+                stream = stream.exchange::<CurveState>(
                     "vm:curve",
                     tvl_filter.clone(),
-                    None,
+                    Some(curve_filter),
                 );
             }
             "uniswap_v4_hooks" => {
@@ -362,9 +372,15 @@ impl ProtocolStreamProcessor {
                     None,
                 );
             }
+            "vm:bopamm" => {
+                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:bopamm",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
             "lunarbase" => {
-                stream =
-                    stream.exchange::<LunarBaseTychoState>("lunarbase", tvl_filter.clone(), None);
+                stream = stream.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
             _ => {
                 return Err(miette::miette!("Unknown protocol: {}", protocol));

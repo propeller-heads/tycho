@@ -1,3 +1,357 @@
+## [0.331.0](https://github.com/propeller-heads/tycho/compare/0.330.2...0.331.0) (2026-07-09)
+
+
+### Features
+
+* add client_metadata builder to TychoStreamBuilder ([ca1b2e5](https://github.com/propeller-heads/tycho/commit/ca1b2e579e521ff3e67beac9d52aec0dcf93d9fb))
+* add generic client-metadata serializer to tycho-client ([7c0a05f](https://github.com/propeller-heads/tycho/commit/7c0a05fd94545220b988a7e7109a486d8898c21f))
+* drop invalid client metadata with a warning instead of failing build ([19bae06](https://github.com/propeller-heads/tycho/commit/19bae0616519685cd39b3c584a856dc0df36c7f8))
+* enforce size caps on client metadata ([ddeb5d0](https://github.com/propeller-heads/tycho/commit/ddeb5d0dbfd14312d1b26a83d54d1ca3061bc595))
+* forward client metadata through ProtocolStreamBuilder ([ef045e7](https://github.com/propeller-heads/tycho/commit/ef045e7f44d0200cf7f9b29beb8c39d38e003dab))
+* merge client metadata setters into add_client_metadata ([368647f](https://github.com/propeller-heads/tycho/commit/368647f45fb3092effcf0c8be33fefa5b9c87902))
+* send client-metadata header from HttpRPCClient ([5a23e5b](https://github.com/propeller-heads/tycho/commit/5a23e5b24657463c83c1a19eb05a8d1a055d6751))
+* send client-metadata header from WsDeltasClient handshake ([e489a8b](https://github.com/propeller-heads/tycho/commit/e489a8bc1bdd62c9e55442a0b5875a5fe9923a4c))
+* **tycho-client:** send generic client metadata header ([#1151](https://github.com/propeller-heads/tycho/issues/1151)) ([1f73084](https://github.com/propeller-heads/tycho/commit/1f73084cc51cd0ffd2406c1bbf39a058dec7f66a))
+* use HashMap for client metadata, sort keys on serialize ([6b450ac](https://github.com/propeller-heads/tycho/commit/6b450acba0fbfda64d0af10b8488c37437710390))
+
+
+### Bug Fixes
+
+* harden client metadata visibility ([025e624](https://github.com/propeller-heads/tycho/commit/025e624cdd0b0dc7ea1c60f44f895a4fcfbd7814))
+* remove unnecessary space ([44f944a](https://github.com/propeller-heads/tycho/commit/44f944a31757eb29b6627beaed21b61c9e55146b))
+
+## [0.330.2](https://github.com/propeller-heads/tycho/compare/0.330.1...0.330.2) (2026-07-09)
+
+
+### Bug Fixes
+
+* **substreams:** bump tycho-substreams to 0.8.0 in DCI packages ([547f86b](https://github.com/propeller-heads/tycho/commit/547f86bc458274fddeecf86e992e34e799204e60))
+* **substreams:** bump tycho-substreams to 0.8.0 in DCI packages ([#1175](https://github.com/propeller-heads/tycho/issues/1175)) ([5a73fad](https://github.com/propeller-heads/tycho/commit/5a73fad39d899a0c634a2aa50b14edb3cbb44d20))
+
+## [0.330.1](https://github.com/propeller-heads/tycho/compare/0.330.0...0.330.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* remove liquidityparty executor address ([c7cb94e](https://github.com/propeller-heads/tycho/commit/c7cb94e82e4dd822476c1e97b48d31b728496c3a))
+* remove liquidityparty executor address ([#1169](https://github.com/propeller-heads/tycho/issues/1169)) ([7f9e642](https://github.com/propeller-heads/tycho/commit/7f9e6423e4e02528de169e2953f897f544ace1a8))
+
+## [0.330.0](https://github.com/propeller-heads/tycho/compare/0.329.1...0.330.0) (2026-07-09)
+
+
+### Features
+
+* add BopAMM registry timestamp overwrites for execution ([4f10442](https://github.com/propeller-heads/tycho/commit/4f10442ef50d5e624f6bbcd8040a4572ffe29f3a)), closes [#1101](https://github.com/propeller-heads/tycho/issues/1101)
+* add BopAMM registry timestamp overwrites for execution ([#1168](https://github.com/propeller-heads/tycho/issues/1168)) ([14cb4e8](https://github.com/propeller-heads/tycho/commit/14cb4e8bdf620581f4e988b15ee841b0ccb33076))
+
+## [0.329.1](https://github.com/propeller-heads/tycho/compare/0.329.0...0.329.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **metric:** params-encode oracle update args, default Ethereum to RetryOnRevert ([b1b9325](https://github.com/propeller-heads/tycho/commit/b1b9325d676b8167da14b2226c0f7ff303742b28))
+* **metric:** params-encode oracle update args, default Ethereum to RetryOnRevert ([#1170](https://github.com/propeller-heads/tycho/issues/1170)) ([fba1c75](https://github.com/propeller-heads/tycho/commit/fba1c75ecbf0a98c24adc1f6e84d6c50e9edef42))
+
+## [0.329.0](https://github.com/propeller-heads/tycho/compare/0.328.1...0.329.0) (2026-07-09)
+
+
+### Features
+
+* add --no-tls flag to tycho-integration-test ([84ecd21](https://github.com/propeller-heads/tycho/commit/84ecd212969a71e73e4c2439e80c7a5b6fde852f))
+* add --no-tls flag to tycho-integration-test ([#1163](https://github.com/propeller-heads/tycho/issues/1163)) ([9ec41dd](https://github.com/propeller-heads/tycho/commit/9ec41ddfda623b49ee18abe93ee1beaa68d1d759))
+
+## [0.328.1](https://github.com/propeller-heads/tycho/compare/0.328.0...0.328.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **simulation:** exclude Angstrom pools when ANGSTROM_API_KEY is unset ([2e98e80](https://github.com/propeller-heads/tycho/commit/2e98e8064eebe6e7a9511cc88d0a309003303caf))
+* **simulation:** exclude Angstrom pools when ANGSTROM_API_KEY is unset ([#1166](https://github.com/propeller-heads/tycho/issues/1166)) ([6e4c8e4](https://github.com/propeller-heads/tycho/commit/6e4c8e4f8b350d5e6a73d529ffdb5079883c386d))
+
+## [0.328.0](https://github.com/propeller-heads/tycho/compare/0.327.0...0.328.0) (2026-07-08)
+
+
+### Features
+
+* support Bebop router contract in BebopExecutor ([1fa99f8](https://github.com/propeller-heads/tycho/commit/1fa99f8574507ecbabed215c0f0f06850e68b25d))
+* support Bebop router contract in BebopExecutor ([#1150](https://github.com/propeller-heads/tycho/issues/1150)) ([073f808](https://github.com/propeller-heads/tycho/commit/073f80803a6e5f5231d29f7302ac81aff6bb45fd))
+* update bebop executor address ([4af6d02](https://github.com/propeller-heads/tycho/commit/4af6d0273b085433c9d1df2c01a84fc0bc1497f7))
+
+## [0.327.0](https://github.com/propeller-heads/tycho/compare/0.326.0...0.327.0) (2026-07-07)
+
+
+### Features
+
+* add bopamm to integration test ([f2f6fd5](https://github.com/propeller-heads/tycho/commit/f2f6fd5e7cb4de616edb8469dc1e606d4ef85ea7))
+* add bopamm to integration test ([#1165](https://github.com/propeller-heads/tycho/issues/1165)) ([cdd0381](https://github.com/propeller-heads/tycho/commit/cdd0381b6be304ca6eabc7e366dc25ba52bad515))
+
+
+### Bug Fixes
+
+* log instead of failing when Metric RFQ is unsupported on chain ([c21f0ee](https://github.com/propeller-heads/tycho/commit/c21f0ee366deaab320f8d8f5556b6366996d6342))
+* log instead of failing when Metric RFQ is unsupported on chain ([#1164](https://github.com/propeller-heads/tycho/issues/1164)) ([117d322](https://github.com/propeller-heads/tycho/commit/117d322a96062bfcd96dfcd533bb31199389e60f))
+
+## [0.326.0](https://github.com/propeller-heads/tycho/compare/0.325.0...0.326.0) (2026-07-07)
+
+
+### Features
+
+* add missing metric addresses ([38d2925](https://github.com/propeller-heads/tycho/commit/38d2925dcef864234c2e9774e36780b10fa80f44))
+
+## [0.325.0](https://github.com/propeller-heads/tycho/compare/0.324.0...0.325.0) (2026-07-07)
+
+
+### Features
+
+* **simulation:** add titan_override_monitor example ([5163cc0](https://github.com/propeller-heads/tycho/commit/5163cc0cb09c113bfd0e8964ae2173ee54aa3e09))
+* **simulation:** fall back to indexed state on override failures ([76db5ce](https://github.com/propeller-heads/tycho/commit/76db5cec154e4b7d23f31ae320a1a250e822692b))
+
+
+### Bug Fixes
+
+* bump crossbeam dependencies ([9a53cf7](https://github.com/propeller-heads/tycho/commit/9a53cf719eb7980b97f5d7cb00d58c110f1f802a))
+* bump crossbeam dependencies ([#1162](https://github.com/propeller-heads/tycho/issues/1162)) ([272d545](https://github.com/propeller-heads/tycho/commit/272d5457a27b4d6b1e78a57c5cb3572b9af80137))
+* **simulation:** derive Titan block timestamp from the beacon slot ([0af3b51](https://github.com/propeller-heads/tycho/commit/0af3b5133217319b393c26772bd184465b6de686))
+* **simulation:** subscribe to every known Titan venue alias per pAMM ([0699dc9](https://github.com/propeller-heads/tycho/commit/0699dc9118ebf34425fad713ff9775f2c830ea2e))
+* **simulation:** Titan override timestamps, venue aliases and indexed-state fallback ([#1159](https://github.com/propeller-heads/tycho/issues/1159)) ([e999e0e](https://github.com/propeller-heads/tycho/commit/e999e0eca7229c872ade07521cce0f2c5c8c49ee))
+
+## [0.324.0](https://github.com/propeller-heads/tycho/compare/0.323.0...0.324.0) (2026-07-06)
+
+
+### Features
+
+* add hybrid Curve implementation (vm:curve) ([db91793](https://github.com/propeller-heads/tycho/commit/db91793daa6d8f2f76ed75e99391e889605d530c))
+* **curve:** warn when vm:curve uses the deprecated VM adapter ([4cd64c6](https://github.com/propeller-heads/tycho/commit/4cd64c6f3220bdb587915bfe47fa768195094821))
+* exclude rate-bearing and rebasing curve pools from vm:curve ([bd21ab3](https://github.com/propeller-heads/tycho/commit/bd21ab3b4c1c2ef9b49c6b4edd619a6657b377e2))
+* hybrid Curve implementation (vm:curve) with vendored MIT math ([#1126](https://github.com/propeller-heads/tycho/issues/1126)) ([3ad633c](https://github.com/propeller-heads/tycho/commit/3ad633cbed5b97e0c61ed0a25d54ead845997f9a))
+* re-derive post-MIT Curve math features from Curve Vyper (clean-room) ([1bbcb36](https://github.com/propeller-heads/tycho/commit/1bbcb36732983b4730c298bfe236e65964de4aa6))
+* vendor MIT curve-math/curve-adapter as inline modules ([c190602](https://github.com/propeller-heads/tycho/commit/c1906027896f4041f61f117058edf97d15659d1b))
+
+
+### Bug Fixes
+
+* **curve:** fail decoding when a pool's MATH() code cannot load ([6412467](https://github.com/propeller-heads/tycho/commit/6412467f0dbf23c109dfd51cc1391bc11e067701))
+* **curve:** resolve TwoCrypto NG-vs-Stable on the probe fallback path ([3bb05c5](https://github.com/propeller-heads/tycho/commit/3bb05c50a51ded33510f76f04c5ea0b82c60cd25))
+* **curve:** return an error from get_limits when the solver fails ([6e280b1](https://github.com/propeller-heads/tycho/commit/6e280b1b882d1a37b23c554b3e56c805402086ec))
+
+## [0.323.0](https://github.com/propeller-heads/tycho/compare/0.322.0...0.323.0) (2026-07-03)
+
+
+### Features
+
+* live pAMM state-override stream integration ([#1106](https://github.com/propeller-heads/tycho/issues/1106)) ([d217aea](https://github.com/propeller-heads/tycho/commit/d217aea1dec0575e9aa96041f467f78fd147fa92))
+* **simulation:** add live VM state-override stream for pAMMs ([f263e1a](https://github.com/propeller-heads/tycho/commit/f263e1a56ec92775f2481f95110c7150ee6ddf41))
+* **simulation:** allow overriding the Titan endpoint via env var ([2fb89d4](https://github.com/propeller-heads/tycho/commit/2fb89d4617b4e9fe079628a89ed82c5eb9c6b540))
+* **simulation:** expire live overrides after their provider-set TTL ([11cec14](https://github.com/propeller-heads/tycho/commit/11cec14d2f9ca931f312d779dc687f003cee3c7c))
+
+
+### Bug Fixes
+
+* **simulation:** add connect timeout to Titan quote stream ([5d76394](https://github.com/propeller-heads/tycho/commit/5d76394b66e4aaa4059de6530f864793fa48f0b4))
+* **simulation:** harden TitanProvider connection handling ([dfcb6c9](https://github.com/propeller-heads/tycho/commit/dfcb6c9bbea20914959fa742731efda1f9fd59c5))
+* **simulation:** read live override snapshot once per simulation ([5d347db](https://github.com/propeller-heads/tycho/commit/5d347db56c05cc7a1e50cc41462909dd49833dfd))
+* **simulation:** stop Titan task when all receivers are dropped ([4f3bce6](https://github.com/propeller-heads/tycho/commit/4f3bce6950b7995accb96db8497ca26298da4f5c))
+
+## [0.322.0](https://github.com/propeller-heads/tycho/compare/0.321.0...0.322.0) (2026-07-02)
+
+
+### Features
+
+* Add LunarBase to Maximodel ([9ae5a0a](https://github.com/propeller-heads/tycho/commit/9ae5a0a1566171565e9d4942e8ad926d793cca25))
+* Add LunarBase to Maximodel ([#1124](https://github.com/propeller-heads/tycho/issues/1124)) ([084e515](https://github.com/propeller-heads/tycho/commit/084e515ae9dd038c2f8cf0824d0286bd615e2ccd))
+
+## [0.321.0](https://github.com/propeller-heads/tycho/compare/0.320.4...0.321.0) (2026-07-02)
+
+
+### Features
+
+* add metric executor deployments ([0a8ac8c](https://github.com/propeller-heads/tycho/commit/0a8ac8c163b069f3738139c4a36ac7f73c2aa61b))
+* add metric executor deployments ([#1141](https://github.com/propeller-heads/tycho/issues/1141)) ([98f22e0](https://github.com/propeller-heads/tycho/commit/98f22e0af5d20a9442bb8fafe605dd270fd36d46))
+
+## [0.320.4](https://github.com/propeller-heads/tycho/compare/0.320.3...0.320.4) (2026-07-02)
+
+
+### Bug Fixes
+
+* update image tag description ([5cb5f40](https://github.com/propeller-heads/tycho/commit/5cb5f400a2325a51db7ebb750b9c31752cbc2e9d))
+* update image tag description ([#1149](https://github.com/propeller-heads/tycho/issues/1149)) ([6142405](https://github.com/propeller-heads/tycho/commit/6142405ac30fec246d7b4039133ce579eac3dff0))
+
+## [0.320.3](https://github.com/propeller-heads/tycho/compare/0.320.2...0.320.3) (2026-07-02)
+
+## [0.320.2](https://github.com/propeller-heads/tycho/compare/0.320.1...0.320.2) (2026-07-01)
+
+
+### Bug Fixes
+
+* retry on lagging RPC in integration test validation ([1defd19](https://github.com/propeller-heads/tycho/commit/1defd1941da3ca2764eb35fc82a646720872b590))
+* retry on lagging RPC in integration test validation ([#1146](https://github.com/propeller-heads/tycho/issues/1146)) ([405ed88](https://github.com/propeller-heads/tycho/commit/405ed8863bb99a84871c9d0207b7a4683c56b9fd))
+
+## [0.320.1](https://github.com/propeller-heads/tycho/compare/0.320.0...0.320.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* handle LunarBase zero quotes and marginal spot price ([768eb8c](https://github.com/propeller-heads/tycho/commit/768eb8c82028c50939b3b068c806e13ac30bcc4c))
+* handle LunarBase zero quotes and marginal spot price ([#1136](https://github.com/propeller-heads/tycho/issues/1136)) ([f385412](https://github.com/propeller-heads/tycho/commit/f385412f601afbf61863db0d241d23862af22b46))
+
+## [0.320.0](https://github.com/propeller-heads/tycho/compare/0.319.3...0.320.0) (2026-06-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **substreams:** make bopamm component ids simulation-compatible
+
+### Features
+
+* **adapter-integration:** add BopAMM swap adapter ([cda4568](https://github.com/propeller-heads/tycho/commit/cda45689b3e433f9529ea19b3de3593f1dfe783c))
+* BopAMM (Bebop PMM) integration — indexing, simulation, execution ([#1095](https://github.com/propeller-heads/tycho/issues/1095)) ([10b902a](https://github.com/propeller-heads/tycho/commit/10b902aad7adbe66d7f37761f749b42401b8d23d))
+* **substreams:** add BopAMM VM integration ([64580d1](https://github.com/propeller-heads/tycho/commit/64580d1332bf7b4a9e134225a0bf57d07fd8b336))
+* **substreams:** emit self_contained_tokens for BopAMM (ENG-6161) ([a2af5c4](https://github.com/propeller-heads/tycho/commit/a2af5c478efad669d4507c4bb99a262e402946fb)), closes [#1118](https://github.com/propeller-heads/tycho/issues/1118) [#1118](https://github.com/propeller-heads/tycho/issues/1118) [#1118](https://github.com/propeller-heads/tycho/issues/1118)
+* **substreams:** make bopamm component ids simulation-compatible ([6065ce3](https://github.com/propeller-heads/tycho/commit/6065ce3e54a7a4cc63ead3409440348005542e19))
+* **substreams:** seed and maintain bopamm maker balances accurately (PR review 7,8) ([2867045](https://github.com/propeller-heads/tycho/commit/2867045bee7556c34b033b159f1c1afb5947f728))
+* **tycho-execution:** add BopAMM executor and swap encoder ([5210b4a](https://github.com/propeller-heads/tycho/commit/5210b4a459d06049471211bad153e3edc2556ef1))
+* **tycho-simulation:** register BopAMM VM swap adapter ([fe0b81d](https://github.com/propeller-heads/tycho/commit/fe0b81db6ce62cdc4fb35009500c009efbcbe692))
+
+
+### Bug Fixes
+
+* **adapter:** derive BopAMM swap amount from quote() ([ca1400e](https://github.com/propeller-heads/tycho/commit/ca1400e6993bbb414c66c8c48e31b4ef54cec4a6))
+* **adapter:** resolve bopamm pricing/usdc lazily and pin test fork ([1cb7e87](https://github.com/propeller-heads/tycho/commit/1cb7e873c45a92dbdc3ddc6c51f0c485c85035e0))
+* **substreams:** attribute registry commits to the BopAMM module only ([7da5582](https://github.com/propeller-heads/tycho/commit/7da558255bb1ef634a8a18337f358ca63286714f))
+* **tycho-execution:** correct BopAMM test executor address after metric merge ([4b81183](https://github.com/propeller-heads/tycho/commit/4b81183d9de9a2edee2643cf7a86b250ef2d3b8a))
+
+
+### Performance Improvements
+
+* **substreams:** build bopamm asset-config slot map lazily (PR review) ([e86f0cd](https://github.com/propeller-heads/tycho/commit/e86f0cde24016031c5a2153c674b4392b5850b55))
+
+## [0.319.3](https://github.com/propeller-heads/tycho/compare/0.319.2...0.319.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* add FermiSwap allowance DCI entrypoints ([00ed46b](https://github.com/propeller-heads/tycho/commit/00ed46b965e188c82e80503fd42bca882a1c9632))
+* revert self-contained token proxy isolation ([9708816](https://github.com/propeller-heads/tycho/commit/9708816874deed352e9751f6558f8b2a694b93fd))
+* **simulation:** cap Metric get_limits to depth and clarify exhaustion error ([3667efc](https://github.com/propeller-heads/tycho/commit/3667efc978a8d53c35a8915fd8a3a2dd0d79342f))
+* **simulation:** cap Metric get_limits to depth and return exact cap ([#1135](https://github.com/propeller-heads/tycho/issues/1135)) ([4609c7d](https://github.com/propeller-heads/tycho/commit/4609c7d18ae1f868656822a4ffaee789b916be84))
+* **simulation:** cover self-contained token proxy isolation ([bab1954](https://github.com/propeller-heads/tycho/commit/bab19549f15739294062ca2d443ef555cf205057))
+* **simulation:** isolate self-contained token proxies in shared DB ([3b85ab1](https://github.com/propeller-heads/tycho/commit/3b85ab155210b2b33113c100753c292107b276d5))
+* **simulation:** resolve self-contained token transfers locally ([dab201d](https://github.com/propeller-heads/tycho/commit/dab201d0dd9860afbf890585a0e38b8b134c8f40))
+* **simulation:** resolve self-contained token transfers locally ([#1118](https://github.com/propeller-heads/tycho/issues/1118)) ([54499f4](https://github.com/propeller-heads/tycho/commit/54499f41eedd34347b23827980b8844d6d9ae84e))
+* **simulation:** return exact Metric cap instead of f64 round-trip ([54d0b47](https://github.com/propeller-heads/tycho/commit/54d0b47722485217cab93d4af85a038d867fab53))
+
+## [0.319.2](https://github.com/propeller-heads/tycho/compare/0.319.1...0.319.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* pin nightly version to work around rustc ICE ([d9624ea](https://github.com/propeller-heads/tycho/commit/d9624ea481141b59a4f864e50a1984ab244e9ed1))
+* pin nightly version to work around rustc ICE ([#1137](https://github.com/propeller-heads/tycho/issues/1137)) ([3f3d9ea](https://github.com/propeller-heads/tycho/commit/3f3d9eabc5d96e943a88ac949ce23a04893e7191))
+
+## [0.319.1](https://github.com/propeller-heads/tycho/compare/0.319.0...0.319.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **protobuf:** prevent usize underflow in bytes_to_f64 ([cf9bfdd](https://github.com/propeller-heads/tycho/commit/cf9bfdde2775cec95072c61c2a481334506ba094))
+* **protobuf:** prevent usize underflow in bytes_to_f64 ([#1133](https://github.com/propeller-heads/tycho/issues/1133)) ([9ef3e8b](https://github.com/propeller-heads/tycho/commit/9ef3e8bf7e798d222d68ee68e39dac2a6cb1166c))
+
+## [0.319.0](https://github.com/propeller-heads/tycho/compare/0.318.1...0.319.0) (2026-06-29)
+
+
+### Features
+
+* add metric executor ([354ba45](https://github.com/propeller-heads/tycho/commit/354ba45746f6dae116b94a6fe30221e2d0a4f362))
+* add metric executor contract ([2406cf3](https://github.com/propeller-heads/tycho/commit/2406cf3f0bb1958a72865b8a2745df5e1aeeef7f))
+* add metric rfq integration ([bbae35f](https://github.com/propeller-heads/tycho/commit/bbae35fed992b1c33c935c63481330bdecfac928))
+* add metric rfq integration ([#1000](https://github.com/propeller-heads/tycho/issues/1000)) ([0dda704](https://github.com/propeller-heads/tycho/commit/0dda704e18436157402558e78f3e9eab5ce1a28a))
+* add metric rfq oracle update encoding ([8ce1d70](https://github.com/propeller-heads/tycho/commit/8ce1d70708d1a160cc5798772ab1e3f3a596e984))
+* add PAMM RFQ protocol mode ([f4f2758](https://github.com/propeller-heads/tycho/commit/f4f2758f673923dee2d155cd5b838d8faf69204b))
+* **contracts-bytecode:** Create script to regenerate it for testing ([9d4fb79](https://github.com/propeller-heads/tycho/commit/9d4fb79a2ed26f38b51df036743d78781671662b))
+* encode Metric oracle updates as args ([2fd087f](https://github.com/propeller-heads/tycho/commit/2fd087f2fbd34fbb1f49c3c59c6f09dfb4a16945))
+* introduce tycho-protobuf crate ([dee224b](https://github.com/propeller-heads/tycho/commit/dee224b3042071fdce1601b3c32faf6a53774b1a))
+* introduce tycho-protobuf crate ([#996](https://github.com/propeller-heads/tycho/issues/996)) ([cb20c4a](https://github.com/propeller-heads/tycho/commit/cb20c4a0eeba24428182a027d8f00c23ccb277ce))
+* normalize Metric TVL with token metadata ([944ac80](https://github.com/propeller-heads/tycho/commit/944ac80c0277b48b88dace22b44fd98276d52773))
+* **simulation:** move ekubo_v3 filter to filters mod ([dba9b45](https://github.com/propeller-heads/tycho/commit/dba9b452fe71a8010ad4ed1ee5428fc88a934fc6))
+* support Metric depth quotes ([750de77](https://github.com/propeller-heads/tycho/commit/750de770b4ba5d17b67a94fdf7b765bffd620f91))
+
+
+### Bug Fixes
+
+* add Base protocol config entry ([282f2eb](https://github.com/propeller-heads/tycho/commit/282f2eb2389f512733cb0c681bc0a815496f6aca))
+* Address review comments ([c0fa9c6](https://github.com/propeller-heads/tycho/commit/c0fa9c6d3ade42b5ebe8f041b5e50d8b6c580953))
+* **contracts:** pin solc and drop metadata hash for reproducible bytecode fixtures ([#1129](https://github.com/propeller-heads/tycho/issues/1129)) ([57fe417](https://github.com/propeller-heads/tycho/commit/57fe417b1a4871cffd973760d1637b311057f5da))
+* **contracts:** pin solc and drop metadata hash for reproducible fixtures ([37e0f86](https://github.com/propeller-heads/tycho/commit/37e0f86bba20f551260445a115cac28b3c3fcc78))
+* enable PAMM RFQ protocols by default ([1736528](https://github.com/propeller-heads/tycho/commit/173652878ebd782348fc2c8203c16f2ac683fd2e))
+* **integration-test:** Fetch router fee from FeeCalculator contract ([4b875f7](https://github.com/propeller-heads/tycho/commit/4b875f71150c2de85346ff8c4568c352167c9cf4))
+* **integration-test:** Fetch router fee from FeeCalculator contract ([#1125](https://github.com/propeller-heads/tycho/issues/1125)) ([b2dcace](https://github.com/propeller-heads/tycho/commit/b2dcace41667d1146e5fe730e0a35e5fc317d87c))
+* **metric:** harden oracle update target ([35a257e](https://github.com/propeller-heads/tycho/commit/35a257e4f22044e39bec5623a62c9875e3050345))
+* **release:** bump tycho-protobuf version in release prepare ([3ecd701](https://github.com/propeller-heads/tycho/commit/3ecd7013b7b763677f631d874dd9c78e13cd5d9c))
+* **release:** bump tycho-protobuf version in release prepare ([#1132](https://github.com/propeller-heads/tycho/issues/1132)) ([c9c08cc](https://github.com/propeller-heads/tycho/commit/c9c08cc67a52ec6ec4d7dcba0bd936efb8f8bdde))
+* reuse HTTP client and simplify depth max lookup ([a2ce043](https://github.com/propeller-heads/tycho/commit/a2ce043def8c105b02241803ecc268639060f2e3))
+* silence metric slither warning ([416845c](https://github.com/propeller-heads/tycho/commit/416845cdd7448e425fc3334592b4d6d8a10e5a7b))
+* **simulation:** update required filters ([87f3d00](https://github.com/propeller-heads/tycho/commit/87f3d0030738b935f7e6ac07cffe6efeab403d1f))
+* **simulation:** use as_chunks for bebop price pairs ([ca91e37](https://github.com/propeller-heads/tycho/commit/ca91e37758325505d8f484b910c23f9811e14cf8))
+* **simulation:** use as_chunks for bebop price pairs ([#1128](https://github.com/propeller-heads/tycho/issues/1128)) ([34f19bb](https://github.com/propeller-heads/tycho/commit/34f19bbbc06fa4aa5eba12799297df035952e58f))
+* **storage:** add single-chain guard on db initialization ([0c1249f](https://github.com/propeller-heads/tycho/commit/0c1249f25de57e409ab5272044457469b1fd6d8d))
+* **storage:** add single-chain guard on db initialization ([#1121](https://github.com/propeller-heads/tycho/issues/1121)) ([ae386ce](https://github.com/propeller-heads/tycho/commit/ae386ce3a9decbf8d73dab474e80a3d3785f02ef))
+* update metric executor slot ([883a932](https://github.com/propeller-heads/tycho/commit/883a932e48a04fb94f8c8847a7918e6456cb3197))
+* Update required filters and refactor ekubo_v3 filter ([#1130](https://github.com/propeller-heads/tycho/issues/1130)) ([04a97b1](https://github.com/propeller-heads/tycho/commit/04a97b1af6bfae2d24df6fbca916c8ba3e68f14c))
+
+## [0.318.1](https://github.com/propeller-heads/tycho/compare/0.318.0...0.318.1) (2026-06-25)
+
+
+### Bug Fixes
+
+* **client:** improve reconnect handling ([#1073](https://github.com/propeller-heads/tycho/issues/1073)) ([193de92](https://github.com/propeller-heads/tycho/commit/193de92119f60e631a01c126f016c81be990a4c4))
+* **lunarbase:** emit reserve-based token balances ([0043389](https://github.com/propeller-heads/tycho/commit/004338900fea2ced2c332f608baadf136e8f1a84))
+* **lunarbase:** emit reserve-based token balances ([#1113](https://github.com/propeller-heads/tycho/issues/1113)) ([87b7e1d](https://github.com/propeller-heads/tycho/commit/87b7e1d0b3c5e28316307f958c7513e9aac95b92))
+* **tycho-client:** double default WS buffer sizes to 256 ([21853a9](https://github.com/propeller-heads/tycho/commit/21853a9935f30c12da0d4d440a55ba662ae86d68))
+* **tycho-client:** loop in ensure_connection on transient WS reconnect ([08aad92](https://github.com/propeller-heads/tycho/commit/08aad9260094273570eed0a87371382790fe56d2))
+* **tycho-client:** unblock ensure_connection callers on close ([5e53d63](https://github.com/propeller-heads/tycho/commit/5e53d637b9cc6cf25e7778a278167879030217ab))
+
+## [0.318.0](https://github.com/propeller-heads/tycho/compare/0.317.4...0.318.0) (2026-06-24)
+
+
+### Features
+
+* update vm gas estimations ([20f0a04](https://github.com/propeller-heads/tycho/commit/20f0a0464f036f5c71588e098b1d621a29dfc295))
+* update vm gas estimations ([#1100](https://github.com/propeller-heads/tycho/issues/1100)) ([5d19fe6](https://github.com/propeller-heads/tycho/commit/5d19fe693c9f9066db3b0c69607a65fde19ccb00))
+
+## [0.317.4](https://github.com/propeller-heads/tycho/compare/0.317.3...0.317.4) (2026-06-24)
+
+
+### Bug Fixes
+
+* **ci:** scope substreams secrets to the test job ([e3ce91a](https://github.com/propeller-heads/tycho/commit/e3ce91a6ce682b535deeca1f26bf1461e0b123d2))
+* **ci:** scope substreams secrets to the test job ([#1114](https://github.com/propeller-heads/tycho/issues/1114)) ([e9a9cc7](https://github.com/propeller-heads/tycho/commit/e9a9cc77e6cbe8ef71a656130c6e2731c6968db0))
+
+## [0.317.3](https://github.com/propeller-heads/tycho/compare/0.317.2...0.317.3) (2026-06-23)
+
+
+### Bug Fixes
+
+* **ci:** gate remaining pull_request_target fork runs ([5c44c1c](https://github.com/propeller-heads/tycho/commit/5c44c1c6b9eae30f2963f09f22edac3d910d14cd))
+* **ci:** gate remaining pull_request_target fork runs ([#1111](https://github.com/propeller-heads/tycho/issues/1111)) ([223424f](https://github.com/propeller-heads/tycho/commit/223424f6d28589f92d2ae1401bdfa1dfc28f73d0))
+
+## [0.317.2](https://github.com/propeller-heads/tycho/compare/0.317.1...0.317.2) (2026-06-23)
+
+
+### Bug Fixes
+
+* **ci:** close pull_request_target injection and gate fork runs ([29b55a7](https://github.com/propeller-heads/tycho/commit/29b55a79c1a2a2817e5e898bc24d6112f7f6c842))
+* **ci:** close pull_request_target injection and gate fork runs ([#1109](https://github.com/propeller-heads/tycho/issues/1109)) ([868ea0b](https://github.com/propeller-heads/tycho/commit/868ea0bc75504be0c5a4b634d61db76f0d54608e))
+
+## [0.317.1](https://github.com/propeller-heads/tycho/compare/0.317.0...0.317.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* add explicit comments for clippy allow ([d79f5a4](https://github.com/propeller-heads/tycho/commit/d79f5a480bacdabde3821a049fcdf994ef85821f))
+* address clippy for private interface ([7c864a0](https://github.com/propeller-heads/tycho/commit/7c864a0756cb51062fe7ab8f5543c68eea4ffbed))
+* fix cargo audit ([#1108](https://github.com/propeller-heads/tycho/issues/1108)) ([8acd319](https://github.com/propeller-heads/tycho/commit/8acd31995d5a632d680127d81033e61d05076ade))
+* update dependency with vulnerability ([b524d7a](https://github.com/propeller-heads/tycho/commit/b524d7a964f4e3b1ffc45d99c4cff64abff4fe2b))
+
 ## [0.317.0](https://github.com/propeller-heads/tycho/compare/0.316.0...0.317.0) (2026-06-23)
 
 

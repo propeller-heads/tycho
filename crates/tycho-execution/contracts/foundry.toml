@@ -6,6 +6,10 @@ evm_version = 'cancun'
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# Pin solc and drop the metadata hash so the runtime bytecode fixtures
+# (protocols/testing/fixtures) are reproducible across Foundry versions.
+solc = '0.8.33'
+bytecode_hash = 'none'
 fs_permissions = [{ access = "read", path = "./test/assets" }, { access = "write", path = "./test" }]
 
 [profile.production]

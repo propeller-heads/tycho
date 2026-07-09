@@ -6,6 +6,7 @@ use revm::{
         result::{EVMError, ExecutionResult, Output, ResultAndState},
         BlockEnv, CfgEnv, Context, TxEnv,
     },
+    context_interface::JournalTr,
     interpreter::{return_ok, InstructionResult},
     primitives::{hardfork::SpecId, TxKind},
     state::EvmState,
@@ -150,6 +151,12 @@ where
                         for (slot, value) in slots {
                             journal.tstore(address, slot, value);
                         }
+                    }
+                }
+                if let Some(overrides) = &params.overrides {
+                    for (address, storage) in overrides {
+                        let keys = storage.keys().copied();
+                        let _ = journal.warm_account_and_storage(*address, keys);
                     }
                 }
             });

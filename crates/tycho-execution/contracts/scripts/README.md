@@ -10,7 +10,6 @@
 2. Set the following environment variables:
    ```bash
    export RPC_URL=<fork-rpc-from-tenderly>
-   export DEPLOY_WALLET=<wallet-address>
    export PRIVATE_KEY=<private-key>
    ```
 

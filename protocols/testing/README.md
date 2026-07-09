@@ -58,3 +58,22 @@ export MODE=full
 export PROTOCOLS="ethereum-balancer-v2=12345678"
 docker compose up --build
 ```
+
+## Runtime Bytecode Fixtures
+
+Execution validation overrides the TychoRouter, FeeCalculator, and protocol executors at simulation
+time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated from the
+`tycho-execution` contracts, so they must be regenerated whenever those contracts change.
+
+```bash
+export RPC_URL=..   # Ethereum mainnet RPC (the router constructor requires a fork)
+
+# Regenerate every fixture from the current contracts
+./scripts/update_runtime_bytecode.sh
+
+# Verify the committed fixtures match the current contracts (CI / drift check)
+./scripts/update_runtime_bytecode.sh --check
+```
+
+The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op during simulation
+(the router calls it on every swap to read the router fee rate).

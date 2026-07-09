@@ -37,12 +37,12 @@ The following exchanges are integrated with the VM approach:
 2.  Clone the Tycho monorepo:
 
     ```bash
-    git clone https://github.com/propeller-heads/tycho-indexer
+    git clone https://github.com/propeller-heads/tycho
     ```
 3.  Install dependencies:
 
     ```bash
-    cd ./tycho-indexer/protocols/adapter-integration/evm/
+    cd ./tycho/protocols/adapter-integration/evm/
     forge install
     ```
 
@@ -103,9 +103,9 @@ Once you have the swap adapter implemented for the new protocol, you will need t
 
 2. Add the associated adapter runtime file to `crates/tycho-simulation/src/protocol/vm/assets`. Make sure to name the file according to the protocol name used by Tycho Indexer in the following format: `<Protocol><Version>Adapter.evm.runtime`. For example: `vm:balancer_v2` will be `BalancerV2Adapter.evm.runtime`. Following this naming format is important as we use an automated name resolution for these files.
 
-### Filtering
+## Filtering
 
-If your implementation does not support all pools indexed for a protocol, you can create a filter function to handle this. This filter can then be used when registering an exchange in the `ProtocolStreamBuilder`. See <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/evm/protocol/filters.rs" target="_blank" rel="noopener noreferrer">here</a> for example implementations.
+If your implementation does not support all pools indexed for a protocol, you can create a filter function to handle this. Add your filter to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/evm/protocol/filters.rs" target="_blank" rel="noopener noreferrer">`filters.rs`</a> alongside the existing ones, and add your protocol name to the `EXCHANGES_REQUIRING_FILTER` constant in <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/evm/stream.rs" target="_blank" rel="noopener noreferrer">`evm/stream.rs`</a>. This warns callers if they stream your protocol without providing the required filter.
 
 ## Gas Estimation
 

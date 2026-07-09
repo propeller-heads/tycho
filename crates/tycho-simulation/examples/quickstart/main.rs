@@ -45,9 +45,10 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            curve::CurveState,
             ekubo::state::EkuboState,
-            ekubo_v3::{self, state::EkuboV3State},
-            filters::balancer_v2_pool_filter,
+            ekubo_v3::state::EkuboV3State,
+            filters::{balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter},
             pancakeswap_v2::state::PancakeswapV2State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
@@ -200,13 +201,16 @@ async fn main() {
                     Some(balancer_v2_pool_filter),
                 )
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                // Angstrom pools are included only when ANGSTROM_API_KEY is set: encoding
+                // their swaps requires per-block attestations from the Angstrom API.
                 .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(), None)
-                // Only uncomment if you have ANGSTROM_API_KEY set
-                // .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(),
-                // Some(uniswap_v4_angstrom_hook_pool_filter))
                 .exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None)
-                .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3::filter_fn))
-                .exchange::<EVMPoolState<PreCachedDB>>("vm:curve", tvl_filter.clone(), None)
+                .exchange::<EkuboV3State>(
+                    "ekubo_v3",
+                    tvl_filter.clone(),
+                    Some(ekubo_v3_extension_filter),
+                )
+                .exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
         }
         Chain::Base => {

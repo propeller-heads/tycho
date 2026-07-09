@@ -2,7 +2,7 @@ use std::{any::Any, collections::HashMap};
 
 use lunarbase_pmm_math::{
     curve_pmm::{quote_x_to_y_with_multiplier, quote_y_to_x_with_multiplier},
-    PoolParams, U256,
+    sqrt_price_x96_to_price, PoolParams, U256,
 };
 use num_bigint::BigUint;
 use tycho_common::{
@@ -21,7 +21,7 @@ pub type Address = [u8; 20];
 const DEFAULT_GAS: u64 = 180_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LunarBaseTychoState {
+pub struct LunarBaseState {
     pub pool: Address,
     pub token_x: Address,
     pub token_y: Address,
@@ -37,7 +37,7 @@ pub struct LunarBaseTychoState {
     pub head_block: u64,
 }
 
-impl LunarBaseTychoState {
+impl LunarBaseState {
     pub fn pool_params(&self) -> PoolParams {
         PoolParams {
             sqrt_price_x96: self.anchor_price_x96,
@@ -129,7 +129,7 @@ impl LunarBaseTychoState {
 }
 
 #[typetag::serde]
-impl ProtocolSim for LunarBaseTychoState {
+impl ProtocolSim for LunarBaseState {
     fn fee(&self) -> f64 {
         0.0
     }
@@ -138,10 +138,16 @@ impl ProtocolSim for LunarBaseTychoState {
         let token_in = address_from_bytes(base.address.as_ref())?;
         let token_out = address_from_bytes(quote.address.as_ref())?;
         if token_in == self.token_x && token_out == self.token_y {
-            return spot_from_reserves(self.reserve_x, self.reserve_y, base, quote);
+            return Ok(apply_fee_discount(
+                anchor_price(self.anchor_price_x96, base, quote),
+                self.fee_bid_x24,
+            ));
         }
         if token_in == self.token_y && token_out == self.token_x {
-            return spot_from_reserves(self.reserve_y, self.reserve_x, base, quote);
+            return Ok(apply_fee_discount(
+                1.0 / anchor_price(self.anchor_price_x96, quote, base),
+                self.fee_ask_x24,
+            ));
         }
         Err(SimulationError::InvalidInput("invalid LunarBase token pair".to_owned(), None))
     }
@@ -152,6 +158,14 @@ impl ProtocolSim for LunarBaseTychoState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        if amount_in == BigUint::ZERO {
+            return Ok(GetAmountOutResult::new(
+                BigUint::ZERO,
+                BigUint::from(DEFAULT_GAS),
+                Box::new(self.clone()),
+            ));
+        }
+
         let (amount_out, next_state) = self
             .quote_exact_in(
                 address_from_bytes(token_in.address.as_ref())?,
@@ -252,17 +266,13 @@ fn u256_to_u128(value: U256) -> Result<u128, QuoteError> {
     Ok(((limbs[1] as u128) << 64) | limbs[0] as u128)
 }
 
-fn spot_from_reserves(
-    reserve_in: u128,
-    reserve_out: u128,
-    token_in: &Token,
-    token_out: &Token,
-) -> Result<f64, SimulationError> {
-    if reserve_in == 0 || reserve_out == 0 {
-        return Err(SimulationError::RecoverableError("zero LunarBase reserve".to_owned()));
-    }
+fn anchor_price(anchor_price_x96: u128, token_in: &Token, token_out: &Token) -> f64 {
     let decimals_adjustment = 10f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
-    Ok((reserve_out as f64 / reserve_in as f64) * decimals_adjustment)
+    sqrt_price_x96_to_price(anchor_price_x96) * decimals_adjustment
+}
+
+fn apply_fee_discount(price: f64, fee_x24: u32) -> f64 {
+    price * (1.0 - fee_x24 as f64 / (1u64 << 24) as f64)
 }
 
 // This soft bound mirrors Tycho's CPMM `get_limits` convention:
@@ -278,7 +288,7 @@ fn soft_limit(reserve_in: u128) -> BigUint {
 }
 
 fn quote_limit(
-    state: &LunarBaseTychoState,
+    state: &LunarBaseState,
     token_in: Address,
     token_out: Address,
     mut amount_in: BigUint,
@@ -330,14 +340,28 @@ fn map_quote_error(err: QuoteError) -> SimulationError {
 
 #[cfg(test)]
 mod tests {
+    use tycho_common::models::Chain;
+
     use super::*;
 
     fn addr(byte: u8) -> [u8; 20] {
         [byte; 20]
     }
 
-    fn state() -> LunarBaseTychoState {
-        LunarBaseTychoState {
+    fn token(address: Address, symbol: &str, decimals: u32) -> Token {
+        Token::new(
+            &Bytes::from(address.to_vec()),
+            symbol,
+            decimals,
+            100,
+            &[Some(100_000)],
+            Chain::Base,
+            100,
+        )
+    }
+
+    fn state() -> LunarBaseState {
+        LunarBaseState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),
@@ -366,6 +390,67 @@ mod tests {
         assert_eq!(next_state.reserve_y, 999_000);
         assert_eq!(next_state.anchor_price_x96, state.anchor_price_x96);
         assert_eq!(next_state.head_block, state.head_block);
+    }
+
+    #[test]
+    fn zero_amount_out_returns_zero_without_transition() {
+        let state = state();
+        let token_x = token(state.token_x, "ETH", 18);
+        let token_y = token(state.token_y, "USDC", 6);
+
+        let quote = state
+            .get_amount_out(BigUint::ZERO, &token_x, &token_y)
+            .unwrap();
+        let next_state = quote
+            .new_state
+            .as_any()
+            .downcast_ref::<LunarBaseState>()
+            .unwrap();
+
+        assert_eq!(quote.amount, BigUint::ZERO);
+        assert_eq!(next_state, &state);
+    }
+
+    #[test]
+    fn spot_price_uses_anchor_price() {
+        let mut state = state();
+        state.anchor_price_x96 = lunarbase_pmm_math::price_to_sqrt_price_x96(2_000.0 / 1e12);
+        state.reserve_x = 1_000_000_000_000_000_000;
+        state.reserve_y = 1_000_000;
+
+        let token_x = token(state.token_x, "ETH", 18);
+        let token_y = token(state.token_y, "USDC", 6);
+
+        let price = state
+            .spot_price(&token_x, &token_y)
+            .unwrap();
+        let inverse = state
+            .spot_price(&token_y, &token_x)
+            .unwrap();
+
+        assert!((price - 2_000.0).abs() < 1e-6);
+        assert!((inverse - 0.0005).abs() < 1e-12);
+    }
+
+    #[test]
+    fn spot_price_applies_directional_base_fee() {
+        let mut state = state();
+        state.anchor_price_x96 = lunarbase_pmm_math::price_to_sqrt_price_x96(2_000.0 / 1e12);
+        state.fee_ask_x24 = (1u32 << 24) / 100;
+        state.fee_bid_x24 = (2 * (1u32 << 24)) / 100;
+
+        let token_x = token(state.token_x, "ETH", 18);
+        let token_y = token(state.token_y, "USDC", 6);
+
+        let price = state
+            .spot_price(&token_x, &token_y)
+            .unwrap();
+        let inverse = state
+            .spot_price(&token_y, &token_x)
+            .unwrap();
+
+        assert!((price - (2_000.0 * 0.98)).abs() < 1e-3);
+        assert!((inverse - (0.0005 * 0.99)).abs() < 1e-9);
     }
 
     #[test]

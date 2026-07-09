@@ -1,4 +1,4 @@
-# RFQ QuickStart with Bebop
+# RFQ QuickStart
 
 This quickstart guide enables you to:
 
@@ -15,12 +15,24 @@ export BEBOP_KEY=<your-bebop-ws-key>
 
 export HASHFLOW_USER=<your-ws-hashflow-username>
 export HASHFLOW_KEY=<your-ws-hashflow-key>
+
+export LIQUORICE_USER=<your-liquorice-solver>
+export LIQUORICE_KEY=<your-liquorice-key>
+
+export METRIC_API_URL=<optional-custom-metric-api-url>
+export METRIC_SECRET_KEY=<optional-metric-secret-key>
 ```
 
 Then, you can run the example with:
 
 ```bash
 cargo run --release --example rfq_quickstart
+```
+
+To run PAMM RFQ protocols without Bebop, Hashflow, or Liquorice credentials:
+
+```bash
+cargo run --release --example rfq_quickstart -- --run-pamm-protocols
 ```
 
 By default, the example will request price levels for 10 USDC -> WETH on Ethereum Mainnet using RFQs.
@@ -46,7 +58,7 @@ export PRIVATE_KEY=<your-private-key>
 ## Important Notes
 
 - **Credentials**: Contact RFQ protocols directly to obtain WebSocket API credentials for accessing live market maker
-  quotes
+  quotes. To run PAMM RFQ protocols, pass `--run-pamm-protocols`.
 
 ## What you'll see
 

@@ -30,6 +30,7 @@ members = [
     "unichain-velodrome",
     "ethereum-liquidityparty",
     "ethereum-fermiswap",
+    "ethereum-bopamm",
 ]
 resolver = "2"
 

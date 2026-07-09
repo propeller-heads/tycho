@@ -1,0 +1,99 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "vm:bopamm"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "bopamm_book"
+
+# Simulation/execution are skipped below: this harness can only validate on-chain component
+# discovery + tracked-contract indexing for BopAMM. The registry enforces an exact-timestamp
+# gate (MAX_UPDATE_AGE == 0): a book only simulates when block.timestamp equals its committed
+# quote timestamp. The harness simulates at the range's stop block, and the only blocks where a
+# committed quote lines up with the block timestamp are far (~95k blocks) from book creation, so
+# a range that both discovers the books and lands on such a block is impractical; the harness
+# also has no hook to re-stamp the committed lane. Simulation and execution are instead validated
+# in Foundry fork tests that pin a quote-commit block and re-stamp the lane:
+#   protocols/adapter-integration/evm/test/BopAMMAdapter.t.sol  (price/limits/swap)
+#   crates/tycho-execution/contracts/test/protocols/BopAMM.t.sol (executor + router swap)
+adapter_contract: "BopAMMAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"
+
+skip_balance_check: true # Venue is intermittently idle; balances validated separately.
+
+# The registry was deployed at block 25,099,176 — before this test's range — so the
+# substreams only emit its storage updates here, never its account creation. Bootstrap its
+# account from RPC so slot updates have something to attach to. The settlement and module
+# are deployed inside the range, so they don't need this.
+initialized_accounts:
+  - "0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F" # PrioUpdateRegistry
+
+tests:
+  - name: test_book_discovery
+    # Covers the settlement/module deployments (~25171611-12), the asset-config write that
+    # creates both books (25171616), and the maker assignment (25171618). The registry was
+    # deployed earlier (25099176) and is bootstrapped via initialized_accounts above.
+    start_block: 25171610
+    stop_block: 25171620
+    expected_components:
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" # WETH
+        static_attributes:
+          asset_id: "0x0000000000000000"
+          manual_updates: "0x01"
+          self_contained_tokens: "0x5b22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307863303261616133396232323366653864306130653563346632376561643930383363373536636332225d"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: true # Exact-timestamp gate; simulated in Foundry (BopAMMAdapter.t.sol). See top.
+        skip_execution: true # No vm:bopamm executor registered; executed in Foundry (BopAMM.t.sol). See top.
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000001"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599" # WBTC
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+        static_attributes:
+          asset_id: "0x0000000000000001"
+          manual_updates: "0x01"
+          self_contained_tokens: "0x5b22307832323630666163356535353432613737336161343466626366656466376331393362633263353939222c22307861306238363939316336323138623336633164313964346132653965623063653336303665623438225d"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: true # Exact-timestamp gate; simulated in Foundry (BopAMMAdapter.t.sol). See top.
+        skip_execution: true # No vm:bopamm executor registered; executed in Foundry (BopAMM.t.sol). See top.
+
+  - name: test_book_simulation
+    # Spans book creation (25171616) through committed quotes for BOTH books, so the indexed
+    # snapshot carries each book's `override_block_timestamp`, which tycho-simulation pins per
+    # component to pass the registry's exact-timestamp gate. This validates the indexing ->
+    # simulation integration on substreams output — coverage the Foundry adapter tests cannot
+    # give (they read mainnet storage directly, never the indexed snapshot). Both books are
+    # two-sided as of their own last commit at this stop block and are simulated end to end
+    # (spot price, limits, amount out both directions). The two books commit at different
+    # blocks, so neither is fresh at the same block.timestamp — but the per-component timestamp
+    # override handles that. Book 1 (WBTC/USDC) is one-sided at its first commit (25252477) and
+    # only becomes two-sided at its 25266022 commit, hence this stop block.
+    start_block: 25171610
+    stop_block: 25266022
+    expected_components:
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" # WETH
+        static_attributes:
+          asset_id: "0x0000000000000000"
+          manual_updates: "0x01"
+          self_contained_tokens: "0x5b22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307863303261616133396232323366653864306130653563346632376561643930383363373536636332225d"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        skip_simulation: false
+        skip_execution: true # No vm:bopamm executor registered; executed in Foundry (BopAMM.t.sol). See top.
+      - id: "0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000001"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599" # WBTC
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+        static_attributes:
+          asset_id: "0x0000000000000001"
+          manual_updates: "0x01"
+          self_contained_tokens: "0x5b22307832323630666163356535353432613737336161343466626366656466376331393362633263353939222c22307861306238363939316336323138623336633164313964346132653965623063653336303665623438225d"
+        creation_tx: "0x58071cb79cabce79033144d3a6b7433f61f917fc76f5b7755e6873b9cf4f8643"
+        # Book 1's first commit (25252477) is one-sided (USDC->WBTC reverts), but its
+        # 25266022 commit is two-sided, so at this stop block the VM state decodes and
+        # simulates both directions.
+        skip_simulation: false
+        skip_execution: true # No vm:bopamm executor registered; executed in Foundry (BopAMM.t.sol). See top.

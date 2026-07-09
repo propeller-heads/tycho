@@ -1,287 +1,20 @@
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use deepsize::DeepSizeOf;
+pub use tycho_common::models::blockchain::{BlockChanges, TxWithContractChanges};
 use tycho_common::{
     models::{
-        blockchain::{
-            Block, BlockAggregatedChanges, BlockScoped, DCIUpdate, TracedEntryPoint, TracingResult,
-            Transaction, TxWithChanges,
-        },
-        contract::{AccountBalance, AccountToContractChanges},
-        protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
-        token::Token,
-        Address, AttrStoreKey, Chain, ComponentId, MergeError,
+        blockchain::{Transaction, TxWithChanges},
+        contract::AccountBalance,
+        protocol::{ComponentBalance, ProtocolComponentStateDelta},
+        Address, AttrStoreKey, ComponentId, MergeError,
     },
     Bytes,
 };
 
 use crate::extractor::{
     reorg_buffer::ProtocolStateIdType, AccountStateIdType, AccountStateKeyType,
-    AccountStateValueType, ExtractionError, ProtocolStateKeyType, ProtocolStateValueType,
-    StateUpdateBufferEntry,
+    AccountStateValueType, ProtocolStateKeyType, ProtocolStateValueType, StateUpdateBufferEntry,
 };
-
-/// Storage changes grouped by transaction
-#[derive(Debug, PartialEq, Default, Clone, DeepSizeOf)]
-pub struct TxWithContractChanges {
-    pub tx: Transaction,
-    pub contract_changes: AccountToContractChanges,
-}
-
-#[derive(Debug, PartialEq, Default, Clone, DeepSizeOf)]
-pub struct BlockChanges {
-    extractor: String,
-    chain: Chain,
-    pub block: Block,
-    pub finalized_block_height: u64,
-    pub revert: bool,
-    pub new_tokens: HashMap<Address, Token>,
-    /// Vec of updates at this block, aggregated by tx and sorted by tx index in ascending order
-    pub txs_with_update: Vec<TxWithChanges>,
-    // Raw block contract changes. This is intended as DCI input and is to be omitted from the
-    // reorg buffer and aggregation into the `BlockAggregatedChanges` object.
-    pub block_contract_changes: Vec<TxWithContractChanges>,
-    /// Required here so that it is part of the reorg buffer and thus inserted into storage once
-    /// finalized.
-    /// Populated by the `DynamicContractIndexer`
-    pub trace_results: Vec<TracedEntryPoint>,
-    /// The index of the partial block. None if it's a full block.
-    pub partial_block_index: Option<u32>,
-}
-
-impl BlockChanges {
-    pub fn new(
-        extractor: String,
-        chain: Chain,
-        block: Block,
-        finalized_block_height: u64,
-        revert: bool,
-        txs_with_update: Vec<TxWithChanges>,
-        block_contract_changes: Vec<TxWithContractChanges>,
-    ) -> Self {
-        BlockChanges {
-            extractor,
-            chain,
-            block,
-            finalized_block_height,
-            revert,
-            new_tokens: HashMap::new(),
-            txs_with_update,
-            block_contract_changes,
-            trace_results: Vec::new(),
-            partial_block_index: None,
-        }
-    }
-
-    /// Aggregates component and account updates.
-    ///
-    /// This function aggregates all protocol updates into a [`BlockAggregatedChanges`] object. This
-    /// new object should have all individual changes merged into only one final/compacted change
-    /// per component and account. This means there is only one state delta and component balance
-    /// per component, and one account delta and account balance per account. DCI trace results are
-    /// also aggregated into a result per entry point.
-    ///
-    /// Note - all non-protocol specific data in the BlockChanges object are lost during
-    /// aggregation. This means block_storage_changes is dropped.
-    ///
-    /// # Errors
-    ///
-    /// This returns an `ExtractionError` if there was a problem during merge.
-    pub fn into_aggregated(
-        self,
-        db_committed_block_height: Option<u64>,
-    ) -> Result<BlockAggregatedChanges, ExtractionError> {
-        if db_committed_block_height.is_some_and(|h| h > self.finalized_block_height) {
-            return Err(ExtractionError::ReorgBufferError(format!(
-                "Database committed block height {:?} is greater than finalized_block_height {}",
-                db_committed_block_height, self.finalized_block_height
-            )));
-        }
-
-        let mut iter = self.txs_with_update.into_iter();
-
-        // Use unwrap_or_else to provide a default state if iter.next() is None
-        let first_state = iter.next().unwrap_or_default();
-
-        // Aggregate txs_with_update
-        let aggregated_changes = iter
-            .try_fold(first_state, |mut acc_state, new_state| {
-                acc_state.merge(new_state.clone())?;
-                Ok::<_, ExtractionError>(acc_state.clone())
-            })
-            .unwrap();
-
-        // Aggregate trace_results
-        let mut aggregated_trace_results = HashMap::new();
-        for result in self.trace_results {
-            let external_id = result.entry_point_id();
-            aggregated_trace_results
-                .entry(external_id)
-                .and_modify(|existing: &mut TracingResult| {
-                    existing.merge(result.tracing_result.clone())
-                })
-                .or_insert(result.tracing_result);
-        }
-
-        Ok(BlockAggregatedChanges {
-            extractor: self.extractor,
-            chain: self.chain,
-            block: self.block,
-            db_committed_block_height,
-            finalized_block_height: self.finalized_block_height,
-            revert: self.revert,
-            new_protocol_components: aggregated_changes.protocol_components,
-            new_tokens: self.new_tokens,
-            deleted_protocol_components: HashMap::new(),
-            state_deltas: aggregated_changes.state_updates,
-            account_deltas: aggregated_changes.account_deltas,
-            component_balances: aggregated_changes.balance_changes,
-            account_balances: aggregated_changes.account_balance_changes,
-            component_tvl: HashMap::new(),
-            dci_update: DCIUpdate {
-                new_entrypoints: aggregated_changes.entrypoints,
-                new_entrypoint_params: aggregated_changes.entrypoint_params,
-                trace_results: aggregated_trace_results,
-            },
-            partial_block_index: self.partial_block_index,
-        })
-    }
-
-    pub fn protocol_components(&self) -> Vec<ProtocolComponent> {
-        self.txs_with_update
-            .iter()
-            .flat_map(|tx_u| {
-                tx_u.protocol_components
-                    .values()
-                    .cloned()
-            })
-            .collect()
-    }
-
-    /// Returns true if the block is a partial block.
-    pub fn is_partial_block(&self) -> bool {
-        self.partial_block_index.is_some()
-    }
-
-    /// Sets the partial block index.
-    pub fn set_partial_block_index(&mut self, index: Option<u32>) {
-        self.partial_block_index = index;
-    }
-
-    /// Sets every transaction's `block_hash` in `txs_with_update` and `block_contract_changes`
-    /// to this block's hash. Used after merging partials so all txs refer to the same block
-    /// (e.g. the final block hash).
-    pub fn normalize_block_hash(&mut self) {
-        let h = self.block.hash.clone();
-        for tx_with_changes in self.txs_with_update.iter_mut() {
-            tx_with_changes.tx.block_hash = h.clone();
-        }
-        for tx_with_contract in self.block_contract_changes.iter_mut() {
-            tx_with_contract.tx.block_hash = h.clone();
-        }
-    }
-
-    /// Merges another partial block into this one, preserving later changes.
-    ///
-    /// The partial block with the higher index represents later changes and takes precedence.
-    /// Merges `new_tokens`, `txs_with_update` (sorted by index), `block_contract_changes`,
-    /// and `trace_results`. When both blocks have the same token address, the token from the
-    /// block with the higher partial index is kept.
-    ///
-    /// Works regardless of merge order: `partial_0.merge_partial(partial_1)` and
-    /// `partial_1.merge_partial(partial_0)` produce equivalent results.
-    ///
-    /// # Errors
-    /// - Non-partial block: Either block is not marked as partial
-    /// - Extractor mismatch: Blocks from different extractors
-    /// - Chain mismatch: Blocks from different chains
-    /// - Block mismatch: Different block numbers (hash may differ for temp vs final partial)
-    /// - Revert mismatch: Different revert status
-    pub fn merge_partial(self, other: Self) -> Result<Self, MergeError> {
-        // Validate both blocks are partial
-        let Some(self_index) = self.partial_block_index else {
-            return Err(MergeError::InvalidState("self is not a partial block".to_string()));
-        };
-
-        let Some(other_index) = other.partial_block_index else {
-            return Err(MergeError::InvalidState("other is not a partial block".to_string()));
-        };
-
-        // Validate that critical fields match
-        if self.extractor != other.extractor {
-            return Err(MergeError::IdMismatch(
-                "partial blocks (extractor)".to_string(),
-                self.extractor.clone(),
-                other.extractor.clone(),
-            ));
-        }
-
-        if self.chain != other.chain {
-            return Err(MergeError::IdMismatch(
-                "partial blocks (chain)".to_string(),
-                format!("{:?}", self.chain),
-                format!("{:?}", other.chain),
-            ));
-        }
-
-        // Same logical block: require block number (and chain, already checked). Do not require
-        // hash/parent_hash to match, since partials may use a temp hash until the final block.
-        if self.block.number != other.block.number {
-            return Err(MergeError::BlockMismatch(
-                "partial blocks".to_string(),
-                self.block.hash.clone(),
-                other.block.hash.clone(),
-            ));
-        }
-
-        if self.revert != other.revert {
-            return Err(MergeError::InvalidState(format!(
-                "different revert status: {} vs {}",
-                self.revert, other.revert
-            )));
-        }
-
-        // Determine which block is "current" (higher index) and which is "previous"
-        let (mut current, previous) = if self_index > other_index {
-            (self, other)
-        } else if self_index < other_index {
-            (other, self)
-        } else {
-            return Err(MergeError::InvalidState(format!("same partial block index: {self_index}")));
-        };
-
-        // Merge tokens: later block's tokens take precedence
-        for (addr, token) in previous.new_tokens {
-            current
-                .new_tokens
-                .entry(addr)
-                .or_insert(token);
-        }
-
-        // Extend and sort txs_with_update by transaction index
-        current
-            .txs_with_update
-            .extend(previous.txs_with_update);
-        current
-            .txs_with_update
-            .sort_by_key(|tx| tx.tx.index);
-
-        // Extend block_contract_changes
-        current
-            .block_contract_changes
-            .extend(previous.block_contract_changes);
-
-        // Normalize block identity so all txs refer to the merged block (latest partial's hash).
-        current.normalize_block_hash();
-
-        // Extend trace_results
-        current
-            .trace_results
-            .extend(previous.trace_results);
-
-        Ok(current)
-    }
-}
 
 /// Inserts or updates a state attribute for a protocol component within a specific transaction.
 ///
@@ -500,18 +233,18 @@ impl StateUpdateBufferEntry for BlockChanges {
     }
 }
 
-impl BlockScoped for BlockChanges {
-    fn block(&self) -> tycho_common::models::blockchain::Block {
-        self.block.clone()
-    }
-}
-
 #[cfg(test)]
 pub mod fixtures {
-    use tycho_common::models::{
-        blockchain::{EntryPoint, RPCTracerParams, TracingParams},
-        contract::AccountDelta,
-        ChangeType,
+    use std::collections::HashMap;
+
+    use tycho_common::{
+        models::{
+            blockchain::{EntryPoint, RPCTracerParams, TracingParams, Transaction},
+            contract::{AccountBalance, AccountDelta},
+            protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
+            Chain, ChangeType,
+        },
+        Bytes,
     };
 
     use super::*;
@@ -520,29 +253,6 @@ pub mod fixtures {
         "0x0000000000000000000000000000000000000000000000000000000000000000";
     pub const HASH_256_1: &str =
         "0x0000000000000000000000000000000000000000000000000000000000000001";
-
-    impl BlockChanges {
-        pub fn new_with_tokens(
-            extractor: String,
-            chain: Chain,
-            block: Block,
-            finalized_block_height: u64,
-            revert: bool,
-            new_tokens: HashMap<Address, Token>,
-            txs_with_update: Vec<TxWithChanges>,
-        ) -> Self {
-            BlockChanges {
-                extractor,
-                chain,
-                block,
-                finalized_block_height,
-                revert,
-                new_tokens,
-                txs_with_update,
-                ..Default::default()
-            }
-        }
-    }
 
     pub fn slots(data: impl IntoIterator<Item = (u64, u64)>) -> HashMap<Bytes, Bytes> {
         data.into_iter()
@@ -780,10 +490,20 @@ pub mod fixtures {
 
 #[cfg(test)]
 mod test {
-    use std::str::FromStr;
+    use std::{collections::HashMap, str::FromStr};
 
     use fixtures::{create_transaction, HASH_256_0};
     use rstest::rstest;
+    use tycho_common::{
+        models::{
+            blockchain::{Block, Transaction, TxWithChanges},
+            contract::AccountBalance,
+            protocol::ComponentBalance,
+            token::Token,
+            Address, Chain, MergeError,
+        },
+        Bytes,
+    };
 
     use super::*;
 
@@ -863,13 +583,10 @@ mod test {
     #[case::commit_before_finalized(None, Ok(None))]
     #[case::commit_before_finalized(Some(4), Ok(Some(4)))]
     #[case::commit_equals_finalized(Some(5), Ok(Some(5)))]
-    #[case::commit_exceeds_finalized(
-        Some(6),
-        Err(ExtractionError::ReorgBufferError(String::new()))
-    )]
+    #[case::commit_exceeds_finalized(Some(6), Err(MergeError::InvalidState(String::new())))]
     fn into_aggregated_respects_commit_invariant(
         #[case] committed_height: Option<u64>,
-        #[case] expected: Result<Option<u64>, ExtractionError>,
+        #[case] expected: Result<Option<u64>, MergeError>,
     ) {
         let changes = BlockChanges::new(
             "test".to_string(),
@@ -888,8 +605,8 @@ mod test {
                 let aggregated = result.expect("expected success");
                 assert_eq!(aggregated.db_committed_block_height, expected_height);
             }
-            Err(ExtractionError::ReorgBufferError(_)) => {
-                assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+            Err(MergeError::InvalidState(_)) => {
+                assert!(matches!(result, Err(MergeError::InvalidState(_))));
             }
             _ => panic!("unexpected error type"),
         }

@@ -100,6 +100,26 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             HashSet::new()
         };
 
+        // Tokens whose protocol does not emit token contract storage. Simulation handles their
+        // transfers entirely in the proxy's local bookkeeping (custom approval + recipient balance)
+        // so they never delegate to an implementation another protocol may have left in the shared
+        // DB.
+        let self_contained_tokens: HashSet<Address> = if let Some(bytes) = snapshot
+            .component
+            .static_attributes
+            .get("self_contained_tokens")
+        {
+            if let Ok(vecs) = json_deserialize_address_list(bytes) {
+                vecs.into_iter()
+                    .map(|addr| Address::from_slice(&addr))
+                    .collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
         // Decode balances
         let balance_owner = snapshot
             .state
@@ -206,6 +226,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             EVMPoolStateBuilder::new(id.clone(), tokens.clone(), adapter_contract_address)
                 .balances(component_balances)
                 .disable_overwrite_tokens(potential_rebase_tokens)
+                .self_contained_tokens(self_contained_tokens)
                 .account_balances(account_balances)
                 .adapter_contract_bytecode(adapter_bytecode)
                 .involved_contracts(involved_contracts)
@@ -222,6 +243,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .build(SHARED_TYCHO_DB.clone())
             .await
             .map_err(InvalidSnapshotError::VMError)?;
+
+        if let Some(receiver) = decoder_context.live_override.clone() {
+            pool_state.set_live_overrides(receiver);
+        }
 
         pool_state.set_spot_prices(all_tokens)?;
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
-use super::state::{Address, LunarBaseTychoState};
+use super::state::{Address, LunarBaseState};
 use crate::protocol::{
     errors::InvalidSnapshotError,
     models::{DecoderContext, TryFromWithBlock},
@@ -21,7 +21,7 @@ mod attrs {
     pub const PAUSED: &str = "paused";
 }
 
-impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseTychoState {
+impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseState {
     type Error = InvalidSnapshotError;
 
     async fn try_from_with_header(
@@ -38,7 +38,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for LunarBaseTychoState {
 }
 
 #[cfg(test)]
-pub fn encode_state(state: &LunarBaseTychoState) -> HashMap<String, Bytes> {
+pub fn encode_state(state: &LunarBaseState) -> HashMap<String, Bytes> {
     HashMap::from([
         (attrs::ANCHOR_PRICE_X96.to_owned(), Bytes::from(state.anchor_price_x96)),
         (attrs::FEE_ASK_X24.to_owned(), Bytes::from(state.fee_ask_x24)),
@@ -53,7 +53,7 @@ pub fn encode_state(state: &LunarBaseTychoState) -> HashMap<String, Bytes> {
 }
 
 pub fn apply_delta(
-    state: &mut LunarBaseTychoState,
+    state: &mut LunarBaseState,
     updated_attributes: HashMap<String, Bytes>,
 ) -> Result<(), InvalidSnapshotError> {
     for (name, value) in updated_attributes {
@@ -75,10 +75,10 @@ pub fn apply_delta(
 
 pub fn decode_lunarbase_snapshot(
     snapshot: &ComponentWithState,
-) -> Result<LunarBaseTychoState, InvalidSnapshotError> {
+) -> Result<LunarBaseState, InvalidSnapshotError> {
     let attrs = &snapshot.state.attributes;
 
-    Ok(LunarBaseTychoState {
+    Ok(LunarBaseState {
         pool: component_pool(snapshot)?,
         token_x: component_token(snapshot, 0)?,
         token_y: component_token(snapshot, 1)?,
@@ -168,8 +168,8 @@ mod tests {
         [byte; 20]
     }
 
-    fn state() -> LunarBaseTychoState {
-        LunarBaseTychoState {
+    fn state() -> LunarBaseState {
+        LunarBaseState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),

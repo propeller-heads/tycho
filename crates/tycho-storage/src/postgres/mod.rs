@@ -607,54 +607,59 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
     Ok(pool)
 }
 
-/// Ensures the `Chain` enum is present in the database, if not it inserts it.
+/// Ensures the given chain is present in the database, inserting it if absent.
 ///
-/// This function serves as a way to ensure all chains found within the `chains`  
-/// slice are present within the database. It does this by inserting each chain into
-/// the `chain` table. If a conflict arises during this operation (indicating that
-/// the chain already exists in the database), it simply does nothing for that
-/// specific operation and moves on.
-///
-/// It uses a connection from the passed in `Pool<AsyncPgConnection>` asynchronously.
-/// In case of any error during these operations, the function will panic with an
-/// appropriate error message.
-///
+/// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
+/// Also ensures the chain's native and wrapped native tokens are present.
 ///
 /// # Arguments
 ///
-/// - `chains`: A slice containing chains which need to be ensured in the database.
-/// - `pool`: An instance of `Pool` containing `AsyncPgConnection`s used to interact with the
-///   database.
+/// - `chain`: The chain to ensure.
+/// - `conn`: An open database connection.
 ///
-/// # Panics
+/// # Errors
 ///
-/// This function will panic under two circumstances:
-///
-/// - If it failed to get a connection from the provided pool.
-/// - If there was an issue ensuring the presence of chains in the database.
-async fn ensure_chains(chains: &[Chain], pool: Pool<AsyncPgConnection>) {
-    let mut conn = pool.get().await.expect("connection ok");
-
-    for chain in chains {
-        diesel::insert_into(schema::chain::table)
-            .values(schema::chain::name.eq(chain.to_string()))
-            .on_conflict_do_nothing()
-            .execute(&mut conn)
-            .await
-            .expect("Could not ensure chain in database");
-
-        let chain_id: i64 = schema::chain::table
-            .select(schema::chain::id)
-            .filter(schema::chain::name.eq(chain.to_string()))
-            .first(&mut conn)
-            .await
-            .expect("Chain must exist after insert");
-
-        ensure_token_with_price(chain_id, &chain.native_token(), &mut conn).await;
-        ensure_token_with_price(chain_id, &chain.wrapped_native_token(), &mut conn).await;
+/// - If the database already contains a different chain.
+/// - If any database operation fails.
+async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), StorageError> {
+    // Guard: each database instance must be dedicated to a single chain. Reject initialization if
+    // the database already belongs to a different chain to prevent silent data corruption
+    // (e.g. Ethereum native tokens leaking into a Base database).
+    let existing: Vec<String> = schema::chain::table
+        .select(schema::chain::name)
+        .load(conn)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    let chain_name = chain.to_string();
+    for existing_name in &existing {
+        if *existing_name != chain_name {
+            return Err(StorageError::Unexpected(format!(
+                "Chain table already contains '{}' but attempting to initialize with '{}'. \
+                Each database instance must be dedicated to a single chain.",
+                existing_name, chain_name
+            )));
+        }
     }
 
-    debug!("Ensured chain enum and native token presence for: {:?}", chains);
+    diesel::insert_into(schema::chain::table)
+        .values(schema::chain::name.eq(&chain_name))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+    let chain_id: i64 = schema::chain::table
+        .select(schema::chain::id)
+        .filter(schema::chain::name.eq(&chain_name))
+        .first(conn)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+    ensure_token_with_price(chain_id, &chain.native_token(), conn).await;
+    ensure_token_with_price(chain_id, &chain.wrapped_native_token(), conn).await;
+
+    debug!("Ensured chain enum and native token presence for: {:?}", chain);
+    Ok(())
 }
 
 pub(crate) async fn ensure_token_with_price(
@@ -712,9 +717,7 @@ pub(crate) async fn ensure_token_with_price(
         .expect("Could not ensure token price in database");
 }
 
-async fn ensure_protocol_systems(protocol_systems: &[String], pool: Pool<AsyncPgConnection>) {
-    let mut conn = pool.get().await.expect("connection ok");
-
+async fn ensure_protocol_systems(protocol_systems: &[String], conn: &mut AsyncPgConnection) {
     diesel::insert_into(schema::protocol_system::table)
         .values(
             protocol_systems
@@ -723,7 +726,7 @@ async fn ensure_protocol_systems(protocol_systems: &[String], pool: Pool<AsyncPg
                 .collect::<Vec<_>>(),
         )
         .on_conflict_do_nothing()
-        .execute(&mut conn)
+        .execute(conn)
         .await
         .expect("Could not ensure protocol system enum's in database");
 
@@ -1456,5 +1459,53 @@ pub mod db_fixtures {
         .execute(conn)
         .await
         .expect("calculating fixture component tvl failed");
+    }
+}
+
+#[cfg(test)]
+mod tests_ensure_chain {
+    use diesel_async::AsyncConnection;
+    use tycho_common::models::Chain;
+
+    use super::ensure_chain;
+
+    async fn setup_conn() -> diesel_async::AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let mut conn = diesel_async::AsyncPgConnection::establish(&db_url)
+            .await
+            .unwrap();
+        conn.begin_test_transaction()
+            .await
+            .unwrap();
+        conn
+    }
+
+    #[tokio::test]
+    async fn test_succeeds_on_empty_table() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_same_chain() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rejects_different_chain() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+        let result = ensure_chain(Chain::Base, &mut conn).await;
+        assert!(result.is_err(), "expected error when inserting a different chain");
     }
 }

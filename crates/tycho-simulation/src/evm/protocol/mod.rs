@@ -3,6 +3,7 @@ pub mod aerodrome_v1;
 mod clmm;
 pub mod cowamm;
 mod cpmm;
+pub mod curve;
 pub mod ekubo;
 pub mod ekubo_v3;
 pub mod erc4626;
