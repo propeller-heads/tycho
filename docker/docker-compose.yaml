@@ -70,14 +70,15 @@ services:
       AUTH_API_KEY: ${AUTH_API_KEY:-local-dev-key}
       # Override to use a chain-specific extractors file, e.g. ./extractors-tempo.yaml
       EXTRACTORS_CONFIG: ${EXTRACTORS_CONFIG:-/opt/tycho-indexer/extractors.yaml}
+      # Custom-chain definitions; empty by default so built-in chains need no config.
+      CHAIN_CONFIG: ${CHAIN_CONFIG:-/opt/tycho-indexer/chains.yaml}
     ports:
       - "4242:4242"
     volumes:
       - ./wait-for-postgres.sh:/usr/wait-for-postgres.sh
       - ../crates/tycho-indexer/extractors.yaml:/opt/tycho-indexer/extractors.yaml
+      - ../crates/tycho-indexer/chains.yaml:/opt/tycho-indexer/chains.yaml
       - ./substreams/:/opt/tycho-indexer/substreams/
-      # Path to a local tycho-protocol-sdk checkout; override with TYCHO_PROTOCOL_SDK_PATH
-      - ${TYCHO_PROTOCOL_SDK_PATH:-../tycho-protocol-sdk}/substreams:/opt/tycho-indexer/substreams-sdk:ro
     # Configure logging driver for better log collection
     logging:
       driver: "json-file"

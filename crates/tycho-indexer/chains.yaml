@@ -1,0 +1,7 @@
+# Custom (non-built-in) chains, keyed by name so that an extractor's `chain: <name>` and the
+# `--chains <name>` flag resolve to a full chain config. Built-in chains (ethereum, base,
+# unichain, …) need no entry here — leave the list empty to run on those.
+#
+# See chains.example.yaml for a documented, filled-in entry.
+
+chains: []
