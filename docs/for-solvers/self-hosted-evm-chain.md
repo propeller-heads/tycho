@@ -218,6 +218,16 @@ docker compose up
 
 Without `--profile substreams-endpoint`, the `substreams-endpoint` service never starts and the indexer streams straight from the hosted endpoint.
 
+## Consuming the custom chain
+
+The indexer serves your custom chain over RPC and WebSocket, but a consumer (tycho-simulation, tycho-client, tycho-execution) resolves a chain name against its own copy of the chain config. Point it at the same `chains.yaml` through the `TYCHO_CHAIN_CONFIG` environment variable:
+
+```bash
+export TYCHO_CHAIN_CONFIG=crates/tycho-indexer/chains.yaml
+```
+
+With the variable set, a chain name like `tempo` resolves to its full config on first use. Leave it unset and the consumer resolves only built-in chains and rejects the custom name. A `TYCHO_CHAIN_CONFIG` that points at a missing or malformed file fails loudly rather than silently falling back to built-in chains.
+
 ## Monitoring sync progress
 
 Follow the logs to watch the stack catch up:
