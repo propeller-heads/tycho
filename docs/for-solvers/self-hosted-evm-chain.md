@@ -226,7 +226,7 @@ The indexer serves your custom chain over RPC and WebSocket, but a consumer (tyc
 export CUSTOM_CHAINS_CONFIG=crates/tycho-indexer/chains.yaml
 ```
 
-With the variable set, a chain name like `tempo` resolves to its full config on first use. Leave it unset and the consumer resolves only built-in chains and rejects the custom name. A `CUSTOM_CHAINS_CONFIG` that points at a missing or malformed file fails loudly rather than silently falling back to built-in chains.
+With the variable set, a chain name like `tempo` resolves to its full config on first use. Leave it unset and the consumer resolves only built-in chains and rejects the custom name. When the variable points at a missing or malformed file, the stream builder rejects it at startup and returns a set-up error naming the config — the consumer never starts against a half-configured chain.
 
 ## Monitoring sync progress
 
