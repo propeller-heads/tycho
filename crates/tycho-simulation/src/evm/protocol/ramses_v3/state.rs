@@ -109,7 +109,7 @@ impl RamsesV3State {
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
     ) -> Result<SwapResults, SimulationError> {
-        if self.liquidity == 0 {
+        if !self.ticks.has_initialized_ticks() {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
         let price_limit = if let Some(limit) = sqrt_price_limit {
@@ -314,6 +314,10 @@ impl ProtocolSim for RamsesV3State {
         token_in: Bytes,
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        if !self.ticks.has_initialized_ticks() {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
+
         let zero_for_one = token_in < token_out;
         let mut current_tick = self.tick;
         let mut current_sqrt_price = self.sqrt_price;
@@ -473,7 +477,7 @@ impl ProtocolSim for RamsesV3State {
     /// This method uses Ramses V3 internal swap logic by swapping an infinite amount of token_in
     /// until the target price is reached.
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
-        if self.liquidity == 0 {
+        if !self.ticks.has_initialized_ticks() {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
 
