@@ -32,8 +32,10 @@ impl SerializableVecBigInt for Vec<BigInt> {
     }
     fn deserialize_bytes(bytes: &[u8]) -> Vec<BigInt> {
         bytes
-            .chunks_exact(32)
-            .map(BigInt::from_signed_bytes_be)
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|chunk| BigInt::from_signed_bytes_be(chunk))
             .collect::<Vec<BigInt>>()
     }
 }

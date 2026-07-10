@@ -54,6 +54,17 @@ pub fn uniswap_v4_angstrom_hook_pool_filter(component: &ComponentWithState) -> b
         .is_some_and(|s| s == "angstrom_v1")
 }
 
+/// Filters out uniswap v4 pools with Angstrom hooks.
+///
+/// Encoding an Angstrom swap requires per-block attestations fetched from the Angstrom API,
+/// authenticated with `ANGSTROM_API_KEY`. Without the key the swap fails at encoding time —
+/// after route selection — so consumers without the key should exclude these pools up front.
+/// [`ProtocolStreamBuilder`](crate::evm::stream::ProtocolStreamBuilder) applies this filter to
+/// `uniswap_v4_hooks` automatically when no filter function is provided and the key is unset.
+pub fn uniswap_v4_non_angstrom_hook_pool_filter(component: &ComponentWithState) -> bool {
+    !uniswap_v4_angstrom_hook_pool_filter(component)
+}
+
 /// Filters out pools that rely on ERC4626 in Balancer V3
 pub fn balancer_v3_pool_filter(component: &ComponentWithState) -> bool {
     if let Some(erc4626) = component
@@ -167,6 +178,8 @@ pub fn erc4626_filter(component: &ComponentWithState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
     use super::*;
 
     fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, Bytes> {
@@ -174,6 +187,26 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), Bytes::from(v.as_bytes().to_vec())))
             .collect()
+    }
+
+    fn hooks_component(hook_identifier: Option<&str>) -> ComponentWithState {
+        let static_attributes = match hook_identifier {
+            Some(id) => attrs(&[("hook_identifier", id)]),
+            None => HashMap::new(),
+        };
+        ComponentWithState {
+            state: ProtocolComponentState::new("test_pool", HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { static_attributes, ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn non_angstrom_filter_excludes_angstrom_pools() {
+        assert!(!uniswap_v4_non_angstrom_hook_pool_filter(&hooks_component(Some("angstrom_v1"))));
+        assert!(uniswap_v4_non_angstrom_hook_pool_filter(&hooks_component(Some("euler_v1"))));
+        assert!(uniswap_v4_non_angstrom_hook_pool_filter(&hooks_component(None)));
     }
 
     #[test]

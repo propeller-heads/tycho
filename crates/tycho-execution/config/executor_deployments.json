@@ -29,7 +29,10 @@
     "vm:balancer_v3": { "contract": "BalancerV3Executor", "args": [] },
     "rfq:bebop": {
       "contract": "BebopExecutor",
-      "args": ["0xbbbbbBB520d69a9775E85b458C58c648259FAD5F"]
+      "args": [
+        "0xbbbbbBB520d69a9775E85b458C58c648259FAD5F",
+        "0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A"
+      ]
     },
     "rfq:hashflow": {
       "contract": "HashflowExecutor",
@@ -82,7 +85,10 @@
     },
     "rfq:bebop": {
       "contract": "BebopExecutor",
-      "args": ["0xbbbbbBB520d69a9775E85b458C58c648259FAD5F"]
+      "args": [
+        "0xbbbbbBB520d69a9775E85b458C58c648259FAD5F",
+        "0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A"
+      ]
     },
     "aerodrome_slipstreams": { "contract": "SlipstreamsExecutor", "args": [] },
     "aerodrome_v1": { "contract": "AerodromeV1Executor", "args": [] },

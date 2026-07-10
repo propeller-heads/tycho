@@ -24,7 +24,7 @@ pub enum MetricOracleUpdatePolicy {
 impl MetricOracleUpdatePolicy {
     pub fn default_for_chain(chain: Chain) -> Self {
         match chain {
-            Chain::Ethereum => Self::Always,
+            Chain::Ethereum => Self::RetryOnRevert,
             _ => Self::Never,
         }
     }

@@ -12,6 +12,8 @@
 //! - [`StateOverrideProvider`](crate::evm::override_stream::StateOverrideProvider) — a source that
 //!   maintains a *live* [`watch`](tokio::sync::watch) channel of snapshots per protocol (kept fresh
 //!   in the background, e.g. from a WebSocket).
+//! - [`FailurePolicy`](crate::evm::override_stream::FailurePolicy) — the provider-set reaction of a
+//!   pool to a simulation that fails while a snapshot's overrides are applied.
 //!
 //! Providers are registered per `protocol_system` (see
 //! [`ProtocolStreamBuilder::with_override_provider`](crate::evm::stream::ProtocolStreamBuilder::with_override_provider)).
@@ -28,12 +30,34 @@ use std::{collections::HashMap, sync::Arc};
 use alloy::primitives::{Address, U256};
 use tokio::sync::watch;
 
+/// What a pool should do when a simulation fails while a snapshot's overrides are applied.
+///
+/// Set by the provider, which knows whether its overrides are authoritative or an advisory
+/// enhancement of the indexed state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FailurePolicy {
+    /// Propagate the failure to the caller.
+    #[default]
+    Error,
+    /// Retry the failed simulation without any overrides, on the plain indexed state.
+    ///
+    /// Suits providers whose overrides are only intermittently applicable — e.g. Titan pAMM
+    /// snapshots, which target the pending block and can make a pair transiently unquotable
+    /// (oracle lane not yet re-stamped for that block) even though the indexed state simulates
+    /// fine.
+    FallbackToIndexedState,
+}
+
 /// Resolved per-block VM overrides for a single protocol at a point in time.
 ///
-/// `block_number` and `block_timestamp` are already resolved by the provider (e.g. Titan computes
-/// `block_timestamp` from lane timestamps) so this core stays protocol-agnostic. Either field may
-/// be `None`, in which case the pool's existing block environment is left intact.
+/// `block_number` and `block_timestamp` are already resolved by the provider (e.g. Titan derives
+/// `block_timestamp` from the frame's beacon slot) so this core stays protocol-agnostic. Either
+/// field may be `None`, in which case the pool's existing block environment is left intact.
+///
+/// The struct is `#[non_exhaustive]` so fields can be added without breaking downstream
+/// providers; construct it outside this crate by mutating a [`Default::default`] value.
 #[derive(Clone, Default, Debug)]
+#[non_exhaustive]
 pub struct OverrideSnapshot {
     /// The L1 block number these overrides apply to, if known.
     pub block_number: Option<u64>,
@@ -47,6 +71,8 @@ pub struct OverrideSnapshot {
     /// provider from its own freshness rules (e.g. Titan uses the quote timestamp plus one block
     /// time). `None` means the snapshot never expires — e.g. the empty initial snapshot.
     pub expires_at: Option<u64>,
+    /// How a pool should react when a simulation fails with these overrides applied.
+    pub failure_policy: FailurePolicy,
 }
 
 impl OverrideSnapshot {

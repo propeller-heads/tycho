@@ -14,14 +14,18 @@ Requires three env vars (can be set in `.claude/settings.local.json`):
 | `TYCHO_API_KEY` | Auth key (`sampletoken` works against local dev instances) |
 | `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation |
 
+Both the token loader and the protocol stream default to TLS (`https`/`wss`). Pass `--no-tls`
+(or set `TYCHO_NO_TLS=true`) when pointing at a local dev instance served over plain HTTP.
+
 ```bash
 cargo run -p tycho-integration-test -- \
   --chain ethereum \
-  --tycho-url ws://localhost:4242 \
+  --tycho-url 127.0.0.1:4242 \
+  --no-tls \
   --tvl-threshold 100
 ```
 
-Key optional flags: `--disable-onchain`, `--disable-rfq`, `--disable-execution`,
+Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-execution`,
 `--protocols uniswap_v2,curve`, `--max-blocks 100`, `--parallel-simulations 5`,
 `--always-test-components <id,...>`.
 

@@ -14,6 +14,7 @@ use tycho_common::{
 };
 
 use crate::{
+    client_metadata::serialize_client_metadata,
     deltas::DeltasClient,
     feed::{
         component_tracker::ComponentFilter, synchronizer::ProtocolStateSynchronizer, BlockHeader,
@@ -71,6 +72,7 @@ pub struct TychoStreamBuilder {
     compression: bool,
     partial_blocks: bool,
     max_messages: Option<usize>,
+    client_metadata: HashMap<String, String>,
 }
 
 impl TychoStreamBuilder {
@@ -102,6 +104,7 @@ impl TychoStreamBuilder {
             compression: true,
             partial_blocks: false,
             max_messages: None,
+            client_metadata: HashMap::new(),
         }
     }
 
@@ -189,6 +192,29 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Adds client-metadata entries sent to the server in the `X-Tycho-Client-Metadata` header.
+    ///
+    /// The metadata is opaque to tycho-client; consumers supply their own keys. Accepts any
+    /// iterator of key/value pairs and inserts each entry, keeping previously set metadata. An
+    /// empty map sends no header. Invalid keys/values and oversized metadata are dropped with a
+    /// warning at `build()` time, sending no header.
+    ///
+    /// Values are self-reported and may surface in the server's metrics and logs. Do not include
+    /// secrets or personally identifiable information.
+    pub fn add_client_metadata<I, K, V>(mut self, metadata: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.client_metadata.extend(
+            metadata
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into())),
+        );
+        self
+    }
+
     /// Disables TLS/SSL for the connection, using `http` and `ws` protocols.
     pub fn no_tls(mut self, no_tls: bool) -> Self {
         self.no_tls = no_tls;
@@ -256,6 +282,14 @@ impl TychoStreamBuilder {
             ));
         }
 
+        // Serialize client metadata once, before any network I/O. Metadata is best-effort
+        // telemetry, so invalid input is dropped with a warning rather than failing the stream.
+        let metadata_header =
+            serialize_client_metadata(&self.client_metadata).unwrap_or_else(|e| {
+                warn!("Ignoring invalid client metadata: {e}");
+                None
+            });
+
         // Attempt to read the authentication key from the environment variable if not provided
         let auth_key = self
             .auth_key
@@ -286,12 +320,14 @@ impl TychoStreamBuilder {
                 config.cooldown,
             ),
         }
-        .map_err(|e| StreamError::SetUpError(e.to_string()))?;
+        .map_err(|e| StreamError::SetUpError(e.to_string()))?
+        .with_client_metadata_header(metadata_header.clone());
         let rpc_client = HttpRPCClient::new(
             &tycho_rpc_url,
             HttpRPCClientOptions::new()
                 .with_auth_key(auth_key)
-                .with_compression(self.compression),
+                .with_compression(self.compression)
+                .with_client_metadata_header(metadata_header),
         )
         .map_err(|e| StreamError::SetUpError(e.to_string()))?;
         let ws_jh = ws_client
@@ -520,6 +556,27 @@ mod tests {
             .build()
             .await;
         assert!(receiver.is_err(), "Client should fail to build when no exchanges are registered.");
+    }
+
+    #[test]
+    fn test_add_client_metadata_accumulates() {
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum)
+            .add_client_metadata([("fynd_version", "0.57.0")])
+            .add_client_metadata([("preset", "best")]);
+        assert_eq!(
+            builder
+                .client_metadata
+                .get("fynd_version")
+                .map(String::as_str),
+            Some("0.57.0")
+        );
+        assert_eq!(
+            builder
+                .client_metadata
+                .get("preset")
+                .map(String::as_str),
+            Some("best")
+        );
     }
 
     #[ignore = "require tycho gateway"]

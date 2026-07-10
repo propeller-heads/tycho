@@ -167,6 +167,9 @@ impl BebopClient {
                 quote.validate(params)?;
 
                 let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
+                // The contract the calldata targets: either the Bebop settlement
+                // or the Bebop router.
+                quote_attributes.insert("tx_to".into(), quote.tx.to);
                 quote_attributes.insert("calldata".into(), quote.tx.data);
                 quote_attributes.insert(
                     "partial_fill_offset".into(),

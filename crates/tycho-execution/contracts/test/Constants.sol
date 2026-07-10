@@ -181,6 +181,9 @@ contract Constants is
     // Bebop Settlement
     address BEBOP_SETTLEMENT = 0xbbbbbBB520d69a9775E85b458C58c648259FAD5F;
 
+    // Bebop Router
+    address BEBOP_ROUTER = 0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A;
+
     // Hashflow Router
     address HASHFLOW_ROUTER = 0x55084eE0fEf03f14a305cd24286359A35D735151;
 

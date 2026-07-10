@@ -528,7 +528,7 @@ fn encode_oracle_update_args(
         biguint_decimal_to_u256(&slot.new_slot_value)?,
         AlloyBytes::from(slot.signature.to_vec()),
     )
-        .abi_encode()
+        .abi_encode_params()
         .into())
 }
 
@@ -813,7 +813,7 @@ mod tests {
         );
         assert_eq!(
             component.component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
-            MetricOracleUpdatePolicy::Always.as_attribute_value()
+            MetricOracleUpdatePolicy::RetryOnRevert.as_attribute_value()
         );
         assert_eq!(component.component.id, metadata.pool_address.to_string());
         assert!(component
@@ -917,5 +917,15 @@ mod tests {
 
         assert!(!args.starts_with(&[0x78, 0xce, 0x3a, 0xe1]));
         assert!(!args.is_empty());
+
+        // Must be params-encoded (no leading tuple offset word), matching Solidity's
+        // `abi.decode(oracleArgs, (address, uint256, uint256, bytes))`. Params encoding is
+        // 256 bytes (address, deadline, new_slot_value, bytes offset, bytes len, 65-byte sig
+        // padded to 96); the wrapped `abi_encode` form prepends a 0x20 offset word (288 bytes)
+        // and shifts every field, which reverts on-chain.
+        assert_eq!(args.len(), 256);
+        // First word is the feed creator address (left-padded), not an ABI offset.
+        assert!(args[0..12].iter().all(|b| *b == 0));
+        assert_eq!(&args[12..32], feed_creator.as_ref());
     }
 }

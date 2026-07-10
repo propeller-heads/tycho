@@ -970,6 +970,10 @@ fn test_single_encoding_strategy_bebop() {
                         .to_vec(),
                 ),
             ),
+            (
+                "tx_to".to_string(),
+                Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
+            ),
         ]),
     };
 
@@ -1047,6 +1051,10 @@ fn test_single_encoding_strategy_bebop_aggregate() {
                         .to_be_bytes()
                         .to_vec(),
                 ),
+            ),
+            (
+                "tx_to".to_string(),
+                Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
     };

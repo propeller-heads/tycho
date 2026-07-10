@@ -50,9 +50,11 @@ pub struct ProtocolStreamProcessor {
     tvl_buffer_ratio: f64,
     protocols: Option<Vec<String>>,
     partial_blocks: bool,
+    no_tls: bool,
 }
 
 impl ProtocolStreamProcessor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         tycho_url: String,
@@ -61,6 +63,7 @@ impl ProtocolStreamProcessor {
         tvl_buffer_ratio: f64,
         protocols: Option<Vec<String>>,
         partial_blocks: bool,
+        no_tls: bool,
     ) -> miette::Result<Self> {
         Ok(Self {
             chain,
@@ -70,6 +73,7 @@ impl ProtocolStreamProcessor {
             tvl_buffer_ratio,
             protocols,
             partial_blocks,
+            no_tls,
         })
     }
 
@@ -163,6 +167,7 @@ impl ProtocolStreamProcessor {
         let infinite_sync_retries = RetryConfiguration::constant(u64::MAX, Duration::from_secs(3));
         protocol_stream
             .auth_key(Some(self.tycho_api_key.clone()))
+            .no_tls(self.no_tls)
             .skip_state_decode_failures(true)
             .startup_timeout(Duration::from_secs(1000))
             .websocket_retry_config(&infinite_ws_retries)
@@ -196,6 +201,7 @@ impl ProtocolStreamProcessor {
                 "rocketpool".to_string(),
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
+                "vm:bopamm".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -362,6 +368,13 @@ impl ProtocolStreamProcessor {
             "vm:fermiswap" => {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:fermiswap",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "vm:bopamm" => {
+                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:bopamm",
                     tvl_filter.clone(),
                     None,
                 );

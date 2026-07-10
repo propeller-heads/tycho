@@ -206,7 +206,7 @@ contract TychoRouterTestSetup is
         curveExecutor = new CurveExecutor(ETH_ADDR, STETH_ADDR);
         maverickv2Executor = new MaverickV2Executor();
         balancerV3Executor = new BalancerV3Executor();
-        bebopExecutor = new BebopExecutor(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutor(BEBOP_SETTLEMENT, BEBOP_ROUTER);
         hashflowExecutor = new HashflowExecutor(HASHFLOW_ROUTER);
         fluidV1Executor = new FluidV1Executor(FLUIDV1_LIQUIDITY);
         slipstreamsExecutor = new SlipstreamsExecutor();

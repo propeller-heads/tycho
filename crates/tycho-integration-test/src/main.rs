@@ -85,6 +85,11 @@ struct Cli {
     #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
+    /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
+    /// dev instance (e.g. http://127.0.0.1:4242).
+    #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
+    no_tls: bool,
+
     /// Disable on-chain protocols
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
@@ -309,7 +314,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     info!(%cli.tycho_url, "Loading tokens...");
     let all_tokens = load_all_tokens(
         &cli.tycho_url,
-        false,
+        cli.no_tls,
         Some(cli.tycho_api_key.as_str()),
         true,
         chain,
@@ -344,6 +349,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.tvl_buffer_ratio,
             cli.protocols.clone(),
             cli.partial_blocks,
+            cli.no_tls,
         ) {
             protocol_handle = Some(
                 protocol_stream_processor

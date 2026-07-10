@@ -63,7 +63,7 @@ pub fn store_components(
             tx_pc
                 .components
                 .into_iter()
-                .for_each(|pc| store.set_if_not_exists(0, format!("pool:{0}", &pc.id), &pc))
+                .for_each(|pc| store.set_if_not_exists(0, format!("pool:{0}", pc.id), &pc))
         });
 }
 
@@ -107,7 +107,7 @@ pub fn map_relative_balances(
                 );
 
                 if store
-                    .get_last(format!("pool:{}", &component_id))
+                    .get_last(format!("pool:{}", component_id))
                     .is_some()
                 {
                     deltas.extend_from_slice(&[
@@ -132,7 +132,7 @@ pub fn map_relative_balances(
                 LiquidityAdded::match_and_decode(vault_log.log)
             {
                 let component_id = format!("0x{}", hex::encode(pool));
-                if let Some(component) = store.get_last(format!("pool:{}", &component_id)) {
+                if let Some(component) = store.get_last(format!("pool:{}", component_id)) {
                     if component.tokens.len() != amounts_added_raw.len() {
                         panic!(
                             "liquidity added to pool with different number of tokens than expected"
@@ -167,7 +167,7 @@ pub fn map_relative_balances(
                     component_id,
                     format!("pool:{}", &component_id)
                 );
-                if let Some(component) = store.get_last(format!("pool:{}", &component_id)) {
+                if let Some(component) = store.get_last(format!("pool:{}", component_id)) {
                     if component.tokens.len() != amounts_removed_raw.len() {
                         panic!(
                             "liquidity removed from pool with different number of tokens than expected"
@@ -232,7 +232,7 @@ pub fn map_protocol_changes(
                 let component_id = format!("0x{}", hex::encode(&pool));
                 let tx: Transaction = log.receipt.transaction.into();
                 if components_store
-                    .get_last(format!("pool:{}", &component_id))
+                    .get_last(format!("pool:{}", component_id))
                     .is_some()
                 {
                     let builder = transaction_changes

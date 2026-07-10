@@ -106,3 +106,5 @@ Angstrom requires querying their <a href="https://docs.angstrom.xyz/l1/core-mech
 
 * Set the `ANGSTROM_API_KEY` environment variable (request one from the Angstrom team directly)
 * Set `ANGSTROM_BLOCKS_IN_FUTURE` environment variable (if you want to override the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/constants.rs" target="_blank" rel="noopener noreferrer">default value</a> of 5 blocks). **Important trade-off**: The more blocks you fetch, the more calldata will be sent to the Tycho Router, making execution more gas expensive.
+
+If `ANGSTROM_API_KEY` is not set, `ProtocolStreamBuilder` excludes Angstrom pools from `uniswap_v4_hooks` by default (unless you pass your own filter function), since routes over these pools would fail at encoding without attestations.
