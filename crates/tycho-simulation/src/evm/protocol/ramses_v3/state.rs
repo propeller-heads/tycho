@@ -342,20 +342,35 @@ impl ProtocolSim for RamsesV3State {
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
             // sqrt_price_next. Direction determines which token is being swapped in vs out
-            let (amount_in, amount_out) = (
-                get_amount0_delta(
+            let (amount_in, amount_out) = if zero_for_one {
+                let amount0 = get_amount0_delta(
                     sqrt_price_next,
                     current_sqrt_price,
                     current_liquidity,
-                    zero_for_one,
-                )?,
-                get_amount1_delta(
+                    true,
+                )?;
+                let amount1 = get_amount1_delta(
                     sqrt_price_next,
                     current_sqrt_price,
                     current_liquidity,
-                    !zero_for_one,
-                )?,
-            );
+                    false,
+                )?;
+                (amount0, amount1)
+            } else {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                (amount1, amount0)
+            };
 
             // Accumulate total amounts for this tick range
             total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
