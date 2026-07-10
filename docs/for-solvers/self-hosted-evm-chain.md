@@ -43,7 +43,7 @@ Configure the stack through `docker/.env`. The compose file reads it for both th
 <tr><td><code>CHAINS</code></td><td>indexer</td><td>No</td><td><code>ethereum</code></td><td>Active chain to index. The indexer uses only the first value (multichain is not yet supported). Name a built-in chain, or a custom chain you declare in <code>chains.yaml</code> (see below).</td></tr>
 <tr><td><code>RETENTION_HORIZON</code></td><td>indexer</td><td>No</td><td><code>2000-01-01T00:00:00</code></td><td>Earliest version history the indexer keeps. Use a <strong>future</strong> date to keep no historical state (recommended) — see <a href="#retention-horizon">the note below</a>. The <code>2000-01-01</code> default keeps all history and fails a from-scratch historical backfill.</td></tr>
 <tr><td><code>EXTRACTORS_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/extractors.yaml</code></td><td>Path to the extractors config inside the container.</td></tr>
-<tr><td><code>CHAIN_CONFIG</code></td><td>indexer</td><td>No</td><td><code>/opt/tycho-indexer/chains.yaml</code></td><td>Path to the custom-chains config inside the container. Only needed to index a non-built-in chain.</td></tr>
+<tr><td><code>TYCHO_CHAINS_CONFIG</code></td><td>indexer + consumers</td><td>No</td><td><code>/opt/tycho-indexer/chains.yaml</code></td><td>Path to the custom-chains config. The indexer and every consumer (tycho-simulation, tycho-client, tycho-execution) read the same variable. Only needed for a non-built-in chain.</td></tr>
 <tr><td><code>SUBSTREAMS_API_TOKEN</code></td><td>indexer</td><td>No</td><td><code>readme</code></td><td>Auth token for a hosted Substreams endpoint; unused self-hosted.</td></tr>
 <tr><td><code>TRACE_RPC_URL</code></td><td>indexer</td><td>For DCI</td><td><code>readme</code> (placeholder)</td><td>Trace-capable RPC for dynamic contract indexing.</td></tr>
 <tr><td><code>OTLP_EXPORTER_ENDPOINT</code></td><td>indexer</td><td>No</td><td>empty (disabled)</td><td>OpenTelemetry collector. Set <code>http://lgtm:4317</code> with the <code>observability</code> profile.</td></tr>
@@ -109,7 +109,7 @@ extractors:
 
 ### Declaring a custom chain
 
-Built-in chains (`ethereum`, `base`, `unichain`, …) need no extra config. To index a chain Tycho does not know, define it in a separate `chains.yaml` file. Copy <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/chains.example.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/chains.example.yaml</code></a> to `crates/tycho-indexer/chains.yaml` and edit it — the compose file mounts it into the container at `/opt/tycho-indexer/chains.yaml`, and the indexer reads it via `CHAIN_CONFIG` (the `--chain-config` flag). Each extractor's `chain:` field and `CHAINS` resolve against these entries; the indexer fails fast at startup if an extractor references a chain that is neither built-in nor defined here.
+Built-in chains (`ethereum`, `base`, `unichain`, …) need no extra config. To index a chain Tycho does not know, define it in a separate `chains.yaml` file. Copy <a href="https://github.com/propeller-heads/tycho/blob/main/crates/tycho-indexer/chains.example.yaml" target="_blank" rel="noopener noreferrer"><code>crates/tycho-indexer/chains.example.yaml</code></a> to `crates/tycho-indexer/chains.yaml` and edit it — the compose file mounts it into the container at `/opt/tycho-indexer/chains.yaml`, and the indexer reads it via `TYCHO_CHAINS_CONFIG` (the `--chain-config` flag). Each extractor's `chain:` field and `CHAINS` resolve against these entries; the indexer fails fast at startup if an extractor references a chain that is neither built-in nor defined here.
 
 ```yaml
 chains:
@@ -220,13 +220,13 @@ Without `--profile substreams-endpoint`, the `substreams-endpoint` service never
 
 ## Consuming the custom chain
 
-The indexer serves your custom chain over RPC and WebSocket, but a consumer (tycho-simulation, tycho-client, tycho-execution) resolves a chain name against its own copy of the chain config. Point it at the same `chains.yaml` through the `TYCHO_CHAIN_CONFIG` environment variable:
+The indexer serves your custom chain over RPC and WebSocket, but a consumer (tycho-simulation, tycho-client, tycho-execution) resolves a chain name against its own copy of the chain config. Point it at the same `chains.yaml` through the `TYCHO_CHAINS_CONFIG` environment variable — the same variable the indexer uses:
 
 ```bash
-export TYCHO_CHAIN_CONFIG=crates/tycho-indexer/chains.yaml
+export TYCHO_CHAINS_CONFIG=crates/tycho-indexer/chains.yaml
 ```
 
-With the variable set, a chain name like `tempo` resolves to its full config on first use. Leave it unset and the consumer resolves only built-in chains and rejects the custom name. A `TYCHO_CHAIN_CONFIG` that points at a missing or malformed file fails loudly rather than silently falling back to built-in chains.
+With the variable set, a chain name like `tempo` resolves to its full config on first use. Leave it unset and the consumer resolves only built-in chains and rejects the custom name. When the variable points at a missing or malformed file, the stream builder rejects it at startup and returns a set-up error naming the config — the consumer never starts against a half-configured chain.
 
 ## Monitoring sync progress
 
