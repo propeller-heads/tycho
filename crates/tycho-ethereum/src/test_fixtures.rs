@@ -40,6 +40,13 @@ pub const ARB_USDC_HOLDER_ADDR: &str = "0xC6962004f452bE9203591991D15f6b388e09E8
 pub const ARB_WETH_HOLDER_ADDR: &str = "0xC6962004f452bE9203591991D15f6b388e09E8D0"; // USDC/WETH V3
 pub const ARB_ARB_HOLDER_ADDR: &str = "0x92c63d0e701CAAe670C9415d91C474F686298f00"; // ARB/ETH V3
 
+// BSC mainnet token addresses
+// Sell-only fee token: charges a fee when transferring to non-whitelisted addresses but not
+// when transferring to/from the LP pool itself.
+pub const BSC_SELL_FEE_TOKEN_STR: &str = "0x701add4311e85c1f9c1549319fe2c476bc8a1b8b";
+// Liquidity pair that holds the token.
+pub const BSC_SELL_FEE_TOKEN_HOLDER_STR: &str = "0x1831Bb2723CED46e1b6c08d2f3ae50b2Ab9427B9";
+
 // Common token addresses array
 pub const TOKEN_ADDRESSES: [&str; 5] = [BALANCER_VAULT_STR, STETH_STR, DAI_STR, WBTC_STR, USDC_STR];
 
@@ -74,6 +81,18 @@ pub static TOKEN_HOLDERS: LazyLock<HashMap<Address, (Bytes, Bytes)>> = LazyLock:
             ),
         ),
     ])
+});
+
+/// Lazily-initialized map of BSC mainnet token addresses to their known holders and balances.
+pub static BSC_TOKEN_HOLDERS: LazyLock<HashMap<Address, (Bytes, Bytes)>> = LazyLock::new(|| {
+    HashMap::from([(
+        Address::from_str(BSC_SELL_FEE_TOKEN_STR).unwrap(),
+        (
+            Bytes::from_str(BSC_SELL_FEE_TOKEN_HOLDER_STR).unwrap(),
+            // 200_000 raw units → amount = 100_000 = MIN_AMOUNT, safe for any decimal count.
+            Bytes::from_str("0x030d40").unwrap(),
+        ),
+    )])
 });
 
 /// Lazily-initialized map of Arbitrum mainnet token addresses to their known holders and balances.
@@ -176,6 +195,18 @@ impl TestFixture {
             Default::default(),
             Default::default(),
         );
+        Self { block, inner_rpc, url }
+    }
+
+    /// Creates a test fixture for BSC using `BSC_RPC_URL`.
+    pub fn new_bsc() -> Self {
+        let url = std::env::var("BSC_RPC_URL").expect("BSC_RPC_URL must be set for BSC tests");
+        let inner_rpc = ClientBuilder::default().http(
+            url.parse()
+                .expect("Invalid BSC_RPC_URL"),
+        );
+        let block =
+            Block::new(0, Chain::Bsc, Default::default(), Default::default(), Default::default());
         Self { block, inner_rpc, url }
     }
 }

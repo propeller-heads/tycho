@@ -12,29 +12,41 @@ interface IForwarder {
 }
 
 /// @title Token Analyzer
-/// @notice Injected at a token holder's address via eth_call state override. Simulates a full
-/// round-trip ERC20 transfer (holder -> settlement -> recipient) in a single call and reports
-/// balances, gas costs, and success flags. No on-chain deployment required.
-/// @dev The inbound transfer uses a low-level call rather than a typed interface so that tokens with
-/// non-standard transfer() implementations (e.g. USDT, which omits the bool return value) are
-/// handled correctly. balanceOf and approve are called via the typed interface since they are
-/// consistently implemented across tokens.
+/// @notice Injected at a token holder's address via eth_call state override. Performs a full
+/// sell-fee analysis in a single call using four transfer legs:
+///
+///   Leg 1 (buy):        holder → settlement           — detects buy fees
+///   Leg 2 (roundtrip):  settlement → holder           — detects fees even to whitelisted LP
+///   Leg 3 (retransfer): holder → settlement            — returns tokens for the sell test
+///   Leg 4 (sell):       settlement → recipient        — detects sell-only fees
+///
+/// If the roundtrip (legs 1-2) passes but the sell test (legs 3-4) fails, the token has a
+/// sell-only fee: it charges fees only when transferring to non-whitelisted addresses.
+///
+/// @dev Inbound transfers (legs 1 and 3) use low-level calls so that tokens with non-standard
+/// transfer() implementations (e.g. USDT, which omits the bool return value) are handled
+/// correctly. balanceOf and approve are called via the typed interface.
 contract Analyzer {
-    /// @notice Simulate ERC20 transfer in and out, measuring balances and gas at each step.
-    /// @param token   The ERC20 token to analyze.
-    /// @param amount  The amount to transfer in from this address (the holder).
-    /// @param settlement  Intermediary address (injected with Forwarder bytecode).
-    /// @param recipient   Final recipient of the outbound transfer.
-    /// @return transferInOk    Whether transfer(settlement, amount) succeeded.
-    /// @return transferOutOk   Whether forwardTransfer(token, recipient, received) succeeded.
-    /// @return approvalOk      Whether forwardApprove(token, recipient, MAX_UINT256) succeeded.
-    /// @return balanceBeforeIn Settlement balance before transfer in.
-    /// @return balanceAfterIn  Settlement balance after transfer in.
-    /// @return balanceAfterOut Settlement balance after transfer out.
-    /// @return recipientBefore Recipient balance before any transfer.
-    /// @return recipientAfter  Recipient balance after transfer out.
-    /// @return gasIn   Gas consumed by the inbound transfer (gasleft() delta).
-    /// @return gasOut  Gas consumed by the outbound transfer (gasleft() delta).
+    /// @notice Simulate a full ERC20 transfer analysis in four legs.
+    /// @param token        The ERC20 token to analyze.
+    /// @param amount       The amount to transfer in each buy leg.
+    /// @param settlement   Intermediary address (injected with Forwarder bytecode).
+    /// @param recipient    Final arbitrary recipient for the sell-only fee test.
+    /// @return transferInOk       Whether leg 1 (holder → settlement) succeeded.
+    /// @return roundtripOutOk     Whether leg 2 (settlement → holder) succeeded.
+    /// @return transferOutOk      Whether leg 4 (settlement → recipient) succeeded.
+    /// @return approvalOk         Whether forwardApprove(MAX_UINT256) succeeded.
+    /// @return balanceBeforeIn    Settlement balance before leg 1.
+    /// @return balanceAfterIn     Settlement balance after leg 1.
+    /// @return balanceAfterRoundtrip  Settlement balance after leg 2.
+    /// @return holderBefore       Holder balance before leg 1.
+    /// @return holderAfter        Holder balance after leg 2.
+    /// @return balanceAfterOut    Settlement balance after leg 4.
+    /// @return recipientBefore    Recipient balance before leg 4.
+    /// @return recipientAfter     Recipient balance after leg 4.
+    /// @return gasIn              Gas consumed by leg 1.
+    /// @return roundtripGasOut    Gas consumed by leg 2.
+    /// @return gasOut             Gas consumed by leg 4.
     function analyze(
         address token,
         uint256 amount,
@@ -42,25 +54,28 @@ contract Analyzer {
         address recipient
     ) external returns (
         bool transferInOk,
+        bool roundtripOutOk,
         bool transferOutOk,
         bool approvalOk,
         uint256 balanceBeforeIn,
         uint256 balanceAfterIn,
+        uint256 balanceAfterRoundtrip,
+        uint256 holderBefore,
+        uint256 holderAfter,
         uint256 balanceAfterOut,
         uint256 recipientBefore,
         uint256 recipientAfter,
         uint256 gasIn,
+        uint256 roundtripGasOut,
         uint256 gasOut
     ) {
         IERC20 erc20 = IERC20(token);
 
-        // Read pre-transfer balances for both the settlement and the final recipient.
         balanceBeforeIn = erc20.balanceOf(settlement);
+        holderBefore = erc20.balanceOf(address(this));
         recipientBefore = erc20.balanceOf(recipient);
 
-        // Transfer from holder (this address) to settlement using a low-level call so that tokens
-        // which omit the bool return value (e.g. USDT) do not cause a revert during ABI decoding.
-        // Success condition: call did not revert AND, if return data is present, it decodes true.
+        // === Leg 1: Buy — holder → settlement ===
         uint256 g1 = gasleft();
         {
             (bool ok, bytes memory data) = token.call(
@@ -71,41 +86,69 @@ contract Analyzer {
         gasIn = g1 - gasleft();
 
         if (!transferInOk) {
-            return (false, false, false, balanceBeforeIn, 0, 0, recipientBefore, 0, gasIn, 0);
+            return (false, false, false, false, balanceBeforeIn, 0, 0, holderBefore, 0, 0, recipientBefore, 0, gasIn, 0, 0);
         }
 
         balanceAfterIn = erc20.balanceOf(settlement);
 
-        // Guard: a token that returns true but reduces the settlement balance is pathological.
-        // Without this check Solidity 0.8 checked arithmetic would revert the entire eth_call,
-        // making the result undecodable. Instead we surface it as a transfer failure.
+        // Guard: a token that returns true but reduces settlement balance is pathological.
         if (balanceAfterIn < balanceBeforeIn) {
-            return (false, false, false, balanceBeforeIn, balanceAfterIn, 0, recipientBefore, 0, gasIn, 0);
+            return (false, false, false, false, balanceBeforeIn, balanceAfterIn, 0, holderBefore, 0, 0, recipientBefore, 0, gasIn, 0, 0);
         }
 
-        // received may be less than amount for fee-on-transfer tokens.
         uint256 received = balanceAfterIn - balanceBeforeIn;
 
-        // Transfer out from settlement to recipient via the injected Forwarder.
+        // === Leg 2: Roundtrip — settlement → holder ===
         uint256 g2 = gasleft();
-        try IForwarder(settlement).forwardTransfer(token, recipient, received) returns (bool success) {
-            transferOutOk = success;
+        try IForwarder(settlement).forwardTransfer(token, address(this), received) returns (bool s) {
+            roundtripOutOk = s;
+        } catch {
+            roundtripOutOk = false;
+        }
+        roundtripGasOut = g2 - gasleft();
+
+        holderAfter = erc20.balanceOf(address(this));
+        balanceAfterRoundtrip = erc20.balanceOf(settlement);
+
+        if (!roundtripOutOk) {
+            return (true, false, false, false, balanceBeforeIn, balanceAfterIn, balanceAfterRoundtrip, holderBefore, holderAfter, 0, recipientBefore, 0, gasIn, roundtripGasOut, 0);
+        }
+
+        // === Leg 3: Retransfer — holder → settlement (returns the received tokens for the sell test) ===
+        // holderAfter = holderBefore - amount + roundtripReceived
+        // ⟹ roundtripReceived = holderAfter + amount - holderBefore
+        // Safe: holderAfter >= holderBefore - amount (holder only gains from roundtrip),
+        // so holderAfter + amount >= holderBefore (no underflow).
+        uint256 roundtripReceived = holderAfter + amount - holderBefore;
+        {
+            (bool ok, bytes memory data) = token.call(
+                abi.encodeWithSelector(0xa9059cbb, settlement, roundtripReceived)
+            );
+            // Intentionally not checked: if this fails, leg 4 will also fail (settlement
+            // has no tokens), and transferOutOk will correctly capture the outcome.
+            (ok, data);
+        }
+
+        // === Leg 4: Sell — settlement → recipient (arbitrary) ===
+        uint256 g3 = gasleft();
+        try IForwarder(settlement).forwardTransfer(token, recipient, roundtripReceived) returns (bool s) {
+            transferOutOk = s;
         } catch {
             transferOutOk = false;
         }
-        gasOut = g2 - gasleft();
+        gasOut = g3 - gasleft();
 
         if (!transferOutOk) {
             balanceAfterOut = erc20.balanceOf(settlement);
-            return (true, false, false, balanceBeforeIn, balanceAfterIn, balanceAfterOut, recipientBefore, 0, gasIn, gasOut);
+            return (true, true, false, false, balanceBeforeIn, balanceAfterIn, balanceAfterRoundtrip, holderBefore, holderAfter, balanceAfterOut, recipientBefore, 0, gasIn, roundtripGasOut, gasOut);
         }
 
         balanceAfterOut = erc20.balanceOf(settlement);
         recipientAfter = erc20.balanceOf(recipient);
 
         // Test that settlement can approve (some tokens block approvals from contracts).
-        try IForwarder(settlement).forwardApprove(token, recipient, type(uint256).max) returns (bool success) {
-            approvalOk = success;
+        try IForwarder(settlement).forwardApprove(token, recipient, type(uint256).max) returns (bool s) {
+            approvalOk = s;
         } catch {
             approvalOk = false;
         }
