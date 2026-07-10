@@ -13,10 +13,14 @@ on:
         required: false
         default: ''
         type: string
-  pull_request_target:
+  pull_request:
     paths:
       - 'protocols/substreams/**'
       - 'protocols/testing/**'
+    # SECURITY: Uses pull_request (not pull_request_target) so fork PRs run with
+    # a read-only GITHUB_TOKEN and no secrets. RPC/API secrets are only available
+    # via workflow_dispatch. Fork PR integration tests that require secrets will
+    # fail gracefully or skip.
 
 permissions:
   contents: read
@@ -184,10 +188,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-changes]
     if: needs.detect-changes.outputs.target-protocols != ''
-    # Fork PRs run unreviewed code with secrets in scope; gate them behind a
-    # required-reviewer environment. Internal-branch PRs (trusted collaborators)
-    # resolve to no environment and run without approval.
-    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
+    # With pull_request trigger, fork PRs have no secrets. Docker images are
+    # built from PR-supplied Dockerfiles — safe because there are no secrets
+    # to exfiltrate. On workflow_dispatch, secrets are available.
     outputs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
@@ -249,8 +252,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-changes, build-images]
     if: needs.detect-changes.outputs.target-protocols != ''
-    # See build-images: gate fork PRs behind required-reviewer approval.
-    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
+    # With pull_request trigger, fork PRs have no secrets — RPC/API env vars
+    # will be empty. Protocol tests requiring RPC will fail on fork PRs. On
+    # workflow_dispatch, secrets are available.
     env:
       RPC_URL: ${{ secrets.RPC_URL_ARCHIVE }}
       BASE_RPC_URL: ${{ secrets.BASE_RPC_URL_ARCHIVE }}

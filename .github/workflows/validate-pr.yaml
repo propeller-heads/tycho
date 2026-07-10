@@ -10,6 +10,13 @@ on:
       - edited
       - synchronize
 
+# SECURITY: Explicit read-only permissions. This workflow runs on
+# pull_request_target (needs base-branch secrets for App token), but the
+# GITHUB_TOKEN itself only needs read access — the App token handles PR
+# validation via the reusable workflow.
+permissions:
+  contents: read
+
 jobs:
   validate-pr:
     uses: propeller-heads/ci-cd-templates/.github/workflows/validate-pr.yaml@main

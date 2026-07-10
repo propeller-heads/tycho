@@ -1,9 +1,11 @@
 name: Rust CI
 
 on:
-  pull_request_target:
-    # This job needs RPC secrets, so fork PRs run here after maintainer approval.
-    # The regular Rust CI workflow stays on pull_request for non-secret checks.
+  pull_request:
+    # SECURITY: Uses pull_request (not pull_request_target) so fork PRs run with
+    # a read-only GITHUB_TOKEN and no secrets. RPC secrets (ETH_RPC_URL) are only
+    # available on push (main) and workflow_dispatch. Fork PR EVM/fork tests that
+    # require RPC will fail gracefully or skip — non-RPC tests still pass.
   push:
     branches: [main]
     paths:
@@ -49,12 +51,12 @@ jobs:
   test-evm:
     name: EVM tests (requires RPC)
     needs: [changes]
-    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request_target'
+    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Runs fork code (cargo build/test) with RPC secrets in scope; gate fork PRs
-    # behind required-reviewer approval. Internal-branch PRs run without approval.
-    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
+    # With pull_request trigger, fork PRs have no secrets — ETH_RPC_URL will
+    # be empty. EVM/fork tests requiring RPC will fail on fork PRs. On push
+    # (main) and workflow_dispatch, secrets are available.
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -88,7 +90,7 @@ jobs:
   test-evm-skip:
     name: EVM tests (requires RPC)
     needs: [changes]
-    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request_target'
+    if: needs.changes.outputs.rust != 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping EVM tests"
