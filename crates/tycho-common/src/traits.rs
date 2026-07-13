@@ -233,10 +233,12 @@ pub trait BalanceSlotDetector: Send + Sync {
     /// Detect balance storage slots for multiple tokens from a single holder.
     /// Useful to allow overriding balances.
     ///
+    /// No block parameter is taken: a token's storage layout is fixed, so the slot location does
+    /// not depend on chain state at any particular block.
+    ///
     /// # Arguments
     /// * `tokens` - Slice of ERC20 token addresses.
     /// * `holder` - Address that holds the tokens (e.g., pool manager)
-    /// * `block_hash` - Block at which to detect slots
     ///
     /// # Returns
     /// HashMap mapping Token -> Result containing (contract_address -> storage_slot) or error.
@@ -245,7 +247,6 @@ pub trait BalanceSlotDetector: Send + Sync {
         &self,
         tokens: &[Address],
         holder: Address,
-        block_hash: BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), Self::Error>>;
 }
 
@@ -258,11 +259,13 @@ pub trait AllowanceSlotDetector: Send + Sync {
     /// Detect allowance storage slots for multiple tokens for owner-spender pairs.
     /// Useful to allow overriding allowances in simulations.
     ///
+    /// No block parameter is taken: a token's storage layout is fixed, so the slot location does
+    /// not depend on chain state at any particular block.
+    ///
     /// # Arguments
     /// * `tokens` - Slice of ERC20 token addresses.
     /// * `owner` - Address that owns the tokens
     /// * `spender` - Address that is allowed to spend the tokens
-    /// * `block_hash` - Block at which to detect slots
     ///
     /// # Returns
     /// HashMap mapping Token -> Result containing (contract_address -> storage_slot) or error.
@@ -272,7 +275,6 @@ pub trait AllowanceSlotDetector: Send + Sync {
         tokens: &[Address],
         owner: Address,
         spender: Address,
-        block_hash: BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), Self::Error>>;
 }
 
