@@ -10,7 +10,7 @@ use crate::{
         TransactionProtocolComponents,
     },
 };
-use anyhow::{Ok, Result};
+use anyhow::{anyhow, Ok, Result};
 use substreams::{
     prelude::{BigInt, StoreGetString},
     store::{StoreGet, StoreGetProto},
@@ -116,38 +116,47 @@ pub fn map_components_with_balances(
                 let pool_address_hex = hex::encode(&pool_address_topic);
                 let pool_key = format!("Pool:0x{}", pool_address_hex);
 
-                let bind_data = match binds.get_first(&pool_address_hex) {
+                let bind_data = match binds.get_at(log.ordinal, &pool_address_hex) {
                     Some(data) => data,
                     None => continue,
                 };
 
-                let parsed_binds = match parse_binds(&bind_data) {
-                    Some(binds) if !binds.is_empty() => binds,
-                    _ => continue,
+                let parsed_binds = parse_binds(&bind_data)?;
+                if parsed_binds.is_empty() {
+                    continue;
+                }
+
+                let Some(pool) = store.get_at(log.ordinal, &pool_key) else {
+                    return Err(anyhow!(
+                        "CowAMM pool {} is missing from store at block {}, tx {}",
+                        pool_key,
+                        block.number,
+                        tx_hash.to_hex()
+                    ));
                 };
 
                 for bind in parsed_binds.iter() {
-                    //HACK - we'll make the txn hash of the balance delta to be the tx hash of the 
+                    //HACK - we'll make the txn hash of the balance delta to be the tx hash of the
                     //pool creation, also the index too, so that it gets emitted in the same transaction
-                    //and not as txns from previous block (Block N) emitted in Block N + X... the decision 
+                    //and not as txns from previous block (Block N) emitted in Block N + X... the decision
                     // to come to this was deliberated and this was the conclusion:
 
                     //we assign the index and the hash of the current balance delta to make it seem
                     //like the component change actually happened in the same transaction in the same
-                    // block, and not from a previous txn from a previous block, doing this before caused 
-                    //write conflicts during syncing with the tycho indexer 
+                    // block, and not from a previous txn from a previous block, doing this before caused
+                    //write conflicts during syncing with the tycho indexer
 
                     //always emit transaction together with the block that produced them, just emit old
-                    // component balances together with the component creation in the same transaction 
-                    //(it’s not 100% accurate but from a Tycho perspective it doesn’t break anything 
-                    // so it’s acceptable) 
+                    // component balances together with the component creation in the same transaction
+                    //(it’s not 100% accurate but from a Tycho perspective it doesn’t break anything
+                    // so it’s acceptable)
                     let bind_tx = bind.tx.as_ref().unwrap();
                     let delta = BalanceDelta {
                         ord: bind.ordinal,
                         tx: Some(Transaction {
                             from: bind_tx.from.clone(),
                             to: bind_tx.to.clone(),
-                            hash: tx_hash.clone(), //since the binds happen 
+                            hash: tx_hash.clone(), //since the binds happen
                             index: tx_index as u64,
                         }),
                         token: bind.token.clone(),
@@ -161,9 +170,6 @@ pub fn map_components_with_balances(
                     };
                     tx_deltas.push(delta);
                 }
-                let pool = store
-                    .get_last(pool_key)
-                    .expect("failed to get pool from store");
                 // Create the component
                 if let Some(component) = create_component(pool.clone()) {
                     tx_components.push(component);

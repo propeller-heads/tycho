@@ -55,6 +55,8 @@ pub struct CowPoolBind {
     /// ordinal of the event the bind was recorded in the block
     #[prost(uint64, tag="6")]
     pub ordinal: u64,
+    #[prost(enumeration="BindingChangeType", tag="7")]
+    pub change_type: i32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -71,12 +73,38 @@ pub struct CowPoolCreation {
     pub lp_token: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes="vec", tag="3")]
     pub created_tx_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag="4")]
+    pub ordinal: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CowPoolCreations {
     #[prost(message, repeated, tag="1")]
     pub pools: ::prost::alloc::vec::Vec<CowPoolCreation>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BindingChangeType {
+    Unspecified = 0,
+    Bind = 1,
+    Unbind = 2,
+}
+impl BindingChangeType {
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            BindingChangeType::Unspecified => "BINDING_CHANGE_TYPE_UNSPECIFIED",
+            BindingChangeType::Bind => "BINDING_CHANGE_TYPE_BIND",
+            BindingChangeType::Unbind => "BINDING_CHANGE_TYPE_UNBIND",
+        }
+    }
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BINDING_CHANGE_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "BINDING_CHANGE_TYPE_BIND" => Some(Self::Bind),
+            "BINDING_CHANGE_TYPE_UNBIND" => Some(Self::Unbind),
+            _ => None,
+        }
+    }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

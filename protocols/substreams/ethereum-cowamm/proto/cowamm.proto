@@ -35,6 +35,13 @@ message CowPoolBind {
   Transaction tx = 5;
   //ordinal of the event the bind was recorded in the block
   uint64 ordinal = 6;
+  BindingChangeType change_type = 7;
+}
+
+enum BindingChangeType {
+  BINDING_CHANGE_TYPE_UNSPECIFIED = 0;
+  BINDING_CHANGE_TYPE_BIND = 1;
+  BINDING_CHANGE_TYPE_UNBIND = 2;
 }
 
 message CowPoolBinds {
@@ -45,6 +52,7 @@ message CowPoolCreation {
   bytes address = 1;
   bytes lp_token = 2;
   bytes created_tx_hash = 3;
+  uint64 ordinal = 4;
 }
 
 message CowPoolCreations {
@@ -125,5 +133,3 @@ message BlockPoolChanges {
   
   BlockBalanceDeltas block_balance_deltas = 2;
 }
-
-

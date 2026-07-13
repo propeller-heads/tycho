@@ -34,6 +34,7 @@ pub fn map_cowpool_creations(params: String, block: Block) -> Result<CowPoolCrea
                 address: address.clone(),
                 lp_token: address.clone(), //address of lptoken is same as the pool address
                 created_tx_hash: tx_hash,
+                ordinal: log.ordinal(),
             })
         })
         .collect::<Vec<CowPoolCreation>>();
