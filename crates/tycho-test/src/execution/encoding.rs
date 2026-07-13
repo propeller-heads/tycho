@@ -245,12 +245,26 @@ pub(crate) async fn detect_token_slots(
     for token_address in &erc20_tokens {
         let balance_slot_data = match balance_results.get(token_address) {
             Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(_)) | None => continue, // Skip tokens with detection failures
+            Some(Err(e)) => {
+                tracing::warn!(token=%token_address, error=?e, "Balance slot detection failed");
+                continue;
+            }
+            None => {
+                tracing::warn!(token=%token_address, "Balance slot detection returned no result");
+                continue;
+            }
         };
 
         let allowance_slot_data = match allowance_results.get(token_address) {
             Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(_)) | None => continue, // Skip tokens with detection failures
+            Some(Err(e)) => {
+                tracing::warn!(token=%token_address, error=?e, "Allowance slot detection failed");
+                continue;
+            }
+            None => {
+                tracing::warn!(token=%token_address, "Allowance slot detection returned no result");
+                continue;
+            }
         };
 
         token_slots.insert(
