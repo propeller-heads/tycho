@@ -10,47 +10,30 @@ jobs:
     uses: ./.github/workflows/ci-rust.yaml
     secrets: inherit
 
-  check-release:
-    uses: propeller-heads/ci-cd-templates/.github/workflows/release-v2.yaml@main
-    with:
-      args: --dry-run --no-ci
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-      id-token: write
-    secrets:
-      app_id: ${{ secrets.APP_ID }}
-      app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
-
+  # Opens/updates a release PR on a normal push; on merge, creates a single bare tag +
+  # GitHub Release (which triggers release.yaml to publish crates + upload binaries).
+  # Never commits to main. Auto-detects rust -> release-plz.
   release:
-    needs:
-      - ci
-      - check-release
-    if: needs.check-release.outputs.verify_release_version != ''
-    uses: propeller-heads/ci-cd-templates/.github/workflows/release-v2.yaml@main
+    uses: propeller-heads/ci-cd-templates/.github/workflows/release-v3.yaml@main
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-      id-token: write
+      contents: read
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
 
-  # ── tycho-indexer: build image and promote to dev ─────────────────────────
+  # ── tycho-indexer: build image and promote to dev (only on an actual release) ─────────
   build-and-push-tycho-indexer:
-    needs: release
+    needs: [ci, release]
+    if: needs.release.outputs.releases_created == 'true'
     uses: propeller-heads/ci-cd-templates/.github/workflows/build-and-push-docker-image.yaml@main
     permissions:
       id-token: write
       contents: read
     with:
-      image_tag: ${{ needs.release.outputs.next_release_version }}
+      image_tag: ${{ needs.release.outputs.version }}
       image_name: tycho-indexer
       dockerfile: docker/tycho-indexer.Dockerfile
       build_args: CARGO_PROFILE=profiling # Use profiling profile for heap profiling with jeprof/pprof. The cost is a bigger binary, no performance penalty.
-      # kaniko_verbosity: debug
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -60,29 +43,29 @@ jobs:
       domain_owner: ${{ secrets.DOMAIN_OWNER }}
 
   promote-tycho-indexer-to-dev:
-    needs:
-      - release
-      - build-and-push-tycho-indexer
+    needs: [release, build-and-push-tycho-indexer]
+    if: needs.release.outputs.releases_created == 'true'
     uses: propeller-heads/ci-cd-templates/.github/workflows/promote-to-dev.yaml@main
     permissions:
       id-token: write
       contents: read
     with:
-      image_tag: ${{ needs.release.outputs.next_release_version }}
+      image_tag: ${{ needs.release.outputs.version }}
       image_name: tycho-indexer
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
 
-  # ── tycho-integration-test: build image and promote to dev ────────────────
+  # ── tycho-integration-test: build image and promote to dev ────────────────────────────
   build-and-push-tycho-integration-test:
-    needs: release
+    needs: [ci, release]
+    if: needs.release.outputs.releases_created == 'true'
     uses: propeller-heads/ci-cd-templates/.github/workflows/build-and-push-docker-image.yaml@main
     permissions:
       id-token: write
       contents: read
     with:
-      image_tag: ${{ needs.release.outputs.next_release_version }}
+      image_tag: ${{ needs.release.outputs.version }}
       image_name: tycho-integration-test
       dockerfile: docker/tycho-integration-test.Dockerfile
     secrets:
@@ -94,15 +77,14 @@ jobs:
       domain_owner: ${{ secrets.DOMAIN_OWNER }}
 
   promote-tycho-integration-test-to-dev:
-    needs:
-      - release
-      - build-and-push-tycho-integration-test
+    needs: [release, build-and-push-tycho-integration-test]
+    if: needs.release.outputs.releases_created == 'true'
     uses: propeller-heads/ci-cd-templates/.github/workflows/promote-to-dev.yaml@main
     permissions:
       id-token: write
       contents: read
     with:
-      image_tag: ${{ needs.release.outputs.next_release_version }}
+      image_tag: ${{ needs.release.outputs.version }}
       image_name: tycho-integration-test
     secrets:
       app_id: ${{ secrets.APP_ID }}

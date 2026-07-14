@@ -1,0 +1,17 @@
+# tycho is a unified-version Cargo workspace. release-plz maintains a release PR (bumps the
+# shared workspace version + Cargo.lock + CHANGELOG) and, on merge, creates a single tag +
+# GitHub Release. Crate publishing (dependency-ordered) and binary upload stay in
+# release.yaml (triggered by the release), so release-plz does not publish here.
+
+[workspace]
+git_tag_enable = false      # one tag for the whole workspace (enabled on `tycho` below)
+git_release_enable = false
+publish = false             # crates are published by release.yaml on the release event
+semver_check = false        # keep the release-pr job to metadata/lockfile (no build)
+pr_labels = ["release"]
+
+[[package]]
+name = "tycho"
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "{{ version }}"  # bare tag, matching history (e.g. 0.335.0)
