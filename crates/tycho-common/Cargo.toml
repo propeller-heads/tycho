@@ -22,6 +22,7 @@ thiserror.workspace = true
 hex.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9.32"
 strum.workspace = true
 strum_macros.workspace = true
 utoipa.workspace = true
@@ -35,6 +36,7 @@ bytes = "1.5.0"
 mockall = { workspace = true, optional = true }
 num-bigint = "0.4"
 deepsize.workspace = true # perf: make optional, as used only by the indexer for memory profiling
+arrayvec = { version = "0.7", features = ["serde"] }
 itertools = "0.10.5"
 uuid.workspace = true
 

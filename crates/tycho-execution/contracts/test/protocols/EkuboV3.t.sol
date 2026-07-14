@@ -3,10 +3,31 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/EkuboV3Executor.sol";
-import {ILocker} from "@ekubo-v3/interfaces/IFlashAccountant.sol";
+import {
+    IFlashAccountant,
+    ILocker
+} from "@ekubo-v3/interfaces/IFlashAccountant.sol";
 import {Constants} from "../Constants.sol";
 import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
+import {LibCall} from "@solady/utils/LibCall.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {createConcentratedPoolConfig} from "@ekubo-v3/types/poolConfig.sol";
+import {createPositionId, PositionId} from "@ekubo-v3/types/positionId.sol";
+import {
+    SignedSwapMeta,
+    createSignedSwapMeta
+} from "@ekubo-v3/types/signedSwapMeta.sol";
+import {ControllerAddress} from "@ekubo-v3/types/controllerAddress.sol";
+import {
+    ISignedExclusiveSwap
+} from "@ekubo-v3/interfaces/extensions/ISignedExclusiveSwap.sol";
+import {
+    SignedExclusiveSwapLib
+} from "@ekubo-v3/libraries/SignedExclusiveSwapLib.sol";
+// Imported so Forge compiles the artifact for deployCodeTo.
+import {
+    SignedExclusiveSwap
+} from "@ekubo-v3/extensions/SignedExclusiveSwap.sol";
 
 // Handles callbacks directly and receives the native token directly
 contract EkuboV3ExecutorStandalone is EkuboV3Executor, ILocker {
@@ -64,8 +85,11 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
 
     modifier setUpFork(uint256 blockNumber) {
         vm.createSelectFork(vm.rpcUrl("mainnet"), blockNumber);
-        // Forks always use the default hardfork https://github.com/foundry-rs/foundry/issues/13040
-        // vm.setEvmVersion not exposed in forge-std 1.9.5 — use low-level cheatcode call
+        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
+        // Forks use the chain's hardfork, not foundry.toml's evm_version.
+        // The current stable (Dec 2024) predates Fusaka (Dec 2025),
+        // so Osaka opcodes aren't enabled for post-Fusaka blocks.
+        // See: https://github.com/foundry-rs/foundry/issues/13040
         address(vm)
             .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
 
@@ -195,6 +219,207 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
     }
 }
 
+/// Adds liquidity to an Ekubo V3 pool via Core flash accounting.
+/// Tokens must be held by this contract before calling `provide`.
+contract LiquidityHelper {
+    function provide(
+        PoolKey memory poolKey,
+        int32 tickLower,
+        int32 tickUpper,
+        int128 liquidity
+    ) external {
+        // Start payment tracking before lock.
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.startPayments.selector, poolKey.token0
+            )
+        );
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.startPayments.selector, poolKey.token1
+            )
+        );
+
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodePacked(
+                IFlashAccountant.lock.selector,
+                abi.encode(poolKey, tickLower, tickUpper, liquidity)
+            )
+        );
+    }
+
+    function locked_6416899205(
+        uint256 /* id */
+    )
+        external
+    {
+        (
+            PoolKey memory poolKey,
+            int32 tickLower,
+            int32 tickUpper,
+            int128 liquidity
+        ) = abi.decode(msg.data[36:], (PoolKey, int32, int32, int128));
+
+        PositionId posId = createPositionId(bytes24(0), tickLower, tickUpper);
+        PoolBalanceUpdate bu = CORE.updatePosition(poolKey, posId, liquidity);
+
+        // Transfer exactly the required amounts to Core.
+        if (bu.delta0() > 0) {
+            SafeTransferLib.safeTransfer(
+                poolKey.token0, CORE_ADDRESS, uint128(bu.delta0())
+            );
+        }
+        if (bu.delta1() > 0) {
+            SafeTransferLib.safeTransfer(
+                poolKey.token1, CORE_ADDRESS, uint128(bu.delta1())
+            );
+        }
+
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.completePayments.selector, poolKey.token0
+            )
+        );
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.completePayments.selector, poolKey.token1
+            )
+        );
+    }
+}
+
+contract EkuboV3SignedSwapTest is Constants, TestUtils {
+    using SignedExclusiveSwapLib for ISignedExclusiveSwap;
+
+    EkuboV3ExecutorStandalone immutable executor =
+        new EkuboV3ExecutorStandalone();
+
+    LiquidityHelper immutable liquidityHelper = new LiquidityHelper();
+
+    IERC20 USDC = IERC20(USDC_ADDR);
+    IERC20 USDT = IERC20(USDT_ADDR);
+
+    // Controller PK whose vm.addr() has high bit clear (first
+    // nibble 0-7) so SignedExclusiveSwap treats it as an EOA.
+    uint256 constant CONTROLLER_PK = 0xBEEF;
+    address constant SIGNED_SWAP_ADMIN = address(0xAD);
+
+    constructor() {
+        vm.makePersistent(address(executor));
+        vm.makePersistent(address(liquidityHelper));
+    }
+
+    modifier setUpFork(uint256 blockNumber) {
+        vm.createSelectFork(vm.rpcUrl("mainnet"), blockNumber);
+        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
+        address(vm)
+            .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
+        _;
+    }
+
+    function testSignedExclusiveSwap() public setUpFork(24218590) {
+        // --- 1. Deploy SignedExclusiveSwap extension ---
+        deployCodeTo(
+            "SignedExclusiveSwap.sol",
+            abi.encode(CORE, SIGNED_SWAP_ADMIN),
+            SIGNED_EXCLUSIVE_SWAP_ADDRESS
+        );
+        ISignedExclusiveSwap ext =
+            ISignedExclusiveSwap(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+
+        // --- 2. Initialize a zero-fee pool ---
+        // USDC < USDT, so token0 = USDC, token1 = USDT.
+        PoolConfig poolConfig = createConcentratedPoolConfig({
+            _fee: 0,
+            _tickSpacing: 100,
+            _extension: SIGNED_EXCLUSIVE_SWAP_ADDRESS
+        });
+        PoolKey memory poolKey =
+            PoolKey({token0: USDC_ADDR, token1: USDT_ADDR, config: poolConfig});
+
+        address controller = vm.addr(CONTROLLER_PK);
+        vm.prank(SIGNED_SWAP_ADMIN);
+        ext.initializePool(
+            poolKey,
+            0, // tick = 0 → ~1:1 price
+            ControllerAddress.wrap(controller)
+        );
+
+        // --- 3. Add liquidity ---
+        uint256 amount0 = 10_000_000_000; // 10k USDC
+        uint256 amount1 = 10_000_000_000; // 10k USDT
+        deal(USDC_ADDR, address(liquidityHelper), amount0);
+        deal(USDT_ADDR, address(liquidityHelper), amount1);
+        liquidityHelper.provide(
+            poolKey,
+            -1000, // tickLower
+            1000, // tickUpper
+            1_000_000_000 // liquidity
+        );
+
+        // --- 4. Prepare signed swap ---
+        uint256 amountIn = 100_000; // 0.1 USDC
+        deal(USDC_ADDR, address(executor), amountIn);
+
+        uint256 usdcBefore = USDC.balanceOf(address(executor));
+        uint256 usdtBefore = USDT.balanceOf(address(executor));
+
+        // Build SignedSwapMeta: no authorized locker, 1h
+        // deadline, zero fee, nonce 0
+        SignedSwapMeta meta = createSignedSwapMeta({
+            _authorizedLocker: address(0),
+            _deadline: uint32(block.timestamp + 1 hours),
+            _fee: 0,
+            _nonce: 0
+        });
+
+        // Minimum balance update: accept any output
+        PoolBalanceUpdate minBU = PoolBalanceUpdate.wrap(
+            bytes32(
+                0x8000000000000000000000000000000080000000000000000000000000000000
+            )
+        );
+
+        // Sign with controller key
+        bytes32 digest =
+            ext.hashSignedSwapPayload(poolKey.toPoolId(), meta, minBU);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(CONTROLLER_PK, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // --- 5. Build hop data and execute ---
+        // Wire: tokenIn(20) | tokenOut(20) | poolConfig(32) |
+        //   meta(32) | minBU(32) | sigLen(2) | sig(N)
+        bytes memory data = abi.encodePacked(
+            USDC_ADDR,
+            USDT_ADDR,
+            poolConfig,
+            bytes32(SignedSwapMeta.unwrap(meta)),
+            PoolBalanceUpdate.unwrap(minBU),
+            uint16(signature.length),
+            signature
+        );
+
+        executor.swap(amountIn, data, address(executor));
+
+        // --- 6. Assert ---
+        uint256 usdcSpent = usdcBefore - USDC.balanceOf(address(executor));
+        uint256 usdtReceived = USDT.balanceOf(address(executor)) - usdtBefore;
+
+        assertEq(usdcSpent, amountIn);
+        assertGt(usdtReceived, 0);
+    }
+}
+
 contract TychoRouterForEkuboV3Test is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
         return 24218590;
@@ -203,8 +428,7 @@ contract TychoRouterForEkuboV3Test is TychoRouterTestSetup {
     function setUp() public virtual override {
         super.setUp();
 
-        // Forks always use the default hardfork (foundry-rs/foundry#13040).
-        // vm.setEvmVersion not exposed in forge-std 1.9.5 — use low-level cheatcode call
+        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
         address(vm)
             .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
 
