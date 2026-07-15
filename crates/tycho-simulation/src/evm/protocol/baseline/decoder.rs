@@ -75,13 +75,6 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for BaselineState {
             ))
         })?;
 
-        if snapshot.state.component_id != snapshot.component.id {
-            return Err(InvalidSnapshotError::ValueError(format!(
-                "Baseline component id mismatch: state={} component={}",
-                snapshot.state.component_id, snapshot.component.id
-            )));
-        }
-
         let relay = get_static_attr(&snapshot, RELAY_ATTRIBUTE)?.clone();
         let reserve_address = get_static_attr(&snapshot, RESERVE_ATTRIBUTE)?.clone();
         let b_token = all_tokens
@@ -370,16 +363,6 @@ mod tests {
             result.unwrap_err(),
             InvalidSnapshotError::MissingAttribute(ref name) if name == missing_attribute
         ));
-    }
-
-    #[tokio::test]
-    async fn rejects_mismatched_component_id() {
-        let mut snapshot = create_test_snapshot();
-        snapshot.state.component_id = RESERVE.to_owned();
-
-        let result = decode(snapshot).await;
-
-        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
     }
 
     #[tokio::test]
