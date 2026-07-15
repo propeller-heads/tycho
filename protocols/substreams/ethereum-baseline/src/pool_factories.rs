@@ -1,6 +1,5 @@
-use crate::abi::b_factory::events::PoolCreated;
-use substreams_ethereum::pb::eth::v2::Log;
-use substreams_ethereum::Event;
+use crate::abi::b_factory::events::{BTokenCreated, PoolCreated};
+use substreams_ethereum::{pb::eth::v2::Log, Event};
 use tycho_substreams::models::{
     Attribute, ChangeType, FinancialType, ImplementationType, ProtocolComponent, ProtocolType,
 };
@@ -9,6 +8,21 @@ pub const RELAY_ADDRESS: [u8; 20] = [
     0xc8, 0x1f, 0xd8, 0x94, 0xc0, 0xac, 0xe0, 0x37, 0xd1, 0x33, 0xaf, 0x48, 0x86, 0x55, 0x0a, 0xc8,
     0x13, 0x35, 0x68, 0xe8,
 ];
+
+/// Returns the bToken address for factory lifecycle events (`BTokenCreated`, `PoolCreated`).
+///
+/// `BTokenCreated` matters even though it does not create a component: in the two-step
+/// `createBToken` -> `createPool` flow, `createBToken` writes `pool.totalSupply` to relay
+/// storage, possibly blocks before `PoolCreated`. Substreams only see storage diffs, so
+/// that slot must be indexed from the moment the bToken address is first known.
+pub fn factory_b_token(log: &Log) -> Option<Vec<u8>> {
+    if log.address.as_slice() != RELAY_ADDRESS {
+        return None;
+    }
+    BTokenCreated::match_and_decode(log)
+        .map(|event| event.b_token_address)
+        .or_else(|| PoolCreated::match_and_decode(log).map(|event| event.b_token_address))
+}
 
 /// Potentially constructs a new ProtocolComponent given a call
 ///

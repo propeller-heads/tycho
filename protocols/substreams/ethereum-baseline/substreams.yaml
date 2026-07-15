@@ -21,14 +21,14 @@ networks:
   mainnet:
     initialBlock:
       map_protocol_components: 24920863
-      store_raw_slots: 24920863
+      store_components: 24920863
       store_slot_index: 24920863
       store_state_slots: 24920863
       map_protocol_changes: 24920863
   base:
     initialBlock:
       map_protocol_components: 45070267
-      store_raw_slots: 45070267
+      store_components: 45070267
       store_slot_index: 45070267
       store_state_slots: 45070267
       map_protocol_changes: 45070267
@@ -40,20 +40,21 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
 
-  - name: store_slot_index
+  - name: store_components
     kind: store
     updatePolicy: set_if_not_exists
     valueType: string
     inputs:
       - map: map_protocol_components
 
-  - name: store_raw_slots
+  # Slots are keccak-derived per bToken, so instead of watching a slot range the exact
+  # slots are indexed as soon as a bToken address appears in a factory event.
+  - name: store_slot_index
     kind: store
-    updatePolicy: set
+    updatePolicy: set_if_not_exists
     valueType: string
     inputs:
       - source: sf.ethereum.type.v2.Block
-      - store: store_slot_index
 
   - name: store_state_slots
     kind: store
@@ -61,8 +62,6 @@ modules:
     valueType: string
     inputs:
       - source: sf.ethereum.type.v2.Block
-      - map: map_protocol_components
-      - store: store_raw_slots
       - store: store_slot_index
 
   - name: map_protocol_changes
@@ -70,6 +69,7 @@ modules:
     inputs:
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
+      - store: store_components
       - store: store_state_slots
         mode: deltas
       - store: store_state_slots

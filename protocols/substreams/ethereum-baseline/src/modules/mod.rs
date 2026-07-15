@@ -9,17 +9,15 @@ mod quote_state;
 mod slot_layout;
 mod slot_stores;
 
-use crate::abi::b_swap::events::Swap;
-use crate::{pool_factories, pool_factories::RELAY_ADDRESS};
+use crate::{abi::b_swap::events::Swap, pool_factories, pool_factories::RELAY_ADDRESS};
 use anyhow::Result;
 use itertools::Itertools;
 use std::collections::HashMap;
 use substreams::{
     pb::substreams::StoreDeltas,
-    store::{StoreGet, StoreGetString},
+    store::{StoreGet, StoreGetString, StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsString},
 };
-use substreams_ethereum::pb::eth;
-use substreams_ethereum::Event;
+use substreams_ethereum::{pb::eth, Event};
 use tycho_substreams::prelude::*;
 
 #[derive(Clone, Copy)]
@@ -110,11 +108,32 @@ fn map_protocol_components(block: eth::v2::Block) -> Result<BlockTransactionProt
     })
 }
 
+/// Records every created component id so later modules can tell created pools apart from
+/// bTokens that only reached the `createBToken` stage.
+#[substreams::handlers::store]
+fn store_components(
+    components: BlockTransactionProtocolComponents,
+    store: StoreSetIfNotExistsString,
+) {
+    components
+        .tx_components
+        .iter()
+        .flat_map(|tx_components| tx_components.components.iter())
+        .for_each(|component| {
+            store.set_if_not_exists(0, component_key(&component.id), &component.id)
+        });
+}
+
+fn component_key(component_id: &str) -> String {
+    format!("pool:{component_id}")
+}
+
 /// Aggregates protocol components and quote-state changes by transaction.
 #[substreams::handlers::map]
 fn map_protocol_changes(
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
+    components_store: StoreGetString,
     state_deltas: StoreDeltas,
     state: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
@@ -165,6 +184,15 @@ fn map_protocol_changes(
         .iter()
         .filter_map(|delta| state_component_id(&delta.key).map(|id| (id, delta.ordinal)))
         .for_each(|(component_id, ordinal)| {
+            // pool.totalSupply is written by createBToken before the pool exists; ignore state
+            // deltas until PoolCreated has made the component known.
+            if !latest_quote_state_tx.contains_key(&component_id) &&
+                components_store
+                    .get_last(component_key(&component_id))
+                    .is_none()
+            {
+                return;
+            }
             let Some(tx) = transaction_for_ordinal(&block, ordinal) else {
                 return;
             };
@@ -234,9 +262,8 @@ fn transaction_for_ordinal(
         .transaction_traces
         .iter()
         .find(|tx| {
-            (tx.begin_ordinal <= ordinal && tx.end_ordinal >= ordinal)
-                || tx
-                    .calls
+            (tx.begin_ordinal <= ordinal && tx.end_ordinal >= ordinal) ||
+                tx.calls
                     .iter()
                     .any(|call| call.begin_ordinal <= ordinal && call.end_ordinal >= ordinal)
         })

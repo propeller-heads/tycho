@@ -9,6 +9,133 @@ pub mod functions {
 pub mod events {
     use super::INTERNAL_ERR;
     #[derive(Debug, Clone, PartialEq)]
+    pub struct BTokenCreated {
+        pub b_token_address: Vec<u8>,
+        pub name: String,
+        pub symbol: String,
+        pub decimals: substreams::scalar::BigInt,
+        pub total_supply: substreams::scalar::BigInt,
+        pub creator: Vec<u8>,
+    }
+    impl BTokenCreated {
+        const TOPIC_ID: [u8; 32] = [
+            92u8,
+            8u8,
+            132u8,
+            64u8,
+            165u8,
+            235u8,
+            191u8,
+            100u8,
+            123u8,
+            109u8,
+            64u8,
+            237u8,
+            172u8,
+            144u8,
+            26u8,
+            51u8,
+            25u8,
+            171u8,
+            18u8,
+            25u8,
+            222u8,
+            50u8,
+            42u8,
+            173u8,
+            205u8,
+            94u8,
+            112u8,
+            70u8,
+            224u8,
+            162u8,
+            234u8,
+            184u8,
+        ];
+        pub fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            if log.topics.len() != 1usize {
+                return false;
+            }
+            if log.data.len() < 256usize {
+                return false;
+            }
+            return log.topics.get(0).expect("bounds already checked").as_ref()
+                == Self::TOPIC_ID;
+        }
+        pub fn decode(
+            log: &substreams_ethereum::pb::eth::v2::Log,
+        ) -> Result<Self, String> {
+            let mut values = ethabi::decode(
+                    &[
+                        ethabi::ParamType::Address,
+                        ethabi::ParamType::String,
+                        ethabi::ParamType::String,
+                        ethabi::ParamType::Uint(8usize),
+                        ethabi::ParamType::Uint(256usize),
+                        ethabi::ParamType::Address,
+                    ],
+                    log.data.as_ref(),
+                )
+                .map_err(|e| format!("unable to decode log.data: {:?}", e))?;
+            values.reverse();
+            Ok(Self {
+                b_token_address: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+                name: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_string()
+                    .expect(INTERNAL_ERR),
+                symbol: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_string()
+                    .expect(INTERNAL_ERR),
+                decimals: {
+                    let mut v = [0 as u8; 32];
+                    values
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+                total_supply: {
+                    let mut v = [0 as u8; 32];
+                    values
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+                creator: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+            })
+        }
+    }
+    impl substreams_ethereum::Event for BTokenCreated {
+        const NAME: &'static str = "BTokenCreated";
+        fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            Self::match_log(log)
+        }
+        fn decode(log: &substreams_ethereum::pb::eth::v2::Log) -> Result<Self, String> {
+            Self::decode(log)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub struct PoolCreated {
         pub b_token_address: Vec<u8>,
         pub reserve_address: Vec<u8>,
