@@ -20,62 +20,34 @@ use substreams::{
 use substreams_ethereum::{pb::eth, Event};
 use tycho_substreams::prelude::*;
 
-#[derive(Clone, Copy)]
-enum QuoteStateAttributeChange {
-    Creation,
-    Update,
-}
-
-impl QuoteStateAttributeChange {
-    fn change_type(self) -> ChangeType {
-        match self {
-            Self::Creation => ChangeType::Creation,
-            Self::Update => ChangeType::Update,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct QuoteStateTx {
+/// The last transaction that touched a component's quote state in a block, and the highest
+/// storage-delta ordinal to read the state stores at (`None` means end of block).
+#[derive(Clone, Copy, Default)]
+struct QuoteStateUpdate {
     tx_index: u64,
-    change: QuoteStateAttributeChange,
     read_ordinal: Option<u64>,
 }
 
-impl QuoteStateTx {
-    fn creation(tx_index: u64) -> Self {
-        Self { tx_index, change: QuoteStateAttributeChange::Creation, read_ordinal: None }
-    }
-
-    fn update(tx_index: u64, read_ordinal: Option<u64>) -> Self {
-        Self { tx_index, change: QuoteStateAttributeChange::Update, read_ordinal }
-    }
-
-    fn record_update(&mut self, tx_index: u64, read_ordinal: Option<u64>) {
-        // Preserve Creation when same-block storage deltas arrive for a new component.
+impl QuoteStateUpdate {
+    fn record(&mut self, tx_index: u64, read_ordinal: Option<u64>) {
         self.tx_index = self.tx_index.max(tx_index);
-        self.read_ordinal = max_optional(self.read_ordinal, read_ordinal);
-    }
-}
-
-fn max_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
+        self.read_ordinal = match (self.read_ordinal, read_ordinal) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (left, right) => left.or(right),
+        };
     }
 }
 
 fn record_quote_state_update(
-    latest_quote_state_tx: &mut HashMap<String, QuoteStateTx>,
+    quote_state_updates: &mut HashMap<String, QuoteStateUpdate>,
     component_id: String,
     tx_index: u64,
     read_ordinal: Option<u64>,
 ) {
-    latest_quote_state_tx
+    quote_state_updates
         .entry(component_id)
-        .and_modify(|state_tx| state_tx.record_update(tx_index, read_ordinal))
-        .or_insert_with(|| QuoteStateTx::update(tx_index, read_ordinal));
+        .or_default()
+        .record(tx_index, read_ordinal);
 }
 
 /// Find and create all relevant protocol components.
@@ -138,8 +110,11 @@ fn map_protocol_changes(
     state: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
-    let mut latest_quote_state_tx: HashMap<String, QuoteStateTx> = HashMap::new();
+    let mut quote_state_updates: HashMap<String, QuoteStateUpdate> = HashMap::new();
 
+    // Register new components and initialize their entity state with zero-valued defaults in
+    // one pass. The computed quote state from this block's storage deltas overwrites the
+    // defaults below, so the snapshot always carries the full attribute set.
     new_components
         .tx_components
         .iter()
@@ -154,8 +129,16 @@ fn map_protocol_changes(
                 .iter()
                 .for_each(|component| {
                     builder.add_protocol_component(component);
-                    latest_quote_state_tx
-                        .insert(component.id.clone(), QuoteStateTx::creation(tx.index));
+                    builder.add_entity_change(&EntityChanges {
+                        component_id: component.id.clone(),
+                        attributes: quote_state::default_attributes(),
+                    });
+                    record_quote_state_update(
+                        &mut quote_state_updates,
+                        component.id.clone(),
+                        tx.index,
+                        None,
+                    );
                 });
         });
 
@@ -175,7 +158,7 @@ fn map_protocol_changes(
                     .entry(tx.index)
                     .or_insert_with(|| TransactionChangesBuilder::new(&tx));
                 builder.mark_component_as_updated(&component_id);
-                record_quote_state_update(&mut latest_quote_state_tx, component_id, tx.index, None);
+                record_quote_state_update(&mut quote_state_updates, component_id, tx.index, None);
             });
     });
 
@@ -186,7 +169,7 @@ fn map_protocol_changes(
         .for_each(|(component_id, ordinal)| {
             // pool.totalSupply is written by createBToken before the pool exists; ignore state
             // deltas until PoolCreated has made the component known.
-            if !latest_quote_state_tx.contains_key(&component_id) &&
+            if !quote_state_updates.contains_key(&component_id) &&
                 components_store
                     .get_last(component_key(&component_id))
                     .is_none()
@@ -202,25 +185,26 @@ fn map_protocol_changes(
                 .or_insert_with(|| TransactionChangesBuilder::new(&tx));
             builder.mark_component_as_updated(&component_id);
             record_quote_state_update(
-                &mut latest_quote_state_tx,
+                &mut quote_state_updates,
                 component_id,
                 tx.index,
                 Some(ordinal),
             );
         });
 
-    latest_quote_state_tx
+    // Emit the computed quote state once per touched component, attached to the last
+    // transaction that changed it.
+    quote_state_updates
         .into_iter()
-        .for_each(|(component_id, state_tx)| {
-            let Some(builder) = transaction_changes.get_mut(&state_tx.tx_index) else {
+        .for_each(|(component_id, update)| {
+            let Some(builder) = transaction_changes.get_mut(&update.tx_index) else {
                 return;
             };
             let quote_state_attributes = quote_state::attributes_from_store(
                 &state,
                 &component_id,
-                state_tx.read_ordinal,
+                update.read_ordinal,
                 block.number,
-                state_tx.change.change_type(),
             )
             .unwrap_or_default();
             if !quote_state_attributes.is_empty() {
@@ -291,36 +275,19 @@ mod tests {
     }
 
     #[test]
-    fn preserves_creation_change_when_storage_delta_arrives_for_new_component() {
-        let component_id = "0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63".to_string();
-        let mut latest_quote_state_tx =
-            HashMap::from([(component_id.clone(), QuoteStateTx::creation(3))]);
-
-        record_quote_state_update(&mut latest_quote_state_tx, component_id.clone(), 3, Some(42));
-
-        let state_tx = latest_quote_state_tx
-            .get(&component_id)
-            .unwrap();
-        assert!(matches!(state_tx.change, QuoteStateAttributeChange::Creation));
-        assert_eq!(state_tx.tx_index, 3);
-        assert_eq!(state_tx.read_ordinal, Some(42));
-    }
-
-    #[test]
     fn tracks_latest_storage_read_ordinal_for_component() {
         let component_id = "0x9fDbDE76236998Dc2836FE67A9954eDE456A1D63".to_string();
-        let mut latest_quote_state_tx = HashMap::new();
+        let mut quote_state_updates = HashMap::new();
 
-        record_quote_state_update(&mut latest_quote_state_tx, component_id.clone(), 1, Some(10));
-        record_quote_state_update(&mut latest_quote_state_tx, component_id.clone(), 1, Some(14));
-        record_quote_state_update(&mut latest_quote_state_tx, component_id.clone(), 2, None);
+        record_quote_state_update(&mut quote_state_updates, component_id.clone(), 1, Some(10));
+        record_quote_state_update(&mut quote_state_updates, component_id.clone(), 1, Some(14));
+        record_quote_state_update(&mut quote_state_updates, component_id.clone(), 2, None);
 
-        let state_tx = latest_quote_state_tx
+        let update = quote_state_updates
             .get(&component_id)
             .unwrap();
-        assert!(matches!(state_tx.change, QuoteStateAttributeChange::Update));
-        assert_eq!(state_tx.tx_index, 2);
-        assert_eq!(state_tx.read_ordinal, Some(14));
+        assert_eq!(update.tx_index, 2);
+        assert_eq!(update.read_ordinal, Some(14));
     }
 
     #[test]

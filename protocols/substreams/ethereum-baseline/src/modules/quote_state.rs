@@ -58,15 +58,33 @@ struct BlockQuoteContext {
     block_sell_delta_circ: BigInt,
 }
 
+/// The full attribute set with zero values, marked as `Creation`.
+///
+/// Emitted for every new component so the snapshot always carries every attribute the
+/// simulation decoder requires, even if the quote state cannot be computed yet. Computed
+/// values from the same transaction's storage deltas overwrite these defaults.
+pub(crate) fn default_attributes() -> Vec<Attribute> {
+    SNAPSHOT_CURVE_FIELDS
+        .iter()
+        .chain(QUOTE_STATE_FIELDS.iter())
+        .map(|name| {
+            if *name == "should_settle_pending_surplus" {
+                bool_attribute(name, false, ChangeType::Creation)
+            } else {
+                uint_attribute(name, BigInt::zero(), ChangeType::Creation)
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn attributes_from_store(
     store: &StoreGetString,
     component_id: &str,
     read_ordinal: Option<u64>,
     current_block_number: u64,
-    change: ChangeType,
 ) -> Option<Vec<Attribute>> {
     load_state(store, component_id, read_ordinal).and_then(|(pool, maker, pricing)| {
-        attributes_from_state(&pool, &maker, &pricing, current_block_number, change)
+        attributes_from_state(&pool, &maker, &pricing, current_block_number, ChangeType::Update)
     })
 }
 
