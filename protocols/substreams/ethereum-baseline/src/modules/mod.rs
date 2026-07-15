@@ -111,6 +111,7 @@ fn map_protocol_changes(
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
     let mut quote_state_updates: HashMap<String, QuoteStateUpdate> = HashMap::new();
+    let mut created_at_tx: HashMap<String, u64> = HashMap::new();
 
     // Register new components and initialize their entity state with zero-valued defaults in
     // one pass. The computed quote state from this block's storage deltas overwrites the
@@ -139,6 +140,7 @@ fn map_protocol_changes(
                         tx.index,
                         None,
                     );
+                    created_at_tx.insert(component.id.clone(), tx.index);
                 });
         });
 
@@ -167,18 +169,28 @@ fn map_protocol_changes(
         .iter()
         .filter_map(|delta| state_component_id(&delta.key).map(|id| (id, delta.ordinal)))
         .for_each(|(component_id, ordinal)| {
-            // pool.totalSupply is written by createBToken before the pool exists; ignore state
-            // deltas until PoolCreated has made the component known.
-            if !quote_state_updates.contains_key(&component_id) &&
-                components_store
-                    .get_last(component_key(&component_id))
-                    .is_none()
-            {
-                return;
-            }
             let Some(tx) = transaction_for_ordinal(&block, ordinal) else {
                 return;
             };
+            // pool.totalSupply is written by createBToken before the pool exists; ignore state
+            // deltas until PoolCreated has made the component known. For components created in
+            // this block that also means skipping deltas from earlier transactions (a same-block
+            // createBToken -> createPool sequence), so no update is emitted before the creation.
+            match created_at_tx.get(&component_id) {
+                Some(&creation_tx_index) => {
+                    if u64::from(tx.index) < creation_tx_index {
+                        return;
+                    }
+                }
+                None => {
+                    if components_store
+                        .get_last(component_key(&component_id))
+                        .is_none()
+                    {
+                        return;
+                    }
+                }
+            }
             let tx: Transaction = (&tx).into();
             let builder = transaction_changes
                 .entry(tx.index)
