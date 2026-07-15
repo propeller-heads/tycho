@@ -89,12 +89,12 @@ impl ProtocolSim for BaselineState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let quote = if token_in.address == self.reserve.address
-            && token_out.address == self.b_token.address
+        let quote = if token_in.address == self.reserve.address &&
+            token_out.address == self.b_token.address
         {
             quote_buy_exact_in(&self.quote_state, &amount_in)?
-        } else if token_in.address == self.b_token.address
-            && token_out.address == self.reserve.address
+        } else if token_in.address == self.b_token.address &&
+            token_out.address == self.reserve.address
         {
             quote_sell_exact_in(&self.quote_state, &amount_in)?
         } else {
@@ -296,14 +296,14 @@ mod tests {
         assert!(
             state
                 .spot_price(&state.b_token, &state.reserve)
-                .unwrap()
-                > 0.0
+                .unwrap() >
+                0.0
         );
         assert!(
             state
                 .spot_price(&state.reserve, &state.b_token)
-                .unwrap()
-                > 0.0
+                .unwrap() >
+                0.0
         );
 
         let buy_limits = state

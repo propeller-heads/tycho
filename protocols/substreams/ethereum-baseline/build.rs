@@ -55,8 +55,8 @@ fn main() -> Result<()> {
             .filter(|entry| {
                 entry
                     .get("type")
-                    .and_then(|entry_type| entry_type.as_str())
-                    == Some("event")
+                    .and_then(|entry_type| entry_type.as_str()) ==
+                    Some("event")
             })
             .cloned()
             .collect::<Vec<_>>();

@@ -496,8 +496,8 @@ fn compute_xyk_dominance_floor(params: &CurveParams) -> Option<BigInt> {
     }
 
     let linear_coeff = (&circ_ratio * 2u8) - BigInt::from(WAD);
-    let discriminant = ((&linear_coeff * &linear_coeff) / BigInt::from(WAD))
-        + div_wad(&(8u8 * mul_wad(&circ_ratio, &circ_ratio)), &buffer_ratio)?;
+    let discriminant = ((&linear_coeff * &linear_coeff) / BigInt::from(WAD)) +
+        div_wad(&(8u8 * mul_wad(&circ_ratio, &circ_ratio)), &buffer_ratio)?;
     let root = sqrt_wad(&discriminant)?;
     Some((-linear_coeff + root) / 2u8)
 }
@@ -588,14 +588,14 @@ fn should_settle_pending_surplus(
     pricing: &BlockPricingState,
     current_block_number: u64,
 ) -> bool {
-    pricing.block_number != 0
-        && pricing.block_number != current_block_number
-        && pool.pending_surplus > BigInt::zero()
+    pricing.block_number != 0 &&
+        pricing.block_number != current_block_number &&
+        pool.pending_surplus > BigInt::zero()
 }
 
 fn in_safety(pool: &PoolState) -> bool {
-    &pool.total_b_tokens * BUFFER_SAFETY_THRESHOLD_DENOMINATOR
-        >= &pool.total_supply * BUFFER_SAFETY_THRESHOLD_NUMERATOR
+    &pool.total_b_tokens * BUFFER_SAFETY_THRESHOLD_DENOMINATOR >=
+        &pool.total_supply * BUFFER_SAFETY_THRESHOLD_NUMERATOR
 }
 
 fn normalize_wad(amount: &BigInt, decimals: u8) -> BigInt {
@@ -673,11 +673,11 @@ fn ln_wad(x: &BigInt) -> Option<BigInt> {
     let mut x96 = x << r as usize;
     x96 >>= 159usize;
 
-    let mut p = dec("43456485725739037958740375743393")
-        + sar(
-            &((dec("24828157081833163892658089445524")
-                + sar(&((dec("3273285459638523848632254066296") + &x96) * &x96), 96))
-                * &x96),
+    let mut p = dec("43456485725739037958740375743393") +
+        sar(
+            &((dec("24828157081833163892658089445524") +
+                sar(&((dec("3273285459638523848632254066296") + &x96) * &x96), 96)) *
+                &x96),
             96,
         );
     p = sar(&(p * &x96), 96) - dec("11111509109440967052023855526967");
@@ -695,9 +695,9 @@ fn ln_wad(x: &BigInt) -> Option<BigInt> {
 
     p = &p / &q;
     p = dec("1677202110996718588342820967067443963516166") * p;
-    p = dec("16597577552685614221487285958193947469193820559219878177908093499208371")
-        * BigInt::from(159 - r)
-        + p;
+    p = dec("16597577552685614221487285958193947469193820559219878177908093499208371") *
+        BigInt::from(159 - r) +
+        p;
     p += dec("600920179829731861736702779321621459595472258049074101567377883020018308");
     Some(sar(&p, 174))
 }
@@ -712,8 +712,8 @@ fn exp_wad(x: &BigInt) -> Option<BigInt> {
 
     let mut x2 = (x << 78usize) / dec("3814697265625");
     let k = sar(
-        &(((x2.clone() << 96usize) / dec("54916777467707473351141471128"))
-            + (BigInt::one() << 95usize)),
+        &(((x2.clone() << 96usize) / dec("54916777467707473351141471128")) +
+            (BigInt::one() << 95usize)),
         96,
     );
     x2 -= &k * dec("54916777467707473351141471128");

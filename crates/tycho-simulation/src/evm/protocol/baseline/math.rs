@@ -78,8 +78,8 @@ pub(super) fn spot_price(state: &BaselineQuoteState, is_buy: bool) -> Result<f64
 
     let price = price
         .to_f64()
-        .ok_or_else(|| fatal("active price overflows f64"))?
-        / 1e18;
+        .ok_or_else(|| fatal("active price overflows f64"))? /
+        1e18;
     if is_buy {
         Ok(price)
     } else {
@@ -197,8 +197,8 @@ fn solver_tolerance(target: &BigInt) -> BigInt {
 fn min_price_moving_delta(params: &BaselineCurve) -> Result<BigInt, SimulationError> {
     let supply_circ = mul_wad(&u_to_bi(params.supply), &u_to_bi(params.circ));
     let convexity_supply = mul_wad(&u_to_bi(params.convexity_exp), &u_to_bi(params.total_supply));
-    let k_factor = mul_wad(&(u_to_bi(params.convexity_exp) - wad()), &u_to_bi(params.supply))
-        + mul_wad(&(u_to_bi(params.convexity_exp) + wad()), &u_to_bi(params.circ));
+    let k_factor = mul_wad(&(u_to_bi(params.convexity_exp) - wad()), &u_to_bi(params.supply)) +
+        mul_wad(&(u_to_bi(params.convexity_exp) + wad()), &u_to_bi(params.circ));
     let blv_value = mul_wad(&u_to_bi(params.blv), &u_to_bi(params.circ));
 
     if u_to_bi(params.reserves) <= blv_value || convexity_supply.is_zero() || k_factor.is_zero() {
@@ -234,8 +234,8 @@ fn quote_swap(
     state: &BaselineQuoteState,
     delta_circ_native: &BigInt,
 ) -> Result<(BigInt, BigInt), SimulationError> {
-    if delta_circ_native < &BigInt::zero()
-        && delta_circ_native.abs() > u_to_bi(state.max_sell_delta)
+    if delta_circ_native < &BigInt::zero() &&
+        delta_circ_native.abs() > u_to_bi(state.max_sell_delta)
     {
         return Err(trade_exceeds_limit());
     }
@@ -358,8 +358,8 @@ fn compute_swap(
     if price_after_denominator.is_zero() {
         return Err(invalid_curve_state());
     }
-    let price_after = u_to_bi(params.blv)
-        + full_mul_div(
+    let price_after = u_to_bi(params.blv) +
+        full_mul_div(
             &new_buffer,
             &mul_wad(&u_to_bi(params.convexity_exp), &u_to_bi(params.total_supply)),
             &price_after_denominator,
@@ -413,8 +413,8 @@ fn compute_zero_circ_swap(
     )?;
     let payment = mul_wad_up(
         delta_circ,
-        &(mul_wad_up(&u_to_bi(params.blv), &(wad() + (u_to_bi(params.swap_fee) * 2u8)))
-            + buffer_reserves),
+        &(mul_wad_up(&u_to_bi(params.blv), &(wad() + (u_to_bi(params.swap_fee) * 2u8))) +
+            buffer_reserves),
     );
     Ok((-payment.clone(), invariant_delta.clone() + payment, invariant_delta))
 }
@@ -437,8 +437,8 @@ fn compute_fee(
         )?;
         let marginal_cost = mul_wad_up(
             &abs_delta,
-            &(mul_wad_up(&u_to_bi(params.blv), &(wad() + (u_to_bi(params.swap_fee) * 2u8)))
-                + marginal_premium),
+            &(mul_wad_up(&u_to_bi(params.blv), &(wad() + (u_to_bi(params.swap_fee) * 2u8))) +
+                marginal_premium),
         );
         return Ok(zero_floor_sub(&marginal_cost, &invariant_delta.abs()));
     }
@@ -450,8 +450,8 @@ fn compute_fee(
     )?;
     let marginal_receipt = mul_wad(
         &abs_delta,
-        &(u_to_bi(params.blv)
-            + mul_wad(&marginal_premium, &(wad() - (u_to_bi(params.swap_fee) * 2u8)))),
+        &(u_to_bi(params.blv) +
+            mul_wad(&marginal_premium, &(wad() - (u_to_bi(params.swap_fee) * 2u8)))),
     );
     Ok(zero_floor_sub(invariant_delta, &marginal_receipt))
 }
@@ -555,11 +555,11 @@ fn ln_wad(x: &BigInt) -> Result<BigInt, SimulationError> {
     let mut x96 = x << r as usize;
     x96 >>= 159usize;
 
-    let mut p = bi("43456485725739037958740375743393")
-        + sar(
-            &((bi("24828157081833163892658089445524")
-                + sar(&((bi("3273285459638523848632254066296") + &x96) * &x96), 96))
-                * &x96),
+    let mut p = bi("43456485725739037958740375743393") +
+        sar(
+            &((bi("24828157081833163892658089445524") +
+                sar(&((bi("3273285459638523848632254066296") + &x96) * &x96), 96)) *
+                &x96),
             96,
         );
     p = sar(&(p * &x96), 96) - bi("11111509109440967052023855526967");
@@ -577,9 +577,9 @@ fn ln_wad(x: &BigInt) -> Result<BigInt, SimulationError> {
 
     p = sdiv(&p, &q);
     p = bi("1677202110996718588342820967067443963516166") * p;
-    p = bi("16597577552685614221487285958193947469193820559219878177908093499208371")
-        * BigInt::from(159 - r)
-        + p;
+    p = bi("16597577552685614221487285958193947469193820559219878177908093499208371") *
+        BigInt::from(159 - r) +
+        p;
     p += bi("600920179829731861736702779321621459595472258049074101567377883020018308");
     Ok(sar(&p, 174))
 }
@@ -605,8 +605,8 @@ fn exp_wad(x: &BigInt) -> Result<BigInt, SimulationError> {
 
     let mut x2 = sdiv(&(x << 78usize), &bi("3814697265625"));
     let k = sar(
-        &(sdiv(&(x2.clone() << 96usize), &bi("54916777467707473351141471128"))
-            + (BigInt::one() << 95usize)),
+        &(sdiv(&(x2.clone() << 96usize), &bi("54916777467707473351141471128")) +
+            (BigInt::one() << 95usize)),
         96,
     );
     x2 -= &k * bi("54916777467707473351141471128");
@@ -626,9 +626,9 @@ fn exp_wad(x: &BigInt) -> Result<BigInt, SimulationError> {
 
     let mut r = sdiv(&p, &q);
     r *= bi("3822833074963236453042738258902158003155416615667");
-    let shift = 195
-        - k.to_i64()
-            .ok_or_else(|| trade_exceeds_limit())?;
+    let shift = 195 -
+        k.to_i64()
+            .ok_or_else(trade_exceeds_limit)?;
     if shift < 0 {
         return Err(trade_exceeds_limit());
     }
