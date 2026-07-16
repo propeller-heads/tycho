@@ -16,7 +16,10 @@ fn concurrent_get_amount_out_matches_single_threaded_oracle() {
     let pools = common::load_pools("balancer_v2_2token");
     assert_eq!(pools.len(), 1, "expected exactly one pool in balancer_v2_2token fixture");
 
-    let state = pools.into_values().next().expect("pool count asserted to be 1");
+    let state = pools
+        .into_values()
+        .next()
+        .expect("pool count asserted to be 1");
     let (t_in, t_out) = common::pool_tokens("balancer_v2_2token");
 
     let amounts: Vec<BigUint> = (1..=20u64)
@@ -26,7 +29,12 @@ fn concurrent_get_amount_out_matches_single_threaded_oracle() {
     // Oracle: single-threaded reference, computed before any threads are spawned.
     let oracle: Vec<Option<BigUint>> = amounts
         .iter()
-        .map(|a| state.get_amount_out(a.clone(), &t_in, &t_out).ok().map(|r| r.amount))
+        .map(|a| {
+            state
+                .get_amount_out(a.clone(), &t_in, &t_out)
+                .ok()
+                .map(|r| r.amount)
+        })
         .collect();
 
     // ProtocolSim is Send + Sync, so Arc<Box<dyn ProtocolSim>> is safe to share.
@@ -47,8 +55,10 @@ fn concurrent_get_amount_out_matches_single_threaded_oracle() {
             );
             thread::spawn(move || {
                 for (i, a) in amounts.iter().enumerate() {
-                    let got =
-                        state.get_amount_out(a.clone(), &t_in, &t_out).ok().map(|r| r.amount);
+                    let got = state
+                        .get_amount_out(a.clone(), &t_in, &t_out)
+                        .ok()
+                        .map(|r| r.amount);
                     assert_eq!(got, oracle[i], "thread result diverged at index {i}");
                 }
             })
@@ -56,6 +66,7 @@ fn concurrent_get_amount_out_matches_single_threaded_oracle() {
         .collect();
 
     for h in handles {
-        h.join().expect("worker thread panicked");
+        h.join()
+            .expect("worker thread panicked");
     }
 }

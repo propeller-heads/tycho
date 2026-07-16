@@ -28,7 +28,10 @@ fn decode_and_simulate(#[case] fixture: &str) {
     let result = state
         .get_amount_out(amount_in, &t_in, &t_out)
         .unwrap_or_else(|e| {
-            panic!("get_amount_out failed for {fixture}: {} -> {}: {e:?}", t_in.symbol, t_out.symbol)
+            panic!(
+                "get_amount_out failed for {fixture}: {} -> {}: {e:?}",
+                t_in.symbol, t_out.symbol
+            )
         });
 
     assert!(

@@ -9,11 +9,7 @@ const FIXTURES: [&str; 3] = ["balancer_v2_2token", "curve_3token", "curve_4token
 
 fn single_pool(fixture: &str) -> Box<dyn ProtocolSim> {
     let pools = common::load_pools(fixture);
-    assert_eq!(
-        pools.len(),
-        1,
-        "fixture {fixture} must contain exactly one pool"
-    );
+    assert_eq!(pools.len(), 1, "fixture {fixture} must contain exactly one pool");
     pools.into_values().next().unwrap()
 }
 
@@ -26,15 +22,11 @@ fn bench_get_amount_out(c: &mut Criterion) {
             ("small", BigUint::from(1_000_000_000_000_000u64)),
             ("large", BigUint::from(1_000_000_000_000_000_000u64)),
         ] {
-            group.bench_with_input(
-                BenchmarkId::new(fixture, label),
-                &amount,
-                |b, amt| {
-                    b.iter(|| {
-                        let _ = state.get_amount_out(amt.clone(), &t_in, &t_out);
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(fixture, label), &amount, |b, amt| {
+                b.iter(|| {
+                    let _ = state.get_amount_out(amt.clone(), &t_in, &t_out);
+                });
+            });
         }
     }
     group.finish();

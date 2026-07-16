@@ -26,12 +26,8 @@ fn bench_threads(c: &mut Criterion) {
             b.iter(|| {
                 let handles: Vec<_> = (0..n)
                     .map(|_| {
-                        let (state, t_in, t_out, amount) = (
-                            state.clone(),
-                            t_in.clone(),
-                            t_out.clone(),
-                            amount.clone(),
-                        );
+                        let (state, t_in, t_out, amount) =
+                            (state.clone(), t_in.clone(), t_out.clone(), amount.clone());
                         thread::spawn(move || {
                             for _ in 0..CALLS_PER_THREAD {
                                 let _ = state.get_amount_out(amount.clone(), &t_in, &t_out);

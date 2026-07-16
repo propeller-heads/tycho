@@ -7,8 +7,7 @@ use std::{
 use tycho_client::feed::{dto, BlockHeader, FeedMessage};
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_simulation::evm::{
-    decoder::TychoStreamDecoder,
-    engine_db::tycho_db::PreCachedDB,
+    decoder::TychoStreamDecoder, engine_db::tycho_db::PreCachedDB,
     protocol::vm::state::EVMPoolState,
 };
 
