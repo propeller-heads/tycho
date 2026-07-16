@@ -48,3 +48,7 @@ pub mod swap;
 
 mod pool;
 pub use pool::{Pool, PoolError};
+
+// Native additions on top of the vendored tree.
+mod swap_to_price;
+pub use swap_to_price::SwapToPriceError;
