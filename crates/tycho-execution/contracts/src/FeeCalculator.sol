@@ -228,8 +228,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         uint256 surplus = actualAmountOut - expectedAmountOut;
         uint32 clientShareBps = _getClientSlippageShareBps(client);
 
-        uint256 clientCut = (surplus * clientShareBps) / MAX_BPS;
-        uint256 routerCut = surplus - clientCut;
+        clientCut = (surplus * clientShareBps) / MAX_BPS;
+        routerCut = surplus - clientCut;
     }
 
     /**
