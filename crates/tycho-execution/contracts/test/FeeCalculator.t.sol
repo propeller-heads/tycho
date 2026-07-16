@@ -1090,6 +1090,14 @@ contract FeeCalculatorSlippageTest is Constants {
         feeCalculator.setCustomClientSlippageShare(BOB, 100_000_001);
     }
 
+    function testSetCustomClientSlippageShareZeroReverts() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(
+            abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
+        );
+        feeCalculator.setCustomClientSlippageShare(BOB, 0);
+    }
+
     function testNegativeSlippageNoSurplus() public {
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);

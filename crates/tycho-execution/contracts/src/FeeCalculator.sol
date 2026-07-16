@@ -535,13 +535,15 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Sets a custom client share of positive slippage for a specific client
      * @param client The client address to set the custom share for
-     * @param bps Share in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
+     * @param bps Share in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%).
+     *      Must be non-zero; to clear a custom share use
+     *      removeCustomClientSlippageShare, which also drops the override flag.
      */
     function setCustomClientSlippageShare(address client, uint32 bps)
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (bps > MAX_BPS) {
+        if (bps == 0 || bps > MAX_BPS) {
             revert FeeCalculator__InvalidBps();
         }
         CustomFees memory customFees = _customRouterFees[client];
