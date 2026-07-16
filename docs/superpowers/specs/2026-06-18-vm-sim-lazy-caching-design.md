@@ -170,3 +170,18 @@ All exact-value unit tests unchanged (amounts, limits, spot prices byte-identica
 pools bypass the caches and keep today's eager behaviour. One pre-existing flaky test
 (`test_failing_overrides_error_by_default`, ~1/10 under parallel runs) is unrelated — confirmed
 present at the same rate on the pre-optimization base.
+
+### Fynd routing (find_best_route, median) — the end-to-end consumer metric
+
+| fixture | after | change vs before |
+|---|---|---|
+| balancer_v2_2token | 208.6 µs | **−55.3%** |
+| curve_3token | 1.155 ms | **−41.7%** |
+| curve_4token | 3.284 ms | **−36.1%** |
+
+Fynd's real `MostLiquidAlgorithm::find_best_route` over VM pools. The end-to-end gain is smaller than
+the raw `get_amount_out` gain because routing also does native graph traversal, path scoring, and gas
+math that this change does not touch — the VM-simulation slice shrinks while the rest is unchanged.
+(The routing `before` baseline was saved against tycho-simulation 0.305 pre-optimization; the
+0.305→0.335 main-drift was separately measured as noise-level on `get_amount_out`, so the delta
+reflects the optimization.)
