@@ -1,3 +1,24 @@
+## [0.335.1](https://github.com/propeller-heads/tycho/compare/0.335.0...0.335.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **substreams:** match readme filename case for cargo publish ([37470fd](https://github.com/propeller-heads/tycho/commit/37470fd282eba913eba91da03fd96e32420748bd))
+* **substreams:** match readme filename case for cargo publish ([#1199](https://github.com/propeller-heads/tycho/issues/1199)) ([069d223](https://github.com/propeller-heads/tycho/commit/069d223d3c8139ae631953b6d926e607238eebeb))
+
+## [0.335.0](https://github.com/propeller-heads/tycho/compare/0.334.0...0.335.0) (2026-07-15)
+
+
+### Features
+
+* support PropAMM pools as SignedExclusiveSwap ([#1171](https://github.com/propeller-heads/tycho/issues/1171)) ([f43221a](https://github.com/propeller-heads/tycho/commit/f43221a79427b7c80104f74414419ee7b2249e83))
+* support PropAMM pools as SignedExclusiveSwap in decoder and encoder ([b59549e](https://github.com/propeller-heads/tycho/commit/b59549ecbd6b6cb4cebde3bf15f513cc690409e6))
+
+
+### Bug Fixes
+
+* assert an exact amount for the fixed block ([7742dec](https://github.com/propeller-heads/tycho/commit/7742dec89aaca47a372cc1b8ddf0d9bd0e7e632d))
+
 ## [0.334.0](https://github.com/propeller-heads/tycho/compare/0.333.1...0.334.0) (2026-07-13)
 
 
