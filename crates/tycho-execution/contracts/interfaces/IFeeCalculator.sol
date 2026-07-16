@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.26;
 
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 
 /**
  * @notice Per-client custom fee configuration
@@ -27,27 +27,15 @@ interface IFeeCalculator {
      *      share are retrieved from contract storage based on the
      *      client address; client fee parameters are passed as
      *      function arguments.
-     * @param actualAmountOut The actual amount received from the swap
-     * @param expectedAmountOut Caller-supplied quoted amount out
-     * @param amountIn The input amount of the swap
-     * @param tokenIn The swap's input token address
-     * @param tokenOut The swap's output token address
-     * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
-     * @param client The client address to look up custom router fees
-     *        and slippage share for, and to receive the client fee
+     * @param feeInput Struct containing all fee calculation inputs
      * @return feeRecipients Array of (address, feeAmount) tuples for
      *         fee distribution. Returns [] when there is nothing to
      *         capture (no fees, no surplus, or toggle off).
      */
-    function calculateFee(
-        uint256 actualAmountOut,
-        uint256 expectedAmountOut,
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint32 clientFeeBps,
-        address client
-    ) external view returns (FeeRecipient[] memory feeRecipients);
+    function calculateFee(FeeInput memory feeInput)
+        external
+        view
+        returns (FeeRecipient[] memory feeRecipients);
 
     /**
      * @notice Whether the router must receive swap output before forwarding

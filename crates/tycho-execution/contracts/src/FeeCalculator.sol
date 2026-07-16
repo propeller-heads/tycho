@@ -5,7 +5,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {
     EnumerableSet
 } from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
@@ -87,43 +87,30 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
-     * @param actualAmountOut The actual amount received from the swap
-     * @param expectedAmountOut Caller-supplied quoted amount out
-     * @param amountIn The input amount of the swap
-     * @param tokenIn The swap's input token address
-     * @param tokenOut The swap's output token address
-     * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
-     * @param client The client address to look up custom router fees
-     *        and slippage share for and to receive fees.
-     *        Pass address(0) to fall back to tx.origin for the
-     *        custom fee lookup.
+     * @param feeInput Struct containing all fee calculation inputs
      * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
      */
-    function calculateFee(
-        uint256 actualAmountOut,
-        uint256 expectedAmountOut,
-        uint256 amountIn,
-        address tokenIn,
-        address tokenOut,
-        uint32 clientFeeBps,
-        address client
-    ) external view returns (FeeRecipient[] memory feeRecipients) {
-        address resolvedClient = _resolveClient(client);
+    function calculateFee(FeeInput memory feeInput)
+        external
+        view
+        returns (FeeRecipient[] memory feeRecipients)
+    {
+        address resolvedClient = _resolveClient(feeInput.client);
 
         FeeRecipient[] memory slippage = _calculatePositiveSlippage(
-            actualAmountOut, expectedAmountOut, resolvedClient
+            feeInput.actualAmountOut, feeInput.expectedAmountOut, resolvedClient
         );
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
         // When no surplus (disabled or actual <= expected): feeBase = actualAmountOut.
-        uint256 feeBase = actualAmountOut;
+        uint256 feeBase = feeInput.actualAmountOut;
         if (slippage.length > 0) {
             feeBase -= slippage[0].feeAmount + slippage[1].feeAmount;
         }
 
         FeeRecipient[] memory fees =
-            _calculateFee(feeBase, resolvedClient, clientFeeBps);
+            _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
 
         return _mergeFeeRecipients(fees, slippage);
     }

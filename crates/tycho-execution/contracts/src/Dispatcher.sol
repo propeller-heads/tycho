@@ -292,16 +292,7 @@ contract Dispatcher is TransferManager {
         returns (FeeRecipient[] memory feeRecipients)
     {
         // slither-disable-next-line calls-loop
-        feeRecipients = IFeeCalculator(feeCalculator)
-            .calculateFee(
-                feeInput.actualAmountOut,
-                feeInput.expectedAmountOut,
-                feeInput.amountIn,
-                feeInput.tokenIn,
-                feeInput.tokenOut,
-                feeInput.clientFeeBps,
-                feeInput.client
-            );
+        feeRecipients = IFeeCalculator(feeCalculator).calculateFee(feeInput);
     }
 
     function _callMustInterceptOutput(

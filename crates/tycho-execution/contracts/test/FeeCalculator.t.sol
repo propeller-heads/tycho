@@ -4,7 +4,7 @@ import "@src/FeeCalculator.sol";
 import {
     IAccessControl
 } from "@openzeppelin/contracts/access/IAccessControl.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import "./Constants.sol";
 
 // Fee constants in the 8-decimal fee unit scale (100_000_000 = 100%).
@@ -42,13 +42,15 @@ contract FeeCalculatorTest is Constants {
 
         // The client is BOB - he doesn't get any router fee discounts.
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -75,13 +77,15 @@ contract FeeCalculatorTest is Constants {
         uint32 clientFeeBps = 2_000_000; // 2%
 
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: BOB
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -112,13 +116,15 @@ contract FeeCalculatorTest is Constants {
 
         // ALICE should get default fee
         FeeRecipient[] memory feeRecipientsAlice = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            ALICE
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: ALICE
+            })
         );
         uint256 amountOutAlice = actualAmountOut - _sumFees(feeRecipientsAlice);
         assertEq(amountOutAlice, 0.99 ether);
@@ -127,13 +133,15 @@ contract FeeCalculatorTest is Constants {
 
         // BOB should get custom fee
         FeeRecipient[] memory feeRecipientsBob = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
         uint256 amountOutBob = actualAmountOut - _sumFees(feeRecipientsBob);
         assertEq(amountOutBob, 0.995 ether); // 0.5% fee
@@ -148,13 +156,15 @@ contract FeeCalculatorTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            ALICE
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: ALICE
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -176,13 +186,15 @@ contract FeeCalculatorTest is Constants {
 
         // BOB is the client - but there are no router fees to overwrite with custom client fees
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: BOB
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -209,13 +221,15 @@ contract FeeCalculatorTest is Constants {
         uint32 clientFeeBps = 2_000_000; // 2%
 
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: BOB
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -248,13 +262,15 @@ contract FeeCalculatorTest is Constants {
             abi.encodeWithSelector(FeeCalculator__FeeTooHigh.selector)
         );
         feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: BOB
+            })
         );
     }
 
@@ -279,13 +295,15 @@ contract FeeCalculatorTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            ALICE
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: ALICE
+            })
         );
 
         // Router fee
@@ -307,13 +325,15 @@ contract FeeCalculatorTest is Constants {
 
         // ALICE should get custom router fee on client fee (5%)
         FeeRecipient[] memory feeRecipientsAlice = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            ALICE
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: ALICE
+            })
         );
         uint256 amountOutAlice = actualAmountOut - _sumFees(feeRecipientsAlice);
 
@@ -331,13 +351,15 @@ contract FeeCalculatorTest is Constants {
 
         // BOB should get default router fee on client fee (10%)
         FeeRecipient[] memory feeRecipientsBob = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: BOB
+            })
         );
         uint256 amountOutBob = actualAmountOut - _sumFees(feeRecipientsBob);
 
@@ -369,13 +391,15 @@ contract FeeCalculatorTest is Constants {
         uint32 clientFeeBps = 2_000_000; // 2%
 
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            clientFeeBps,
-            ALICE
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: clientFeeBps,
+                client: ALICE
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -404,13 +428,15 @@ contract FeeCalculatorTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(feeRecipients);
 
@@ -431,13 +457,15 @@ contract FeeCalculatorTest is Constants {
         // Call with client=address(0) and tx.origin=ALICE
         vm.prank(address(this), ALICE);
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            address(0)
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: address(0)
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(fees);
 
@@ -461,13 +489,15 @@ contract FeeCalculatorTest is Constants {
         // Call with client=BOB (no custom fee), tx.origin=ALICE
         vm.prank(address(this), ALICE);
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            amountIn,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
         uint256 amountOut = actualAmountOut - _sumFees(fees);
 
@@ -945,13 +975,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            0,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // surplus = 0.1 ether, all to router
@@ -969,13 +1001,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            0,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // surplus = 0.1 ether, 50% each
@@ -995,13 +1029,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            0,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // surplus = 0.1 ether, BOB gets 80% custom share
@@ -1022,13 +1058,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            0,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // After removal, falls back to default 20%
@@ -1060,13 +1098,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            0,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // No surplus, but router fee on output still applies
@@ -1085,13 +1125,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 expectedAmountOut = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            actualAmountOut,
-            expectedAmountOut,
-            0,
-            address(0),
-            address(0),
-            0,
-            BOB
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // surplus = 0.1 ether, split 50/50 → router 0.05, BOB 0.05
@@ -1111,7 +1153,15 @@ contract FeeCalculatorSlippageTest is Constants {
         uint256 amount = 1 ether;
 
         FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            amount, amount, 0, address(0), address(0), 0, BOB
+            FeeInput({
+                actualAmountOut: amount,
+                expectedAmountOut: amount,
+                amountIn: 0,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 0,
+                client: BOB
+            })
         );
 
         // No surplus, but router fee on output still applies
