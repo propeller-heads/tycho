@@ -18,11 +18,7 @@ pub fn store_pools(pools_created: BlockEntityChanges, store: StoreSetIfNotExists
                 .id
                 .trim_start_matches("0x");
 
-            store.set_if_not_exists(
-                0,
-                pool_address,
-                &Pool { token0, token1 },
-            );
+            store.set_if_not_exists(0, pool_address, &Pool { token0, token1 });
         }
     }
 }

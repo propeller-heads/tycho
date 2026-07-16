@@ -33,6 +33,8 @@ pub fn map_events(block: eth::Block, pools_store: StoreGetProto<Pool>) -> Events
     Events { pool_events }
 }
 
+// The symmetric `else if let Some(..)` chain reads better here than the `?` form clippy wants.
+#[allow(clippy::question_mark)]
 fn maybe_pool_event(log: &Log, pool: Pool, tx: &TransactionTrace) -> Option<PoolEvent> {
     let typ = if let Some(init) = Initialize::match_and_decode(log) {
         Typ::Initialize(pool_event::Initialize {
