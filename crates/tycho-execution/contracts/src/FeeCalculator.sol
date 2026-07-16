@@ -97,22 +97,22 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     {
         address resolvedClient = _resolveClient(feeInput.client);
 
-        FeeRecipient[] memory slippage = _calculatePositiveSlippage(
+        (uint256 routerSurplus, uint256 clientSurplus) = _calculatePositiveSlippage(
             feeInput.actualAmountOut, feeInput.expectedAmountOut, resolvedClient
         );
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
-        // When no surplus (disabled or actual <= expected): feeBase = actualAmountOut.
-        uint256 feeBase = feeInput.actualAmountOut;
-        if (slippage.length > 0) {
-            feeBase -= slippage[0].feeAmount + slippage[1].feeAmount;
-        }
+        // When no surplus (disabled or actual <= expected): both cuts are zero.
+        uint256 feeBase =
+            feeInput.actualAmountOut - routerSurplus - clientSurplus;
 
-        FeeRecipient[] memory fees =
+        feeRecipients =
             _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
 
-        return _mergeFeeRecipients(fees, slippage);
+        // fees[0] = router, fees[1] = client (see _calculateFee).
+        feeRecipients[0].feeAmount += routerSurplus;
+        feeRecipients[1].feeAmount += clientSurplus;
     }
 
     /**
@@ -145,7 +145,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Calculates fees from the fee base amount (output minus any
      *      extracted surplus).
      * @return feeRecipients 2-element array: [0] = router, [1] = client.
-     *         _mergeFeeRecipients relies on this ordering.
      */
     function _calculateFee(uint256 feeBase, address client, uint32 clientFeeBps)
         internal
@@ -214,16 +213,16 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     /**
      * @dev Calculates positive slippage surplus distribution
-     * @return Empty array if disabled or no surplus; otherwise 2-element array:
-     *         [0] = router, [1] = client. _mergeFeeRecipients relies on this ordering.
+     * @return routerCut Router's share of the surplus (zero if disabled or no surplus)
+     * @return clientCut Client's share of the surplus (zero if disabled or no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
         uint256 expectedAmountOut,
         address client
-    ) internal view returns (FeeRecipient[] memory) {
+    ) internal view returns (uint256 routerCut, uint256 clientCut) {
         if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
-            return new FeeRecipient[](0);
+            return (0, 0);
         }
 
         uint256 surplus = actualAmountOut - expectedAmountOut;
@@ -231,13 +230,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
         uint256 clientCut = (surplus * clientShareBps) / MAX_BPS;
         uint256 routerCut = surplus - clientCut;
-
-        FeeRecipient[] memory result = new FeeRecipient[](2);
-        result[0] =
-            FeeRecipient({recipient: _routerFeeReceiver, feeAmount: routerCut});
-        result[1] = FeeRecipient({recipient: client, feeAmount: clientCut});
-
-        return result;
     }
 
     /**
@@ -253,26 +245,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             return customFees.clientSlippageShareBps;
         }
         return _defaultClientSlippageShareBps;
-    }
-
-    /**
-     * @dev Merges fee recipients with slippage recipients.
-     *      Combines amounts for the same recipient (router fee receiver).
-     */
-    function _mergeFeeRecipients(
-        FeeRecipient[] memory fees,
-        FeeRecipient[] memory slippage
-    ) internal pure returns (FeeRecipient[] memory) {
-        if (slippage.length == 0) return fees;
-
-        // fees[0] = router fees, slippage[0] = router slippage
-        // fees[1] = client fees, slippage[1] = client slippage
-        // Merge router amounts into fees[0]
-        fees[0].feeAmount += slippage[0].feeAmount;
-        // Merge client slippage into fees[1]
-        fees[1].feeAmount += slippage[1].feeAmount;
-
-        return fees;
     }
 
     /**

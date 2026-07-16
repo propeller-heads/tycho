@@ -80,16 +80,18 @@ pub fn calculate_fee(
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    let slippage = _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
+    let (router_surplus, client_surplus) =
+        _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
 
-    let mut fee_base = actual_amount_out;
-    if !slippage.is_empty() {
-        fee_base -= slippage[0].fee_amount + slippage[1].fee_amount;
-    }
+    let fee_base = actual_amount_out - router_surplus - client_surplus;
 
-    let fees = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
+    let mut fees = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
 
-    Ok(_merge_fee_recipients(fees, slippage))
+    // fees[0] = router, fees[1] = client (see _calculate_fee).
+    fees[0].fee_amount += router_surplus;
+    fees[1].fee_amount += client_surplus;
+
+    Ok(fees)
 }
 
 /// Mirrors `FeeCalculator.mustInterceptOutput` in Solidity.
@@ -157,15 +159,14 @@ fn _calculate_fee(
 
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
-/// Returns empty vec if disabled or no surplus; otherwise 2-element vec:
-/// [0] = router, [1] = client.
+/// Returns (router_cut, client_cut); both zero if disabled or no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
     fee_info: &FeeInfo,
-) -> Vec<FeeRecipient> {
+) -> (i64, i64) {
     if !fee_info.positive_slippage_enabled || actual_amount_out <= expected_amount_out {
-        return vec![];
+        return (0, 0);
     }
 
     let surplus = actual_amount_out - expected_amount_out;
@@ -173,29 +174,5 @@ fn _calculate_positive_slippage(
         (surplus as i128 * fee_info.client_slippage_share_bps as i128 / MAX_BPS as i128) as i64;
     let router_cut = surplus - client_cut;
 
-    vec![
-        FeeRecipient { recipient: Address::RouterFeeReceiver, fee_amount: router_cut },
-        FeeRecipient { recipient: Address::ClientFeeReceiver, fee_amount: client_cut },
-    ]
-}
-
-/// Mirrors `FeeCalculator._mergeFeeRecipients` in Solidity.
-///
-/// Merges slippage amounts into fee amounts for the same recipients.
-fn _merge_fee_recipients(
-    mut fees: Vec<FeeRecipient>,
-    slippage: Vec<FeeRecipient>,
-) -> Vec<FeeRecipient> {
-    if slippage.is_empty() {
-        return fees;
-    }
-
-    // fees[0] = router fees, slippage[0] = router slippage
-    // fees[1] = client fees, slippage[1] = client slippage
-    debug_assert!(fees.len() == 2, "expected exactly 2 fee recipients (router, client)");
-    debug_assert!(slippage.len() == 2, "expected exactly 2 slippage recipients (router, client)");
-    fees[0].fee_amount += slippage[0].fee_amount;
-    fees[1].fee_amount += slippage[1].fee_amount;
-
-    fees
+    (router_cut, client_cut)
 }
