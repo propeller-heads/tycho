@@ -113,12 +113,16 @@ impl EkuboPool for TwammPool {
             .liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: TokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: TokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let quote = self
             .imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(self.state),
                 meta: self.estimate_block_timestamp()?,
             })
