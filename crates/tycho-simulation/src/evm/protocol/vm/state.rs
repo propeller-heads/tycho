@@ -309,6 +309,10 @@ where
     ///
     /// * `Result<(), SimulationError>` - Returns `Ok(())` if the capability is supported, or a
     ///   `SimulationError` otherwise.
+    ///
+    /// Only used by tests now that `set_spot_prices_with` inlines the capability check via
+    /// `compute_spot_price`.
+    #[cfg(test)]
     fn ensure_capability(&self, capability: Capability) -> Result<(), SimulationError> {
         if !self.capabilities.contains(&capability) {
             return Err(SimulationError::FatalError(format!(
@@ -369,6 +373,132 @@ where
         )
     }
 
+    /// Computes the spot price for a single `(sell, buy)` pair against `live_snapshot`'s overrides
+    /// (or the plain indexed state when `None`), using the same logic as `set_spot_prices_with`:
+    /// the adapter `price` function when `PriceFunction` is supported, otherwise a two-swap
+    /// finite-difference. Does not touch the cache.
+    fn compute_spot_price(
+        &self,
+        tokens: &HashMap<Bytes, Token>,
+        sell_token_address: Address,
+        buy_token_address: Address,
+        live_snapshot: Option<&OverrideSnapshot>,
+        block_overrides: Option<BlockEnvOverrides>,
+    ) -> Result<f64, SimulationError> {
+        if self
+            .capabilities
+            .contains(&Capability::PriceFunction)
+        {
+            let overwrites = Some(self.get_overwrites(
+                vec![sell_token_address, buy_token_address],
+                *MAX_BALANCE / U256::from(100),
+                live_snapshot,
+            )?);
+
+            let (sell_amount_limit, _) = self.get_amount_limits(
+                vec![sell_token_address, buy_token_address],
+                overwrites.clone(),
+                block_overrides.clone(),
+            )?;
+            let price_result = self.adapter_contract.price(
+                &self.id,
+                sell_token_address,
+                buy_token_address,
+                vec![sell_amount_limit / U256::from(100)],
+                overwrites,
+                self.spot_price_caller,
+                block_overrides.clone(),
+            )?;
+
+            if self
+                .capabilities
+                .contains(&Capability::ScaledPrice)
+            {
+                Ok(*price_result.first().ok_or_else(|| {
+                    SimulationError::FatalError("Calculated price array is empty".to_string())
+                })?)
+            } else {
+                let unscaled_price = price_result.first().ok_or_else(|| {
+                    SimulationError::FatalError("Calculated price array is empty".to_string())
+                })?;
+                let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
+                let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
+                Ok(*unscaled_price * 10f64.powi(sell_token_decimals as i32) /
+                    10f64.powi(buy_token_decimals as i32))
+            }
+        } else {
+            // If the pool does not support price function, we need to calculate spot prices by
+            // swapping two amounts and use the approximation to get the derivative.
+            let overwrites = Some(self.get_overwrites(
+                vec![sell_token_address, buy_token_address],
+                *MAX_BALANCE / U256::from(100),
+                live_snapshot,
+            )?);
+
+            // Calculate the first sell amount (x1) as 1% of the maximum limit.
+            let x1 =
+                self.get_amount_limits(
+                    vec![sell_token_address, buy_token_address],
+                    overwrites.clone(),
+                    block_overrides.clone(),
+                )?
+                .0 / U256::from(100);
+
+            // Calculate the second sell amount (x2) as x1 + 1% of x1. 1.01% of the max limit
+            let x2 = x1 + (x1 / U256::from(100));
+
+            // Perform a swap for the first sell amount (x1) and retrieve the received amount
+            // (y1).
+            let y1 = self
+                .adapter_contract
+                .swap(
+                    &self.id,
+                    sell_token_address,
+                    buy_token_address,
+                    false,
+                    x1,
+                    overwrites.clone(),
+                    block_overrides.clone(),
+                )?
+                .0
+                .received_amount;
+
+            // Perform a swap for the second sell amount (x2) and retrieve the received amount
+            // (y2).
+            let y2 = self
+                .adapter_contract
+                .swap(
+                    &self.id,
+                    sell_token_address,
+                    buy_token_address,
+                    false,
+                    x2,
+                    overwrites,
+                    block_overrides.clone(),
+                )?
+                .0
+                .received_amount;
+
+            let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
+            let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
+
+            let num = y2 - y1;
+            let den = x2 - x1;
+
+            // Calculate the marginal price, adjusting for token decimals.
+            let token_correction =
+                10f64.powi(sell_token_decimals as i32 - buy_token_decimals as i32);
+            let num_f64 = u256_to_f64(num)?;
+            let den_f64 = u256_to_f64(den)?;
+            if den_f64 == 0.0 {
+                return Err(SimulationError::FatalError(
+                    "Failed to compute marginal price: denominator converted to 0".into(),
+                ));
+            }
+            Ok(num_f64 / den_f64 * token_correction)
+        }
+    }
+
     /// Computes and stores spot prices against `live_snapshot`'s overrides (or the plain indexed
     /// state when `None`).
     fn set_spot_prices_with(
@@ -377,141 +507,27 @@ where
         live_snapshot: Option<&OverrideSnapshot>,
     ) -> Result<(), SimulationError> {
         let block_overrides = self.block_env(live_snapshot);
-        match self.ensure_capability(Capability::PriceFunction) {
-            Ok(_) => {
-                for [sell_token_address, buy_token_address] in self
-                    .tokens
-                    .iter()
-                    .permutations(2)
-                    .map(|p| [p[0], p[1]])
-                {
-                    let sell_token_address = bytes_to_address(sell_token_address)?;
-                    let buy_token_address = bytes_to_address(buy_token_address)?;
+        for [sell_token_address, buy_token_address] in self
+            .tokens
+            .iter()
+            .permutations(2)
+            .map(|p| [p[0], p[1]])
+        {
+            let sell_token_address = bytes_to_address(sell_token_address)?;
+            let buy_token_address = bytes_to_address(buy_token_address)?;
 
-                    let overwrites = Some(self.get_overwrites(
-                        vec![sell_token_address, buy_token_address],
-                        *MAX_BALANCE / U256::from(100),
-                        live_snapshot,
-                    )?);
+            let price = self.compute_spot_price(
+                tokens,
+                sell_token_address,
+                buy_token_address,
+                live_snapshot,
+                block_overrides.clone(),
+            )?;
 
-                    let (sell_amount_limit, _) = self.get_amount_limits(
-                        vec![sell_token_address, buy_token_address],
-                        overwrites.clone(),
-                        block_overrides.clone(),
-                    )?;
-                    let price_result = self.adapter_contract.price(
-                        &self.id,
-                        sell_token_address,
-                        buy_token_address,
-                        vec![sell_amount_limit / U256::from(100)],
-                        overwrites,
-                        self.spot_price_caller,
-                        block_overrides.clone(),
-                    )?;
-
-                    let price = if self
-                        .capabilities
-                        .contains(&Capability::ScaledPrice)
-                    {
-                        *price_result.first().ok_or_else(|| {
-                            SimulationError::FatalError(
-                                "Calculated price array is empty".to_string(),
-                            )
-                        })?
-                    } else {
-                        let unscaled_price = price_result.first().ok_or_else(|| {
-                            SimulationError::FatalError(
-                                "Calculated price array is empty".to_string(),
-                            )
-                        })?;
-                        let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
-                        let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
-                        *unscaled_price * 10f64.powi(sell_token_decimals as i32) /
-                            10f64.powi(buy_token_decimals as i32)
-                    };
-
-                    self.spot_price_cache
-                        .write()
-                        .expect("spot_price_cache poisoned")
-                        .insert((sell_token_address, buy_token_address), price);
-                }
-            }
-            Err(SimulationError::FatalError(_)) => {
-                // If the pool does not support price function, we need to calculate spot prices by
-                // swapping two amounts and use the approximation to get the derivative.
-
-                for iter_tokens in self.tokens.iter().permutations(2) {
-                    let t0 = bytes_to_address(iter_tokens[0])?;
-                    let t1 = bytes_to_address(iter_tokens[1])?;
-
-                    let overwrites = Some(self.get_overwrites(
-                        vec![t0, t1],
-                        *MAX_BALANCE / U256::from(100),
-                        live_snapshot,
-                    )?);
-
-                    // Calculate the first sell amount (x1) as 1% of the maximum limit.
-                    let x1 =
-                        self.get_amount_limits(
-                            vec![t0, t1],
-                            overwrites.clone(),
-                            block_overrides.clone(),
-                        )?
-                        .0 / U256::from(100);
-
-                    // Calculate the second sell amount (x2) as x1 + 1% of x1. 1.01% of the max
-                    // limit
-                    let x2 = x1 + (x1 / U256::from(100));
-
-                    // Perform a swap for the first sell amount (x1) and retrieve the received
-                    // amount (y1).
-                    let y1 = self
-                        .adapter_contract
-                        .swap(
-                            &self.id,
-                            t0,
-                            t1,
-                            false,
-                            x1,
-                            overwrites.clone(),
-                            block_overrides.clone(),
-                        )?
-                        .0
-                        .received_amount;
-
-                    // Perform a swap for the second sell amount (x2) and retrieve the received
-                    // amount (y2).
-                    let y2 = self
-                        .adapter_contract
-                        .swap(&self.id, t0, t1, false, x2, overwrites, block_overrides.clone())?
-                        .0
-                        .received_amount;
-
-                    let sell_token_decimals = self.get_decimals(tokens, &t0)?;
-                    let buy_token_decimals = self.get_decimals(tokens, &t1)?;
-
-                    let num = y2 - y1;
-                    let den = x2 - x1;
-
-                    // Calculate the marginal price, adjusting for token decimals.
-                    let token_correction =
-                        10f64.powi(sell_token_decimals as i32 - buy_token_decimals as i32);
-                    let num_f64 = u256_to_f64(num)?;
-                    let den_f64 = u256_to_f64(den)?;
-                    if den_f64 == 0.0 {
-                        return Err(SimulationError::FatalError(
-                            "Failed to compute marginal price: denominator converted to 0".into(),
-                        ));
-                    }
-                    let marginal_price = num_f64 / den_f64 * token_correction;
-
-                    self.spot_price_cache
-                        .write()
-                        .expect("spot_price_cache poisoned")
-                        .insert((t0, t1), marginal_price);
-                }
-            }
-            Err(e) => return Err(e),
+            self.spot_price_cache
+                .write()
+                .expect("spot_price_cache poisoned")
+                .insert((sell_token_address, buy_token_address), price);
         }
 
         Ok(())
