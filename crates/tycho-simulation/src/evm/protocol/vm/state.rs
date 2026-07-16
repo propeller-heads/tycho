@@ -630,6 +630,14 @@ where
                 SimulationError::FatalError(format!("Failed to clear temporary storage: {err:?}",))
             })?;
         self.block_lasting_overwrites.clear();
+        self.spot_price_cache
+            .write()
+            .expect("spot_price_cache poisoned")
+            .clear();
+        self.limit_cache
+            .write()
+            .expect("limit_cache poisoned")
+            .clear();
 
         // Set balances. Component balances and contract balances are refreshed independently:
         // hybrid pools (e.g. Balancer V3) carry both, and `get_balance_overwrites` layers
@@ -1843,6 +1851,30 @@ mod tests {
             U256::from(3000000000u64),
             "New token balance should be unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_pool_state_warms_caches() {
+        let mut pool_state = setup_pool_state().await;
+        let tokens =
+            HashMap::from([(dai().address.clone(), dai()), (bal().address.clone(), bal())]);
+        let balances =
+            Balances { component_balances: HashMap::new(), account_balances: HashMap::new() };
+
+        pool_state
+            .update_pool_state(&tokens, &balances)
+            .unwrap();
+
+        assert!(!pool_state
+            .spot_price_cache
+            .read()
+            .expect("spot_price_cache poisoned")
+            .is_empty());
+        assert!(!pool_state
+            .limit_cache
+            .read()
+            .expect("limit_cache poisoned")
+            .is_empty());
     }
 
     #[tokio::test]
