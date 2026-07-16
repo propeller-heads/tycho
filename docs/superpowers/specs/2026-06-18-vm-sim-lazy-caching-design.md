@@ -126,3 +126,47 @@ later foreground read becomes a hit — no redesign.
 - No change to `get_amount_out`'s returned amounts or gas.
 - No change to the per-block streaming behaviour beyond also warming the limit cache.
 - No lock-batching of the shared DB.
+
+## Results — after lazy caching (deltas vs `before` baseline)
+
+Measured on branch `feat/vm-sim-bench` (optimized) vs the `before` baseline re-saved on the
+rebased pre-optimization tip (same latest-main code minus the caching change), release, x86_64,
+`cargo bench -- --baseline before`. All changes statistically significant (p < 0.05).
+
+### get_amount_out (median, and change)
+
+| fixture | before | after | change |
+|---|---|---|---|
+| balancer_v2_2token / small | ~467 µs | 197.6 µs | **−57.6%** |
+| balancer_v2_2token / large | ~459 µs | 200.6 µs | **−56.2%** |
+| curve_3token / small | ~1.83 ms | 382.2 µs | **−79.1%** |
+| curve_3token / large | ~1.81 ms | 377.8 µs | **−79.1%** |
+| curve_4token / small | ~1.30 ms | 275.0 µs | **−78.9%** |
+| curve_4token / large | ~1.33 ms | 274.8 µs | **−79.4%** |
+
+Multi-token pools gain the most (−79%): they had the most token-pair permutations to eagerly
+recompute per call. The 2-token pool still gains −57% (eager recompute removed + limit reuse).
+
+### spot_price (median)
+
+Now a lock-guarded cache read: ~51 ns (from ~0.95 µs), **−94.5%** across all fixtures.
+
+### get_amount_out_contended (throughput, no regression)
+
+| threads | before thrpt | after thrpt | change |
+|---|---|---|---|
+| 1 | ~1.53 Kelem/s | 1.98 Kelem/s | **+29%** |
+| 2 | ~2.86 Kelem/s | 3.84 Kelem/s | **+34%** |
+| 4 | ~5.20 Kelem/s | 7.64 Kelem/s | **+47%** |
+| 8 | ~10.3 Kelem/s | 15.6 Kelem/s | **+52%** |
+
+Concurrent throughput improves (limit caching helps the repeated-call loop; the `RwLock` reads do
+not regress scaling). The concurrency equivalence tests (`vm_concurrency`) stay green, including the
+cold-miss `spot_price` race.
+
+### Correctness
+
+All exact-value unit tests unchanged (amounts, limits, spot prices byte-identical). Override-enabled
+pools bypass the caches and keep today's eager behaviour. One pre-existing flaky test
+(`test_failing_overrides_error_by_default`, ~1/10 under parallel runs) is unrelated — confirmed
+present at the same rate on the pre-optimization base.
