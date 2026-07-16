@@ -15,6 +15,7 @@ pub fn store_tick_spacing_fee(tick_spacing_fees: TickSpacingFees, store: StoreSe
     // store.set(0, "tick_spacing_50", &500);
     // store.set(0, "tick_spacing_100", &500);
     // store.set(0, "tick_spacing_200", &3000);
+    // store.set(0, "tick_spacing_500", &20000);
     // store.set(0, "tick_spacing_2000", &10000);
 
     for fee in tick_spacing_fees
