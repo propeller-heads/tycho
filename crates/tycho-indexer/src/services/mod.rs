@@ -32,6 +32,7 @@ use crate::{
 mod access_control;
 mod api_docs;
 mod cache;
+mod client_metadata;
 #[cfg(feature = "jemalloc")]
 mod debug;
 mod deltas_buffer;

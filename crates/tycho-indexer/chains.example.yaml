@@ -1,0 +1,26 @@
+# Example custom-chains config — copy to your own file and edit, then point the indexer at it via
+# the `--chain-config <path>` flag (default `./chains.yaml`).
+#
+# This file defines custom (non-built-in) chains by name so that an extractor's `chain: <name>` (in
+# extractors.yaml) and the `--chains <name>` flag resolve to a full chain config. Built-in chains
+# (ethereum, base, unichain, …) need no entry here.
+#
+# Consumers (tycho-simulation, tycho-client, tycho-execution) resolve custom chains the same way:
+# set the `TYCHO_CHAINS_CONFIG` env var to this file's path and they load the identical definitions
+# the indexer uses. Leave it unset and they resolve only built-in chains.
+
+chains:
+  - name: tempo                       # the value used as `chain:` on extractors and in `--chains`
+    chain_id: <tempo chain id>        # EVM chain id
+    block_time_secs: 1
+    native:                           # native gas token
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "ETH"
+      decimals: 18
+    wrapped_native:                   # wrapped native token (e.g. WETH)
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "WETH"
+      decimals: 18
+    default_tvl_thresholds:           # TVL gates (in native token units) for component tracking
+      low: 1000
+      medium: 10000

@@ -9,8 +9,10 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     hash::{Hash, Hasher},
+    str::FromStr,
 };
 
+use arrayvec::ArrayString;
 use chrono::{NaiveDateTime, Utc};
 use deepsize::{Context, DeepSizeOf};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -20,7 +22,10 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    models::{self, Address, Balance, Code, ComponentId, StoreKey, StoreVal},
+    models::{
+        self, chain_config::ChainConfigError, Address, Balance, Code, ComponentId, StoreKey,
+        StoreVal,
+    },
     serde_primitives::{
         hex_bytes, hex_bytes_option, hex_hashmap_key, hex_hashmap_key_value, hex_hashmap_value,
     },
@@ -28,23 +33,8 @@ use crate::{
 };
 
 /// Currently supported Blockchains
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumString,
-    Display,
-    Default,
-    ToSchema,
-    DeepSizeOf,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
 pub enum Chain {
     #[default]
     Ethereum,
@@ -55,14 +45,36 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    #[schema(value_type = String)]
+    Custom(ArrayString<32>),
 }
 
-pub use models::TvlThresholdTier;
+impl DeepSizeOf for Chain {
+    fn deep_size_of_children(&self, _context: &mut Context) -> usize {
+        0
+    }
+}
+
+pub use models::chain_config::TvlThresholdTier;
 
 impl Chain {
     /// Returns a default TVL threshold in native token units for the given tier.
     pub fn default_tvl_threshold(&self, tier: TvlThresholdTier) -> f64 {
         models::Chain::from(*self).default_tvl_threshold(tier)
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        models::Chain::from(*self).fmt(f)
+    }
+}
+
+impl FromStr for Chain {
+    type Err = ChainConfigError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        models::Chain::from_str(s).map(Self::from)
     }
 }
 
@@ -99,6 +111,10 @@ impl From<models::Chain> for Chain {
             models::Chain::Bsc => Chain::Bsc,
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
+            models::Chain::Custom(id) => Chain::Custom(
+                ArrayString::from(id.as_str())
+                    .expect("custom chain name is already within 32 bytes"),
+            ),
         }
     }
 }

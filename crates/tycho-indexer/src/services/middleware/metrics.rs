@@ -5,8 +5,10 @@ use actix_web::{
     dev::{ServiceRequest, ServiceResponse},
     middleware::Next,
 };
-use metrics::{counter, histogram};
+use metrics::{counter, histogram, Label};
 use tracing::{instrument, Span};
+
+use crate::services::client_metadata;
 
 /// Middleware to record metrics for RPC requests.
 #[instrument(skip_all, fields(user_identity))]
@@ -32,7 +34,37 @@ where
 
     Span::current().record("user_identity", &user_identity);
 
-    counter!("rpc_requests", "endpoint" => endpoint.clone(), "user_identity" => user_identity.clone()).increment(1);
+    // Mirrors the WS `client_version` label (raw User-Agent), defaulting to a bounded sentinel.
+    let client_version = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    // Client plan from the upstream-injected X-User-Plan header (`none` when absent).
+    let user_plan = req
+        .headers()
+        .get("x-user-plan")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none")
+        .to_string();
+
+    let metadata = client_metadata::parse_client_metadata(
+        req.headers()
+            .get(client_metadata::CLIENT_METADATA_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    let metadata_labels = client_metadata::metric_labels(&metadata);
+
+    let mut request_labels = vec![
+        Label::new("endpoint", endpoint.clone()),
+        Label::new("user_identity", user_identity.clone()),
+        Label::new("client_version", client_version.clone()),
+        Label::new("user_plan", user_plan.clone()),
+    ];
+    request_labels.extend(metadata_labels.iter().cloned());
+    counter!("rpc_requests", request_labels).increment(1);
 
     let res = next.call(req).await;
 
@@ -45,13 +77,15 @@ where
     match res {
         Ok(srv_res) => {
             if srv_res.status().is_client_error() || srv_res.status().is_server_error() {
-                counter!(
-                    "rpc_requests_failed",
-                    "endpoint" => endpoint.clone(),
-                    "status" => srv_res.status().as_u16().to_string(),
-                    "user_identity" => user_identity.clone()
-                )
-                .increment(1);
+                let mut fail_labels = vec![
+                    Label::new("endpoint", endpoint.clone()),
+                    Label::new("status", srv_res.status().as_u16().to_string()),
+                    Label::new("user_identity", user_identity.clone()),
+                    Label::new("client_version", client_version.clone()),
+                    Label::new("user_plan", user_plan.clone()),
+                ];
+                fail_labels.extend(metadata_labels.iter().cloned());
+                counter!("rpc_requests_failed", fail_labels).increment(1);
             }
 
             Ok(srv_res.map_into_boxed_body())
@@ -60,13 +94,15 @@ where
             let resp_e = e.as_response_error();
             let status = resp_e.status_code().as_u16();
 
-            counter!(
-                "rpc_requests_failed",
-                "endpoint" => endpoint.clone(),
-                "status" => status.to_string(),
-                "user_identity" => user_identity.clone()
-            )
-            .increment(1);
+            let mut fail_labels = vec![
+                Label::new("endpoint", endpoint.clone()),
+                Label::new("status", status.to_string()),
+                Label::new("user_identity", user_identity.clone()),
+                Label::new("client_version", client_version.clone()),
+                Label::new("user_plan", user_plan.clone()),
+            ];
+            fail_labels.extend(metadata_labels.iter().cloned());
+            counter!("rpc_requests_failed", fail_labels).increment(1);
 
             Err(e)
         }
@@ -184,15 +220,29 @@ mod tests {
 
         let after = snapshot_to_map(snapshotter.snapshot());
 
-        let success_labels = [("endpoint", "/v1/health"), ("user_identity", "alice")];
+        let success_labels = [
+            ("endpoint", "/v1/health"),
+            ("user_identity", "alice"),
+            ("client_version", "unknown"),
+            ("user_plan", "none"),
+            ("fynd_version", "none"),
+            ("fynd_preset", "none"),
+        ];
         assert_eq!(
             counter_value(&after, "rpc_requests", &success_labels) -
                 counter_value(&before, "rpc_requests", &success_labels),
             1
         );
 
-        let no_failure_labels =
-            [("endpoint", "/v1/health"), ("status", "400"), ("user_identity", "alice")];
+        let no_failure_labels = [
+            ("endpoint", "/v1/health"),
+            ("status", "400"),
+            ("user_identity", "alice"),
+            ("client_version", "unknown"),
+            ("user_plan", "none"),
+            ("fynd_version", "none"),
+            ("fynd_preset", "none"),
+        ];
         assert_eq!(
             counter_value(&after, "rpc_requests_failed", &no_failure_labels),
             counter_value(&before, "rpc_requests_failed", &no_failure_labels),
@@ -206,6 +256,49 @@ mod tests {
             ),
             1
         );
+
+        // --- Client metadata case: allowlisted keys become labels, others are dropped ---
+        let before = snapshot_to_map(snapshotter.snapshot());
+
+        let request = test::TestRequest::get()
+            .uri("/v1/health")
+            .insert_header(("user-identity", "alice"))
+            .insert_header(("user-agent", "tycho-client-1.0"))
+            .insert_header(("x-user-plan", "pro"))
+            .insert_header((
+                "x-tycho-client-metadata",
+                "fynd_version=1.2.3; fynd_preset=fast; secret=xyz",
+            ))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let after = snapshot_to_map(snapshotter.snapshot());
+
+        let metadata_labels = [
+            ("endpoint", "/v1/health"),
+            ("user_identity", "alice"),
+            ("client_version", "tycho-client-1.0"),
+            ("user_plan", "pro"),
+            ("fynd_version", "1.2.3"),
+            ("fynd_preset", "fast"),
+        ];
+        assert_eq!(
+            counter_value(&after, "rpc_requests", &metadata_labels) -
+                counter_value(&before, "rpc_requests", &metadata_labels),
+            1
+        );
+        // The non-allowlisted `secret` key must never appear as a label.
+        let with_secret = [
+            ("endpoint", "/v1/health"),
+            ("user_identity", "alice"),
+            ("client_version", "tycho-client-1.0"),
+            ("user_plan", "pro"),
+            ("fynd_version", "1.2.3"),
+            ("fynd_preset", "fast"),
+            ("secret", "xyz"),
+        ];
+        assert_eq!(counter_value(&after, "rpc_requests", &with_secret), 0);
 
         // --- Failure case ---
         let expected_error = RpcError::Pagination(100);
@@ -221,7 +314,14 @@ mod tests {
 
         let after = snapshot_to_map(snapshotter.snapshot());
 
-        let fail_request_labels = [("endpoint", "/v1/fail"), ("user_identity", "unknown")];
+        let fail_request_labels = [
+            ("endpoint", "/v1/fail"),
+            ("user_identity", "unknown"),
+            ("client_version", "unknown"),
+            ("user_plan", "none"),
+            ("fynd_version", "none"),
+            ("fynd_preset", "none"),
+        ];
         assert_eq!(
             counter_value(&after, "rpc_requests", &fail_request_labels) -
                 counter_value(&before, "rpc_requests", &fail_request_labels),
@@ -232,6 +332,10 @@ mod tests {
             ("endpoint", "/v1/fail"),
             ("status", expected_status.as_str()),
             ("user_identity", "unknown"),
+            ("client_version", "unknown"),
+            ("user_plan", "none"),
+            ("fynd_version", "none"),
+            ("fynd_preset", "none"),
         ];
         assert_eq!(
             counter_value(&after, "rpc_requests_failed", &fail_labels) -

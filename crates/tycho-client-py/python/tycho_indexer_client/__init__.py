@@ -11,6 +11,7 @@ from .rpc_client import (
 )
 from .dto import (
     Chain,
+    CustomChain,
     ProtocolComponent,
     ResponseProtocolState,
     ResponseAccount,
