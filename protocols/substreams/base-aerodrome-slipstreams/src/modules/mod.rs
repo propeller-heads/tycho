@@ -7,6 +7,9 @@ mod map_tick_spacing_fee;
 #[path = "2_store_tick_spacing_fee.rs"]
 mod store_tick_spacing_fee;
 
+#[path = "1_store_dynamic_fee_config.rs"]
+mod store_dynamic_fee_config;
+
 #[path = "4_store_pools.rs"]
 mod store_pools;
 

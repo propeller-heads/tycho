@@ -6,8 +6,44 @@ module_name: "map_protocol_changes"
 skip_balance_check: true
 initialized_accounts:
 tests: []
-  # These tests are skipped because they require some specific testing logic (see comment in2_store_tick_spacing_fee.rs)
-  # Else we would need to index over 10M blocks, which would take days.
+  # The new fee module first sets dfc_baseFee at block 44,221,840, then updates
+  # dfc_feeCap and dfc_scalingFactor independently at block 44,227,070.
+  # - name: test_new_fee_module_partial_updates
+  #   start_block: 44102164
+  #   stop_block: 44227070
+  #   expected_components:
+  #     - id: "0xfcd3f5ca230e7c1bd5b415eb85d5186346de0fec"
+  #       tokens:
+  #         - "0x8e4cbbcc33db6c0a18561fde1f6ba35906d4848b"
+  #         - "0xdd468a1ddc392dcdbef6db6e34e89aa338f9f186"
+  #       static_attributes:
+  #         default_fee: "0x0bb8"
+  #         tick_spacing: "0x00c8"
+  #       creation_tx: "0x798e0c9744073bcb80901d5ddb336bae0bcb8b93604f432607c90569bbb28ba9"
+  #       # Simulation support is released separately after the SPKG replay has caught up.
+  #       skip_simulation: true
+  #       skip_execution: true
+
+  # InitialFeeSet enables a fee of 50 at block 44,228,502. At the selected stop
+  # block the pool has no observation from that block, so Factory.getSwapFee returns 50.
+  # - name: test_initial_fee_enabled
+  #   start_block: 38996897
+  #   stop_block: 44228510
+  #   expected_components:
+  #     - id: "0xb30540172f1b37d1ee1d109e49f883e935e69219"
+  #       tokens:
+  #         - "0x311935cd80b76769bf2ecc9d8ab7635b2139cf82" # SOL
+  #         - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+  #       static_attributes:
+  #         default_fee: "0x01f4"
+  #         tick_spacing: "0x0a"
+  #       creation_tx: "0x967196d2f84a5cb83dfdc0efa91b5e0b602b1f897f2ce81aff765b94a61724b9"
+  #       # Simulation support is released separately after the SPKG replay has caught up.
+  #       skip_simulation: true
+  #       skip_execution: true
+
+  # These historical cases remain disabled because their wide ranges are too slow for routine
+  # integration runs.
 
   # - name: test_weth_b3
   #   start_block: 26204083
