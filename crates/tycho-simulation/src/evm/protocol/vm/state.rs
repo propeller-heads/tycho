@@ -1116,6 +1116,8 @@ where
         tokens: &HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError> {
+        let mut block_overrides_changed = false;
+
         if let Some(block_number) = delta
             .updated_attributes
             .get("override_block_number")
@@ -1131,6 +1133,7 @@ where
             self.block_overrides
                 .get_or_insert_with(BlockEnvOverrides::default)
                 .number = Some(number);
+            block_overrides_changed = true;
         }
 
         if let Some(block_timestamp) = delta
@@ -1148,6 +1151,21 @@ where
             self.block_overrides
                 .get_or_insert_with(BlockEnvOverrides::default)
                 .timestamp = Some(timestamp);
+            block_overrides_changed = true;
+        }
+
+        // A block-environment change invalidates cached limits (which are computed against the
+        // block env via the adapter), even when `update_pool_state` is skipped for a
+        // `manual_updates` pool without an update marker. Only `limit_cache` is cleared:
+        // the old code recomputed limits fresh here, whereas the spot-price map was
+        // retained-stale in this path, so leaving `spot_price_cache` untouched preserves
+        // byte-identical behavior (and avoids breaking override pools, which error on a
+        // spot-price cache miss).
+        if block_overrides_changed {
+            self.limit_cache
+                .write()
+                .expect("limit_cache poisoned")
+                .clear();
         }
 
         if self.manual_updates {
@@ -1971,6 +1989,51 @@ mod tests {
             pool_state.balances[&dai_addr()],
             U256::from_str("178754012737301807104").unwrap()
         );
+    }
+
+    /// A block-environment-only delta (no `update_marker`) on a `manual_updates` pool skips
+    /// `update_pool_state`, but must still invalidate `limit_cache` since limits are computed
+    /// against the block env. `spot_price_cache` is not required to be cleared here: it stays
+    /// byte-identical to pre-optimization behavior, which also retained stale spot prices in this
+    /// skip path.
+    #[tokio::test]
+    async fn test_block_override_delta_clears_limit_cache_when_update_skipped() {
+        let mut pool_state = setup_pool_state().await;
+        pool_state.manual_updates = true;
+
+        // Populate the limit cache.
+        let overwrites = pool_state
+            .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
+            .unwrap();
+        let _ = pool_state
+            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites), None)
+            .unwrap();
+        assert!(!pool_state
+            .limit_cache
+            .read()
+            .unwrap()
+            .is_empty());
+
+        // A delta that only changes the block env, with no `update_marker`.
+        let delta = ProtocolStateDelta {
+            component_id: pool_state.id.clone(),
+            updated_attributes: HashMap::from([(
+                "override_block_number".to_string(),
+                Bytes::from(1234_u64.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        pool_state
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        // limit_cache must be cleared: the block env changed, so cached limits could be stale.
+        assert!(pool_state
+            .limit_cache
+            .read()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
