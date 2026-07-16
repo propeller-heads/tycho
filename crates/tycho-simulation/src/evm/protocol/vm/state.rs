@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Debug},
     str::FromStr,
+    sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -40,7 +41,6 @@ use crate::evm::{
     simulation::BlockEnvOverrides,
 };
 
-#[derive(Clone)]
 pub struct EVMPoolState<D: EngineDatabaseInterface + Clone + Debug>
 where
     <D as DatabaseRef>::Error: Debug,
@@ -57,8 +57,13 @@ where
     /// simulations. This has been deprecated in favor of `contract_balances`.
     #[deprecated(note = "Use contract_balances instead")]
     balance_owner: Option<Address>,
-    /// Spot prices of the pool by token pair
-    spot_prices: HashMap<(Address, Address), f64>,
+    /// Read-through cache of spot prices by `(sell, buy)`. Lazily populated by `spot_price`,
+    /// eagerly warmed by `update_pool_state`, and cleared whenever pool state changes. Bypassed
+    /// for pools with live overrides (see later tasks).
+    spot_price_cache: RwLock<HashMap<(Address, Address), f64>>,
+    /// Read-through cache of `(sell_limit, buy_limit)` by `(sell, buy)`. Stable per
+    /// pool-state-version; cleared whenever pool state changes. Bypassed under live overrides.
+    limit_cache: RwLock<HashMap<(Address, Address), (U256, U256)>>,
     /// The supported capabilities of this pool
     capabilities: HashSet<Capability>,
     /// Storage overwrites that will be applied to all simulations. They will be cleared
@@ -96,6 +101,44 @@ where
     /// block update. Takes precedence over [`Self::block_lasting_overwrites`] and
     /// [`Self::block_overrides`] on conflict.
     live_overrides: Option<watch::Receiver<OverrideSnapshot>>,
+}
+
+impl<D> Clone for EVMPoolState<D>
+where
+    D: EngineDatabaseInterface + Clone + Debug,
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            tokens: self.tokens.clone(),
+            balances: self.balances.clone(),
+            balance_owner: self.balance_owner,
+            spot_price_cache: RwLock::new(
+                self.spot_price_cache
+                    .read()
+                    .expect("spot_price_cache poisoned")
+                    .clone(),
+            ),
+            limit_cache: RwLock::new(
+                self.limit_cache
+                    .read()
+                    .expect("limit_cache poisoned")
+                    .clone(),
+            ),
+            capabilities: self.capabilities.clone(),
+            block_lasting_overwrites: self.block_lasting_overwrites.clone(),
+            involved_contracts: self.involved_contracts.clone(),
+            contract_balances: self.contract_balances.clone(),
+            manual_updates: self.manual_updates,
+            adapter_contract: self.adapter_contract.clone(),
+            disable_overwrite_tokens: self.disable_overwrite_tokens.clone(),
+            self_contained_tokens: self.self_contained_tokens.clone(),
+            block_overrides: self.block_overrides.clone(),
+            live_overrides: self.live_overrides.clone(),
+        }
+    }
 }
 
 impl<D> Debug for EVMPoolState<D>
@@ -148,7 +191,8 @@ where
             tokens,
             balances: component_balances,
             balance_owner,
-            spot_prices,
+            spot_price_cache: RwLock::new(spot_prices),
+            limit_cache: RwLock::new(HashMap::new()),
             capabilities,
             block_lasting_overwrites,
             involved_contracts,
@@ -386,7 +430,9 @@ where
                             10f64.powi(buy_token_decimals as i32)
                     };
 
-                    self.spot_prices
+                    self.spot_price_cache
+                        .write()
+                        .expect("spot_price_cache poisoned")
                         .insert((sell_token_address, buy_token_address), price);
                 }
             }
@@ -459,7 +505,9 @@ where
                     }
                     let marginal_price = num_f64 / den_f64 * token_correction;
 
-                    self.spot_prices
+                    self.spot_price_cache
+                        .write()
+                        .expect("spot_price_cache poisoned")
                         .insert((t0, t1), marginal_price);
                 }
             }
@@ -936,7 +984,9 @@ where
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let base_address = bytes_to_address(&base.address)?;
         let quote_address = bytes_to_address(&quote.address)?;
-        self.spot_prices
+        self.spot_price_cache
+            .read()
+            .expect("spot_price_cache poisoned")
             .get(&(base_address, quote_address))
             .cloned()
             .ok_or(SimulationError::FatalError(format!(
@@ -1299,7 +1349,16 @@ mod tests {
             .downcast_ref::<EVMPoolState<PreCachedDB>>()
             .unwrap();
         assert_eq!(result.amount, BigUint::from_str("137780051463393923").unwrap());
-        assert_ne!(new_state.spot_prices, pool_state.spot_prices);
+        assert_ne!(
+            *new_state
+                .spot_price_cache
+                .read()
+                .unwrap(),
+            *pool_state
+                .spot_price_cache
+                .read()
+                .unwrap()
+        );
         assert!(pool_state
             .block_lasting_overwrites
             .is_empty());
@@ -1319,7 +1378,16 @@ mod tests {
             .downcast_ref::<EVMPoolState<PreCachedDB>>()
             .unwrap();
         assert_eq!(result.amount, BigUint::from_str("137780051463393923").unwrap());
-        assert_ne!(new_state.spot_prices, pool_state.spot_prices);
+        assert_ne!(
+            *new_state
+                .spot_price_cache
+                .read()
+                .unwrap(),
+            *pool_state
+                .spot_price_cache
+                .read()
+                .unwrap()
+        );
 
         let new_result = new_state
             .get_amount_out(BigUint::from_str("1000000000000000000").unwrap(), &dai(), &bal())
@@ -1331,7 +1399,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(new_result.amount, BigUint::from_str("136964651490065626").unwrap());
-        assert_ne!(new_state_second_swap.spot_prices, new_state.spot_prices);
+        assert_ne!(
+            *new_state_second_swap
+                .spot_price_cache
+                .read()
+                .unwrap(),
+            *new_state
+                .spot_price_cache
+                .read()
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1421,22 +1498,26 @@ mod tests {
             )
             .unwrap();
 
-        let dai_bal_spot_price = pool_state
-            .spot_prices
+        let dai_bal_spot_price = *pool_state
+            .spot_price_cache
+            .read()
+            .unwrap()
             .get(&(
                 bytes_to_address(&pool_state.tokens[0]).unwrap(),
                 bytes_to_address(&pool_state.tokens[1]).unwrap(),
             ))
             .unwrap();
-        let bal_dai_spot_price = pool_state
-            .spot_prices
+        let bal_dai_spot_price = *pool_state
+            .spot_price_cache
+            .read()
+            .unwrap()
             .get(&(
                 bytes_to_address(&pool_state.tokens[1]).unwrap(),
                 bytes_to_address(&pool_state.tokens[0]).unwrap(),
             ))
             .unwrap();
-        assert_eq!(dai_bal_spot_price, &0.137_778_914_319_047_9);
-        assert_eq!(bal_dai_spot_price, &7.071_503_245_428_246);
+        assert_eq!(dai_bal_spot_price, 0.137_778_914_319_047_9);
+        assert_eq!(bal_dai_spot_price, 7.071_503_245_428_246);
     }
 
     #[tokio::test]
@@ -1457,22 +1538,26 @@ mod tests {
             )
             .unwrap();
 
-        let dai_bal_spot_price = pool_state
-            .spot_prices
+        let dai_bal_spot_price = *pool_state
+            .spot_price_cache
+            .read()
+            .unwrap()
             .get(&(
                 bytes_to_address(&pool_state.tokens[0]).unwrap(),
                 bytes_to_address(&pool_state.tokens[1]).unwrap(),
             ))
             .unwrap();
-        let bal_dai_spot_price = pool_state
-            .spot_prices
+        let bal_dai_spot_price = *pool_state
+            .spot_price_cache
+            .read()
+            .unwrap()
             .get(&(
                 bytes_to_address(&pool_state.tokens[1]).unwrap(),
                 bytes_to_address(&pool_state.tokens[0]).unwrap(),
             ))
             .unwrap();
-        assert_eq!(dai_bal_spot_price, &0.13736685496467538);
-        assert_eq!(bal_dai_spot_price, &7.050354297665408);
+        assert_eq!(dai_bal_spot_price, 0.13736685496467538);
+        assert_eq!(bal_dai_spot_price, 7.050354297665408);
     }
 
     #[tokio::test]
