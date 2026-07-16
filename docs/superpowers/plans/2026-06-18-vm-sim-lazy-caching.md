@@ -10,6 +10,49 @@
 
 ---
 
+## Execution addendum (2026-07-16) — rebased onto latest main
+
+The branch was rebased from main 0.305.1 → 0.335.x. Two deltas from the code the plan was written
+against; the task **intent is unchanged**, but the exact code differs — implementers must verify
+signatures against the live file (line numbers below are current):
+
+1. **Struct grew 3 fields** (`state.rs:49-95`): `self_contained_tokens: HashSet<Address>`,
+   `block_overrides: Option<BlockEnvOverrides>`, `live_overrides: Option<watch::Receiver<OverrideSnapshot>>`.
+   `new()` gained `self_contained_tokens` + `block_overrides` params (`state.rs:126`). The manual
+   `Clone` (Task 1) MUST include all current fields, incl. `live_overrides: self.live_overrides.clone()`
+   (a `watch::Receiver` is `Clone`). `#[derive(Clone)]` is still at `state.rs:43`.
+
+2. **Live-overrides subsystem** (Titan pAMM sub-block maker quotes). The sim helpers now thread
+   `live_snapshot: Option<&OverrideSnapshot>` and `block_overrides: Option<BlockEnvOverrides>`:
+   `get_amount_limits(tokens, overwrites, block_overrides)` (`state.rs:498`), `set_spot_prices` →
+   `set_spot_prices_with(tokens, live_snapshot)` (`state.rs:307,325`), `get_overwrites(tokens, max,
+   live)` (`state.rs:586`), `adapter.price(...,block_overrides)` / `adapter.swap(...,block_overrides)`.
+   `get_amount_out_with` still does the wasteful eager `set_spot_prices(&new_state)` at `state.rs:824`;
+   `spot_price` still reads `self.spot_prices` at `state.rs:924`.
+
+   **NEW CORRECTNESS RULE — cache bypass under live overrides.** For a pool with live overrides, spot
+   prices and limits are *override-derived* and change sub-block (see `state.rs:197-199`), so caching
+   by `(sell, buy)` + per-block invalidation would serve stale quotes. Predicate:
+   `self.live_overrides.is_some()`. When true, keep **today's exact eager/uncached behavior** (no lazy
+   compute, no cache); when false, use the new lazy + cache path. Concretely:
+   - `spot_price` (Task 3): if `live_overrides.is_some()` → read-or-error on the map as today; else →
+     lazy compute-on-miss + cache.
+   - `get_amount_limits` (Task 4): if `live_overrides.is_some()` → call adapter directly (today); else
+     → cache-through by `(sell, buy)`. (Static `block_overrides` without live overrides is constant
+     per pool, so it does not affect cache validity.)
+   - `get_amount_out_with` (Task 5): if `live_overrides.is_some()` → keep the eager
+     `set_spot_prices(&new_state)`; else → clear `new_state`'s caches (lazy).
+   - `update_pool_state` (Task 6): unchanged intent — clear caches, then eager `set_spot_prices`
+     (which warms only the non-override path's limit cache as a side effect).
+   - Add a test asserting the cache is bypassed when `live_overrides.is_some()` (all committed
+     fixtures are non-override, so a unit test constructs/attaches a dummy `watch` channel or asserts
+     the non-override fixtures DO cache).
+
+The renamed field is `spot_prices` → `spot_price_cache` throughout. Baselines were re-saved as
+`before` on this rebased pre-optimization tip.
+
+---
+
 ## Conventions
 
 - Work in the worktree `/home/dev/projects/propellerheads/tycho-indexer-vm-sim-bench` (branch `feat/vm-sim-bench`). Run cargo from there.
