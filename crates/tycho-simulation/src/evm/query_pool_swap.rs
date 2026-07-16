@@ -95,7 +95,7 @@ pub fn query_pool_swap(
 /// # Returns
 /// The price as f64, adjusted for decimal differences: `(num/den) * 10^(decimals_in -
 /// decimals_out)`
-fn price_to_f64_with_decimals(
+pub(crate) fn price_to_f64_with_decimals(
     price: &Price,
     decimals_in: u32,
     decimals_out: u32,
