@@ -1000,14 +1000,40 @@ where
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let base_address = bytes_to_address(&base.address)?;
         let quote_address = bytes_to_address(&quote.address)?;
-        self.spot_price_cache
+
+        // Fast path: cache hit (all pools).
+        if let Some(price) = self
+            .spot_price_cache
             .read()
             .expect("spot_price_cache poisoned")
             .get(&(base_address, quote_address))
-            .cloned()
-            .ok_or(SimulationError::FatalError(format!(
+            .copied()
+        {
+            return Ok(price);
+        }
+
+        // Pools with live overrides derive spot prices from a sub-block snapshot that changes
+        // intra-block, so lazily computing and caching would serve stale values. Preserve today's
+        // behavior: the eagerly-warmed value is authoritative, and a genuine miss is an error.
+        if self.live_overrides.is_some() {
+            return Err(SimulationError::FatalError(format!(
                 "Spot price not found for base token {base_address} and quote token {quote_address}"
-            )))
+            )));
+        }
+
+        // Non-override pool: compute this single pair on demand and cache it.
+        let tokens = HashMap::from([
+            (base.address.clone(), base.clone()),
+            (quote.address.clone(), quote.clone()),
+        ]);
+        let block_overrides = self.block_env(None);
+        let price =
+            self.compute_spot_price(&tokens, base_address, quote_address, None, block_overrides)?;
+        self.spot_price_cache
+            .write()
+            .expect("spot_price_cache poisoned")
+            .insert((base_address, quote_address), price);
+        Ok(price)
     }
 
     fn get_amount_out(
@@ -1574,6 +1600,32 @@ mod tests {
             .unwrap();
         assert_eq!(dai_bal_spot_price, 0.13736685496467538);
         assert_eq!(bal_dai_spot_price, 7.050354297665408);
+    }
+
+    #[tokio::test]
+    async fn test_spot_price_lazy_computes_on_miss() {
+        let pool_state = setup_pool_state().await;
+        // Non-override pool with a cold cache: the builder does not warm spot prices.
+        assert!(pool_state
+            .spot_price_cache
+            .read()
+            .unwrap()
+            .is_empty());
+
+        // Reading a pair computes it on demand and caches it.
+        let price = pool_state
+            .spot_price(&dai(), &bal())
+            .unwrap();
+        assert!(price > 0.0);
+        assert_eq!(
+            pool_state
+                .spot_price_cache
+                .read()
+                .unwrap()
+                .get(&(dai_addr(), bal_addr()))
+                .copied(),
+            Some(price)
+        );
     }
 
     #[tokio::test]
