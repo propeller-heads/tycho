@@ -554,6 +554,10 @@ where
     /// Attempting to swap an amount of the sell token that exceeds the sell amount limit is not
     /// advised and in most cases will result in a revert.
     ///
+    /// Cached per `(sell, buy)` pair in `limit_cache`. Pools with live overrides derive limits
+    /// from a sub-block snapshot that changes intra-block, so caching is bypassed and the adapter
+    /// is called directly; see [`Self::live_overrides`].
+    ///
     /// # Arguments
     ///
     /// * `tokens` - A vec of tokens, where the first token is the sell token and the second is the
@@ -571,6 +575,20 @@ where
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<(U256, U256), SimulationError> {
+        let key = (tokens[0], tokens[1]);
+
+        if self.live_overrides.is_none() {
+            if let Some(limits) = self
+                .limit_cache
+                .read()
+                .expect("limit_cache poisoned")
+                .get(&key)
+                .copied()
+            {
+                return Ok(limits);
+            }
+        }
+
         let limits = self.adapter_contract.get_limits(
             &self.id,
             tokens[0],
@@ -578,6 +596,13 @@ where
             overwrites,
             block_overrides,
         )?;
+
+        if self.live_overrides.is_none() {
+            self.limit_cache
+                .write()
+                .expect("limit_cache poisoned")
+                .insert(key, limits);
+        }
 
         Ok(limits)
     }
@@ -1525,6 +1550,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bal_limit, U256::from_str("13997408640689987484").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_limits_cached_matches_fresh() {
+        let pool_state = setup_pool_state().await;
+        let overwrites = pool_state
+            .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
+            .unwrap();
+
+        // First call populates the cache.
+        let fresh = pool_state
+            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites.clone()), None)
+            .unwrap();
+        assert_eq!(
+            pool_state
+                .limit_cache
+                .read()
+                .unwrap()
+                .get(&(dai_addr(), bal_addr()))
+                .copied(),
+            Some(fresh)
+        );
+
+        // Second call returns the cached value, identical to the first.
+        let cached = pool_state
+            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites), None)
+            .unwrap();
+        assert_eq!(fresh, cached);
     }
 
     #[tokio::test]
