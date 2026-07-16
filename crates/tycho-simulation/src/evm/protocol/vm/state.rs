@@ -917,12 +917,29 @@ where
             }
         }
 
-        // Update spot prices
-        let tokens = HashMap::from([
-            (token_in.address.clone(), token_in.clone()),
-            (token_out.address.clone(), token_out.clone()),
-        ]);
-        let _ = new_state.set_spot_prices(&tokens);
+        if new_state.live_overrides.is_some() {
+            // Override pools do not cache spot prices lazily (they are override-derived and
+            // change sub-block), so keep eagerly warming the returned state exactly as before.
+            let tokens = HashMap::from([
+                (token_in.address.clone(), token_in.clone()),
+                (token_out.address.clone(), token_out.clone()),
+            ]);
+            let _ = new_state.set_spot_prices(&tokens);
+        } else {
+            // The swap changed pool state; invalidate the derived caches so spot prices and
+            // limits are recomputed lazily on next read against `new_state`'s post-swap
+            // overwrites.
+            new_state
+                .spot_price_cache
+                .write()
+                .expect("spot_price_cache poisoned")
+                .clear();
+            new_state
+                .limit_cache
+                .write()
+                .expect("limit_cache poisoned")
+                .clear();
+        }
 
         let buy_amount = trade.received_amount;
 
@@ -1416,16 +1433,21 @@ mod tests {
             .downcast_ref::<EVMPoolState<PreCachedDB>>()
             .unwrap();
         assert_eq!(result.amount, BigUint::from_str("137780051463393923").unwrap());
-        assert_ne!(
-            *new_state
-                .spot_price_cache
-                .read()
-                .unwrap(),
-            *pool_state
-                .spot_price_cache
-                .read()
-                .unwrap()
-        );
+        // new_state has an invalidated (empty) spot-price cache; reading recomputes the
+        // post-swap price lazily, which differs from the pre-swap price because the swap moved
+        // the pool.
+        assert!(new_state
+            .spot_price_cache
+            .read()
+            .unwrap()
+            .is_empty());
+        let pre = pool_state
+            .spot_price(&dai(), &bal())
+            .unwrap();
+        let post = new_state
+            .spot_price(&dai(), &bal())
+            .unwrap();
+        assert_ne!(pre, post);
         assert!(pool_state
             .block_lasting_overwrites
             .is_empty());
@@ -1445,16 +1467,20 @@ mod tests {
             .downcast_ref::<EVMPoolState<PreCachedDB>>()
             .unwrap();
         assert_eq!(result.amount, BigUint::from_str("137780051463393923").unwrap());
-        assert_ne!(
-            *new_state
-                .spot_price_cache
-                .read()
-                .unwrap(),
-            *pool_state
-                .spot_price_cache
-                .read()
-                .unwrap()
-        );
+        // The swap invalidates the returned state's spot-price cache; a lazily-computed price
+        // against the post-swap overwrites differs from the pre-swap price.
+        assert!(new_state
+            .spot_price_cache
+            .read()
+            .unwrap()
+            .is_empty());
+        let price_before_first_swap = pool_state
+            .spot_price(&dai(), &bal())
+            .unwrap();
+        let price_after_first_swap = new_state
+            .spot_price(&dai(), &bal())
+            .unwrap();
+        assert_ne!(price_before_first_swap, price_after_first_swap);
 
         let new_result = new_state
             .get_amount_out(BigUint::from_str("1000000000000000000").unwrap(), &dai(), &bal())
@@ -1466,16 +1492,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(new_result.amount, BigUint::from_str("136964651490065626").unwrap());
-        assert_ne!(
-            *new_state_second_swap
-                .spot_price_cache
-                .read()
-                .unwrap(),
-            *new_state
-                .spot_price_cache
-                .read()
-                .unwrap()
-        );
+        // Same invalidation applies after the second swap: the cache is empty and the lazily
+        // recomputed price has moved again relative to the state right after the first swap.
+        assert!(new_state_second_swap
+            .spot_price_cache
+            .read()
+            .unwrap()
+            .is_empty());
+        let price_after_second_swap = new_state_second_swap
+            .spot_price(&dai(), &bal())
+            .unwrap();
+        assert_ne!(price_after_first_swap, price_after_second_swap);
     }
 
     #[tokio::test]
