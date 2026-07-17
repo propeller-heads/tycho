@@ -41,6 +41,10 @@ struct Cli {
     /// The target blockchain
     #[clap(long, default_value = "ethereum")]
     pub chain: String,
+    /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
+    /// dev instance (e.g. http://127.0.0.1:4242).
+    #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
+    no_tls: bool,
 }
 
 fn register_exchanges(
@@ -133,7 +137,7 @@ async fn main() {
     let tycho_message_processor: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         let all_tokens = load_all_tokens(
             tycho_url.as_str(),
-            false,
+            cli.no_tls,
             Some(tycho_api_key.as_str()),
             true,
             chain,
@@ -149,6 +153,7 @@ async fn main() {
         let protocol_stream =
             register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter)
                 .auth_key(Some(tycho_api_key.clone()))
+                .no_tls(cli.no_tls)
                 .skip_state_decode_failures(true)
                 .set_tokens(all_tokens)
                 .await

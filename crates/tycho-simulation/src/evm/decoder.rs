@@ -472,8 +472,8 @@ where
                 .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
 
                 // Force-overwrite new proxy token accounts so that authoritative vm_storage data
-                // always wins over any empty placeholder previously inserted by another
-                // decoder's snapshot loop (which uses init_account / init-if-not-exists).
+                // always wins over any empty placeholder previously inserted by engine setup
+                // (which uses init_account / init-if-not-exists).
                 if !proxy_creates.is_empty() {
                     SHARED_TYCHO_DB
                         .force_update_accounts(proxy_creates)
@@ -738,8 +738,8 @@ where
 
                                 // Create proxy token account with original account's storage (at
                                 // original address). Track it separately so it can be
-                                // force-overwritten and win over any placeholder that another
-                                // decoder's snapshot loop may have written earlier.
+                                // force-overwritten and win over any placeholder that an engine
+                                // setup routine may have written earlier.
                                 let proxy_state = create_proxy_token_account(
                                     original_address,
                                     Some(impl_addr),
@@ -780,7 +780,7 @@ where
                 .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
 
                 // Force-overwrite any newly-created proxy token accounts so they always win
-                // over placeholder entries inserted by other decoders' snapshot loops.
+                // over placeholder entries inserted by engine setup.
                 if !new_proxy_accounts.is_empty() {
                     SHARED_TYCHO_DB
                         .force_update_accounts(new_proxy_accounts)

@@ -1,3 +1,18 @@
+## [0.337.1](https://github.com/propeller-heads/tycho/compare/0.337.0...0.337.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **simulation:** overwrite existing accounts on snapshot re-apply ([c0724e6](https://github.com/propeller-heads/tycho/commit/c0724e6c6e4eea9cac1695d44de45b9a1f8214da))
+* **simulation:** overwrite existing accounts on snapshot re-apply ([#1215](https://github.com/propeller-heads/tycho/issues/1215)) ([460cb9a](https://github.com/propeller-heads/tycho/commit/460cb9adb0a4c849508e26cf952f5a9e31f5f649))
+
+## [0.337.0](https://github.com/propeller-heads/tycho/compare/0.336.1...0.337.0) (2026-07-16)
+
+
+### Features
+
+* add --no-tls flag to the price_printer example ([#1206](https://github.com/propeller-heads/tycho/issues/1206)) ([6db0d30](https://github.com/propeller-heads/tycho/commit/6db0d30fb0d88bab3c1dab2359ed8f7167d3d734))
+
 ## [0.336.1](https://github.com/propeller-heads/tycho/compare/0.336.0...0.336.1) (2026-07-16)
 
 

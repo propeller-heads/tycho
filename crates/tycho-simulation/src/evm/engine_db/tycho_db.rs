@@ -77,6 +77,15 @@ impl PreCachedDB {
         })
     }
 
+    /// Applies account changes for one block and advances the stored block header.
+    ///
+    /// Semantics per [`ChangeType`]:
+    /// - `Creation`: an authoritative full-account snapshot (code, native balance, complete slot
+    ///   map) that replaces any existing entry. Consumers re-deliver snapshots for already-known
+    ///   contracts when healing after a disconnect; the snapshot must win, otherwise the account
+    ///   keeps pre-outage storage whose changes were never delivered as deltas.
+    /// - `Update`: per-slot storage and balance deltas merged into the existing account.
+    /// - `Deletion`: not implemented.
     #[instrument(skip_all)]
     pub fn update(
         &self,
@@ -125,8 +134,9 @@ impl PreCachedDB {
                     // If the balance is not present, we set it to zero.
                     let balance = update.balance.unwrap_or(U256::ZERO);
 
-                    // Initialize the account.
-                    write_guard.accounts.init_account(
+                    // Replace, don't merge: snapshots omit zero-valued slots, so merging
+                    // would keep stale non-zero values for slots that are zero on-chain.
+                    write_guard.accounts.overwrite_account(
                         update.address,
                         AccountInfo::new(balance, 0, code.hash_slow(), code),
                         Some(update.slots.clone()),
@@ -142,12 +152,9 @@ impl PreCachedDB {
         Ok(())
     }
 
-    /// Like [`update()`](Self::update) but unconditionally overwrites existing accounts on
-    /// `Creation` updates.
-    ///
-    /// Use only for authoritative proxy-token accounts that must win over placeholder entries
-    /// inserted by other decoders' snapshot loops. Generic callers should use
-    /// [`update()`](Self::update).
+    /// Like [`update()`](Self::update) restricted to `Creation` updates, but leaves the stored
+    /// block header untouched. Used for proxy-token accounts written outside the regular
+    /// snapshot/delta flow; generic callers should use [`update()`](Self::update).
     pub fn force_update_accounts(
         &self,
         account_updates: Vec<AccountUpdate>,
@@ -502,6 +509,89 @@ mod tests {
         mock_db
             .storage_ref(mock_acc_address, storage_address)
             .unwrap();
+    }
+
+    fn header(number: u64) -> BlockHeader {
+        BlockHeader { number, ..Default::default() }
+    }
+
+    fn snapshot(address: Address, slots: &[(u64, u64)], balance: u64) -> AccountUpdate {
+        AccountUpdate {
+            address,
+            chain: Chain::Ethereum,
+            slots: slots
+                .iter()
+                .map(|(k, v)| (U256::from(*k), U256::from(*v)))
+                .collect(),
+            balance: Some(U256::from(balance)),
+            code: Some(vec![0x60, 0x00]),
+            change: ChangeType::Creation,
+        }
+    }
+
+    /// A consumer that re-fetches a snapshot for an already-known contract (client reconnect
+    /// healing, in-process stream rebuild, TVL re-entry) delivers it as `ChangeType::Creation`.
+    /// Snapshots are authoritative full state: slots that changed while the account was warm
+    /// must end up at the snapshot values, otherwise the DB is left mixed-epoch and VM-based
+    /// protocols quote against a state that never existed on-chain.
+    #[rstest]
+    fn test_creation_reapply_overwrites_existing_account(
+        mock_db: PreCachedDB,
+    ) -> Result<(), Box<dyn Error>> {
+        let address = Address::from_str("0xd51a44d3fae010294c616388b506acda1bfaae46")?;
+        let slot = U256::from(1);
+
+        mock_db.update(vec![snapshot(address, &[(1, 100)], 10)], Some(header(1)))?;
+        // Account is now warm; the outage window ends and a fresh full snapshot arrives.
+        mock_db.update(vec![snapshot(address, &[(1, 999), (2, 42)], 20)], Some(header(2)))?;
+
+        assert_eq!(
+            mock_db.get_storage(&address, &slot),
+            Some(U256::from(999)),
+            "re-applied snapshot must overwrite a stale slot on an existing account"
+        );
+        assert_eq!(
+            mock_db.get_storage(&address, &U256::from(2)),
+            Some(U256::from(42)),
+            "slots first seen in the re-applied snapshot must be present"
+        );
+        assert_eq!(
+            mock_db
+                .basic_ref(address)
+                .unwrap()
+                .map(|acc| acc.balance),
+            Some(U256::from(20)),
+            "re-applied snapshot must refresh the native balance"
+        );
+        Ok(())
+    }
+
+    /// Contrast case: the continuously-connected path. Per-block deltas arrive as
+    /// `ChangeType::Update` and must refresh slots on existing accounts.
+    #[rstest]
+    fn test_delta_update_refreshes_existing_slot(
+        mock_db: PreCachedDB,
+    ) -> Result<(), Box<dyn Error>> {
+        let address = Address::from_str("0xd51a44d3fae010294c616388b506acda1bfaae46")?;
+        let slot = U256::from(1);
+
+        mock_db.update(vec![snapshot(address, &[(1, 100)], 10)], Some(header(1)))?;
+        let delta = AccountUpdate {
+            address,
+            chain: Chain::Ethereum,
+            slots: HashMap::from([(slot, U256::from(200))]),
+            balance: None,
+            code: None,
+            change: ChangeType::Update,
+        };
+        mock_db.update(vec![delta], Some(header(2)))?;
+
+        assert_eq!(
+            mock_db.get_storage(&address, &slot),
+            Some(U256::from(200)),
+            "delta updates must refresh slots on existing accounts"
+        );
+        Ok(())
     }
 
     #[rstest]
