@@ -123,7 +123,6 @@ impl RFQStreamProcessor {
         let metric_enabled = if self.run_pamm_protocols {
             match MetricClientBuilder::new(self.chain)
                 .tokens(rfq_tokens.clone())
-                .token_metadata(all_tokens.clone())
                 .tvl_threshold(self.tvl_threshold)
                 .poll_time(Duration::from_secs(30))
                 .build()

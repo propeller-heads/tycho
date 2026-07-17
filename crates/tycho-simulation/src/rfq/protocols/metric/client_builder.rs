@@ -1,45 +1,32 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use tokio::time::Duration;
-use tycho_common::{
-    models::{token::Token, Chain},
-    Bytes,
-};
+use tycho_common::{models::Chain, Bytes};
 
-use super::{client::MetricClient, models::MetricOracleUpdatePolicy};
-use crate::rfq::{
-    constants::get_metric_config, errors::RFQError,
-    protocols::utils::default_quote_tokens_for_chain,
-};
+use super::client::MetricClient;
+use crate::rfq::{constants::get_metric_config, errors::RFQError};
 
 pub struct MetricClientBuilder {
     chain: Chain,
     tokens: HashSet<Bytes>,
-    token_metadata: HashMap<Bytes, Token>,
     tvl: f64,
-    quote_tokens: Option<HashSet<Bytes>>,
     base_url: String,
-    secret_key: Option<String>,
+    api_key: Option<String>,
     poll_time: Duration,
     quote_timeout: Duration,
-    oracle_update_policy: MetricOracleUpdatePolicy,
 }
 
 impl MetricClientBuilder {
     pub fn new(chain: Chain) -> Self {
         let config = get_metric_config();
-        let oracle_update_policy = MetricOracleUpdatePolicy::default_for_chain(chain);
         Self {
             chain,
             tokens: HashSet::new(),
-            token_metadata: HashMap::new(),
             tvl: 0.0,
-            quote_tokens: None,
             base_url: config.base_url,
-            secret_key: config.secret_key,
+            api_key: config.api_key,
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
-            oracle_update_policy,
         }
     }
 
@@ -48,22 +35,8 @@ impl MetricClientBuilder {
         self
     }
 
-    /// Provide Tycho token metadata for Metric TVL normalization.
-    ///
-    /// The `tokens` filter above controls which RFQ pairs are emitted. This metadata is broader:
-    /// Metric may need token decimals for a one-hop quote-token pool that is not itself emitted.
-    pub fn token_metadata(mut self, tokens: HashMap<Bytes, Token>) -> Self {
-        self.token_metadata = tokens;
-        self
-    }
-
     pub fn tvl_threshold(mut self, tvl: f64) -> Self {
         self.tvl = tvl;
-        self
-    }
-
-    pub fn quote_tokens(mut self, quote_tokens: HashSet<Bytes>) -> Self {
-        self.quote_tokens = Some(quote_tokens);
         self
     }
 
@@ -72,8 +45,8 @@ impl MetricClientBuilder {
         self
     }
 
-    pub fn secret_key(mut self, secret_key: Option<String>) -> Self {
-        self.secret_key = secret_key;
+    pub fn api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key;
         self
     }
 
@@ -87,28 +60,15 @@ impl MetricClientBuilder {
         self
     }
 
-    pub fn oracle_update_policy(mut self, policy: MetricOracleUpdatePolicy) -> Self {
-        self.oracle_update_policy = policy;
-        self
-    }
-
     pub fn build(self) -> Result<MetricClient, RFQError> {
-        let quote_tokens = match self.quote_tokens {
-            Some(tokens) => tokens,
-            None => default_quote_tokens_for_chain(&self.chain)?,
-        };
-
-        MetricClient::new_with_token_metadata(
+        MetricClient::new(
             self.chain,
             self.tokens,
-            self.token_metadata,
             self.tvl,
-            quote_tokens,
             self.base_url,
-            self.secret_key,
+            self.api_key,
             self.poll_time,
             self.quote_timeout,
-            self.oracle_update_policy,
         )
     }
 }

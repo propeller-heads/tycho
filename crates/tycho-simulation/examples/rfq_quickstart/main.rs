@@ -237,7 +237,6 @@ async fn main() {
         println!("Setting up Metric RFQ client...\n");
         match MetricClientBuilder::new(chain)
             .tokens(rfq_tokens.clone())
-            .token_metadata(all_tokens.clone())
             .tvl_threshold(cli.tvl_threshold)
             .build()
         {
