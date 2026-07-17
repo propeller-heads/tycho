@@ -42,6 +42,13 @@ pub trait EkuboPool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError>;
 
-    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError>;
+    /// Quotes a swap of `token_amount` against the pool, optionally stopping the swap once the
+    /// pool's sqrt ratio reaches `sqrt_ratio_limit` (in which case only part of the input is
+    /// consumed).
+    fn quote(
+        &self,
+        token_amount: EvmTokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError>;
     fn get_limit(&self, token_in: Address) -> Result<i128, SimulationError>;
 }
