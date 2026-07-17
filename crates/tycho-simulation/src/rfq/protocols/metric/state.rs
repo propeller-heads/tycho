@@ -35,7 +35,7 @@ impl fmt::Debug for MetricState {
             .field("base_token", &self.base_token)
             .field("quote_token", &self.quote_token)
             .field("pool", &self.metadata.pool_address)
-            .field("latest_block", &self.bid_ask.latest_block)
+            .field("server_ts", &self.bid_ask.server_ts)
             .finish_non_exhaustive()
     }
 }
@@ -578,12 +578,15 @@ impl IndicativelyPriced for MetricState {
             .get_amount_out(params.amount_in.clone(), token_in, token_out)?
             .amount;
 
-        // Metric's swap path is independent from the quote API. Execution uses this hook to fetch
-        // signed oracle-update args that can be submitted before the pool swap.
-        Ok(self
-            .client
-            .request_oracle_update_for_pool(&self.metadata, &params, amount_out)
-            .await?)
+        // The v1 heartbeat updates the oracle on-chain every block, so execution relays no signed
+        // oracle-update args with the swap. The quote therefore carries no quote attributes.
+        Ok(SignedQuote {
+            base_token: params.token_in.clone(),
+            quote_token: params.token_out.clone(),
+            amount_in: params.amount_in.clone(),
+            amount_out,
+            quote_attributes: HashMap::new(),
+        })
     }
 }
 
@@ -628,23 +631,22 @@ mod tests {
             pool_address: Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap(),
             token0: weth.address.clone(),
             token1: usdc.address.clone(),
+            tvl_fiat: Some(3000.0),
         };
         let bid_ask = MetricBidAskResponse {
             // 3000 * 2^64
             bid_adj: "55340232221128654848000".to_string(),
             // 3010 * 2^64
             ask_adj: "55524699661865750400000".to_string(),
-            quote_available: true,
-            total_token0_available: "10000000000000000000".to_string(),
-            total_token1_available: "30000000000".to_string(),
-            latest_block: 100,
+            total_token0_available: Some("10000000000000000000".to_string()),
+            total_token1_available: Some("30000000000".to_string()),
+            server_ts: 100,
             depth: MetricDepth::default(),
         };
         let client = MetricClient::new(
             Chain::Ethereum,
             HashSet::new(),
             0.0,
-            HashSet::new(),
             "http://localhost:8080".to_string(),
             None,
             Duration::from_secs(1),
@@ -681,7 +683,7 @@ mod tests {
     #[test]
     fn test_get_amount_out_caps_to_available_liquidity() {
         let mut state = state();
-        state.bid_ask.total_token1_available = "1500000000".to_string();
+        state.bid_ask.total_token1_available = Some("1500000000".to_string());
         let err = state
             .get_amount_out(
                 BigUint::from(1_000_000_000_000_000_000u128),
@@ -879,29 +881,32 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "hits Metric's public API"]
-    async fn test_live_metric_api_state_get_amount_out_and_oracle_update() {
+    async fn test_live_metric_api_state_get_amount_out_and_signed_quote() {
+        use crate::rfq::protocols::metric::models::PaginatedMetadataResponse;
+
         let weth = weth();
         let usdc = usdc();
-        let base_url = std::env::var("METRIC_API_URL")
-            .unwrap_or_else(|_| "http://54.199.103.16:8080".to_string())
+        let config = crate::rfq::constants::get_metric_config();
+        let base_url = config
+            .base_url
             .trim_end_matches('/')
             .to_string();
         let client = MetricClient::new(
             Chain::Ethereum,
             HashSet::from([weth.address.clone(), usdc.address.clone()]),
             0.0,
-            HashSet::new(),
             base_url.clone(),
-            None,
+            config.api_key.clone(),
             Duration::from_secs(1),
             Duration::from_secs(5),
         )
         .unwrap();
 
         let http_client = reqwest::Client::new();
-        let metadata: Vec<MetricMetadata> = http_client
-            .get(format!("{base_url}/ethereum/metadata"))
+        let metadata: PaginatedMetadataResponse = http_client
+            .get(format!("{base_url}/public/v1/evm/1/metadata"))
             .header("accept", "application/json")
+            .query(&[("count", "500")])
             .send()
             .await
             .unwrap()
@@ -911,12 +916,19 @@ mod tests {
 
         let mut selected = None;
         for pool in metadata
+            .data
             .into_iter()
             .filter(|pool| pool.token0 == weth.address && pool.token1 == usdc.address)
         {
-            let bid_ask: MetricBidAskResponse = http_client
-                .get(format!("{base_url}/ethereum/{}/bid_ask", pool.pool_address))
-                .header("accept", "application/json")
+            let checksummed =
+                alloy::primitives::Address::from_slice(&pool.pool_address).to_checksum(None);
+            let mut request = http_client
+                .get(format!("{base_url}/public/v1/evm/1/{checksummed}/bid_ask"))
+                .header("accept", "application/json");
+            if let Some(api_key) = &config.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let bid_ask: MetricBidAskResponse = request
                 .send()
                 .await
                 .unwrap()
@@ -927,7 +939,7 @@ mod tests {
                 .total_token1_available()
                 .map(|available| available > BigUint::from(10u8))
                 .unwrap_or(false);
-            if bid_ask.quote_available && has_enough_quote_liquidity {
+            if bid_ask.is_quotable() && has_enough_quote_liquidity {
                 selected = Some((pool, bid_ask));
                 break;
             }
@@ -939,7 +951,7 @@ mod tests {
         };
 
         let state = MetricState::new(weth, usdc, metadata, bid_ask, client);
-        assert!(state.bid_ask.quote_available);
+        assert!(state.bid_ask.is_quotable());
 
         let amount_in = BigUint::from(1_000_000_000u64);
         let indicative_quote = state
@@ -961,6 +973,7 @@ mod tests {
         assert!(signed_quote.amount_out > BigUint::from(0u8));
         assert_eq!(signed_quote.base_token, state.base_token.address);
         assert_eq!(signed_quote.quote_token, state.quote_token.address);
-        assert!(!signed_quote.quote_attributes["oracle_update_0_args"].is_empty());
+        // The heartbeat model relays no oracle-update args, so the quote carries no attributes.
+        assert!(signed_quote.quote_attributes.is_empty());
     }
 }

@@ -67,14 +67,14 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
             pool_address,
             token0: token0_address.clone(),
             token1: token1_address.clone(),
+            tvl_fiat: None,
         };
         let bid_ask = MetricBidAskResponse {
             bid_adj: read_string_attr(&attrs, "bid_adj")?,
             ask_adj: read_string_attr(&attrs, "ask_adj")?,
-            quote_available: true,
-            total_token0_available: read_string_attr(&attrs, "total_token0_available")?,
-            total_token1_available: read_string_attr(&attrs, "total_token1_available")?,
-            latest_block: read_u64_attr(&attrs, "latest_block")?,
+            total_token0_available: Some(read_string_attr(&attrs, "total_token0_available")?),
+            total_token1_available: Some(read_string_attr(&attrs, "total_token1_available")?),
+            server_ts: read_u64_attr(&attrs, "server_ts")?,
             depth: read_optional_depth_attr(&attrs, "depth")?,
         };
 
@@ -183,7 +183,7 @@ mod tests {
         );
         attrs
             .insert("total_token1_available".to_string(), "30000000000".as_bytes().to_vec().into());
-        attrs.insert("latest_block".to_string(), "100".as_bytes().to_vec().into());
+        attrs.insert("server_ts".to_string(), "100".as_bytes().to_vec().into());
         attrs.insert("depth".to_string(), r#"{"asks":[],"bids":[]}"#.as_bytes().to_vec().into());
 
         let pool_address = Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap();
@@ -227,7 +227,7 @@ mod tests {
 
         assert_eq!(state.base_token.symbol, "WETH");
         assert_eq!(state.quote_token.symbol, "USDC");
-        assert_eq!(state.bid_ask.latest_block, 100);
+        assert_eq!(state.bid_ask.server_ts, 100);
     }
 
     #[tokio::test]

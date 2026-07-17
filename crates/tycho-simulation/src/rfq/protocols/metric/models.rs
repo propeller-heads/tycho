@@ -4,34 +4,19 @@ use alloy::primitives::Address;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::Bytes;
 
 use crate::rfq::errors::RFQError;
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
 
-pub const ORACLE_UPDATE_POLICY_ATTR: &str = "oracle_update_policy";
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum MetricOracleUpdatePolicy {
-    #[default]
-    Never = 0,
-    Always = 1,
-    RetryOnRevert = 2,
-}
-
-impl MetricOracleUpdatePolicy {
-    pub fn default_for_chain(chain: Chain) -> Self {
-        match chain {
-            Chain::Ethereum => Self::RetryOnRevert,
-            _ => Self::Never,
-        }
-    }
-
-    pub fn as_attribute_value(self) -> Bytes {
-        vec![self as u8].into()
-    }
+/// The `PaginatedMetadataResponse` envelope returned by `GET /public/v1/evm/{chain_id}/metadata`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PaginatedMetadataResponse {
+    pub data: Vec<MetricMetadata>,
+    /// `offset` for the next page, or `None` on the last page.
+    #[serde(rename = "nextOffset", default)]
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +27,11 @@ pub struct MetricMetadata {
     pub token0: Bytes,
     #[serde(deserialize_with = "deserialize_address")]
     pub token1: Bytes,
+    /// Total value locked in the requested fiat currency. Absent when Metric has no price for the
+    /// pool; used directly as the component TVL. Not carried through the component attributes, so
+    /// it is `None` once a state is reconstructed by the decoder.
+    #[serde(rename = "tvlFiat", default)]
+    pub tvl_fiat: Option<f64>,
 }
 
 fn deserialize_address<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
@@ -59,14 +49,15 @@ pub struct MetricBidAskResponse {
     pub bid_adj: String,
     #[serde(rename = "askAdj")]
     pub ask_adj: String,
-    #[serde(rename = "quoteAvailable")]
-    pub quote_available: bool,
-    #[serde(rename = "totalToken0Available")]
-    pub total_token0_available: String,
-    #[serde(rename = "totalToken1Available")]
-    pub total_token1_available: String,
-    #[serde(rename = "latestBlock")]
-    pub latest_block: u64,
+    /// Token0 available for the quote (raw units). `None` when the pool cannot currently quote.
+    #[serde(rename = "totalToken0Available", default)]
+    pub total_token0_available: Option<String>,
+    /// Token1 available for the quote (raw units). `None` when the pool cannot currently quote.
+    #[serde(rename = "totalToken1Available", default)]
+    pub total_token1_available: Option<String>,
+    /// Server Unix timestamp (seconds) when the quote was produced.
+    #[serde(rename = "serverTs")]
+    pub server_ts: u64,
     #[serde(default)]
     pub depth: MetricDepth,
 }
@@ -88,22 +79,6 @@ pub struct MetricDepthBin {
     pub cumulative_volume: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MetricSignedOracleUpdateResponse {
-    #[serde(rename = "feedCreator", deserialize_with = "deserialize_address")]
-    pub feed_creator: Bytes,
-    #[serde(default)]
-    pub slots: Vec<MetricSignedOracleUpdateSlot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MetricSignedOracleUpdateSlot {
-    pub deadline: u64,
-    #[serde(rename = "newSlotValue")]
-    pub new_slot_value: String,
-    pub signature: Bytes,
-}
-
 impl MetricBidAskResponse {
     pub fn bid_price(&self) -> Result<f64, RFQError> {
         q64_decimal_to_f64(&self.bid_adj)
@@ -114,11 +89,20 @@ impl MetricBidAskResponse {
     }
 
     pub fn total_token0_available(&self) -> Result<BigUint, RFQError> {
-        parse_biguint(&self.total_token0_available, "totalToken0Available")
+        parse_optional_biguint(&self.total_token0_available, "totalToken0Available")
     }
 
     pub fn total_token1_available(&self) -> Result<BigUint, RFQError> {
-        parse_biguint(&self.total_token1_available, "totalToken1Available")
+        parse_optional_biguint(&self.total_token1_available, "totalToken1Available")
+    }
+
+    /// Whether the pool can currently be quoted. v1 has no `quoteAvailable` flag, so availability
+    /// is inferred from parseable bid/ask prices and both non-null availability figures.
+    pub fn is_quotable(&self) -> bool {
+        self.bid_price().is_ok() &&
+            self.ask_price().is_ok() &&
+            self.total_token0_available().is_ok() &&
+            self.total_token1_available().is_ok()
     }
 }
 
@@ -146,6 +130,13 @@ fn parse_biguint(value: &str, field: &str) -> Result<BigUint, RFQError> {
         .map_err(|_| RFQError::ParsingError(format!("Failed to parse {field}: {value}")))
 }
 
+fn parse_optional_biguint(value: &Option<String>, field: &str) -> Result<BigUint, RFQError> {
+    let value = value
+        .as_deref()
+        .ok_or_else(|| RFQError::ParsingError(format!("{field} is null")))?;
+    parse_biguint(value, field)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,10 +152,9 @@ mod tests {
         let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
             "bidAdj": "55340232221128654848000",
             "askAdj": "55524699661865750400000",
-            "quoteAvailable": true,
             "totalToken0Available": "1000000000000000000",
             "totalToken1Available": "3000000000",
-            "latestBlock": 0,
+            "serverTs": 0,
             "depth": {
                 "asks": [{
                     "binIdx": 0,
@@ -191,5 +181,39 @@ mod tests {
                 .unwrap(),
             BigUint::from(3_000_000_000u64)
         );
+    }
+
+    #[test]
+    fn test_bid_ask_null_totals_are_not_quotable() {
+        let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
+            "bidAdj": "55340232221128654848000",
+            "askAdj": "55524699661865750400000",
+            "totalToken0Available": null,
+            "totalToken1Available": null,
+            "serverTs": 1_770_053_095u64,
+        }))
+        .unwrap();
+
+        assert_eq!(response.total_token0_available, None);
+        assert!(!response.is_quotable());
+    }
+
+    #[test]
+    fn test_paginated_metadata_deserializes_tvl_fiat() {
+        let response: PaginatedMetadataResponse = serde_json::from_value(serde_json::json!({
+            "data": [{
+                "pair": "ethusdc",
+                "poolAddress": "0xbF48bCf474d57fF82A3215319229e0DE1476A557",
+                "token0": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "token1": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "tvlFiat": 1234.56
+            }],
+            "total": 1,
+            "nextOffset": null
+        }))
+        .unwrap();
+
+        assert_eq!(response.next_offset, None);
+        assert_eq!(response.data[0].tvl_fiat, Some(1234.56));
     }
 }
