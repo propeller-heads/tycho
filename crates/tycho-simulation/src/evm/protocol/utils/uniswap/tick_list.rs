@@ -42,9 +42,26 @@ pub(crate) enum TickListErrorKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TickListData")]
 pub(crate) struct TickList {
     tick_spacing: u16,
     ticks: Vec<TickInfo>,
+}
+
+/// Deserialization mirror of [`TickList`]; converting through [`TickList::from`] re-runs the
+/// invariant checks (positive spacing, aligned and ordered ticks) on decoded data.
+#[derive(Deserialize)]
+struct TickListData {
+    tick_spacing: u16,
+    ticks: Vec<TickInfo>,
+}
+
+impl TryFrom<TickListData> for TickList {
+    type Error = SimulationError;
+
+    fn try_from(data: TickListData) -> Result<Self, Self::Error> {
+        TickList::from(data.tick_spacing, data.ticks)
+    }
 }
 
 impl TickList {
