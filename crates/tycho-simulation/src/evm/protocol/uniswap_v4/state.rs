@@ -4,6 +4,7 @@ use alloy::primitives::{Address, Sign, I256, U256};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive, Zero};
 use revm::primitives::I128;
+use serde::{Deserialize, Serialize};
 use tracing::trace;
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -19,36 +20,33 @@ use tycho_common::{
 };
 
 use super::hooks::utils::{has_permission, HookOptions};
-use crate::{
-    evm::protocol::{
-        clmm::clmm_swap_to_price,
-        safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
-        uniswap_v4::hooks::{
-            hook_handler::HookHandler,
-            models::{
-                AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                StateContext, SwapParams,
-            },
+use crate::evm::protocol::{
+    clmm::clmm_swap_to_price,
+    safe_math::{safe_add_u256, safe_sub_u256},
+    u256_num::u256_to_biguint,
+    uniswap_v4::hooks::{
+        hook_handler::HookHandler,
+        models::{
+            AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters, StateContext,
+            SwapParams,
         },
-        utils::{
-            add_fee_markup,
-            uniswap::{
-                i24_be_bytes_to_i32, liquidity_math,
-                lp_fee::{self, is_dynamic},
-                sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-                swap_math,
-                tick_list::{TickInfo, TickList, TickListErrorKind},
-                tick_math::{
-                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                    MIN_SQRT_RATIO, MIN_TICK,
-                },
-                StepComputation, SwapResults, SwapState,
-            },
-        },
-        vm::constants::EXTERNAL_ACCOUNT,
     },
-    impl_non_serializable_protocol,
+    utils::{
+        add_fee_markup,
+        uniswap::{
+            i24_be_bytes_to_i32, liquidity_math,
+            lp_fee::{self, is_dynamic},
+            sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
+            swap_math,
+            tick_list::{TickInfo, TickList, TickListErrorKind},
+            tick_math::{
+                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+                MIN_SQRT_RATIO, MIN_TICK,
+            },
+            StepComputation, SwapResults, SwapState,
+        },
+    },
+    vm::constants::EXTERNAL_ACCOUNT,
 };
 
 // Fixed overhead per swap: covers router overhead, executor preamble (decode, sync,
@@ -71,7 +69,10 @@ const PM_PER_HOOK_CALL_OVERHEAD: u64 = 25_000;
 const MAX_SWAP_GAS: u64 = 16_700_000;
 const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_TICK;
 
-#[derive(Clone)]
+/// Serde support is limited to hookless pools: serializing returns an error when `hook` is set
+/// (`HookHandler` is a trait object), and deserializing always yields `hook: None`, re-running
+/// tick-list validation on the decoded data.
+#[derive(Clone, Deserialize)]
 pub struct UniswapV4State {
     liquidity: u128,
     sqrt_price: U256,
@@ -79,10 +80,44 @@ pub struct UniswapV4State {
     tick: i32,
     ticks: TickList,
     tick_spacing: i32,
+    #[serde(skip)]
     pub hook: Option<Box<dyn HookHandler>>,
 }
 
-impl_non_serializable_protocol!(UniswapV4State, "not supported due vm state deps");
+/// Borrowed mirror of [`UniswapV4State`]'s serializable fields (everything except `hook`),
+/// avoiding a [`TickList`] clone when serializing.
+#[derive(Serialize)]
+struct UniswapV4StateData<'a> {
+    liquidity: u128,
+    sqrt_price: U256,
+    fees: &'a UniswapV4Fees,
+    tick: i32,
+    ticks: &'a TickList,
+    tick_spacing: i32,
+}
+
+impl Serialize for UniswapV4State {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.hook.is_some() {
+            return Err(serde::ser::Error::custom(
+                "UniswapV4State with a hook cannot be serialized: HookHandler is a trait object",
+            ));
+        }
+
+        let data = UniswapV4StateData {
+            liquidity: self.liquidity,
+            sqrt_price: self.sqrt_price,
+            fees: &self.fees,
+            tick: self.tick,
+            ticks: &self.ticks,
+            tick_spacing: self.tick_spacing,
+        };
+        data.serialize(serializer)
+    }
+}
 
 impl fmt::Debug for UniswapV4State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -108,7 +143,7 @@ impl PartialEq for UniswapV4State {
 
 impl Eq for UniswapV4State {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapV4Fees {
     // Protocol fees in the zero for one direction
     pub zero_for_one: u32,
@@ -2462,5 +2497,102 @@ mod tests {
         // Default price limit for zero_for_one is MIN_SQRT_RATIO + 1 == sqrt_price, so invalid
         let result = pool.swap(true, amount, None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+
+    #[test]
+    fn test_serde_roundtrip_hookless_state() {
+        let pool = create_basic_v4_test_pool();
+
+        let json = serde_json::to_string(&pool).expect("hookless state should serialize");
+        let deserialized: UniswapV4State =
+            serde_json::from_str(&json).expect("hookless state should deserialize");
+
+        assert_eq!(deserialized.liquidity, pool.liquidity);
+        assert_eq!(deserialized.sqrt_price, pool.sqrt_price);
+        assert_eq!(deserialized.fees, pool.fees);
+        assert_eq!(deserialized.tick, pool.tick);
+        assert_eq!(deserialized.tick_spacing, pool.tick_spacing);
+        assert_eq!(deserialized.ticks, pool.ticks);
+        assert!(deserialized.hook.is_none());
+    }
+
+    #[test]
+    fn test_serde_roundtrip_via_protocol_sim_typetag() {
+        let pool = create_basic_v4_test_pool();
+
+        let json =
+            serde_json::to_string(&pool as &dyn ProtocolSim).expect("state should serialize");
+        let deserialized: Box<dyn ProtocolSim> =
+            serde_json::from_str(&json).expect("state should deserialize");
+
+        assert!(deserialized.eq(&pool));
+    }
+
+    #[test]
+    fn test_serialize_fails_with_hook() {
+        let mut pool = create_basic_v4_test_pool();
+        let handler = AngstromHookHandler::new(
+            Address::from_str("0x0000000aa232009084bd71a5797d089aa4edfad4").unwrap(),
+            Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap(),
+            AngstromFees { unlock: U24::from(238), protocol_unlock: U24::from(112) },
+            false,
+        );
+        pool.set_hook_handler(Box::new(handler));
+
+        let result = serde_json::to_string(&pool);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("HookHandler is a trait object"));
+    }
+
+    #[test]
+    fn test_serialized_wire_format_is_stable() {
+        let pool = create_basic_v4_test_pool();
+
+        let json =
+            serde_json::to_string(&pool as &dyn ProtocolSim).expect("state should serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            value
+                .get("protocol")
+                .and_then(|v| v.as_str()),
+            Some("UniswapV4State"),
+            "typetag name is part of the persisted format"
+        );
+        let payload = value
+            .get("state")
+            .expect("adjacently tagged payload under `state`")
+            .as_object()
+            .expect("payload should be a JSON object");
+
+        let mut keys: Vec<&str> = payload
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["fees", "liquidity", "sqrt_price", "tick", "tick_spacing", "ticks"]);
+    }
+
+    #[test]
+    fn test_deserialize_rejects_invalid_tick_list() {
+        // Values kept within u64 range so serde_json::to_value can represent them exactly.
+        let pool = UniswapV4State::new(
+            1_000,
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3000),
+            0,
+            60,
+            vec![TickInfo::new(0, 0).unwrap(), TickInfo::new(60, 0).unwrap()],
+        )
+        .expect("valid state");
+        let mut json = serde_json::to_value(&pool).expect("hookless state should serialize");
+        json["ticks"]["tick_spacing"] = 0.into();
+
+        let err = serde_json::from_value::<UniswapV4State>(json).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Tick spacing is 0"));
     }
 }
