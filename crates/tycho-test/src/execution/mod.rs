@@ -91,6 +91,18 @@ pub async fn simulate_swap_transaction(
         )
     };
 
+    let bopamm_asset_ids =
+        collect_bopamm_asset_ids(&execution_info).map_err(|e| (e, None, None))?;
+    let bopamm_overwrites = if bopamm_asset_ids.is_empty() {
+        None
+    } else {
+        Some(
+            encoding::setup_bopamm_overwrites(rpc_tools, block, &bopamm_asset_ids)
+                .await
+                .map_err(|e| (e, None, None))?,
+        )
+    };
+
     for (simulation_id, info) in &execution_info {
         let request = match encoding::swap_request(&info.transaction, block) {
             Ok(request) => request,
@@ -130,6 +142,9 @@ pub async fn simulate_swap_transaction(
         }
         if let Some(ref fermiswap_overwrites) = fermiswap_overwrites {
             state_overwrites.extend(fermiswap_overwrites.clone());
+        }
+        if let Some(ref bopamm_overwrites) = bopamm_overwrites {
+            state_overwrites.extend(bopamm_overwrites.clone());
         }
 
         // Add protocol-specific overwrites for Angstrom hooks
@@ -278,4 +293,32 @@ fn collect_fermiswap_pairs(
     }
 
     Ok(pairs.into_iter().collect())
+}
+
+fn collect_bopamm_asset_ids(
+    execution_info: &HashMap<String, TychoExecutionInput>,
+) -> miette::Result<Vec<U256>> {
+    let mut asset_ids = HashSet::new();
+
+    for info in execution_info.values() {
+        for swap in info.solution.swaps() {
+            let component = swap.component();
+            if component.protocol_system != "vm:bopamm" {
+                continue;
+            }
+
+            let asset_id = component
+                .static_attributes
+                .get("asset_id")
+                .ok_or_else(|| {
+                    miette!(
+                        "BopAMM component {:?} is missing the asset_id static attribute",
+                        component.id
+                    )
+                })?;
+            asset_ids.insert(U256::from_be_slice(asset_id.as_ref()));
+        }
+    }
+
+    Ok(asset_ids.into_iter().collect())
 }

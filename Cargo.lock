@@ -1624,6 +1624,9 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "assert-json-diff"
@@ -3026,18 +3029,18 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-channel"
-version = "0.5.15"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
 dependencies = [
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
 dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -3045,18 +3048,18 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-utils"
-version = "0.8.21"
+version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "crossterm"
@@ -6577,7 +6580,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "alloy",
  "clap",
@@ -9379,7 +9382,7 @@ dependencies = [
 
 [[package]]
 name = "tycho"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -9390,7 +9393,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "async-trait",
  "backoff",
@@ -9424,9 +9427,10 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "anyhow",
+ "arrayvec",
  "async-trait",
  "bytes",
  "chrono",
@@ -9443,6 +9447,7 @@ dependencies = [
  "rstest 0.24.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "strum 0.25.0",
  "strum_macros 0.25.3",
  "thiserror 1.0.69",
@@ -9456,7 +9461,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9480,7 +9485,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9503,7 +9508,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "actix",
  "actix-cors",
@@ -9572,7 +9577,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "actix-web",
  "alloy",
@@ -9598,7 +9603,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-protobuf"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "chrono",
  "num-bigint",
@@ -9622,10 +9627,11 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "alloy",
  "alloy-chains",
+ "alloy-primitives 1.5.7",
  "anyhow",
  "approx",
  "async-stream",
@@ -9680,7 +9686,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9704,7 +9710,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.323.0"
+version = "0.337.1"
 dependencies = [
  "alloy",
  "alloy-chains",

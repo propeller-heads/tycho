@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-fluid_v1"
-version = "0.2.0"
+version = "0.3.1"
 edition = "2021"
 
 [lib]
@@ -12,7 +12,7 @@ substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
 prost = "0.11"
 substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", rev = "b8aeaa3" }
-tycho-substreams = "0.5.1"
+tycho-substreams = "0.8.0"
 anyhow = "1.0.95"
 ethabi = "18.0.0"
 num-bigint = "0.4.6"

@@ -136,9 +136,8 @@ impl RFQStreamProcessor {
                     true
                 }
                 Err(e) => {
-                    return Err(miette!(
-                        "No PAMM RFQ client could be added with --run-pamm-protocols: {e}"
-                    ));
+                    warn!("Metric RFQ not supported on chain {:?}, skipping: {e}", self.chain);
+                    false
                 }
             }
         } else {

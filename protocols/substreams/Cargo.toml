@@ -23,6 +23,7 @@ members = [
     "ethereum-lido",
     "ethereum-balancer-v3",
     "ethereum-fluid",
+    "base-aerodrome-v1",
     "base-aerodrome-slipstreams",
     "base-lunarbase",
     "ethereum-erc4626",
@@ -31,6 +32,7 @@ members = [
     "ethereum-liquidityparty",
     "ethereum-fermiswap",
     "ethereum-bopamm",
+    "polygon-ramses-v3",
 ]
 resolver = "2"
 

@@ -10,13 +10,16 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>uniswap_v4</code></td><td>Native (<code>UniswapV4State</code>)</td><td>3 μs (0.003 ms)</td><td>Ethereum, Base, Unichain</td><td>Only core uniswap V4 pools are supported on this native implementation.</td></tr>
 <tr><td><code>uniswap_v4_hooks</code></td><td>Hybrid (<code>UniswapV4State</code>)<br>[DCI indexed]</td><td>1 ms</td><td>Ethereum, Unichain</td><td>All composable hooks are supported.<br><strong>Angstrom</strong>: see more details <a href="supported-protocols.md#angstrom-uniswap-v4-hook">below</a>.<br><em>recommended</em>: set a high startup timeout on the stream builder: <code>.startup_timeout(Duration::from_secs(120))</code></td></tr>
 <tr><td><code>vm:balancer_v2</code></td><td>VM (<code>EVMPoolState</code>)<br>[DCI indexed]</td><td>0.5 ms</td><td>Ethereum</td><td>A few pools are currently unsupported. Use <code>balancer_v2_pool_filter</code></td></tr>
-<tr><td><code>vm:curve</code></td><td>VM (<code>EVMPoolState</code>)<br>[DCI indexed]</td><td>1 ms</td><td>Ethereum</td><td>NOTE: curve requires a node RPC to fetch some code at startup. Please set the <code>RPC_URL</code> env var.</td></tr>
+<tr><td><code>vm:curve</code></td><td>Hybrid (<code>CurveState</code>)<br>[DCI indexed]</td><td>30 μs (0.03 ms)</td><td>Ethereum</td><td>Pools with rate-bearing or rebasing coins are unsupported. Use <code>curve_filter</code>.<br>NOTE: curve requires a node RPC to fetch some code at startup. Please set the <code>RPC_URL</code> env var.</td></tr>
 <tr><td><code>sushiswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>pancakeswap_v2</code></td><td>Native (<code>PancakeswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>pancakeswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base</td><td></td></tr>
+<tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>.</td></tr>
 <tr><td><code>vm:maverick_v2</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>vm:bopamm</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>vm:fermiswap</code></td><td>VM (<code>EVMPoolState</code>)</td><td>4 ms</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td></td></tr>
 <tr><td><code>lunarbase</code></td><td>Native (<code>LunarBaseState</code>)</td><td>7 μs (0.007 ms)</td><td>Base</td><td></td></tr>
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
@@ -57,8 +60,10 @@ fn register_exchanges(
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:balancer_v2", tvl_filter.clone(), Some(balancer_v2_pool_filter))
                 .exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None)
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
-                .exchange::<EVMPoolState<PreCachedDB>>("vm:curve", tvl_filter.clone(), None)
+                .exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:bopamm", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:fermiswap", tvl_filter.clone(), None)
         }
         Chain::Base => {
             builder = builder
@@ -74,6 +79,10 @@ fn register_exchanges(
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Polygon => {
+            builder = builder
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
         }
         _ => {}
     }
@@ -106,3 +115,5 @@ Angstrom requires querying their <a href="https://docs.angstrom.xyz/l1/core-mech
 
 * Set the `ANGSTROM_API_KEY` environment variable (request one from the Angstrom team directly)
 * Set `ANGSTROM_BLOCKS_IN_FUTURE` environment variable (if you want to override the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/constants.rs" target="_blank" rel="noopener noreferrer">default value</a> of 5 blocks). **Important trade-off**: The more blocks you fetch, the more calldata will be sent to the Tycho Router, making execution more gas expensive.
+
+If `ANGSTROM_API_KEY` is not set, `ProtocolStreamBuilder` excludes Angstrom pools from `uniswap_v4_hooks` by default (unless you pass your own filter function), since routes over these pools would fail at encoding without attestations.

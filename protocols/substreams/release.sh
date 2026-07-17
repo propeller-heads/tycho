@@ -59,7 +59,10 @@ else
 fi
 
 set -e  # Exit the script if any command fails
-cargo build --target wasm32-unknown-unknown --release -p "$package"
+# Build from inside the package directory so rustup picks up the package's own
+# rust-toolchain.toml; --locked enforces the committed Cargo.lock. Both are
+# required for reproducible wasm builds.
+(cd "$package" && cargo build --locked --target wasm32-unknown-unknown --release)
 mkdir -p ./target/spkg/
 
 # Loop through each YAML file and build the substreams package
@@ -83,11 +86,28 @@ for yaml_file in "${yaml_files[@]}"; do
         exit 1
     fi
 
-    REPOSITORY=${REPOSITORY:-"s3://repo.propellerheads/substreams"}
+    REPOSITORY=${REPOSITORY:-"s3://repo.propellerheads-propellerheads/substreams"}
     repository_path="$REPOSITORY/$package/$version_prefix-$version.spkg"
+    bucket_and_key="${repository_path#s3://}"
 
     substreams pack "$yaml_file" -o ./target/spkg/$version_prefix-$version.spkg
-    aws s3 cp ./target/spkg/$version_prefix-$version.spkg $repository_path
+
+    if [[ "$version" == pre.* ]]; then
+        # Pre-releases are keyed by commit sha and may be rebuilt and overwritten.
+        aws s3 cp "./target/spkg/$version_prefix-$version.spkg" "$repository_path"
+    else
+        # Releases are immutable: the conditional write makes S3 reject the upload
+        # atomically if the object already exists. Requires AWS CLI >= 2.17 and
+        # only s3:PutObject permission.
+        if ! aws s3api put-object \
+            --bucket "${bucket_and_key%%/*}" \
+            --key "${bucket_and_key#*/}" \
+            --body "./target/spkg/$version_prefix-$version.spkg" \
+            --if-none-match '*' > /dev/null; then
+            echo "Error: upload rejected. A PreconditionFailed error above means $repository_path already exists — releases are immutable, bump the package version instead."
+            exit 1
+        fi
+    fi
 
     echo "RELEASED SUBSTREAMS PACKAGE: '$repository_path'"
 done

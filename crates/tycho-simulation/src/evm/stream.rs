@@ -130,6 +130,7 @@ use crate::{
         override_stream::{self, StateOverrideProvider},
         pending::PendingBlockProcessor,
         protocol::{
+            filters::uniswap_v4_non_angstrom_hook_pool_filter,
             native_wrapper::state::NativeWrapperState,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
@@ -142,6 +143,22 @@ use crate::{
 };
 
 const EXCHANGES_REQUIRING_FILTER: [&str; 4] = ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3"];
+
+/// The client-side filter applied to exchange `name` when the caller provides none.
+///
+/// `uniswap_v4_hooks`: without `ANGSTROM_API_KEY`, Angstrom swaps cannot be encoded (encoding
+/// fetches per-block attestations from the Angstrom API), so Angstrom pools are excluded up
+/// front rather than failing every route that selects them at encoding time.
+fn default_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
+    if name == "uniswap_v4_hooks" && std::env::var("ANGSTROM_API_KEY").is_err() {
+        warn!(
+            "ANGSTROM_API_KEY is not set: excluding Angstrom pools from '{name}'. \
+             Set the key to include them."
+        );
+        return Some(uniswap_v4_non_angstrom_hook_pool_filter);
+    }
+    None
+}
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum StreamEndPolicy {
@@ -308,6 +325,9 @@ impl ProtocolStreamBuilder {
         if let Some(predicate) = filter_fn {
             self.decoder
                 .register_filter(name, predicate);
+        } else if let Some(predicate) = default_filter_fn(name) {
+            self.decoder
+                .register_filter(name, predicate);
         }
 
         if EXCHANGES_REQUIRING_FILTER.contains(&name) && filter_fn.is_none() {
@@ -363,6 +383,9 @@ impl ProtocolStreamBuilder {
         self.decoder
             .register_decoder_with_context::<T>(name, decoder_context);
         if let Some(predicate) = filter_fn {
+            self.decoder
+                .register_filter(name, predicate);
+        } else if let Some(predicate) = default_filter_fn(name) {
             self.decoder
                 .register_filter(name, predicate);
         }
@@ -434,6 +457,24 @@ impl ProtocolStreamBuilder {
     /// Sets the API key for authenticating with the Tycho server.
     pub fn auth_key(mut self, auth_key: Option<String>) -> Self {
         self.stream_builder = self.stream_builder.auth_key(auth_key);
+        self
+    }
+
+    /// Adds client-metadata entries forwarded to the server in the `X-Tycho-Client-Metadata`
+    /// header.
+    ///
+    /// See [`TychoStreamBuilder::add_client_metadata`]. Values are self-reported and may surface in
+    /// the server's metrics and logs — do not include secrets or personally identifiable
+    /// information.
+    pub fn add_client_metadata<I, K, V>(mut self, metadata: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.stream_builder = self
+            .stream_builder
+            .add_client_metadata(metadata);
         self
     }
 

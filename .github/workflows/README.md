@@ -138,5 +138,5 @@ Triggered on `protocols/substreams/v*` tags or manually.
 
 **Jobs:**
 
-- **`publish-crates`** — Publishes `substreams-helper` then `tycho-substreams` to crates.io.
-- **`release-substreams-package`** — Manual-only. Builds a named substreams package for `wasm32-unknown-unknown` and runs `release.sh` to publish it.
+- **`publish-crates`** — Publishes `substreams-helper` then `tycho-substreams` to crates.io. Versions already on crates.io are skipped, so the job is safe to re-run.
+- **`release-substreams-package`** — Manual-only. Runs `release.sh`, which builds the package for `wasm32-unknown-unknown` with the package's pinned toolchain and locked dependencies, packs the spkg, and uploads it to S3. See [protocols/substreams/Readme.md](../../protocols/substreams/Readme.md) for the full publishing procedure.

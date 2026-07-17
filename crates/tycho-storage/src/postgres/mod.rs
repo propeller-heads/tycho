@@ -762,6 +762,7 @@ pub mod testing {
         let tables = vec![
             // put block early so most FKs cascade, it would
             // be better to find the correct order tough.
+            "transaction_cleanup_progress",
             "extraction_state",
             "block",
             "contract_storage",
@@ -1507,5 +1508,98 @@ mod tests_ensure_chain {
             .unwrap();
         let result = ensure_chain(Chain::Base, &mut conn).await;
         assert!(result.is_err(), "expected error when inserting a different chain");
+    }
+}
+
+#[cfg(test)]
+mod tests_transaction_cleanup {
+    use std::str::FromStr;
+
+    use diesel::prelude::*;
+    use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
+    use tycho_common::Bytes;
+
+    use super::{db_fixtures, schema, testing::run_against_db};
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_transactions_serial_db() {
+        run_against_db(|connection_pool| async move {
+            let mut conn = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut conn, "ethereum").await;
+            let block_ids = db_fixtures::insert_blocks(&mut conn, chain_id).await;
+            let tx_ids = db_fixtures::insert_txns(
+                &mut conn,
+                &[
+                    (
+                        block_ids[0],
+                        1,
+                        "0xbb7e16d797a9e2fbc537e30f91ed3d9a656b25c8d720c28866fbb242b1b0824d",
+                    ),
+                    (
+                        block_ids[0],
+                        2,
+                        "0x794f7df7a3fe973f1583fbb92536f9a8def3a89902439289315326c04068de54",
+                    ),
+                    (
+                        block_ids[1],
+                        1,
+                        "0x3108322284d0a89a7accb288d1a94384d499504fe7e04441b0706c7628dee7b7",
+                    ),
+                    (
+                        block_ids[1],
+                        2,
+                        "0x50449de1973d86f21bfafa7c72011854a7e33a226709dc3e2e4edcca34188388",
+                    ),
+                ],
+            )
+            .await;
+            // tx0 is referenced via account.creation_tx, tx1 via contract_code.modify_tx;
+            // tx2 and tx3 are orphans.
+            let account_id = db_fixtures::insert_account(
+                &mut conn,
+                "6B175474E89094C44Da98b954EedeAC495271d0F",
+                "cleanup_test_account",
+                chain_id,
+                Some(tx_ids[0]),
+            )
+            .await;
+            db_fixtures::insert_contract_code(
+                &mut conn,
+                account_id,
+                tx_ids[1],
+                Bytes::from_str("C0C0").unwrap(),
+            )
+            .await;
+
+            // The procedure commits internally, so it must run as a single autocommit
+            // statement rather than inside a transaction. p_min_age is zeroed because the
+            // fixtures were inserted just now, far inside the production horizon.
+            conn.batch_execute(
+                "CALL cleanup_orphaned_transactions(
+                    p_batch_size => 1000,
+                    p_time_budget => interval '1 minute',
+                    p_min_age => interval '0 seconds'
+                );",
+            )
+            .await
+            .expect("cleanup procedure should run");
+
+            let mut remaining: Vec<i64> = schema::transaction::table
+                .select(schema::transaction::id)
+                .load(&mut conn)
+                .await
+                .expect("querying remaining transactions failed");
+            remaining.sort();
+            let mut expected = vec![tx_ids[0], tx_ids[1]];
+            expected.sort();
+            assert_eq!(
+                remaining, expected,
+                "referenced transactions must survive, orphans must be deleted"
+            );
+        })
+        .await;
     }
 }

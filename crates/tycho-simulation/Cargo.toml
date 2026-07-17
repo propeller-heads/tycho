@@ -43,6 +43,9 @@ itertools = { workspace = true }
 lunarbase-pmm-math = "0.2.4"
 num-traits = { workspace = true }
 
+# Used by the vendored Curve math/adapter modules (src/evm/protocol/curve/{math,adapter}).
+alloy-primitives = { version = "1.5", features = ["serde"], optional = true }
+
 # Enum utilities
 strum_macros = { workspace = true }
 
@@ -113,6 +116,7 @@ evm = [
     "dep:revm-inspectors",
     "dep:alloy",
     "dep:reqwest",
+    "dep:alloy-primitives",
     "dep:tokio-tungstenite",
 ]
 rfq = [

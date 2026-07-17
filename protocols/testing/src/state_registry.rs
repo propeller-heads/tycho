@@ -3,9 +3,10 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             ekubo::state::EkuboState, fluid::FluidV1, lunarbase::LunarBaseState,
-            pancakeswap_v2::state::PancakeswapV2State, rocketpool::state::RocketpoolState,
-            uniswap_v2::state::UniswapV2State, uniswap_v3::state::UniswapV3State,
-            uniswap_v4::state::UniswapV4State, vm::state::EVMPoolState,
+            pancakeswap_v2::state::PancakeswapV2State, ramses_v3::state::RamsesV3State,
+            rocketpool::state::RocketpoolState, uniswap_v2::state::UniswapV2State,
+            uniswap_v3::state::UniswapV3State, uniswap_v4::state::UniswapV4State,
+            vm::state::EVMPoolState,
         },
         stream::ProtocolStreamBuilder,
     },
@@ -45,6 +46,12 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
+        "ramses_v3" => stream_builder.exchange_with_decoder_context::<RamsesV3State>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
         "ekubo_v2" => stream_builder.exchange_with_decoder_context::<EkuboState>(
             protocol_system,
             tvl_filter,
