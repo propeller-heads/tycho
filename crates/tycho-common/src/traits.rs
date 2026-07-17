@@ -233,8 +233,10 @@ pub trait BalanceSlotDetector: Send + Sync {
     /// Detect balance storage slots for multiple tokens from a single holder.
     /// Useful to allow overriding balances.
     ///
-    /// No block parameter is taken: a token's storage layout is fixed, so the slot location does
-    /// not depend on chain state at any particular block.
+    /// No block parameter is taken: a token's balance slot is effectively fixed, so the slot
+    /// location does not depend on chain state. An upgradeable proxy could technically relocate the
+    /// balances mapping, but only alongside a migration of every existing balance, so in practice
+    /// it does not happen.
     ///
     /// # Arguments
     /// * `tokens` - Slice of ERC20 token addresses.
@@ -259,8 +261,10 @@ pub trait AllowanceSlotDetector: Send + Sync {
     /// Detect allowance storage slots for multiple tokens for owner-spender pairs.
     /// Useful to allow overriding allowances in simulations.
     ///
-    /// No block parameter is taken: a token's storage layout is fixed, so the slot location does
-    /// not depend on chain state at any particular block.
+    /// No block parameter is taken: a token's allowance slot is effectively fixed, so the slot
+    /// location does not depend on chain state. An upgradeable proxy could technically relocate the
+    /// allowances mapping, but only alongside a migration of every existing allowance, so in
+    /// practice it does not happen.
     ///
     /// # Arguments
     /// * `tokens` - Slice of ERC20 token addresses.
