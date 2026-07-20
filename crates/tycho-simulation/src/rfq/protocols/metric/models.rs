@@ -75,8 +75,13 @@ pub struct MetricDepthBin {
     #[serde(rename = "binIdx")]
     pub bin_idx: i64,
     pub price: String,
+    /// Cumulative output-token volume from the current position to this boundary (raw units).
     #[serde(rename = "cumulativeVolume")]
     pub cumulative_volume: String,
+    /// Cumulative input-token amount required to reach this boundary (raw units). Used to drive
+    /// the input-based depth walk so pricing matches Metric's own accounting.
+    #[serde(rename = "cumulativeInputVolume")]
+    pub cumulative_input_volume: String,
 }
 
 impl MetricBidAskResponse {
@@ -113,6 +118,10 @@ impl MetricDepthBin {
 
     pub fn cumulative_volume(&self) -> Result<BigUint, RFQError> {
         parse_biguint(&self.cumulative_volume, "depth.cumulativeVolume")
+    }
+
+    pub fn cumulative_input_volume(&self) -> Result<BigUint, RFQError> {
+        parse_biguint(&self.cumulative_input_volume, "depth.cumulativeInputVolume")
     }
 }
 
@@ -160,12 +169,14 @@ mod tests {
                     "binIdx": 0,
                     "price": "57184906628499610009600",
                     "cumulativeVolume": "1000000000000000000",
+                    "cumulativeInputVolume": "3100000000",
                     "priceImpactE6": "33333"
                 }],
                 "bids": [{
                     "binIdx": -1,
                     "price": "53495557813757699686400",
                     "cumulativeVolume": "3000000000",
+                    "cumulativeInputVolume": "1000000000000000000",
                     "priceImpactE6": "33333"
                 }]
             }
@@ -180,6 +191,12 @@ mod tests {
                 .cumulative_volume()
                 .unwrap(),
             BigUint::from(3_000_000_000u64)
+        );
+        assert_eq!(
+            response.depth.bids[0]
+                .cumulative_input_volume()
+                .unwrap(),
+            BigUint::from(1_000_000_000_000_000_000u64)
         );
     }
 

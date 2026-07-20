@@ -75,6 +75,7 @@ impl MetricState {
         &self,
         direction: MetricDirection,
         amount_in_human: f64,
+        token_in_decimals: u32,
         token_out_decimals: u32,
         max_output: &BigUint,
     ) -> Result<Option<DepthQuote>, SimulationError> {
@@ -105,6 +106,7 @@ impl MetricState {
             bins,
             start_price,
             amount_in_human,
+            token_in_decimals,
             token_out_decimals,
             max_output_human,
         )?;
@@ -184,8 +186,13 @@ impl ProtocolSim for MetricState {
         };
         // Prefer size-aware depth when Metric exposes it, otherwise use best bid/ask with only
         // the aggregate inventory cap.
-        let depth_quote =
-            self.quote_with_depth(direction, amount_in_human, token_out.decimals, &max_output)?;
+        let depth_quote = self.quote_with_depth(
+            direction,
+            amount_in_human,
+            token_in.decimals,
+            token_out.decimals,
+            &max_output,
+        )?;
         let (amount_out_human, effective_max_output, exhausted) = match depth_quote {
             Some(quote) => (quote.amount_out_human, quote.max_output, quote.exhausted),
             None => (flat_amount_out_human, max_output.clone(), false),
@@ -354,6 +361,7 @@ fn depth_output_for_input(
     bins: &[MetricDepthBin],
     start_price: f64,
     input_human: f64,
+    input_decimals: u32,
     output_decimals: u32,
     max_output_human: f64,
 ) -> Result<DepthFill, SimulationError> {
@@ -362,18 +370,27 @@ fn depth_output_for_input(
     }
 
     let mut current_price = start_price;
-    let mut previous_volume = 0.0;
+    let mut previous_output = 0.0;
+    let mut previous_input = 0.0;
     let mut remaining_input = input_human;
     let mut output_human = 0.0;
 
     for bin in bins {
         let bin_price = bin.price()?;
-        // Metric reports cumulative depth in output-token units for the side being walked.
-        // Adjacent differences give the volume available in each linear price segment.
-        let cumulative =
+        // Metric reports both sides cumulatively to each boundary: output volume in output-token
+        // units and the input required to reach it in input-token units. Adjacent differences give
+        // the per-segment volumes.
+        let cumulative_output =
             raw_to_human(&bin.cumulative_volume()?, output_decimals, "depth cumulative volume")?;
-        let volume_in_bin = cumulative - previous_volume;
-        previous_volume = cumulative;
+        let cumulative_input = raw_to_human(
+            &bin.cumulative_input_volume()?,
+            input_decimals,
+            "depth cumulative input volume",
+        )?;
+        let volume_in_bin = cumulative_output - previous_output;
+        let input_in_bin = cumulative_input - previous_input;
+        previous_output = cumulative_output;
+        previous_input = cumulative_input;
 
         if volume_in_bin <= 0.0 {
             current_price = bin_price;
@@ -384,29 +401,48 @@ fn depth_output_for_input(
         if output_capacity <= 0.0 {
             break;
         }
-        let fillable_volume = volume_in_bin.min(output_capacity);
-        // If the aggregate liquidity cap cuts this bin short, the segment can end before bin_price.
+
+        if volume_in_bin <= output_capacity {
+            // Whole bin is within the aggregate inventory cap, so use Metric's own input figure for
+            // the segment rather than re-deriving it from the price curve.
+            if remaining_input >= input_in_bin {
+                output_human += volume_in_bin;
+                remaining_input -= input_in_bin;
+                current_price = bin_price;
+                continue;
+            }
+
+            // The remaining input stops partway through the bin. Invert the documented linear-price
+            // model between current_price and bin_price to price the partial output.
+            output_human += depth_segment_output_for_input(
+                direction,
+                remaining_input,
+                volume_in_bin,
+                current_price,
+                bin_price,
+            )?;
+            remaining_input = 0.0;
+            break;
+        }
+
+        // The aggregate inventory cap cuts this bin short before bin_price, so Metric's full-bin
+        // input figure no longer applies; derive the price and input for the fillable slice.
+        let fillable_volume = output_capacity;
         let segment_exit_price =
             current_price + (bin_price - current_price) * fillable_volume / volume_in_bin;
-        // First price this whole segment. If the remaining input can pay that cost, the quote
-        // consumes fillable_volume completely and then continues into the next depth bin.
-        let full_segment_input = depth_segment_input_required(
+        let fillable_input = depth_segment_input_required(
             direction,
             fillable_volume,
             current_price,
             segment_exit_price,
         )?;
 
-        if remaining_input >= full_segment_input {
+        if remaining_input >= fillable_input {
             output_human += fillable_volume;
-            remaining_input -= full_segment_input;
-            current_price = segment_exit_price;
-            continue;
+            remaining_input -= fillable_input;
+            break;
         }
 
-        // The remaining input is not enough for the whole segment, so the trade stops between
-        // current_price and segment_exit_price. Invert this segment's price formula to compute
-        // the partial output bought by remaining_input.
         output_human += depth_segment_output_for_input(
             direction,
             remaining_input,
@@ -704,6 +740,8 @@ mod tests {
             price: "53495557813757699686400".to_string(),
             // Only 3000 USDC of depth, far less than the 30000 USDC aggregate inventory.
             cumulative_volume: "3000000000".to_string(),
+            // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
+            cumulative_input_volume: "1016949152542372881".to_string(),
         }];
 
         let err = state
@@ -734,6 +772,9 @@ mod tests {
             // 3100 * 2^64
             price: "57184906628499610009600".to_string(),
             cumulative_volume: cap.to_string(),
+            // Full-bin input at avg price 3055 (~6.5756 WETH * 3055) ≈ 20088 USDC, below the
+            // 30000 USDC input so the whole bin is consumed and the trade is depth-exhausted.
+            cumulative_input_volume: "20088000000".to_string(),
         }];
 
         let err = state
@@ -764,6 +805,8 @@ mod tests {
             price: "53495557813757699686400".to_string(),
             // 1500 USDC of depth, below the 30000 USDC aggregate inventory.
             cumulative_volume: "1500000000".to_string(),
+            // 1500 USDC / avg price 2950 ≈ 0.508 WETH (unused by get_limits).
+            cumulative_input_volume: "508474576271186440".to_string(),
         }];
 
         let (sell_limit, buy_limit) = state
@@ -796,6 +839,8 @@ mod tests {
             // 2900 * 2^64
             price: "53495557813757699686400".to_string(),
             cumulative_volume: "3000000000".to_string(),
+            // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
+            cumulative_input_volume: "1016949152542372881".to_string(),
         }];
 
         let result = state
@@ -818,6 +863,8 @@ mod tests {
             // 3100 * 2^64
             price: "57184906628499610009600".to_string(),
             cumulative_volume: "1000000000000000000".to_string(),
+            // Full-bin input at avg price 3055 (1 WETH * 3055) = 3055 USDC.
+            cumulative_input_volume: "3055000000".to_string(),
         }];
 
         let result = state
@@ -835,10 +882,12 @@ mod tests {
             // 2900 * 2^64
             price: "53495557813757699686400".to_string(),
             cumulative_volume: "3000000000".to_string(),
+            // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
+            cumulative_input_volume: "1016949152542372881".to_string(),
         }];
 
         let fill =
-            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 1.0, 6, 3000.0)
+            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 1.0, 18, 6, 3000.0)
                 .unwrap();
 
         assert!((fill.output_human - 2950.8196721311474).abs() < 1e-9);
@@ -852,10 +901,12 @@ mod tests {
             // 3100 * 2^64
             price: "57184906628499610009600".to_string(),
             cumulative_volume: "1000000000000000000".to_string(),
+            // Full-bin input at avg price 3055 (1 WETH * 3055) = 3055 USDC.
+            cumulative_input_volume: "3055000000".to_string(),
         }];
 
         let fill =
-            depth_output_for_input(MetricDirection::OneForZero, &bins, 3010.0, 3000.0, 18, 1.0)
+            depth_output_for_input(MetricDirection::OneForZero, &bins, 3010.0, 3000.0, 6, 18, 1.0)
                 .unwrap();
 
         assert!((fill.output_human - 0.9822534928279816).abs() < 1e-12);
@@ -869,10 +920,12 @@ mod tests {
             // 2900 * 2^64
             price: "53495557813757699686400".to_string(),
             cumulative_volume: "3000000000".to_string(),
+            // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
+            cumulative_input_volume: "1016949152542372881".to_string(),
         }];
 
         let fill =
-            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 2.0, 6, 3000.0)
+            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 2.0, 18, 6, 3000.0)
                 .unwrap();
 
         assert_eq!(fill.output_human, 3000.0);

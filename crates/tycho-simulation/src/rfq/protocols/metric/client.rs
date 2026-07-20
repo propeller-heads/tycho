@@ -154,7 +154,13 @@ impl MetricClient {
                 .http_client()
                 .get(&self.metadata_endpoint)
                 .header("accept", "application/json")
-                .query(&[("count", METADATA_PAGE_SIZE.to_string()), ("offset", offset.to_string())])
+                // `include24h=true` is required for the top-level `tvlFiat` field; without it the
+                // API omits TVL and every pool would fall below any non-zero threshold.
+                .query(&[
+                    ("count", METADATA_PAGE_SIZE.to_string()),
+                    ("offset", offset.to_string()),
+                    ("include24h", "true".to_string()),
+                ])
                 .send()
                 .await
                 .map_err(|e| {
@@ -542,6 +548,8 @@ mod tests {
         {
             assert!(bin.price().unwrap().is_finite());
             assert!(bin.cumulative_volume().is_ok());
+            // The input-driven depth walk depends on this field being present in live responses.
+            assert!(bin.cumulative_input_volume().is_ok());
         }
     }
 }
