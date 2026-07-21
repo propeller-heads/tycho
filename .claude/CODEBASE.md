@@ -1,4 +1,4 @@
-<!-- docs-synced-at: c3bca92fd490a8e1aeccfa0c30118ec06ea829de -->
+<!-- docs-synced-at: 52ca8c6a5f26a8057b917b3e07700c954230659b -->
 # Tycho Codebase Guide
 
 Low-latency, reorg-aware indexer that streams DEX liquidity state from on-chain data to consumers.
