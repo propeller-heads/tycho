@@ -9,11 +9,6 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-// Oracle update mode byte consumed by MetricExecutor. Under the v1 heartbeat model Tycho never
-// relays an oracle update, so the encoder always emits `Never`. Kept as a named constant to stay
-// lined up with MetricExecutor's OracleUpdateMode enum.
-const ORACLE_UPDATE_MODE_NEVER: u8 = 0;
-
 #[derive(Clone)]
 pub struct MetricSwapEncoder {
     executor_address: Bytes,
@@ -70,13 +65,11 @@ impl SwapEncoder for MetricSwapEncoder {
             )));
         };
 
-        let mut encoded = Vec::with_capacity(62);
+        let mut encoded = Vec::with_capacity(61);
         encoded.extend_from_slice(token_in.as_slice());
         encoded.extend_from_slice(token_out.as_slice());
         encoded.extend_from_slice(pool.as_slice());
         encoded.push(u8::from(zero_for_one));
-        // Byte 61 is the oracle update mode consumed by MetricExecutor.
-        encoded.push(ORACLE_UPDATE_MODE_NEVER);
 
         Ok(encoded)
     }
@@ -147,10 +140,9 @@ mod tests {
             "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
             "1111111111111111111111111111111111111111",
             "01",
-            "00",
         ));
         assert_eq!(hex_swap, expected);
-        assert_eq!(encoded_swap.len(), 62);
+        assert_eq!(encoded_swap.len(), 61);
     }
 
     #[test]
@@ -170,10 +162,9 @@ mod tests {
             .unwrap();
         let hex_swap = encode(&encoded_swap);
 
-        // Byte 60 (direction) is 0 for one-for-zero, byte 61 (oracle mode) is always Never.
+        // Byte 60 is the direction flag and is 0 for one-for-zero.
         assert_eq!(&hex_swap[120..122], "00");
-        assert_eq!(&hex_swap[122..124], "00");
-        assert_eq!(encoded_swap.len(), 62);
+        assert_eq!(encoded_swap.len(), 61);
     }
 
     #[test]

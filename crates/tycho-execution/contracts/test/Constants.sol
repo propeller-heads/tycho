@@ -211,9 +211,6 @@ contract Constants is
     // FermiSwap
     address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
 
-    // Metric oracle (Base)
-    address METRIC_ORACLE = 0x681E908B8ab57c49C74D770F369754CCC3E1ae09;
-
     // BopAMM (Bebop on-chain PMM)
     address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;
     address BOPAMM_MODULE = 0xBC60639345dFa607d73b74e88C2d54D8B8AD7Cc3;

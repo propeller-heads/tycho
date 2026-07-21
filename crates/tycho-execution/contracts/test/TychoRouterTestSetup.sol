@@ -245,7 +245,7 @@ contract TychoRouterTestSetup is
         liquidityPartyExecutor = new LiquidityPartyExecutor();
         aerodromeV1Executor = new AerodromeV1Executor();
         fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
-        metricExecutor = new MetricExecutor(METRIC_ORACLE);
+        metricExecutor = new MetricExecutor();
         bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
 
         address[] memory executors = new address[](24);

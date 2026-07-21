@@ -70,7 +70,7 @@
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     }
   },
   "base": {
@@ -99,7 +99,7 @@
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     }
   },
   "unichain": {
@@ -141,7 +141,7 @@
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     }
   },
   "polygon": {
@@ -160,7 +160,7 @@
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     }
   },
   "bsc": {
@@ -180,7 +180,7 @@
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     }
   }
 }

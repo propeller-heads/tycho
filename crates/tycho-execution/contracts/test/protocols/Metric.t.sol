@@ -39,38 +39,14 @@ contract MetricToken is ERC20 {
     }
 }
 
-contract MockMetricOracle {
-    bool public updated;
-
-    function updateBySignature(
-        address, /* feedCreator */
-        uint256, /* slotId */
-        uint256, /* deadline */
-        bytes calldata /* signature */
-    )
-        external
-    {
-        updated = true;
-    }
-}
-
 contract MockMetricPool {
     address public immutable token0;
     address public immutable token1;
-    MockMetricOracle public immutable oracle;
-    bool public immutable requireOracleUpdate;
     uint128 public lastPriceLimitX64;
 
-    constructor(
-        address token0_,
-        address token1_,
-        MockMetricOracle oracle_,
-        bool requireOracleUpdate_
-    ) {
+    constructor(address token0_, address token1_) {
         token0 = token0_;
         token1 = token1_;
-        oracle = oracle_;
-        requireOracleUpdate = requireOracleUpdate_;
     }
 
     function swap(
@@ -81,10 +57,6 @@ contract MockMetricPool {
         bytes calldata data
     ) external {
         lastPriceLimitX64 = priceLimitX64;
-        if (requireOracleUpdate) {
-            require(oracle.updated(), "oracle not updated");
-        }
-
         uint256 amountIn = uint256(uint128(amountSpecified));
         uint256 amountOut = amountIn * 2;
 
@@ -105,8 +77,6 @@ contract MockMetricPool {
 }
 
 contract MetricExecutorExposed is MetricExecutor {
-    constructor(address oracle_) MetricExecutor(oracle_) {}
-
     function metricOmmSwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
@@ -206,13 +176,8 @@ contract MetricDispatcherHarness {
 }
 
 contract MetricExecutorTest is Test {
-    uint8 constant ORACLE_UPDATE_NEVER = 0;
-    uint8 constant ORACLE_UPDATE_ALWAYS = 1;
-    uint8 constant ORACLE_UPDATE_RETRY_ON_REVERT = 2;
-
     MetricToken token0;
     MetricToken token1;
-    MockMetricOracle oracle;
     MetricExecutorExposed executor;
 
     address receiver = makeAddr("receiver");
@@ -220,14 +185,12 @@ contract MetricExecutorTest is Test {
     function setUp() public {
         token0 = new MetricToken("Token 0", "TK0");
         token1 = new MetricToken("Token 1", "TK1");
-        oracle = new MockMetricOracle();
-        executor = new MetricExecutorExposed(address(oracle));
+        executor = new MetricExecutorExposed();
     }
 
     function testGetTransferData() public {
-        MockMetricPool pool = _pool(false);
-        bytes memory data =
-            _encodeData(address(pool), true, ORACLE_UPDATE_NEVER, "");
+        MockMetricPool pool = _pool();
+        bytes memory data = _encodeData(address(pool), true);
 
         (
             TransferManager.TransferType transferType,
@@ -244,17 +207,13 @@ contract MetricExecutorTest is Test {
         assertFalse(outputToRouter);
     }
 
-    function testSwapWithoutOracleUpdate() public {
-        MockMetricPool pool = _pool(false);
+    function testSwap() public {
+        MockMetricPool pool = _pool();
         uint256 amountIn = 100 ether;
         token0.mint(address(executor), amountIn);
         token1.mint(address(pool), amountIn * 2);
 
-        executor.swap(
-            amountIn,
-            _encodeData(address(pool), true, ORACLE_UPDATE_NEVER, ""),
-            receiver
-        );
+        executor.swap(amountIn, _encodeData(address(pool), true), receiver);
 
         assertEq(token0.balanceOf(address(pool)), amountIn);
         assertEq(token1.balanceOf(receiver), amountIn * 2);
@@ -263,16 +222,12 @@ contract MetricExecutorTest is Test {
     }
 
     function testSwapOneForZeroUsesMaxPriceLimit() public {
-        MockMetricPool pool = _pool(false);
+        MockMetricPool pool = _pool();
         uint256 amountIn = 100 ether;
         token1.mint(address(executor), amountIn);
         token0.mint(address(pool), amountIn * 2);
 
-        executor.swap(
-            amountIn,
-            _encodeData(address(pool), false, ORACLE_UPDATE_NEVER, ""),
-            receiver
-        );
+        executor.swap(amountIn, _encodeData(address(pool), false), receiver);
 
         assertEq(token1.balanceOf(address(pool)), amountIn);
         assertEq(token0.balanceOf(receiver), amountIn * 2);
@@ -280,78 +235,10 @@ contract MetricExecutorTest is Test {
         assertEq(pool.lastPriceLimitX64(), type(uint128).max);
     }
 
-    function testSwapWithOracleUpdate() public {
-        MockMetricPool pool = _pool(true);
-        uint256 amountIn = 50 ether;
-        token0.mint(address(executor), amountIn);
-        token1.mint(address(pool), amountIn * 2);
-
-        bytes memory oracleArgs = abi.encode(
-            address(this), uint256(0), uint256(block.timestamp + 1), ""
-        );
-
-        executor.swap(
-            amountIn,
-            _encodeData(address(pool), true, ORACLE_UPDATE_ALWAYS, oracleArgs),
-            receiver
-        );
-
-        assertTrue(oracle.updated());
-        assertEq(token1.balanceOf(receiver), amountIn * 2);
-    }
-
-    function testSwapRetriesWithOracleUpdate() public {
-        MockMetricPool pool = _pool(true);
-        uint256 amountIn = 50 ether;
-        token0.mint(address(executor), amountIn);
-        token1.mint(address(pool), amountIn * 2);
-
-        bytes memory oracleArgs = abi.encode(
-            address(this), uint256(0), uint256(block.timestamp + 1), ""
-        );
-
-        executor.swap(
-            amountIn,
-            _encodeData(
-                address(pool), true, ORACLE_UPDATE_RETRY_ON_REVERT, oracleArgs
-            ),
-            receiver
-        );
-
-        assertTrue(oracle.updated());
-        assertEq(token0.balanceOf(address(pool)), amountIn);
-        assertEq(token1.balanceOf(receiver), amountIn * 2);
-        assertEq(token0.balanceOf(address(executor)), 0);
-    }
-
-    function testRetryModeDoesNotUpdateOracleWhenFirstSwapSucceeds() public {
-        MockMetricPool pool = _pool(false);
-        uint256 amountIn = 50 ether;
-        token0.mint(address(executor), amountIn);
-        token1.mint(address(pool), amountIn * 2);
-
-        bytes memory oracleArgs = abi.encode(
-            address(this), uint256(0), uint256(block.timestamp + 1), ""
-        );
-
-        executor.swap(
-            amountIn,
-            _encodeData(
-                address(pool), true, ORACLE_UPDATE_RETRY_ON_REVERT, oracleArgs
-            ),
-            receiver
-        );
-
-        assertFalse(oracle.updated());
-        assertEq(token0.balanceOf(address(pool)), amountIn);
-        assertEq(token1.balanceOf(receiver), amountIn * 2);
-        assertEq(token0.balanceOf(address(executor)), 0);
-    }
-
     function testSwapThroughDispatcherHarness() public {
         MetricDispatcherHarness harness = new MetricDispatcherHarness();
-        MetricExecutor implementation = new MetricExecutor(address(oracle));
-        MockMetricPool pool = _pool(false);
+        MetricExecutor implementation = new MetricExecutor();
+        MockMetricPool pool = _pool();
         uint256 amountIn = 25 ether;
         token0.mint(address(harness), amountIn);
         token1.mint(address(pool), amountIn * 2);
@@ -359,7 +246,7 @@ contract MetricExecutorTest is Test {
         harness.execute(
             address(implementation),
             amountIn,
-            _encodeData(address(pool), true, ORACLE_UPDATE_NEVER, ""),
+            _encodeData(address(pool), true),
             receiver
         );
 
@@ -368,14 +255,10 @@ contract MetricExecutorTest is Test {
         assertEq(token0.balanceOf(address(harness)), 0);
     }
 
-    function testInvalidOracleDataLength() public {
-        MockMetricPool pool = _pool(false);
-        bytes memory invalid = abi.encodePacked(
-            _baseData(address(pool), true),
-            bytes1(uint8(1)),
-            uint32(99),
-            hex"1234"
-        );
+    function testRejectsTrailingSwapData() public {
+        MockMetricPool pool = _pool();
+        bytes memory invalid =
+            abi.encodePacked(_encodeData(address(pool), true), hex"00");
 
         vm.expectRevert(MetricExecutor__InvalidDataLength.selector);
         executor.getTransferData(invalid);
@@ -393,29 +276,11 @@ contract MetricExecutorTest is Test {
         );
     }
 
-    function _pool(bool requireOracleUpdate) internal returns (MockMetricPool) {
-        return new MockMetricPool(
-            address(token0), address(token1), oracle, requireOracleUpdate
-        );
+    function _pool() internal returns (MockMetricPool) {
+        return new MockMetricPool(address(token0), address(token1));
     }
 
-    function _encodeData(
-        address pool,
-        bool zeroForOne,
-        uint8 oracleUpdateMode,
-        bytes memory oracleArgs
-    ) internal view returns (bytes memory) {
-        bytes memory data = abi.encodePacked(
-            _baseData(pool, zeroForOne), bytes1(oracleUpdateMode)
-        );
-        if (oracleUpdateMode == ORACLE_UPDATE_NEVER) {
-            return data;
-        }
-
-        return abi.encodePacked(data, uint32(oracleArgs.length), oracleArgs);
-    }
-
-    function _baseData(address pool, bool zeroForOne)
+    function _encodeData(address pool, bool zeroForOne)
         internal
         view
         returns (bytes memory)

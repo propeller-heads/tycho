@@ -2632,8 +2632,8 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
 fn test_single_encoding_strategy_metric() {
     // Generates calldata for TychoRouterForMetricTest Solidity integration test.
     // WETH -> USDC via Metric RFQ on Base (wethusdc pool 0x770004fE).
-    // Under the v1 heartbeat model the encoder always emits the Never oracle update mode: the
-    // pool relies on its on-chain price at the fork block, so no signed oracle update is encoded.
+    // Under the v1 heartbeat model the pool relies on its on-chain price at the fork block, so no
+    // signed oracle update is encoded.
     let weth_base = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
     let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
 
