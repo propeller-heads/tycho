@@ -101,13 +101,16 @@ impl MetricBidAskResponse {
         parse_optional_biguint(&self.total_token1_available, "totalToken1Available")
     }
 
-    /// Whether the pool can currently be quoted. v1 has no `quoteAvailable` flag, so availability
-    /// is inferred from parseable bid/ask prices and both non-null availability figures.
+    /// Whether the pool can currently be quoted. The API has no `quoteAvailable` flag, so
+    /// availability is inferred from parseable bid/ask prices, both non-null availability figures,
+    /// and a non-empty order book. Pools with empty depth (e.g. `bidAdj=0` / `askAdj` sentinel and
+    /// no bins) are treated as not quotable, since depth-based pricing has no bins to walk.
     pub fn is_quotable(&self) -> bool {
         self.bid_price().is_ok() &&
             self.ask_price().is_ok() &&
             self.total_token0_available().is_ok() &&
-            self.total_token1_available().is_ok()
+            self.total_token1_available().is_ok() &&
+            !(self.depth.bids.is_empty() && self.depth.asks.is_empty())
     }
 }
 
@@ -212,6 +215,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.total_token0_available, None);
+        assert!(!response.is_quotable());
+    }
+
+    #[test]
+    fn test_bid_ask_empty_depth_is_not_quotable() {
+        // Real degenerate pool observed on Base: bidAdj=0, askAdj=uint128 max sentinel, no depth.
+        let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
+            "bidAdj": "0",
+            "askAdj": "340282366920938463463374607431768211455",
+            "totalToken0Available": "11419581536531814910",
+            "totalToken1Available": "12935676138",
+            "serverTs": 1_784_611_959u64,
+        }))
+        .unwrap();
+
+        assert!(response.depth.bids.is_empty() && response.depth.asks.is_empty());
         assert!(!response.is_quotable());
     }
 
