@@ -74,18 +74,16 @@ impl MetricState {
     fn quote_with_depth(
         &self,
         direction: MetricDirection,
-        amount_in_human: f64,
-        token_in_decimals: u32,
-        token_out_decimals: u32,
+        amount_in: &BigUint,
         max_output: &BigUint,
     ) -> Result<Option<DepthQuote>, SimulationError> {
-        let (start_price, bins) = match direction {
-            MetricDirection::ZeroForOne => (self.bid_ask.bid_price()?, &self.bid_ask.depth.bids),
-            MetricDirection::OneForZero => (self.bid_ask.ask_price()?, &self.bid_ask.depth.asks),
+        let bins = match direction {
+            MetricDirection::ZeroForOne => &self.bid_ask.depth.bids,
+            MetricDirection::OneForZero => &self.bid_ask.depth.asks,
         };
 
         // Some pools still return an empty depth object. In that case the top-of-book quote is
-        // the best signal we have, so keep the old flat-price path.
+        // the best signal we have, so keep the flat-price path.
         let Some(depth_max_output) = depth_max_output(bins)? else {
             return Ok(None);
         };
@@ -93,26 +91,16 @@ impl MetricState {
         let effective_max_output = depth_max_output.min(max_output.clone());
         if effective_max_output.is_zero() {
             return Ok(Some(DepthQuote {
-                amount_out_human: 0.0,
+                amount_out: BigUint::ZERO,
                 max_output: effective_max_output,
-                exhausted: amount_in_human > 0.0,
+                exhausted: !amount_in.is_zero(),
             }));
         }
 
-        let max_output_human =
-            raw_to_human(&effective_max_output, token_out_decimals, "depth max output")?;
-        let depth_fill = depth_output_for_input(
-            direction,
-            bins,
-            start_price,
-            amount_in_human,
-            token_in_decimals,
-            token_out_decimals,
-            max_output_human,
-        )?;
+        let depth_fill = depth_output_for_input(bins, amount_in, &effective_max_output)?;
 
         Ok(Some(DepthQuote {
-            amount_out_human: depth_fill.output_human,
+            amount_out: depth_fill.output,
             max_output: effective_max_output,
             exhausted: depth_fill.exhausted,
         }))
@@ -126,13 +114,14 @@ enum MetricDirection {
 }
 
 struct DepthQuote {
-    amount_out_human: f64,
+    amount_out: BigUint,
     max_output: BigUint,
     exhausted: bool,
 }
 
+#[derive(Debug)]
 struct DepthFill {
-    output_human: f64,
+    output: BigUint,
     exhausted: bool,
 }
 
@@ -170,75 +159,62 @@ impl ProtocolSim for MetricState {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let direction = self.direction(&token_in.address, &token_out.address)?;
+        let max_output = match direction {
+            MetricDirection::ZeroForOne => self.bid_ask.total_token1_available()?,
+            MetricDirection::OneForZero => self.bid_ask.total_token0_available()?,
+        };
+
+        // Prefer size-aware depth when Metric exposes it. The depth walk runs entirely in raw
+        // integer units on Metric's own per-bin accounting, so its result is exact — including
+        // the cap returned when the depth is exhausted.
+        if let Some(quote) = self.quote_with_depth(direction, &amount_in, &max_output)? {
+            let res = GetAmountOutResult {
+                amount: quote.amount_out,
+                gas: BigUint::from(170_000u64),
+                new_state: self.clone_box(),
+            };
+            if quote.exhausted {
+                return Err(SimulationError::InvalidInput(
+                    format!(
+                        "Metric pool depth exhausted. Input {amount_in} cannot be fully filled; \
+                         tradable depth caps output at {}",
+                        quote.max_output
+                    ),
+                    Some(res),
+                ));
+            }
+            return Ok(res);
+        }
+
+        // No depth bins: flat top-of-book quote, capped only by the aggregate inventory.
         let amount_in_human = amount_in.to_f64().ok_or_else(|| {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())
         })? / 10_f64.powi(token_in.decimals as i32);
-
-        let (flat_amount_out_human, max_output) = match direction {
-            MetricDirection::ZeroForOne => {
-                let price = self.bid_ask.bid_price()?;
-                (amount_in_human * price, self.bid_ask.total_token1_available()?)
-            }
-            MetricDirection::OneForZero => {
-                let price = self.bid_ask.ask_price()?;
-                (amount_in_human / price, self.bid_ask.total_token0_available()?)
-            }
+        let flat_amount_out_human = match direction {
+            MetricDirection::ZeroForOne => amount_in_human * self.bid_ask.bid_price()?,
+            MetricDirection::OneForZero => amount_in_human / self.bid_ask.ask_price()?,
         };
-        // Prefer size-aware depth when Metric exposes it, otherwise use best bid/ask with only
-        // the aggregate inventory cap.
-        let depth_quote = self.quote_with_depth(
-            direction,
-            amount_in_human,
-            token_in.decimals,
-            token_out.decimals,
-            &max_output,
-        )?;
-        let (amount_out_human, effective_max_output, exhausted) = match depth_quote {
-            Some(quote) => (quote.amount_out_human, quote.max_output, quote.exhausted),
-            None => (flat_amount_out_human, max_output.clone(), false),
-        };
-
         let amount_out =
-            BigUint::from_f64(amount_out_human * 10_f64.powi(token_out.decimals as i32))
+            BigUint::from_f64(flat_amount_out_human * 10_f64.powi(token_out.decimals as i32))
                 .ok_or_else(|| {
                     SimulationError::RecoverableError("Can't convert amount out to BigUint".into())
                 })?;
-        // When the trade is capped by available depth/inventory, the exact answer is the BigUint
-        // cap itself. Reconstructing it from the f64 human amount loses precision — an 18-decimal
-        // cap can drift by a few wei through the f64 round-trip — so return the cap directly and
-        // only fall back to the f64 result for genuine partial fills.
-        let capped_amount = if exhausted {
-            effective_max_output.clone()
-        } else {
-            amount_out
-                .clone()
-                .min(effective_max_output.clone())
-        };
         let res = GetAmountOutResult {
-            amount: capped_amount.clone(),
+            amount: amount_out
+                .clone()
+                .min(max_output.clone()),
             gas: BigUint::from(170_000u64),
             new_state: self.clone_box(),
         };
-
-        if amount_out > effective_max_output {
+        if amount_out > max_output {
             return Err(SimulationError::InvalidInput(
                 format!(
                     "Metric pool has not enough liquidity. Requested output {amount_out} exceeds \
-                     available {effective_max_output}"
+                     available {max_output}"
                 ),
                 Some(res),
             ));
         }
-        if exhausted {
-            return Err(SimulationError::InvalidInput(
-                format!(
-                    "Metric pool depth exhausted. Input {amount_in} cannot be fully filled; \
-                     tradable depth caps output at {effective_max_output}"
-                ),
-                Some(res),
-            ));
-        }
-
         Ok(res)
     }
 
@@ -356,247 +332,84 @@ fn cap_to_depth(aggregate: BigUint, bins: &[MetricDepthBin]) -> Result<BigUint, 
     }
 }
 
+/// Walks the depth bins and computes the output bought by `amount_in`, entirely in raw integer
+/// units using Metric's own per-bin accounting.
+///
+/// Full bins cost exactly their `cumulativeInputVolume` difference. Partial fills are priced
+/// pro-rata within the bin — live data shows a bin's full input over its full volume equals the
+/// bin's boundary price (one price per bin), so pro-rata is exact at bin boundaries — and the
+/// division rounds down so the quote never overstates the output.
 fn depth_output_for_input(
-    direction: MetricDirection,
     bins: &[MetricDepthBin],
-    start_price: f64,
-    input_human: f64,
-    input_decimals: u32,
-    output_decimals: u32,
-    max_output_human: f64,
+    amount_in: &BigUint,
+    max_output: &BigUint,
 ) -> Result<DepthFill, SimulationError> {
-    if input_human == 0.0 || max_output_human == 0.0 {
-        return Ok(DepthFill { output_human: 0.0, exhausted: input_human > 0.0 });
+    if amount_in.is_zero() || max_output.is_zero() {
+        return Ok(DepthFill { output: BigUint::ZERO, exhausted: !amount_in.is_zero() });
     }
 
-    let mut current_price = start_price;
-    let mut previous_output = 0.0;
-    let mut previous_input = 0.0;
-    let mut remaining_input = input_human;
-    let mut output_human = 0.0;
+    let mut previous_output = BigUint::ZERO;
+    let mut previous_input = BigUint::ZERO;
+    let mut remaining_input = amount_in.clone();
+    let mut output = BigUint::ZERO;
 
     for bin in bins {
-        let bin_price = bin.price()?;
         // Metric reports both sides cumulatively to each boundary: output volume in output-token
-        // units and the input required to reach it in input-token units. Adjacent differences give
-        // the per-segment volumes.
-        let cumulative_output =
-            raw_to_human(&bin.cumulative_volume()?, output_decimals, "depth cumulative volume")?;
-        let cumulative_input = raw_to_human(
-            &bin.cumulative_input_volume()?,
-            input_decimals,
-            "depth cumulative input volume",
-        )?;
-        let volume_in_bin = cumulative_output - previous_output;
-        let input_in_bin = cumulative_input - previous_input;
+        // raw units and the input required to reach it in input-token raw units. Adjacent
+        // differences give the per-bin amounts.
+        let cumulative_output = bin.cumulative_volume()?;
+        let cumulative_input = bin.cumulative_input_volume()?;
+        if cumulative_output < previous_output || cumulative_input < previous_input {
+            return Err(SimulationError::RecoverableError(
+                "Metric depth cumulative volumes are not monotonic".into(),
+            ));
+        }
+        let volume_in_bin = &cumulative_output - &previous_output;
+        let input_in_bin = &cumulative_input - &previous_input;
         previous_output = cumulative_output;
         previous_input = cumulative_input;
 
-        if volume_in_bin <= 0.0 {
-            current_price = bin_price;
+        // Price-grid bins without liquidity carry neither volume nor input.
+        if volume_in_bin.is_zero() && input_in_bin.is_zero() {
+            continue;
+        }
+        // A bin with volume but no input (or vice versa) would hand out output for free or charge
+        // input for nothing; refuse to price against corrupt data.
+        if volume_in_bin.is_zero() || input_in_bin.is_zero() {
+            return Err(SimulationError::RecoverableError(
+                "Metric depth bin has inconsistent volume and input".into(),
+            ));
+        }
+
+        let output_capacity = max_output - &output;
+        if output_capacity.is_zero() {
+            break;
+        }
+
+        // The aggregate inventory cap can cut the bin short; charge the fillable slice pro-rata,
+        // rounding the input up so the quote never undercharges.
+        let (fillable_volume, fillable_input) = if volume_in_bin <= output_capacity {
+            (volume_in_bin, input_in_bin)
+        } else {
+            let fillable_input = (&input_in_bin * &output_capacity + &volume_in_bin -
+                BigUint::from(1u8)) /
+                &volume_in_bin;
+            (output_capacity, fillable_input)
+        };
+
+        if remaining_input >= fillable_input {
+            output += &fillable_volume;
+            remaining_input -= &fillable_input;
             continue;
         }
 
-        let output_capacity = max_output_human - output_human;
-        if output_capacity <= 0.0 {
-            break;
-        }
-
-        if volume_in_bin <= output_capacity {
-            // Whole bin is within the aggregate inventory cap, so use Metric's own input figure for
-            // the segment rather than re-deriving it from the price curve.
-            if remaining_input >= input_in_bin {
-                output_human += volume_in_bin;
-                remaining_input -= input_in_bin;
-                current_price = bin_price;
-                continue;
-            }
-
-            // The remaining input stops partway through the bin. Invert the documented linear-price
-            // model between current_price and bin_price to price the partial output.
-            output_human += depth_segment_output_for_input(
-                direction,
-                remaining_input,
-                volume_in_bin,
-                current_price,
-                bin_price,
-            )?;
-            remaining_input = 0.0;
-            break;
-        }
-
-        // The aggregate inventory cap cuts this bin short before bin_price, so Metric's full-bin
-        // input figure no longer applies; derive the price and input for the fillable slice.
-        let fillable_volume = output_capacity;
-        let segment_exit_price =
-            current_price + (bin_price - current_price) * fillable_volume / volume_in_bin;
-        let fillable_input = depth_segment_input_required(
-            direction,
-            fillable_volume,
-            current_price,
-            segment_exit_price,
-        )?;
-
-        if remaining_input >= fillable_input {
-            output_human += fillable_volume;
-            remaining_input -= fillable_input;
-            break;
-        }
-
-        output_human += depth_segment_output_for_input(
-            direction,
-            remaining_input,
-            fillable_volume,
-            current_price,
-            segment_exit_price,
-        )?;
-        remaining_input = 0.0;
+        // The input runs out inside this bin: pro-rata output, rounding down.
+        output += &fillable_volume * &remaining_input / &fillable_input;
+        remaining_input = BigUint::ZERO;
         break;
     }
 
-    if remaining_input > 1e-12 && output_human < max_output_human - 1e-12 {
-        return Err(SimulationError::RecoverableError(
-            "Metric depth has not enough cumulative volume".into(),
-        ));
-    }
-
-    Ok(DepthFill {
-        output_human: output_human.min(max_output_human),
-        exhausted: remaining_input > 1e-12,
-    })
-}
-
-fn depth_segment_input_required(
-    direction: MetricDirection,
-    output_human: f64,
-    entry_price: f64,
-    exit_price: f64,
-) -> Result<f64, SimulationError> {
-    let average_price = depth_segment_average_price(entry_price, exit_price)?;
-    match direction {
-        MetricDirection::ZeroForOne => Ok(output_human / average_price),
-        MetricDirection::OneForZero => Ok(output_human * average_price),
-    }
-}
-
-fn depth_segment_output_for_input(
-    direction: MetricDirection,
-    input_human: f64,
-    segment_output_human: f64,
-    entry_price: f64,
-    exit_price: f64,
-) -> Result<f64, SimulationError> {
-    if segment_output_human <= 0.0 || entry_price <= 0.0 {
-        return Err(SimulationError::RecoverableError(
-            "Metric depth has invalid price curve".into(),
-        ));
-    }
-
-    // Variables for this segment:
-    //   V  = segment_output_human, the max output available in this segment.
-    //   p0 = entry_price, the price at x = 0.
-    //   p1 = exit_price, the price at x = V.
-    //   x  = output filled inside this segment, where 0 <= x <= V.
-    //   I  = input_human, the input available for this partial segment.
-    //
-    // Metric linearly interpolates the price reached after filling x output:
-    //   exit_price_at_x = p0 + (p1 - p0) * x / V
-    //
-    // Metric prices the partial fill by averaging the start price and that exit price:
-    //   avg_price(x) = (p0 + exit_price_at_x) / 2
-    //
-    // Substitute exit_price_at_x:
-    //   avg_price(x) = (p0 + p0 + (p1 - p0) * x / V) / 2
-    //                = p0 + (p1 - p0) * x / (2 * V)
-    //
-    // Store the x coefficient as average_slope:
-    //   average_slope = (p1 - p0) / (2 * V)
-    //   avg_price(x) = p0 + average_slope * x
-    let average_slope = (exit_price - entry_price) / (2.0 * segment_output_human);
-    let output = match direction {
-        MetricDirection::ZeroForOne => {
-            // ZeroForOne sells base for quote, so price is quote/base and:
-            //
-            //   I = x / avg_price(x)
-            //
-            // Substitute avg_price(x):
-            //   I = x / (p0 + average_slope * x)
-            //
-            // Solve for x:
-            //   x = I * p0 / (1 - I * average_slope)
-            let denominator = 1.0 - input_human * average_slope;
-            if denominator <= 0.0 {
-                return Err(SimulationError::RecoverableError(
-                    "Metric depth has invalid price curve".into(),
-                ));
-            }
-            input_human * entry_price / denominator
-        }
-        MetricDirection::OneForZero => {
-            // OneForZero sells quote for base, so price is quote/base and:
-            //
-            //   I = x * avg_price(x)
-            //
-            // Substitute avg_price(x):
-            //   I = x * (p0 + average_slope * x)
-            //   I = p0 * x + average_slope * x^2
-            //
-            // Rearrange into the standard quadratic form a*x^2 + b*x + c = 0:
-            //   average_slope * x^2 + p0 * x - I = 0
-            //
-            // Here:
-            //   a = average_slope
-            //   b = p0
-            //   c = -I
-            //
-            // The quadratic formula uses sqrt(b^2 - 4*a*c):
-            //   b^2 - 4*a*c = p0^2 + 4 * average_slope * I
-            //
-            // The valid solution is the root inside [0, segment_output_human].
-            if average_slope.abs() < 1e-18 {
-                input_human / entry_price
-            } else {
-                let discriminant =
-                    entry_price.mul_add(entry_price, 4.0 * average_slope * input_human);
-                if discriminant < 0.0 {
-                    return Err(SimulationError::RecoverableError(
-                        "Metric depth has invalid price curve".into(),
-                    ));
-                }
-                let root_a = (-entry_price + discriminant.sqrt()) / (2.0 * average_slope);
-                let root_b = (-entry_price - discriminant.sqrt()) / (2.0 * average_slope);
-                [root_a, root_b]
-                    .into_iter()
-                    .find(|root| {
-                        root.is_finite() && *root >= -1e-12 && *root <= segment_output_human + 1e-12
-                    })
-                    .ok_or_else(|| {
-                        SimulationError::RecoverableError(
-                            "Metric depth has invalid price curve".into(),
-                        )
-                    })?
-            }
-        }
-    };
-
-    Ok(output.clamp(0.0, segment_output_human))
-}
-
-fn depth_segment_average_price(entry_price: f64, exit_price: f64) -> Result<f64, SimulationError> {
-    let average_price = (entry_price + exit_price) / 2.0;
-    if average_price <= 0.0 {
-        return Err(SimulationError::RecoverableError(
-            "Metric depth has non-positive average price".into(),
-        ));
-    }
-    Ok(average_price)
-}
-
-fn raw_to_human(amount: &BigUint, decimals: u32, field: &str) -> Result<f64, SimulationError> {
-    let amount = amount.to_f64().ok_or_else(|| {
-        SimulationError::RecoverableError(format!("Can't convert {field} to f64"))
-    })?;
-    Ok(amount / 10_f64.powi(decimals as i32))
+    Ok(DepthFill { output, exhausted: !remaining_input.is_zero() })
 }
 
 #[async_trait]
@@ -877,8 +690,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(result.amount < BigUint::from(3_000_000_000u64));
-        assert!(result.amount > BigUint::from(2_950_000_000u64));
+        // Pro-rata at the bin's own average price (3000 USDC over 1.016949... WETH = 2950):
+        // 1 WETH buys exactly 2950 USDC.
+        assert_eq!(result.amount, BigUint::from(2_950_000_000u64));
     }
 
     #[test]
@@ -901,61 +715,137 @@ mod tests {
         assert!(result.amount > BigUint::from(980_000_000_000_000_000u128));
     }
 
+    fn depth_bin(cumulative_volume: &str, cumulative_input_volume: &str) -> MetricDepthBin {
+        MetricDepthBin {
+            bin_idx: 0,
+            // 2900 * 2^64; the integer walk prices from the volume/input columns, not this field.
+            price: "53495557813757699686400".to_string(),
+            cumulative_volume: cumulative_volume.to_string(),
+            cumulative_input_volume: cumulative_input_volume.to_string(),
+        }
+    }
+
     #[test]
     fn test_depth_output_for_input_partially_fills_bid_bin() {
-        let bins = vec![MetricDepthBin {
-            bin_idx: 0,
-            // 2900 * 2^64
-            price: "53495557813757699686400".to_string(),
-            cumulative_volume: "3000000000".to_string(),
-            // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
-            cumulative_input_volume: "1016949152542372881".to_string(),
-        }];
+        // Full-bin input at price 2950: 3000 USDC costs 3000/2950 ≈ 1.0169 WETH.
+        let bins = vec![depth_bin("3000000000", "1016949152542372881")];
 
-        let fill =
-            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 1.0, 18, 6, 3000.0)
-                .unwrap();
+        let fill = depth_output_for_input(
+            &bins,
+            &BigUint::from(1_000_000_000_000_000_000u128),
+            &BigUint::from(3_000_000_000u64),
+        )
+        .unwrap();
 
-        assert!((fill.output_human - 2950.8196721311474).abs() < 1e-9);
+        // Pro-rata within the bin: 1 WETH buys exactly 2950 USDC.
+        assert_eq!(fill.output, BigUint::from(2_950_000_000u64));
         assert!(!fill.exhausted);
     }
 
     #[test]
     fn test_depth_output_for_input_partially_fills_ask_bin() {
-        let bins = vec![MetricDepthBin {
-            bin_idx: 0,
-            // 3100 * 2^64
-            price: "57184906628499610009600".to_string(),
-            cumulative_volume: "1000000000000000000".to_string(),
-            // Full-bin input at avg price 3055 (1 WETH * 3055) = 3055 USDC.
-            cumulative_input_volume: "3055000000".to_string(),
-        }];
+        // Full-bin input at price 3055: 1 WETH costs 3055 USDC.
+        let bins = vec![depth_bin("1000000000000000000", "3055000000")];
 
-        let fill =
-            depth_output_for_input(MetricDirection::OneForZero, &bins, 3010.0, 3000.0, 6, 18, 1.0)
-                .unwrap();
+        let fill = depth_output_for_input(
+            &bins,
+            &BigUint::from(3_000_000_000u64),
+            &BigUint::from(1_000_000_000_000_000_000u128),
+        )
+        .unwrap();
 
-        assert!((fill.output_human - 0.9822534928279816).abs() < 1e-12);
+        // Pro-rata within the bin, rounded down: 1e18 * 3000 / 3055.
+        let expected = BigUint::from(1_000_000_000_000_000_000u128) *
+            BigUint::from(3_000_000_000u64) /
+            BigUint::from(3_055_000_000u64);
+        assert_eq!(fill.output, expected);
         assert!(!fill.exhausted);
     }
 
     #[test]
     fn test_depth_output_for_input_exhausts_available_depth() {
-        let bins = vec![MetricDepthBin {
-            bin_idx: 0,
-            // 2900 * 2^64
-            price: "53495557813757699686400".to_string(),
-            cumulative_volume: "3000000000".to_string(),
-            // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
-            cumulative_input_volume: "1016949152542372881".to_string(),
-        }];
+        let bins = vec![depth_bin("3000000000", "1016949152542372881")];
 
-        let fill =
-            depth_output_for_input(MetricDirection::ZeroForOne, &bins, 3000.0, 2.0, 18, 6, 3000.0)
-                .unwrap();
+        let fill = depth_output_for_input(
+            &bins,
+            &BigUint::from(2_000_000_000_000_000_000u128),
+            &BigUint::from(3_000_000_000u64),
+        )
+        .unwrap();
 
-        assert_eq!(fill.output_human, 3000.0);
+        assert_eq!(fill.output, BigUint::from(3_000_000_000u64));
         assert!(fill.exhausted);
+    }
+
+    #[test]
+    fn test_depth_output_for_input_walks_multiple_bins() {
+        // Bin 1 sells 3000 USDC for 1 WETH; bin 2 sells another 3000 USDC for 1.1 WETH.
+        let bins = vec![
+            depth_bin("3000000000", "1000000000000000000"),
+            depth_bin("6000000000", "2100000000000000000"),
+        ];
+
+        let fill = depth_output_for_input(
+            &bins,
+            // 1.55 WETH: consumes bin 1 fully, then half of bin 2's 1.1 WETH.
+            &BigUint::from(1_550_000_000_000_000_000u128),
+            &BigUint::from(6_000_000_000u64),
+        )
+        .unwrap();
+
+        // 3000 + 3000 * 0.55/1.1 = 4500 USDC.
+        assert_eq!(fill.output, BigUint::from(4_500_000_000u64));
+        assert!(!fill.exhausted);
+    }
+
+    #[test]
+    fn test_depth_output_for_input_caps_slice_to_aggregate_inventory() {
+        let bins = vec![depth_bin("3000000000", "1000000000000000000")];
+
+        // Aggregate inventory truncates the bin to 1500 USDC; the fillable slice costs a
+        // pro-rata 0.5 WETH, so 1 WETH exhausts it.
+        let fill = depth_output_for_input(
+            &bins,
+            &BigUint::from(1_000_000_000_000_000_000u128),
+            &BigUint::from(1_500_000_000u64),
+        )
+        .unwrap();
+
+        assert_eq!(fill.output, BigUint::from(1_500_000_000u64));
+        assert!(fill.exhausted);
+    }
+
+    #[test]
+    fn test_depth_output_for_input_rejects_inconsistent_bin() {
+        // Volume without input would hand out output for free.
+        let bins = vec![depth_bin("3000000000", "0")];
+
+        let err = depth_output_for_input(
+            &bins,
+            &BigUint::from(1_000_000_000_000_000_000u128),
+            &BigUint::from(3_000_000_000u64),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SimulationError::RecoverableError(_)));
+    }
+
+    #[test]
+    fn test_depth_output_for_input_rejects_non_monotonic_bins() {
+        let bins = vec![
+            depth_bin("3000000000", "1000000000000000000"),
+            // Cumulative volume goes backwards.
+            depth_bin("2000000000", "2000000000000000000"),
+        ];
+
+        let err = depth_output_for_input(
+            &bins,
+            &BigUint::from(2_000_000_000_000_000_000u128),
+            &BigUint::from(3_000_000_000u64),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SimulationError::RecoverableError(_)));
     }
 
     #[tokio::test]
