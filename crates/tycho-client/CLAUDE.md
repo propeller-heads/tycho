@@ -8,6 +8,7 @@ Consumer library implementing the snapshot + deltas pattern for real-time protoc
 rpc.rs              HTTP snapshot client — fetches protocol state at a block height
 deltas.rs           WebSocket client — streams real-time state deltas
 stream.rs           Builder entry point — wires RPC + WS clients into a TychoStream
+client_metadata.rs  Validates/serialises X-Tycho-Client-Metadata header entries
 feed/
   mod.rs            BlockSynchronizer — aligns N synchronizers by block, emits FeedMessage
   synchronizer.rs   ProtocolStateSynchronizer — manages snapshot + delta sync for one extractor
@@ -39,6 +40,11 @@ TychoStreamBuilder (stream.rs)
    block, then promoted to `InFlight`.
 3. `BlockSynchronizer` waits for all synchronizers, then emits a `FeedMessage` per block
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are kept but skipped
+
+`TychoStreamBuilder::add_client_metadata` attaches the same bounded
+`X-Tycho-Client-Metadata` header to HTTP snapshot requests and WebSocket handshakes. Custom chains
+are resolved through the `tycho-common` registry; set `TYCHO_CHAINS_CONFIG` before building a
+stream so malformed configuration fails at startup.
 
 ## CLI
 

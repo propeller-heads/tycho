@@ -45,6 +45,7 @@ services/
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
+  client_metadata.rs        Parses bounded X-Tycho-Client-Metadata values for metric labels
   middleware/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
     compression.rs          Zstd response compression
@@ -106,7 +107,8 @@ non-canonical pending blocks on the same broadcast.
 `CachedGateway` enqueues `WriteOp` messages; `DBCacheWriteExecutor` flushes them when the next
 block batch arrives. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
 components → state → entry points → cursor). Every mutable row is versioned with `valid_from` /
-`valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
+`valid_to`; inserting a version closes the previous row's validity window (see
+`tycho-storage/CLAUDE.md`).
 
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
 they are provably behind the finality horizon.
@@ -121,6 +123,9 @@ would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
 `db_committed_block_height` on each message tells `PendingDeltasBuffer` when a block has been
 written; it auto-drains those blocks so memory usage stays bounded.
+
+HTTP and WebSocket services parse `X-Tycho-Client-Metadata`, discard invalid or excess entries,
+and expose an allowlisted subset as request/connection metric labels.
 
 ## Connections
 

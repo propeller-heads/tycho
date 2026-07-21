@@ -1,4 +1,4 @@
-<!-- docs-synced-at: 2342f18bda260cfaf2d403d8fdc079d56d7ea476 -->
+<!-- docs-synced-at: c3bca92fd490a8e1aeccfa0c30118ec06ea829de -->
 # Tycho Codebase Guide
 
 Low-latency, reorg-aware indexer that streams DEX liquidity state from on-chain data to consumers.
@@ -27,6 +27,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | Crate | Description |
 |---|---|
 | [`tycho-common`](../crates/tycho-common/CLAUDE.md) | Domain types (`Chain`, `Block`, `ProtocolComponent`, `Token`), DTOs, async gateway/extraction traits, simulation abstractions (`SwapQuoter`) |
+| `tycho-protobuf` | Protobuf definitions and conversions between Substreams wire messages and `tycho-common` domain models |
 | `tycho` | Meta-crate re-exporting a compatible, versioned set of ecosystem crates for downstream consumers |
 
 **Features on `tycho-common`**: `diesel` (Diesel derives), `test-utils` (mockall mocks).
@@ -44,8 +45,9 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 | Crate | Description |
 |---|---|
-| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; `evm` module for EVM storage-based protocols, `protocol` module for custom implementations, `rfq` for request-for-quote protocols |
+| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; native and VM-backed implementations under `evm`, plus `rfq` request-for-quote protocols |
 | `tycho-execution` | Swap encoding and execution: Solidity TychoRouter contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
+| `tycho-router-model` (`tycho-execution/model`) | Rust security model that explores caller-controlled TychoRouter swap parameters and flags suspicious outcomes |
 
 ### Consumer SDK
 
@@ -140,8 +142,9 @@ blocks are served to RPC via `PendingDeltasBuffer`.
 
 ### Temporal versioning
 
-Every mutable Postgres entity carries `valid_from`/`valid_to`. `apply_versioning()` sets
-`valid_to` on the previous row when a new version is inserted. Historical rows are never mutated.
+Every mutable Postgres entity carries `valid_from`/`valid_to`. `apply_versioning()` closes the
+previous row by updating its `valid_to` before inserting the new version; historical payloads are
+otherwise preserved.
 
 ### Dual runtime
 
@@ -162,6 +165,7 @@ Configurable via `EXTRACTION_WORKER_THREADS` (default 2) and `MAIN_WORKER_THREAD
 | `MAIN_WORKER_THREADS` | Server runtime threads (default 3) |
 | `OTLP_EXPORTER_ENDPOINT` | OpenTelemetry trace exporter |
 | `RUST_LOG` | Tracing filter (e.g. `tycho_indexer=debug`) |
+| `TYCHO_CHAINS_CONFIG` | Path to custom-chain YAML (default `./chains.yaml` for indexer commands); consumers lazily load the same registry when the variable is set |
 
 ### CLI commands
 
@@ -178,8 +182,10 @@ Configurable via `EXTRACTION_WORKER_THREADS` (default 2) and `MAIN_WORKER_THREAD
 |---|---|---|
 | `tycho-common` | `diesel` | Diesel derives on `Bytes` and model types |
 | `tycho-common` | `test-utils` | `mockall` auto-mocks on trait abstractions |
-
-No other crate-level features. Runtime behavior controlled via CLI args, env vars, and YAML config.
+| `tycho-indexer` | `jemalloc` (default) | jemalloc allocator and profiling support |
+| `tycho-simulation` | `evm`, `rfq` (both default), `network_tests` | EVM simulators, RFQ simulators, and live-network tests |
+| `tycho-execution` | `evm` (default), `fork-tests`, `test-utils` | EVM encoding, RPC fork tests, and test helpers |
+| `tycho` | `evm` (default), `rfq` | Re-export the matching simulation/execution surfaces |
 
 ## Testing
 
@@ -187,6 +193,5 @@ No other crate-level features. Runtime behavior controlled via CLI args, env var
 - DB serial tests: name must include `serial_db` (nextest test group, sequential)
 - DB harness: `run_against_db` (tycho-storage) manages setup/teardown
 - Archive RPC tests: `#[ignore]`-d
-- Lint: `cargo clippy --workspace --lib --all-targets --all-features`
+- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Format: `cargo +nightly fmt --check`
-

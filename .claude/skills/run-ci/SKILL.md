@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(cargo:*), Bash(diesel:*), Bash(psql:*), Bash(bash .claude/scripts/run-nextest.sh:*), Bash(printenv:*), Bash(git diff:*), Bash(git branch:*), Bash(git status:*), Bash(git log:*), Read
+allowed-tools: Bash(cargo:*), Bash(env:*), Bash(diesel:*), Bash(psql:*), Bash(bash .claude/scripts/run-nextest.sh:*), Bash(printenv:*), Bash(git diff:*), Bash(git branch:*), Bash(git status:*), Bash(git log:*), Read
 description: "Run the full CI pipeline locally to catch failures before pushing. Use this skill before creating a PR, before pushing commits, or whenever you want to verify that CI will pass. Also use it when the user says 'run ci', 'check ci', 'run tests', 'lint', or 'will ci pass'."
 user-invocable: true
 ---
@@ -84,9 +84,9 @@ checks run). Otherwise, map changed file patterns to check categories:
 
 | File pattern | Category |
 |---|---|
-| `crates/tycho-*/src/**/*.rs`, `Cargo.toml`, `Cargo.lock` | `rust` |
+| `crates/**`, `protocols/testing/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | `rust` |
 | `crates/tycho-client-py/**` | `python` |
-| `.github/workflows/**` | `ci` (always run full) |
+| `.github/workflows/ci-rust.yaml` | `ci` (always run full) |
 
 If only `python` files changed, skip Rust format/clippy/tests entirely and only run Python checks.
 If only `rust` files changed, skip Python checks. If both changed (or `ci`), run everything.
@@ -109,12 +109,24 @@ Check `git diff --stat -- '*.rs'` and report whether any files were reformatted.
 Run clippy next. If clippy fails, tests won't compile either, so there's no point running them.
 
 ```bash
-cargo clippy --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Report pass/fail. If there are warnings or errors, list them.
 
 **If clippy fails, stop here.** Report the errors and skip Phase 3.
+
+### Phase 2.5: Rustdoc and no-default-features checks
+
+Run the remaining compile-time CI gates after clippy:
+
+```bash
+env RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --workspace --no-deps --all-features --locked
+env RUSTFLAGS="-Dwarnings" cargo check --workspace --no-default-features --locked
+```
+
+Report each command separately. If either fails, continue to tests so the final report includes all
+independent failures.
 
 ### Phase 3: Parallel test checks
 
@@ -170,6 +182,8 @@ tests run in the other phase.
 | Scope    | detected          | rust / python / rust + python / full |
 | Format   | pass/fail/skipped | files reformatted or clean           |
 | Clippy   | pass/fail/skipped | warning/error count                  |
+| Rustdoc  | pass/fail/skipped | broken intra-doc links               |
+| No-default check | pass/fail/skipped | workspace builds without default features |
 | Tests    | pass/fail/skipped | X passed, Y failed, Z skipped        |
 
 If clippy failed, mark tests as "skipped (clippy failed)".

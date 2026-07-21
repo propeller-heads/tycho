@@ -124,8 +124,10 @@ receivers, and `outputToRouter` are hardcoded per-executor -- not encodable in c
 simple: they just call the protocol. All balance tracking, output verification, and transfer logic lives in the
 Dispatcher/TransferManager.
 
-Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
-AerodromeV1, LiquidityParty, Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, WETH.
+Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
+Slipstreams, RamsesV3, MaverickV2, AerodromeV1, BopAMM, FermiSwap, LiquidityParty, LunarBase,
+Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626,
+Etherfi, WETH.
 
 ### Executor Flow, Callbacks & Output Verification
 
@@ -138,7 +140,7 @@ amounts and handles fee-on-transfer/rebasing tokens universally.
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1 | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams/RamsesV3, MaverickV2, AerodromeV1, BopAMM, FermiSwap, LiquidityParty, LunarBase, Metric, ERC4626, FluidV1 | `false`          | Dispatcher measures balance at receiver                                                          |
 | **Output-lands-at-router** | Curve, WETH, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                                    | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
@@ -146,7 +148,8 @@ amounts and handles fee-on-transfer/rebasing tokens universally.
 **Direct-transfer** (UniswapV2, BalancerV2, Curve): Dispatcher staticcalls `getTransferData()` to get
 the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs the transfer, then delegatecalls `swap()`.
 
-**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo): Also implement `ICallback`. Flow:
+**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo, EkuboV3, Slipstreams/RamsesV3,
+Metric): Also implement `ICallback`. Flow:
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool
@@ -160,6 +163,10 @@ the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs th
 
 `_currentSwappingExecutor` is stored in transient storage so `fallback()` knows which executor to route to. Cleared
 after the callback to prevent re-entrancy.
+
+Ekubo V3 normally calls `Core.swap`, but extension-owned swap call points require forwarding.
+Ve33 hops are detected by their extension address and sent through `Core.forward` with the Ve33
+selectorless swap payload; their packed hop encoding remains the normal fixed 52 bytes.
 
 Transfer types returned by executors:
 
@@ -257,6 +264,11 @@ Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
 
+Contract changes can alter the deployed runtime bytecode used by `protocol-testing`. From the
+repository root, run `./protocols/testing/scripts/update_runtime_bytecode.sh` and commit any changed
+`protocols/testing/fixtures/*.runtime.json`; CI runs the same script with `--check`. Foundry pins
+the compiler and omits the metadata hash to keep these fixtures reproducible.
+
 ### Rust
 
 ```bash
@@ -294,6 +306,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
+9. Regenerate and commit runtime-bytecode fixtures with
+   `./protocols/testing/scripts/update_runtime_bytecode.sh`.
 
 ## Security
 

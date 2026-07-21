@@ -15,12 +15,14 @@ for any protocol indexed by Tycho.
   resolve the latest snapshot on every simulation and can fall back to indexed state per the
   snapshot's `FailurePolicy`
 - **`evm/protocol/`**: Protocol implementations
-  - **Native** (`uniswap_v2/`, `uniswap_v3/`, `uniswap_v4/`, `ekubo/`, `cowamm/`, `fluid/`,
-    `aerodrome_v1/`, `aerodrome_slipstreams/`, `pancakeswap_v2/`, `etherfi/`, `erc4626/`,
-    `rocketpool/`, `cpmm/`, `clmm/`): Pure Rust math, no EVM execution
+  - **Native** (`uniswap_v2/`, `uniswap_v3/`, `uniswap_v4/`, `ekubo/`, `ekubo_v3/`, `cowamm/`,
+    `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`, `ramses_v3/`,
+    `pancakeswap_v2/`, `etherfi/`, `erc4626/`, `rocketpool/`, `lunarbase/`, `native_wrapper/`,
+    `cpmm/`, `clmm/`): Pure Rust swap logic
+  - **Hybrid** (`curve/`, `fluid/`): Native swap math backed by state read from the local EVM
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
-- **`rfq/`**: RFQ client for off-chain market makers (WebSocket-based quote streaming)
+- **`rfq/`**: RFQ clients for off-chain market makers, including Bebop and Metric
 
 ## Simulation Approaches
 
@@ -34,6 +36,15 @@ fallback for protocols too complex to port, not a default.
 3. **VM** — Solidity adapter in `revm`; works for any EVM protocol but is slower and requires an
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
+
+### Ekubo V3 Ve33 pools
+
+`ekubo_v3::pool::Ve33Pool` wraps full-range, stableswap, or concentrated native pool math. Ve33
+pools must have a zero Core fee; the simulator reads the extension-managed `swap_fee` state
+attribute and applies it to both exact-input and exact-output quotes. The Ekubo V3 Substreams
+package initializes that attribute and updates it from `VoteWeightApplied` events. Until Ve33 is
+deployed on Robinhood, keep the placeholder extension address synchronized between the simulator,
+Substreams package, and executor.
 
 ## Features
 

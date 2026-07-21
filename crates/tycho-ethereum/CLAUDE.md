@@ -31,7 +31,9 @@ services/
 
 ## Module Dependencies
 
-All services depend on `rpc/` for RPC calls and on `erc20.rs` for ABI encoding. The entrypoint tracer's slot detectors feed into `account_extractor` when slot layout is unknown.
+All services depend on `rpc/` for RPC calls and on `erc20.rs` for ABI encoding. The entrypoint
+tracer's slot detectors feed the hooks DCI with balance/allowance slot layouts for traced entry
+points; `account_extractor` independently fetches requested account state.
 
 ```
 tycho-common traits

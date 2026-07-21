@@ -22,8 +22,12 @@ contract) as a starting point. Implement the map modules, update the manifest, a
 
 ## Versioning
 
-Every PR that touches a package **must** bump that package's version in its `Cargo.toml` before
-merging to main — never merge changes without a version bump.
+Every PR that touches a package **must** bump that package's version in its `Cargo.toml` and add a
+`CHANGELOG.md` entry before merging to main — never merge package changes without both updates.
 
 - **Minor bump** (e.g. `0.3.2` → `0.3.3`): bug fixes, small adjustments
 - **Major bump** (e.g. `0.3.2` → `0.4.0`): significant changes, breaking output format
+
+The Ekubo V3 package also tracks extension-owned state. Ve33 pool creation initializes a
+`swap_fee` attribute, and `VoteWeightApplied` events update it so downstream native quotes use the
+current extension fee.

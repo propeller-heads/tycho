@@ -6,12 +6,12 @@ results. Exits after `--max-blocks` blocks, or runs indefinitely.
 
 ## Running
 
-Requires three env vars (can be set in `.claude/settings.local.json`):
+Requires `TYCHO_URL` and `RPC_URL` (they can be set in `.claude/settings.local.json`):
 
 | Variable | Purpose |
 |---|---|
 | `TYCHO_URL` | WebSocket endpoint of the Tycho server |
-| `TYCHO_API_KEY` | Auth key (`sampletoken` works against local dev instances) |
+| `TYCHO_API_KEY` | Optional auth key; defaults to `sampletoken` for local dev instances |
 | `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation |
 
 Both the token loader and the protocol stream default to TLS (`https`/`wss`). Pass `--no-tls`

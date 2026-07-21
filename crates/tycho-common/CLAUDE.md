@@ -10,7 +10,8 @@ Shared domain types, storage/extraction traits, and simulation abstractions used
 - **`display`** — `DisplayOption` wrapper for tracing logs
 
 ### Domain Models (`models/`)
-- **`mod`** — Type aliases (`Address`, `TxHash`, …) and the `Chain` enum; imported by every other module
+- **`mod`** — Type aliases (`Address`, `TxHash`, …) and the non-exhaustive `Chain` enum, including registry-backed `Chain::Custom`; imported by every other module
+- **`chain_config`** — `ChainConfigRegistry` and custom-chain YAML loading. The process-wide registry lazily reads `TYCHO_CHAINS_CONFIG`, or callers can install one explicitly before first access
 - **`blockchain`** — `Block`, `Transaction`, `BlockAggregatedChanges`; the output type of the indexing pipeline
 - **`contract`** — `Account` / `AccountDelta`; versioned EVM contract state written by tycho-ethereum and persisted by tycho-storage
 - **`protocol`** — `ProtocolComponent` / `ProtocolComponentStateDelta`; DEX/lending pool state alongside `ComponentBalance`

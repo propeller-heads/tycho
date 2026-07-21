@@ -187,7 +187,7 @@ that hash and HEAD to find changes that demand documentation updates.
 >    - Changed feature flags in any crate's `Cargo.toml`
 >    - Changed CLI commands in `crates/tycho-indexer/src/cli/`
 >    - Changed data flow or extraction pipeline logic
->    - New DEX integrations added to `crates/tycho-simulation/src/protocol/` or `crates/tycho-execution/src/encoding/`
+>    - New DEX integrations added to `crates/tycho-simulation/src/evm/protocol/` or `crates/tycho-execution/src/encoding/`
 > 4. For each change that affects something documented in `.claude/CODEBASE.md` or any `CLAUDE.md`, report:
 >    - The commit(s) that introduced the change
 >    - Which doc file is affected

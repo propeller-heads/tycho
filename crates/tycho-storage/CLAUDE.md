@@ -49,5 +49,5 @@ and `apply_versioning()` utility consumed by `contract` and `protocol`.
 ## Temporal Model
 
 Every mutable entity carries `valid_from` / `valid_to` timestamps enabling time-travel
-queries. `versioning::apply_versioning()` sets `valid_to` on the previous row when a new
-version is inserted. Historical rows are never mutated.
+queries. `versioning::apply_versioning()` updates the previous row's `valid_to` to close its
+validity window, then inserts the new version; historical payloads are otherwise preserved.
