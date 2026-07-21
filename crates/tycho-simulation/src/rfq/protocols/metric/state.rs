@@ -248,48 +248,48 @@ impl ProtocolSim for MetricState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let direction = self.direction(&sell_token, &buy_token)?;
-        match direction {
-            MetricDirection::ZeroForOne => {
-                let price = self.bid_ask.bid_price()?;
-                // Mirror get_amount_out: the tradable output is capped by the published depth,
-                // not just aggregate inventory. Reporting the aggregate would advertise a limit
-                // that get_amount_out then rejects as depth-exhausted.
-                let buy_limit =
-                    cap_to_depth(self.bid_ask.total_token1_available()?, &self.bid_ask.depth.bids)?;
-                let buy_limit_human = buy_limit.to_f64().ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert buy limit to f64".into())
-                })? / 10_f64.powi(self.quote_token.decimals as i32);
-                let sell_limit = buy_limit_human / price;
-                let sell_limit =
-                    BigUint::from_f64(sell_limit * 10_f64.powi(self.base_token.decimals as i32))
-                        .ok_or_else(|| {
-                            SimulationError::RecoverableError(
-                                "Can't convert sell limit to BigUint".into(),
-                            )
-                        })?;
-                Ok((sell_limit, buy_limit))
-            }
-            MetricDirection::OneForZero => {
-                let price = self.bid_ask.ask_price()?;
-                // Mirror get_amount_out: the tradable output is capped by the published depth,
-                // not just aggregate inventory. Reporting the aggregate would advertise a limit
-                // that get_amount_out then rejects as depth-exhausted.
-                let buy_limit =
-                    cap_to_depth(self.bid_ask.total_token0_available()?, &self.bid_ask.depth.asks)?;
-                let buy_limit_human = buy_limit.to_f64().ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert buy limit to f64".into())
-                })? / 10_f64.powi(self.base_token.decimals as i32);
-                let sell_limit = buy_limit_human * price;
-                let sell_limit =
-                    BigUint::from_f64(sell_limit * 10_f64.powi(self.quote_token.decimals as i32))
-                        .ok_or_else(|| {
-                        SimulationError::RecoverableError(
-                            "Can't convert sell limit to BigUint".into(),
-                        )
-                    })?;
-                Ok((sell_limit, buy_limit))
+        // Price of one buy-token unit in sell tokens, plus the per-direction inventory cap, depth
+        // side, and token decimals.
+        let (sell_per_buy, aggregate, bins, sell_decimals, buy_decimals) = match direction {
+            MetricDirection::ZeroForOne => (
+                1.0 / self.bid_ask.bid_price()?,
+                self.bid_ask.total_token1_available()?,
+                &self.bid_ask.depth.bids,
+                self.base_token.decimals,
+                self.quote_token.decimals,
+            ),
+            MetricDirection::OneForZero => (
+                self.bid_ask.ask_price()?,
+                self.bid_ask.total_token0_available()?,
+                &self.bid_ask.depth.asks,
+                self.quote_token.decimals,
+                self.base_token.decimals,
+            ),
+        };
+
+        // Metric's own accounting gives the exact input required to consume the whole book: the
+        // last bin's cumulativeInputVolume. Prefer it over reconstructing the input from the
+        // top-of-book price, which understates the limit by the cumulative price impact.
+        if let Some(last_bin) = bins.last() {
+            let depth_output = last_bin.cumulative_volume()?;
+            if depth_output <= aggregate {
+                return Ok((last_bin.cumulative_input_volume()?, depth_output));
             }
         }
+
+        // No depth bins, or the aggregate inventory truncates the walkable depth: cap the output
+        // at the aggregate and estimate the matching input from the top-of-book price. Mirrors
+        // get_amount_out, which rejects anything beyond this cap as depth-exhausted.
+        let buy_limit = cap_to_depth(aggregate, bins)?;
+        let buy_limit_human = buy_limit.to_f64().ok_or_else(|| {
+            SimulationError::RecoverableError("Can't convert buy limit to f64".into())
+        })? / 10_f64.powi(buy_decimals as i32);
+        let sell_limit =
+            BigUint::from_f64(buy_limit_human * sell_per_buy * 10_f64.powi(sell_decimals as i32))
+                .ok_or_else(|| {
+                SimulationError::RecoverableError("Can't convert sell limit to BigUint".into())
+            })?;
+        Ok((sell_limit, buy_limit))
     }
 
     fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
@@ -805,7 +805,7 @@ mod tests {
             price: "53495557813757699686400".to_string(),
             // 1500 USDC of depth, below the 30000 USDC aggregate inventory.
             cumulative_volume: "1500000000".to_string(),
-            // 1500 USDC / avg price 2950 ≈ 0.508 WETH (unused by get_limits).
+            // 1500 USDC / avg price 2950 ≈ 0.508 WETH.
             cumulative_input_volume: "508474576271186440".to_string(),
         }];
 
@@ -815,8 +815,34 @@ mod tests {
 
         // Output limit follows the depth, not the aggregate inventory.
         assert_eq!(buy_limit, BigUint::from(1_500_000_000u64));
-        // Input limit derived from the depth-capped output at the top-of-book bid (3000).
-        assert_eq!(sell_limit, BigUint::from(500_000_000_000_000_000u128));
+        // Input limit is Metric's own accounting: the last bin's cumulativeInputVolume, not a
+        // top-of-book reconstruction (which would understate it by the price impact).
+        assert_eq!(sell_limit, BigUint::from(508_474_576_271_186_440u128));
+    }
+
+    #[test]
+    fn test_get_limits_aggregate_truncates_depth() {
+        let mut state = state();
+        // Aggregate inventory (1000 USDC) is below the 3000 USDC depth total, so the exact
+        // last-bin input no longer applies and the limit falls back to the top-of-book estimate.
+        state.bid_ask.total_token1_available = Some("1000000000".to_string());
+        state.bid_ask.depth.bids = vec![MetricDepthBin {
+            bin_idx: 0,
+            // 2900 * 2^64
+            price: "53495557813757699686400".to_string(),
+            cumulative_volume: "3000000000".to_string(),
+            cumulative_input_volume: "1016949152542372881".to_string(),
+        }];
+
+        let (sell_limit, buy_limit) = state
+            .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
+            .unwrap();
+
+        // Output limit follows the aggregate inventory, not the deeper book.
+        assert_eq!(buy_limit, BigUint::from(1_000_000_000u64));
+        // Input limit estimated at the top-of-book bid (3000): 1000 USDC / 3000 = 1/3 WETH,
+        // rounded through the f64 estimate path (this fallback is an estimate by design).
+        assert_eq!(sell_limit, BigUint::from(333_333_333_333_333_312u128));
     }
 
     #[test]
