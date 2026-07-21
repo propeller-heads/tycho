@@ -21,7 +21,7 @@
     "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
     "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
     "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C",
-    "rfq:metric": "0x157c8d0042cFE1776f6B8FEde3F9495E1edF03C4"
+    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -33,7 +33,7 @@
     "native_wrapper": "0x68AF9cDcc2e177e9D75c60f132b8DC52EAF1adBf",
     "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
     "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
-    "rfq:metric": "0x912F992D38bc9Ff6a362984077F4E22e6aB2C4dD"
+    "rfq:metric": "0xb8644a264a4b765E60C4A65Fb8049EAE1A791D97"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -49,7 +49,7 @@
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
     "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
-    "rfq:metric": "0xE47b0671b054d71405041724303357C7583d485F"
+    "rfq:metric": "0xCe5af637bFfe0C34A37f34471Ab6a3E90adf8Ffb"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -58,7 +58,7 @@
     "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
     "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
-    "rfq:metric": "0x5b656d10e669Fe61Ff1B2F232a401D282f4c0855"
+    "rfq:metric": "0x8A61866f7F9c979beE4426247e144aDD46cD21Aa"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -67,6 +67,6 @@
     "ramses_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
     "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
-    "rfq:metric": "0x781079f98a4f9f31Cee4cCE49A89438F8d3BF834"
+    "rfq:metric": "0x746Cdaf8Ef08A9d023155Dddc95291Ab8C9A7936"
   }
 }
