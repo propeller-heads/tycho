@@ -9,7 +9,7 @@ use tycho_substreams::models::{
 };
 
 use crate::{
-    addresses::CORE_ADDRESS,
+    addresses::{CORE_ADDRESS, VE33_ADDRESS},
     pb::ekubo::{
         block_transaction_events::transaction_events::{pool_log::Event, PoolLog},
         BlockTransactionEvents,
@@ -103,6 +103,14 @@ fn maybe_create_component(
         B256::try_from(pi.config.as_slice()).expect("pool config to be 32 bytes long"),
     )
     .expect("pool config to be valid");
+
+    if pool_config.extension == VE33_ADDRESS {
+        entity_attributes.push(Attribute {
+            change: ChangeType::Creation.into(),
+            name: "swap_fee".to_string(),
+            value: 0_u64.to_be_bytes().to_vec(),
+        });
+    }
 
     let component_id = log.pool_id.to_hex();
 

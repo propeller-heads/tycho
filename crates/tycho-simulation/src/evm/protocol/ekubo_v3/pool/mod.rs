@@ -6,6 +6,7 @@ pub mod oracle;
 pub mod stableswap;
 mod timed;
 pub mod twamm;
+pub mod ve33;
 
 use std::collections::{HashMap, HashSet};
 

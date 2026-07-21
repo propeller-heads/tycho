@@ -27,7 +27,8 @@ fn map_filtered_events(
                         {
                             Event::PoolInitialized(_) |
                             Event::VirtualExecution(_) |
-                            Event::RateUpdated(_) => true,
+                            Event::RateUpdated(_) |
+                            Event::SwapFeeUpdated(_) => true,
                             Event::Swapped(_) | Event::PositionUpdated(_) => {
                                 pool_details_store.has_last(log.pool_id.to_hex())
                             }

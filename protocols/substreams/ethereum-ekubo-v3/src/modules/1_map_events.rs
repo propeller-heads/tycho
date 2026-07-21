@@ -11,14 +11,15 @@ use substreams_ethereum::{
 use crate::{
     abi::{
         boosted_fees::events as boosted_fees_events, core::events as core_events,
-        twamm::events as twamm_events,
+        twamm::events as twamm_events, ve33::events as ve33_events,
     },
-    addresses::{BOOSTED_FEES_CONCENTRATED_ADDRESS, CORE_ADDRESS, TWAMM_ADDRESS},
+    addresses::{BOOSTED_FEES_CONCENTRATED_ADDRESS, CORE_ADDRESS, TWAMM_ADDRESS, VE33_ADDRESS},
     pb::ekubo::{
         block_transaction_events::{
             transaction_events::{
                 pool_log::{
-                    Event, PoolInitialized, PositionUpdated, RateUpdated, Swapped, VirtualExecution,
+                    Event, PoolInitialized, PositionUpdated, RateUpdated, SwapFeeUpdated, Swapped,
+                    VirtualExecution,
                 },
                 PoolLog,
             },
@@ -190,6 +191,18 @@ fn maybe_pool_log(log: &Log) -> Option<PoolLog> {
                 }),
             )
         }
+    } else if emitter == VE33_ADDRESS {
+        let ev = ve33_events::VoteWeightApplied::match_and_decode(log)?;
+        (
+            ev.pool_id.to_vec(),
+            Event::SwapFeeUpdated(SwapFeeUpdated {
+                swap_fee: ev
+                    .swap_fee
+                    .to_u64()
+                    .to_be_bytes()
+                    .to_vec(),
+            }),
+        )
     } else {
         return None;
     };

@@ -50,6 +50,8 @@ address constant MEV_CAPTURE_ADDRESS =
 // TODO: replace with the deployed SignedExclusiveSwap extension address.
 address constant SIGNED_EXCLUSIVE_SWAP_ADDRESS =
     0x5519eD5e5e5E5E5e5E5E5e5e5e5E5e5e5e5E5E5E;
+// TODO: replace with the deployed Ve33 extension address on Robinhood.
+address constant VE33_ADDRESS = 0xd100000000000000000000000000000000000000;
 
 contract EkuboV3Executor is IExecutor, ICallback {
     error EkuboV3Executor__InvalidDataLength();
@@ -294,6 +296,13 @@ contract EkuboV3Executor is IExecutor, ICallback {
                 );
 
                 offset = sigEnd;
+            } else if (poolConfig.extension() == VE33_ADDRESS) {
+                (balanceUpdate,) = abi.decode(
+                    // slither-disable-next-line calls-loop
+                    CORE.forward(VE33_ADDRESS, abi.encode(pk, swapParameters)),
+                    (PoolBalanceUpdate, PoolState)
+                );
+                offset += _HOP_BYTE_LEN;
             } else if (poolConfig.extension() == MEV_CAPTURE_ADDRESS) {
                 (balanceUpdate,) = abi.decode(
                     // slither-disable-next-line calls-loop
