@@ -49,17 +49,6 @@ interface IFeeCalculator {
         returns (bool);
 
     /**
-     * @dev Returns the effective router fee on output for a specific client
-     *      in fee units (100_000_000 = 100%).
-     * @param client The client address to check
-     * @return The fee in fee units (custom if set, otherwise default)
-     */
-    function getEffectiveRouterFeeOnOutput(address client)
-        external
-        view
-        returns (uint32);
-
-    /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
      * @param start Index to start reading from (0-indexed)
      * @param count Maximum number of entries to return
