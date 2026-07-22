@@ -5,14 +5,19 @@ import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "../TransferManager.sol";
 
+// MetricOmmPool swap interface; see
+// https://oracle-based-omm.gitbook.io/metric -> Developers -> Smart Contracts Reference.
+// The returned deltas are intentionally ignored: the Dispatcher verifies output
+// via balance-diff.
 interface IMetricPool {
     function swap(
-        address receiver,
+        address recipient,
         bool zeroForOne,
         int128 amountSpecified,
         uint128 priceLimitX64,
-        bytes calldata data
-    ) external;
+        bytes calldata callbackData,
+        bytes calldata extensionData
+    ) external returns (int128 amount0Delta, int128 amount1Delta);
 }
 
 error MetricExecutor__InvalidDataLength();
@@ -23,9 +28,8 @@ contract MetricExecutor is IExecutor, ICallback {
     uint256 private constant _DATA_LENGTH = 61;
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
 
+    // metricOmmSwapCallback(int256,int256,bytes) — the only callback the pool emits.
     bytes4 private constant _METRIC_CALLBACK_SELECTOR = 0xc3251075;
-    // Metric docs still mention both names, so keep accepting the older selector for now.
-    bytes4 private constant _COOL_CALLBACK_SELECTOR = 0xa4b618b2;
 
     // keccak256("MetricExecutor#CURRENT_METRIC_POOL")
     bytes32 private constant _CURRENT_METRIC_POOL_SLOT =
@@ -66,6 +70,7 @@ contract MetricExecutor is IExecutor, ICallback {
                 zeroForOne,
                 amountSpecified,
                 zeroForOne ? 0 : type(uint128).max,
+                "",
                 ""
             );
         _setCurrentPool(address(0));
@@ -142,10 +147,7 @@ contract MetricExecutor is IExecutor, ICallback {
         }
 
         bytes4 selector = bytes4(data[:4]);
-        if (
-            selector != _METRIC_CALLBACK_SELECTOR
-                && selector != _COOL_CALLBACK_SELECTOR
-        ) {
+        if (selector != _METRIC_CALLBACK_SELECTOR) {
             revert MetricExecutor__InvalidCallback();
         }
     }

@@ -23,7 +23,10 @@ interface IMetricSwapCallback {
         int256 amount1Delta,
         bytes calldata data
     ) external;
+}
 
+// Legacy v1 callback name; the executor must reject its selector.
+interface ILegacyCoolAmmCallback {
     function coolAmmSwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
@@ -50,12 +53,14 @@ contract MockMetricPool {
     }
 
     function swap(
-        address receiver,
+        address recipient,
         bool zeroForOne,
         int128 amountSpecified,
         uint128 priceLimitX64,
-        bytes calldata data
-    ) external {
+        bytes calldata callbackData,
+        bytes calldata extensionData
+    ) external returns (int128 amount0Delta, int128 amount1Delta) {
+        extensionData;
         lastPriceLimitX64 = priceLimitX64;
         uint256 amountIn = uint256(uint128(amountSpecified));
         uint256 amountOut = amountIn * 2;
@@ -63,29 +68,25 @@ contract MockMetricPool {
         if (zeroForOne) {
             IMetricSwapCallback(msg.sender)
                 .metricOmmSwapCallback(
-                    int256(amountIn), -int256(amountOut), data
+                    int256(amountIn), -int256(amountOut), callbackData
                 );
-            IERC20(token1).transfer(receiver, amountOut);
+            IERC20(token1).transfer(recipient, amountOut);
+            amount0Delta = int128(uint128(amountIn));
+            amount1Delta = -int128(uint128(amountOut));
         } else {
             IMetricSwapCallback(msg.sender)
                 .metricOmmSwapCallback(
-                    -int256(amountOut), int256(amountIn), data
+                    -int256(amountOut), int256(amountIn), callbackData
                 );
-            IERC20(token0).transfer(receiver, amountOut);
+            IERC20(token0).transfer(recipient, amountOut);
+            amount0Delta = -int128(uint128(amountOut));
+            amount1Delta = int128(uint128(amountIn));
         }
     }
 }
 
 contract MetricExecutorExposed is MetricExecutor {
     function metricOmmSwapCallback(
-        int256 amount0Delta,
-        int256 amount1Delta,
-        bytes calldata data
-    ) external {
-        _payCallback(amount0Delta, amount1Delta, data);
-    }
-
-    function coolAmmSwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
         bytes calldata data
@@ -269,6 +270,18 @@ contract MetricExecutorTest is Test {
         executor.handleCallback(
             abi.encodeWithSelector(
                 IMetricSwapCallback.metricOmmSwapCallback.selector,
+                int256(1),
+                int256(0),
+                ""
+            )
+        );
+    }
+
+    function testRejectsLegacyCallbackSelector() public {
+        vm.expectRevert(MetricExecutor__InvalidCallback.selector);
+        executor.handleCallback(
+            abi.encodeWithSelector(
+                ILegacyCoolAmmCallback.coolAmmSwapCallback.selector,
                 int256(1),
                 int256(0),
                 ""
