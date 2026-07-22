@@ -10,7 +10,6 @@ import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
 error FeeCalculator__AddressZero();
-error FeeCalculator__InvalidBps();
 
 /**
  * @title FeeCalculator
@@ -44,7 +43,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     // Positive slippage configuration
     bool private _positiveSlippageEnabled;
-    uint32 private _defaultClientSlippageShareBps;
 
     //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
@@ -64,9 +62,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         address indexed oldReceiver, address indexed newReceiver
     );
     event PositiveSlippageToggled(bool enabled);
-    event DefaultClientSlippageShareUpdated(uint32 oldBps, uint32 newBps);
-    event CustomClientSlippageShareSet(address indexed client, uint32 bps);
-    event CustomClientSlippageShareRemoved(address indexed client);
 
     constructor(address routerFeeSetter) {
         _routerFeeReceiver = msg.sender;
@@ -81,7 +76,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *
      *      Deduction order:
      *      1. Positive slippage surplus (actualAmountOut - expectedAmountOut) is
-     *         split between router and client first.
+     *         taken by the router first.
      *      2. Fees (client fee + router fees) are then calculated on
      *         expectedAmountOut, i.e. on the amount *after* surplus extraction.
      *
@@ -97,22 +92,24 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     {
         address resolvedClient = _resolveClient(feeInput.client);
 
-        (uint256 routerSurplus, uint256 clientSurplus) = _calculatePositiveSlippage(
-            feeInput.actualAmountOut, feeInput.expectedAmountOut, resolvedClient
+        uint256 routerSurplus = _calculatePositiveSlippage(
+            feeInput.actualAmountOut, feeInput.expectedAmountOut
         );
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
-        // When no surplus (disabled or actual <= expected): both cuts are zero.
-        uint256 feeBase =
-            feeInput.actualAmountOut - routerSurplus - clientSurplus;
+        // When no surplus (disabled or actual <= expected): the cut is zero.
+        uint256 feeBase = feeInput.actualAmountOut - routerSurplus;
 
-        feeRecipients =
+        (uint256 routerFee, uint256 clientFee) =
             _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
 
-        // fees[0] = router, fees[1] = client (see _calculateFee).
-        feeRecipients[0].feeAmount += routerSurplus;
-        feeRecipients[1].feeAmount += clientSurplus;
+        feeRecipients = new FeeRecipient[](2);
+        feeRecipients[0] = FeeRecipient({
+            recipient: _routerFeeReceiver, feeAmount: routerFee + routerSurplus
+        });
+        feeRecipients[1] =
+            FeeRecipient({recipient: resolvedClient, feeAmount: clientFee});
     }
 
     /**
@@ -144,12 +141,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Calculates fees from the fee base amount (output minus any
      *      extracted surplus).
-     * @return feeRecipients 2-element array: [0] = router, [1] = client.
+     * @return routerFee Total router fee (fee on output + cut of the client fee)
+     * @return clientFee Client's portion of the client fee (after the router's cut)
      */
     function _calculateFee(uint256 feeBase, address client, uint32 clientFeeBps)
         internal
         view
-        returns (FeeRecipient[] memory feeRecipients)
+        returns (uint256 routerFee, uint256 clientFee)
     {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(client);
@@ -162,7 +160,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
 
         uint256 routerFeeOnClientFee = 0;
-        uint256 clientPortion = 0;
 
         // Calculate client fee if > 0
         if (clientFeeBps > 0) {
@@ -180,25 +177,15 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             }
 
             // Client gets their portion (after router's cut)
-            clientPortion = totalClientFee - routerFeeOnClientFee;
+            clientFee = totalClientFee - routerFeeOnClientFee;
         }
 
-        uint256 totalRouterFee = routerFeeOnClientFee;
+        routerFee = routerFeeOnClientFee;
 
         // Calculate router fee on output amount if > 0
         if (routerFeeOnOutputBps > 0) {
-            uint256 routerFeeOnOutput =
-                (feeBase * routerFeeOnOutputBps) / MAX_BPS;
-            totalRouterFee += routerFeeOnOutput;
+            routerFee += (feeBase * routerFeeOnOutputBps) / MAX_BPS;
         }
-
-        // Build fee recipients array
-        feeRecipients = new FeeRecipient[](2);
-        feeRecipients[0] = FeeRecipient({
-            recipient: _routerFeeReceiver, feeAmount: totalRouterFee
-        });
-        feeRecipients[1] =
-            FeeRecipient({recipient: client, feeAmount: clientPortion});
     }
 
     /**
@@ -212,39 +199,18 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates positive slippage surplus distribution
-     * @return routerCut Router's share of the surplus (zero if disabled or no surplus)
-     * @return clientCut Client's share of the surplus (zero if disabled or no surplus)
+     * @dev Calculates the positive slippage surplus, all of which goes to the router
+     * @return routerCut The full surplus (zero if disabled or no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
-        uint256 expectedAmountOut,
-        address client
-    ) internal view returns (uint256 routerCut, uint256 clientCut) {
+        uint256 expectedAmountOut
+    ) internal view returns (uint256 routerCut) {
         if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
-            return (0, 0);
+            return 0;
         }
 
-        uint256 surplus = actualAmountOut - expectedAmountOut;
-        uint32 clientShareBps = _getClientSlippageShareBps(client);
-
-        clientCut = (surplus * clientShareBps) / MAX_BPS;
-        routerCut = surplus - clientCut;
-    }
-
-    /**
-     * @dev Returns the client's slippage share: custom if set, otherwise the default
-     */
-    function _getClientSlippageShareBps(address client)
-        internal
-        view
-        returns (uint32)
-    {
-        CustomFees memory customFees = _customRouterFees[client];
-        if (customFees.hasCustomClientSlippageShare) {
-            return customFees.clientSlippageShareBps;
-        }
-        return _defaultClientSlippageShareBps;
+        routerCut = actualAmountOut - expectedAmountOut;
     }
 
     /**
@@ -329,10 +295,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnOutput = 0;
         _customRouterFees[client] = customFees;
 
-        if (
-            !customFees.hasCustomFeeOnClientFee
-                && !customFees.hasCustomClientSlippageShare
-        ) {
+        if (!customFees.hasCustomFeeOnClientFee) {
             // slither-disable-next-line unused-return
             _customFeeClients.remove(client);
         }
@@ -415,10 +378,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         customFees.feeBpsOnClientFee = 0;
         _customRouterFees[client] = customFees;
 
-        if (
-            !customFees.hasCustomFeeOnOutput
-                && !customFees.hasCustomClientSlippageShare
-        ) {
+        if (!customFees.hasCustomFeeOnOutput) {
             // slither-disable-next-line unused-return
             _customFeeClients.remove(client);
         }
@@ -507,76 +467,5 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      */
     function getPositiveSlippageEnabled() external view returns (bool) {
         return _positiveSlippageEnabled;
-    }
-
-    /**
-     * @dev Sets the default client share of positive slippage
-     * @param bps Share in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
-     */
-    function setDefaultClientSlippageShare(uint32 bps)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        if (bps > MAX_BPS) {
-            revert FeeCalculator__InvalidBps();
-        }
-        uint32 oldBps = _defaultClientSlippageShareBps;
-        _defaultClientSlippageShareBps = bps;
-        emit DefaultClientSlippageShareUpdated(oldBps, bps);
-    }
-
-    /**
-     * @dev Returns the default client share of positive slippage in fee units
-     */
-    function getDefaultClientSlippageShare() external view returns (uint32) {
-        return _defaultClientSlippageShareBps;
-    }
-
-    /**
-     * @dev Sets a custom client share of positive slippage for a specific client
-     * @param client The client address to set the custom share for
-     * @param bps Share in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%).
-     *      Must be non-zero; to clear a custom share use
-     *      removeCustomClientSlippageShare, which also drops the override flag.
-     */
-    function setCustomClientSlippageShare(address client, uint32 bps)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        if (bps == 0 || bps > MAX_BPS) {
-            revert FeeCalculator__InvalidBps();
-        }
-        CustomFees memory customFees = _customRouterFees[client];
-        customFees.hasCustomClientSlippageShare = true;
-        customFees.clientSlippageShareBps = bps;
-        _customRouterFees[client] = customFees;
-        // slither-disable-next-line unused-return
-        _customFeeClients.add(client);
-
-        emit CustomClientSlippageShareSet(client, bps);
-    }
-
-    /**
-     * @dev Removes the custom client slippage share for a specific client, reverting to default
-     * @param client The client address to remove the custom share from
-     */
-    function removeCustomClientSlippageShare(address client)
-        external
-        onlyRole(ROUTER_FEE_SETTER_ROLE)
-    {
-        CustomFees memory customFees = _customRouterFees[client];
-        customFees.hasCustomClientSlippageShare = false;
-        customFees.clientSlippageShareBps = 0;
-        _customRouterFees[client] = customFees;
-
-        if (
-            !customFees.hasCustomFeeOnOutput
-                && !customFees.hasCustomFeeOnClientFee
-        ) {
-            // slither-disable-next-line unused-return
-            _customFeeClients.remove(client);
-        }
-
-        emit CustomClientSlippageShareRemoved(client);
     }
 }

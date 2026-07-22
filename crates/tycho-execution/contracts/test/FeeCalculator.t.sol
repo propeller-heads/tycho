@@ -773,7 +773,6 @@ contract FeeCalculatorConfigTest is Constants {
         // Default fee receiver should be the contract deployer
         assertEq(feeCalculator.getRouterFeeReceiver(), address(this));
         assertFalse(feeCalculator.getPositiveSlippageEnabled());
-        assertEq(feeCalculator.getDefaultClientSlippageShare(), 0);
     }
 
     function testMaximumFee() public {
@@ -936,20 +935,14 @@ contract FeeCalculatorConfigTest is Constants {
         vm.startPrank(FEE_SETTER);
         feeCalculator.setCustomRouterFeeOnOutput(BOB, _1_PCT);
         feeCalculator.setCustomRouterFeeOnClientFee(BOB, _5_PCT);
-        feeCalculator.setCustomClientSlippageShare(BOB, _50_PCT);
 
-        // Remove output fee — client stays (2 custom fees remain)
+        // Remove output fee — client stays (client fee remains)
         feeCalculator.removeCustomRouterFeeOnOutput(BOB);
         (address[] memory clients,) = feeCalculator.getAllClientFees(0, 10);
         assertEq(clients.length, 1);
 
-        // Remove client fee — client stays (slippage share remains)
+        // Remove client fee — client removed (no custom fees left)
         feeCalculator.removeCustomRouterFeeOnClientFee(BOB);
-        (clients,) = feeCalculator.getAllClientFees(0, 10);
-        assertEq(clients.length, 1);
-
-        // Remove slippage share — client removed (no custom fees left)
-        feeCalculator.removeCustomClientSlippageShare(BOB);
         vm.stopPrank();
 
         (clients,) = feeCalculator.getAllClientFees(0, 10);
@@ -970,7 +963,7 @@ contract FeeCalculatorSlippageTest is Constants {
     }
 
     function testRouterKeepsAllPositiveSlippage() public view {
-        // Default clientSlippageShareBps = 0 → router keeps all
+        // The full surplus always goes to the router
         uint256 actualAmountOut = 1.1 ether;
         uint256 expectedAmountOut = 1 ether;
 
@@ -991,111 +984,6 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[0].feeAmount, 0.1 ether);
         assertEq(fees[1].recipient, BOB);
         assertEq(fees[1].feeAmount, 0);
-    }
-
-    function testClientGetsHalfPositiveSlippage() public {
-        vm.prank(FEE_SETTER);
-        feeCalculator.setDefaultClientSlippageShare(_50_PCT); // 50%
-
-        uint256 actualAmountOut = 1.1 ether;
-        uint256 expectedAmountOut = 1 ether;
-
-        FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            FeeInput({
-                actualAmountOut: actualAmountOut,
-                expectedAmountOut: expectedAmountOut,
-                amountIn: 0,
-                tokenIn: address(0),
-                tokenOut: address(0),
-                clientFeeBps: 0,
-                client: BOB
-            })
-        );
-
-        // surplus = 0.1 ether, 50% each
-        assertEq(fees[0].recipient, ADMIN);
-        assertEq(fees[0].feeAmount, 0.05 ether);
-        assertEq(fees[1].recipient, BOB);
-        assertEq(fees[1].feeAmount, 0.05 ether);
-    }
-
-    function testCustomSlippageShareOverridesDefault() public {
-        vm.startPrank(FEE_SETTER);
-        feeCalculator.setDefaultClientSlippageShare(20_000_000); // 20%
-        feeCalculator.setCustomClientSlippageShare(BOB, 80_000_000); // 80%
-        vm.stopPrank();
-
-        uint256 actualAmountOut = 1.1 ether;
-        uint256 expectedAmountOut = 1 ether;
-
-        FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            FeeInput({
-                actualAmountOut: actualAmountOut,
-                expectedAmountOut: expectedAmountOut,
-                amountIn: 0,
-                tokenIn: address(0),
-                tokenOut: address(0),
-                clientFeeBps: 0,
-                client: BOB
-            })
-        );
-
-        // surplus = 0.1 ether, BOB gets 80% custom share
-        assertEq(fees[0].recipient, ADMIN);
-        assertEq(fees[0].feeAmount, 0.02 ether);
-        assertEq(fees[1].recipient, BOB);
-        assertEq(fees[1].feeAmount, 0.08 ether);
-    }
-
-    function testRemoveCustomSlippageFallsBackToDefault() public {
-        vm.startPrank(FEE_SETTER);
-        feeCalculator.setDefaultClientSlippageShare(20_000_000); // 20%
-        feeCalculator.setCustomClientSlippageShare(BOB, 80_000_000); // 80%
-        feeCalculator.removeCustomClientSlippageShare(BOB);
-        vm.stopPrank();
-
-        uint256 actualAmountOut = 1.1 ether;
-        uint256 expectedAmountOut = 1 ether;
-
-        FeeRecipient[] memory fees = feeCalculator.calculateFee(
-            FeeInput({
-                actualAmountOut: actualAmountOut,
-                expectedAmountOut: expectedAmountOut,
-                amountIn: 0,
-                tokenIn: address(0),
-                tokenOut: address(0),
-                clientFeeBps: 0,
-                client: BOB
-            })
-        );
-
-        // After removal, falls back to default 20%
-        assertEq(fees[0].feeAmount, 0.08 ether); // router 80%
-        assertEq(fees[1].feeAmount, 0.02 ether); // BOB 20%
-    }
-
-    function testSetDefaultClientSlippageShareTooHighReverts() public {
-        vm.prank(FEE_SETTER);
-        vm.expectRevert(
-            abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
-        );
-        feeCalculator.setDefaultClientSlippageShare(100_000_001);
-    }
-
-    function testSetCustomClientSlippageShareTooHighReverts() public {
-        vm.prank(FEE_SETTER);
-        vm.expectRevert(
-            abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
-        );
-        feeCalculator.setCustomClientSlippageShare(BOB, 100_000_001);
-    }
-
-    function testSetCustomClientSlippageShareZeroReverts() public {
-        vm.prank(FEE_SETTER);
-        vm.expectRevert(
-            abi.encodeWithSelector(FeeCalculator__InvalidBps.selector)
-        );
-        feeCalculator.setCustomClientSlippageShare(BOB, 0);
     }
 
     function testNegativeSlippageNoSurplus() public {
@@ -1124,10 +1012,8 @@ contract FeeCalculatorSlippageTest is Constants {
     }
 
     function testPositiveSlippageWithRouterFeeOnOutput() public {
-        vm.startPrank(FEE_SETTER);
+        vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        feeCalculator.setDefaultClientSlippageShare(_50_PCT); // 50%
-        vm.stopPrank();
 
         uint256 actualAmountOut = 1.1 ether;
         uint256 expectedAmountOut = 1 ether;
@@ -1144,14 +1030,14 @@ contract FeeCalculatorSlippageTest is Constants {
             })
         );
 
-        // surplus = 0.1 ether, split 50/50 → router 0.05, BOB 0.05
+        // surplus = 0.1 ether, all to router
         // feeBase = 1.1 - 0.1 = 1 ether (expectedAmountOut)
         // routerFee on output = 1 ether * 1% = 0.01 ether
-        // total router = 0.05 + 0.01 = 0.06 ether
+        // total router = 0.1 + 0.01 = 0.11 ether
         assertEq(fees[0].recipient, ADMIN);
-        assertEq(fees[0].feeAmount, 0.06 ether);
+        assertEq(fees[0].feeAmount, 0.11 ether);
         assertEq(fees[1].recipient, BOB);
-        assertEq(fees[1].feeAmount, 0.05 ether);
+        assertEq(fees[1].feeAmount, 0);
     }
 
     function testZeroSlippageNoSurplus() public {

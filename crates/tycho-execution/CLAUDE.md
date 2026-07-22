@@ -89,8 +89,8 @@ Three fee layers, deducted from swap output:
    intent (`amountIn`, `tokenIn`, `tokenOut`, `expectedAmountOut`, `minAmountOut`, `receiver`, `swap`); the router verifies the EIP-712
    signature on-chain before applying any fee. Binding the signature to swap data (including the encoded swap bytes)
    prevents cross-swap replay attacks. The `clientFeeReceiver` address doubles as the client
-   identifier. `maxClientContribution` caps how much positive slippage the client absorbs (prevents the client from
-   claiming all surplus). Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
+   identifier. `maxClientContribution` caps how much the client contributes from their vault balance to cover a
+   shortfall below `minAmountOut`. Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
 2. **Router fee on output** (stored): `_routerFeeOnOutputBps` -- Tycho's cut of the swap output amount.
 3. **Router fee on client fee** (stored): `_routerFeeOnClientFeeBps` -- Tycho's cut of the client fee (deducted from the
    client's portion, not from the user).

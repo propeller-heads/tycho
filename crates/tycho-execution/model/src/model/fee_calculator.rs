@@ -14,7 +14,6 @@ struct FeeInfo {
     router_fee_on_output_bps: i64,
     router_fee_on_client_fee_bps: i64,
     positive_slippage_enabled: bool,
-    client_slippage_share_bps: i64,
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
@@ -42,26 +41,16 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
             (0, 0)
         };
 
-    let (positive_slippage_enabled, client_slippage_share_bps) =
-        if crate::config::ENABLE_POSITIVE_SLIPPAGE {
-            let enabled = params.request("positive_slippage_enabled", vec![true, false])?;
-            let has_custom_client_slippage_share =
-                params.request("has_custom_client_slippage_share", vec![true, false])?;
-            let client_slippage_share_bps = if has_custom_client_slippage_share {
-                params.request("custom_client_slippage_share_bps", vec![0, MAX_BPS])?
-            } else {
-                params.request("default_client_slippage_share_bps", vec![0, MAX_BPS])?
-            };
-            (enabled, client_slippage_share_bps)
-        } else {
-            (false, 0)
-        };
+    let positive_slippage_enabled = if crate::config::ENABLE_POSITIVE_SLIPPAGE {
+        params.request("positive_slippage_enabled", vec![true, false])?
+    } else {
+        false
+    };
 
     Ok(FeeInfo {
         router_fee_on_output_bps,
         router_fee_on_client_fee_bps,
         positive_slippage_enabled,
-        client_slippage_share_bps,
     })
 }
 
@@ -80,18 +69,20 @@ pub fn calculate_fee(
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    let (router_surplus, client_surplus) =
+    let router_surplus =
         _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
 
-    let fee_base = actual_amount_out - router_surplus - client_surplus;
+    let fee_base = actual_amount_out - router_surplus;
 
-    let mut fees = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
+    let (router_fee, client_fee) = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
 
-    // fees[0] = router, fees[1] = client (see _calculate_fee).
-    fees[0].fee_amount += router_surplus;
-    fees[1].fee_amount += client_surplus;
-
-    Ok(fees)
+    Ok(vec![
+        FeeRecipient {
+            recipient: Address::RouterFeeReceiver,
+            fee_amount: router_fee + router_surplus,
+        },
+        FeeRecipient { recipient: Address::ClientFeeReceiver, fee_amount: client_fee },
+    ])
 }
 
 /// Mirrors `FeeCalculator.mustInterceptOutput` in Solidity.
@@ -116,12 +107,13 @@ pub fn must_intercept_output(params: &Params, client_fee_bps: i64) -> Result<boo
 
 /// Mirrors `FeeCalculator._calculateFee` in Solidity.
 ///
-/// Returns 2-element array: [0] = router, [1] = client.
+/// Returns `(router_fee, client_fee)`: the total router fee (fee on output +
+/// cut of the client fee) and the client's portion of the client fee.
 fn _calculate_fee(
     fee_base: i64,
     client_fee_bps: i64,
     fee_info: &FeeInfo,
-) -> Result<Vec<FeeRecipient>, Error> {
+) -> Result<(i64, i64), Error> {
     if (client_fee_bps + fee_info.router_fee_on_output_bps > MAX_BPS) ||
         fee_info.router_fee_on_client_fee_bps > MAX_BPS
     {
@@ -129,7 +121,7 @@ fn _calculate_fee(
     }
 
     let mut router_fee_on_client_fee = 0;
-    let mut client_portion = 0;
+    let mut client_fee = 0;
 
     if client_fee_bps > 0 {
         let client_fee_numerator = fee_base as i128 * client_fee_bps as i128;
@@ -141,38 +133,30 @@ fn _calculate_fee(
                 MAX_BPS_SQUARED as i128) as i64;
         }
 
-        client_portion = checked_subtract(total_client_fee, router_fee_on_client_fee)?;
+        client_fee = checked_subtract(total_client_fee, router_fee_on_client_fee)?;
     }
 
-    let mut total_router_fee = router_fee_on_client_fee;
+    let mut router_fee = router_fee_on_client_fee;
 
     if fee_info.router_fee_on_output_bps > 0 {
-        total_router_fee +=
+        router_fee +=
             (fee_base as i128 * fee_info.router_fee_on_output_bps as i128 / MAX_BPS as i128) as i64;
     }
 
-    Ok(vec![
-        FeeRecipient { recipient: Address::RouterFeeReceiver, fee_amount: total_router_fee },
-        FeeRecipient { recipient: Address::ClientFeeReceiver, fee_amount: client_portion },
-    ])
+    Ok((router_fee, client_fee))
 }
 
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
-/// Returns (router_cut, client_cut); both zero if disabled or no surplus.
+/// Returns the router's surplus cut (the full surplus); zero if disabled or no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
     fee_info: &FeeInfo,
-) -> (i64, i64) {
+) -> i64 {
     if !fee_info.positive_slippage_enabled || actual_amount_out <= expected_amount_out {
-        return (0, 0);
+        return 0;
     }
 
-    let surplus = actual_amount_out - expected_amount_out;
-    let client_cut =
-        (surplus as i128 * fee_info.client_slippage_share_bps as i128 / MAX_BPS as i128) as i64;
-    let router_cut = surplus - client_cut;
-
-    (router_cut, client_cut)
+    actual_amount_out - expected_amount_out
 }
