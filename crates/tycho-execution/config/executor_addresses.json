@@ -48,8 +48,7 @@
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
-    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
-    "rfq:metric": "0xCe5af637bFfe0C34A37f34471Ab6a3E90adf8Ffb"
+    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -57,8 +56,7 @@
     "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
-    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
-    "rfq:metric": "0x8A61866f7F9c979beE4426247e144aDD46cD21Aa"
+    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -66,7 +64,6 @@
     "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "ramses_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
-    "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
-    "rfq:metric": "0x746Cdaf8Ef08A9d023155Dddc95291Ab8C9A7936"
+    "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3"
   }
 }
