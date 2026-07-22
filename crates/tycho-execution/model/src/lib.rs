@@ -1,7 +1,7 @@
 //! # Run
 //!
 //! Run the model using:
-//! ```
+//! ```text
 //! cargo run --release
 //! ```
 //!

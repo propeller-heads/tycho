@@ -61,8 +61,10 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         uint256 expectedClientFee = 36338713894957219915;
         uint256 expectedAmountOut = 1958252915450472406531;
 
-        // slippageToleranceBps=500: total fees are ~3% of quotedAmountOut; need slippage > 3% to avoid
-        // NegativeSlippage after fee deduction (slippage check is on post-fee output)
+        // minAmountOut is 5% below quotedAmountOut; total fees are ~3% of
+        // quotedAmountOut, so the post-fee output must still clear the min
+        // (the slippage check runs on the post-fee output).
+        uint256 minAmountOut = quotedAmountOut * 9500 / 10000;
         ClientFeeParams memory feeParams = makeClientFeeParams(
             2_000_000,
             0,
@@ -70,7 +72,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             quotedAmountOut,
-            500,
+            minAmountOut,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -91,7 +93,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             quotedAmountOut,
-            500,
+            minAmountOut,
             ALICE,
             feeParams,
             swap
@@ -281,7 +283,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
-            200,
+            1,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -296,7 +298,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             )
         );
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -326,7 +328,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
-            200,
+            1,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -335,7 +337,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__InvalidClientSignature.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -365,7 +367,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
-            200,
+            1,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -376,7 +378,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__InvalidClientSignature.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -406,7 +408,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1,
-            200,
+            1,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -416,7 +418,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__InvalidClientSignature.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 1, 200, ALICE, feeParams, swap
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, feeParams, swap
         );
         vm.stopPrank();
     }
@@ -490,7 +492,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             STA_ADDR,
             quotedSTA,
-            200,
+            quotedSTA * 9800 / 10000,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -502,7 +504,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             STA_ADDR,
             quotedSTA,
-            200,
+            quotedSTA * 9800 / 10000,
             ALICE,
             feeParams,
             swap
@@ -549,7 +551,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             quotedAmountOut,
-            200,
+            quotedAmountOut * 9800 / 10000,
             ALICE,
             noClientFee(),
             swap
@@ -596,7 +598,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        uint256 minAmountOut = 1900 * 1e18;
+        uint256 expectedAmountOut = 1900 * 1e18;
 
         // Signed params: clientFeeReceiver has no custom fee (uses default 0%)
         ClientFeeParams memory feeParams = makeClientFeeParams(
@@ -605,8 +607,8 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
-            200,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -617,8 +619,8 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
-            200,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
             ALICE,
             feeParams,
             swap

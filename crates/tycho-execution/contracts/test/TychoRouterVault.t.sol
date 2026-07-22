@@ -58,11 +58,11 @@ contract VaultSwapBatcher {
         });
 
         router.singleSwapUsingVault(
-            amountIn1, tokenIn, tokenOut, 1, 200, address(this), noFee, swap1
+            amountIn1, tokenIn, tokenOut, 1, 1, address(this), noFee, swap1
         );
 
         router.singleSwapUsingVault(
-            amountIn2, tokenIn, tokenOut, 1, 200, address(this), noFee, swap2
+            amountIn2, tokenIn, tokenOut, 1, 1, address(this), noFee, swap2
         );
     }
 }
@@ -130,8 +130,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             WBTC_ADDR,
-            1, // min amount
-            200,
+            1, // expected amount out
+            1, // min amount out
             2, // nTokens: [WETH=0, WBTC=1]
             ALICE, // receiver
             noClientFee(),
@@ -168,8 +168,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             ETH_ADDR,
             DAI_ADDR,
-            1, // min amount
-            200,
+            1, // expected amount out
+            1, // min amount out
             ALICE, // receiver
             noClientFee(),
             swap
@@ -202,8 +202,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             ETH_ADDR,
             RETH_ADDR,
-            1, // min amount
-            200,
+            1, // expected amount out
+            1, // min amount out
             ALICE, // receiver
             noClientFee(),
             _rocketpoolEthRethSwap()
@@ -242,8 +242,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             ETH_ADDR,
             RETH_ADDR,
-            1, // min amount
-            200,
+            1, // expected amount out
+            1, // min amount out
             ALICE, // receiver
             noClientFee(),
             _rocketpoolEthRethSwap()
@@ -265,8 +265,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             ETH_ADDR,
             RETH_ADDR,
-            1, // min amount
-            200,
+            1, // expected amount out
+            1, // min amount out
             ALICE, // receiver
             noClientFee(),
             _rocketpoolEthRethSwap()
@@ -327,8 +327,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             RETH_ADDR,
-            1, // min amount
-            200,
+            1, // expected amount out
+            1, // min amount out
             ALICE, // receiver
             noClientFee(),
             pleEncode(swaps)
@@ -436,7 +436,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             USDC_ADDR,
             USDC_ADDR,
             amountIn,
-            0,
+            amountIn,
             tychoRouterAddr,
             encodedSwaps,
             tychoRouterAddr,
@@ -453,7 +453,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             USDC_ADDR,
             USDC_ADDR,
             amountIn,
-            0,
+            amountIn,
             tychoRouterAddr,
             feeParams,
             encodedSwaps
@@ -499,7 +499,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             WETH_ADDR,
             WETH_ADDR,
             2 * inputAmount,
-            0,
+            2 * inputAmount,
             tychoRouterAddr,
             encodedSwaps,
             tychoRouterAddr,
@@ -511,7 +511,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             WETH_ADDR,
             WETH_ADDR,
             2 * inputAmount,
-            0,
+            2 * inputAmount,
             tychoRouterAddr,
             feeParams,
             encodedSwaps
@@ -547,13 +547,13 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        uint256 minAmountOut = 1900 * 1e18;
+        uint256 expectedAmountOut = 1900 * 1e18;
         uint256 amountOut = tychoRouter.singleSwap(
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
-            200,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
             tychoRouterAddr, // receiver = tychoRouter to rebalance vault
             noClientFee(),
             swap
@@ -619,8 +619,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             USDC_ADDR,
-            amountIn, // min amount out
-            200,
+            amountIn, // expected amount out
+            amountIn * 9800 / 10000, // min amount out
             tychoRouterAddr, // receiver = tychoRouter to rebalance vault
             noClientFee(),
             pleEncode(swaps)
@@ -684,8 +684,8 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             USDC_ADDR,
-            amountIn, // min amount out
-            200,
+            amountIn, // expected amount out
+            amountIn * 9800 / 10000, // min amount out
             tychoRouterAddr, // receiver = tychoRouter to credit vault
             noClientFee(),
             pleEncode(swaps)
@@ -761,7 +761,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000,
-            200,
+            1000_000000 * 9800 / 10000,
             4,
             tychoRouterAddr, // receiver = router
             noClientFee(),
@@ -848,7 +848,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             1900 * 1e18,
-            200,
+            1900 * 1e18 * 9800 / 10000,
             tychoRouterAddr, // receiver = router
             noClientFee(),
             swap

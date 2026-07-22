@@ -470,7 +470,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR,
             USDT_ADDR,
             99943850,
-            200,
+            (99943850 * 9800) / 10000,
             ALICE,
             noClientFee(),
             permitSingle,
@@ -514,12 +514,13 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
 
         vm.startPrank(ALICE);
         IERC20(USDE_ADDR).approve(tychoRouterAddr, amountIn);
+        uint256 expectedAmountOut = 118280;
         tychoRouter.singleSwap(
             amountIn,
             USDE_ADDR,
             WBTC_ADDR,
-            118280,
-            200,
+            expectedAmountOut,
+            (expectedAmountOut * 9800) / 10000,
             ALICE,
             noClientFee(),
             swap
@@ -862,7 +863,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 USDT_ADDR,
                 1,
-                uint16(200),
+                1,
                 address(settler),
                 noClientFee(),
                 swap
@@ -928,7 +929,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 WETH_ADDR,
                 USDT_ADDR,
                 1,
-                200,
+                1,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -991,7 +992,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDT_ADDR,
                 WETH_ADDR,
                 1,
-                200,
+                1,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -1067,7 +1068,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 WBTC_ADDR,
                 1,
-                200,
+                1,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -1152,7 +1153,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
                 USDE_ADDR,
                 USDC_ADDR,
                 1,
-                200,
+                1,
                 address(settler),
                 noClientFee(),
                 pleEncode(swaps)
@@ -1166,4 +1167,3 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         settler.settle(loans, USDE_ADDR, USDE_ADDR, swapAmount, tychoCalldata);
     }
 }
-

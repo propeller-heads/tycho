@@ -53,15 +53,15 @@ impl StrategyEncoder for SingleSwapStrategyEncoder {
     fn encode_strategy(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         let function_signature = match solution.user_transfer_type() {
             UserTransferType::TransferFromPermit2 => {
-                "singleSwapPermit2(uint256,address,address,uint256,uint16,address,\
+                "singleSwapPermit2(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             }
             UserTransferType::TransferFrom => {
-                "singleSwap(uint256,address,address,uint256,uint16,address,\
+                "singleSwap(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             }
             UserTransferType::UseVaultsFunds => {
-                "singleSwapUsingVault(uint256,address,address,uint256,uint16,address,\
+                "singleSwapUsingVault(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             }
         }
@@ -182,15 +182,15 @@ impl StrategyEncoder for SequentialSwapStrategyEncoder {
     fn encode_strategy(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         let function_signature = match solution.user_transfer_type() {
             UserTransferType::TransferFromPermit2 => {
-                "sequentialSwapPermit2(uint256,address,address,uint256,uint16,address,\
+                "sequentialSwapPermit2(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             }
             UserTransferType::TransferFrom => {
-                "sequentialSwap(uint256,address,address,uint256,uint16,address,\
+                "sequentialSwap(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             }
             UserTransferType::UseVaultsFunds => {
-                "sequentialSwapUsingVault(uint256,address,address,uint256,uint16,address,\
+                "sequentialSwapUsingVault(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             }
         }
@@ -312,15 +312,15 @@ impl StrategyEncoder for SplitSwapStrategyEncoder {
     fn encode_strategy(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         let function_signature = match solution.user_transfer_type() {
             UserTransferType::TransferFromPermit2 => {
-                "splitSwapPermit2(uint256,address,address,uint256,uint16,uint256,address,\
+                "splitSwapPermit2(uint256,address,address,uint256,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             }
             UserTransferType::TransferFrom => {
-                "splitSwap(uint256,address,address,uint256,uint16,uint256,address,\
+                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             }
             UserTransferType::UseVaultsFunds => {
-                "splitSwapUsingVault(uint256,address,address,uint256,uint16,uint256,address,\
+                "splitSwapUsingVault(uint256,address,address,uint256,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             }
         }
@@ -512,7 +512,7 @@ mod tests {
             assert_eq!(hex_calldata, expected_swap);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "singleSwapPermit2(uint256,address,address,uint256,uint16,address,\
+                "singleSwapPermit2(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
@@ -592,7 +592,7 @@ mod tests {
             assert_eq!(hex_calldata, expected);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "sequentialSwap(uint256,address,address,uint256,uint16,address,\
+                "sequentialSwap(uint256,address,address,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
@@ -738,7 +738,7 @@ mod tests {
             assert_eq!(hex_calldata, expected_swaps);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "splitSwapPermit2(uint256,address,address,uint256,uint16,uint256,address,\
+                "splitSwapPermit2(uint256,address,address,uint256,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
@@ -876,7 +876,7 @@ mod tests {
             assert_eq!(hex_calldata, expected_swaps);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "splitSwap(uint256,address,address,uint256,uint16,uint256,address,\
+                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,\
 (uint32,address,uint256,uint256,bytes),bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());

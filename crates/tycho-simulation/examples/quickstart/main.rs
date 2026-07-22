@@ -693,7 +693,7 @@ fn create_solution(
 /// **Users must implement their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
 /// - Proper validation and setting of critical inputs such as `expectedAmountOut` and
-///   `slippageToleranceBps`.
+///   `minAmountOut`.
 fn encode_tycho_router_call(
     chain_id: u64,
     encoded_solution: EncodedSolution,
@@ -703,7 +703,8 @@ fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.amount_out());
-    let slippage_tolerance_bps = (solution.slippage() * 10_000.0).round() as u16;
+    let slippage_bps = (solution.slippage() * 10_000.0).round() as u64;
+    let min_amount_out = amount_out * U256::from(10_000 - slippage_bps) / U256::from(10_000u64);
     let given_token = convert_to_router_token(Address::from_slice(solution.token_in()));
     let checked_token = convert_to_router_token(Address::from_slice(solution.token_out()));
     let receiver = Address::from_slice(solution.receiver());
@@ -720,7 +721,7 @@ fn encode_tycho_router_call(
             given_token,
             checked_token,
             amount_out,
-            slippage_tolerance_bps,
+            min_amount_out,
             receiver,
             client_fee_params,
             encoded_solution.swaps().to_vec(),
@@ -744,7 +745,7 @@ fn encode_tycho_router_call(
             given_token,
             checked_token,
             amount_out,
-            slippage_tolerance_bps,
+            min_amount_out,
             receiver,
             client_fee_params,
             permit,

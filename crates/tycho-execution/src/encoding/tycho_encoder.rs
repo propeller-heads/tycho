@@ -17,8 +17,8 @@ use crate::encoding::{
 ///
 /// - `encode_solutions` returns raw [`EncodedSolution`] objects, which include Tycho’s swap path
 ///   encoding, but leave **function argument encoding entirely in the user’s hands**.
-/// - The function arguments to the router (e.g., `expectedAmountOut`, `slippageToleranceBps`,
-///   `receiver`, `permit2`, etc.) are used as **guardrails** to ensure safe on-chain execution.
+/// - The function arguments to the router (e.g., `expectedAmountOut`, `minAmountOut`, `receiver`,
+///   `permit2`, etc.) are used as **guardrails** to ensure safe on-chain execution.
 /// - Automatically constructing full transactions via `encode_calldata` can obscure these important
 ///   safeguards and may result in unexpected behavior or vulnerability to MEV.
 ///
@@ -32,8 +32,7 @@ pub trait TychoEncoder: Send + Sync {
     /// This method gives users maximum flexibility and control. It **does not** produce full
     /// transaction objects. Users are responsible for:
     /// - Constructing the full calldata using their own encoding logic.
-    /// - Managing execution-critical parameters like `expectedAmountOut` and
-    ///   `slippageToleranceBps`.
+    /// - Managing execution-critical parameters like `expectedAmountOut` and `minAmountOut`.
     ///
     /// # Returns
     /// A vector of encoded solutions, each containing:

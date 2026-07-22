@@ -471,12 +471,12 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
     .data;
 
     let expected_input = [
-        "04df9f39", // selector (singleSwapPermit2)
+        "ca931073", // selector (singleSwapPermit2)
         "000000000000000000000000000000000000000000000000000000003b9aca00", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "0000000000000000000000006982508145454ce325ddbe47a25d4ec3d2311933", // token out
         "0000000000000000000000000000000000000000005064ff624d54346285543f", // expectedAmountOut
-        "00000000000000000000000000000000000000000000000000000000000000c8", // slippage_tolerance_bps=200
+        "0000000000000000000000000000000000000000004ec960ad22d28541d4951f", // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         // clientFeeParams offset = 480
         "00000000000000000000000000000000000000000000000000000000000001e0",
@@ -736,7 +736,8 @@ fn test_single_encoding_strategy_curve() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1").unwrap(),
-        0.02,
+        // Dummy 1-wei quote: zero slippage keeps minAmountOut = 1 (accept any output)
+        0.0,
         vec![swap],
     );
 
@@ -802,7 +803,8 @@ fn test_single_encoding_strategy_curve_st_eth() {
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1").unwrap(),
-        0.02,
+        // Dummy 1-wei quote: zero slippage keeps minAmountOut = 1 (accept any output)
+        0.0,
         vec![swap],
     );
 
@@ -877,7 +879,8 @@ fn test_single_encoding_strategy_curve_protocol_will_debit_from_vault() {
         usdc,
         BigUint::from_str("1000_000000000000000000").unwrap(), // 1000 DAI
         BigUint::from_str("1").unwrap(),
-        0.02,
+        // Dummy 1-wei quote: zero slippage keeps minAmountOut = 1 (accept any output)
+        0.0,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::UseVaultsFunds);
@@ -2433,7 +2436,8 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token() {
         // Use a large amount so the swap produces >=1 USDC.
         BigUint::from_str("10000000000000000000000000000000000").unwrap(),
         BigUint::from(1u64),
-        0.02,
+        // Dummy 1-wei quote: zero slippage keeps minAmountOut = 1 (accept any output)
+        0.0,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -2510,7 +2514,8 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token_output() {
         twif,
         BigUint::from_str("100000000").unwrap(), // 100 USDC
         BigUint::from(1u64),
-        0.02,
+        // Dummy 1-wei quote: zero slippage keeps minAmountOut = 1 (accept any output)
+        0.0,
         vec![swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -2795,7 +2800,8 @@ fn test_evm_two_hop_usv4_twif_intermediary() {
         usdc,
         BigUint::from_str("100000000").unwrap(), // 100 USDC
         BigUint::from(1u64),
-        0.02,
+        // Dummy 1-wei quote: zero slippage keeps minAmountOut = 1 (accept any output)
+        0.0,
         vec![swap1, swap2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);

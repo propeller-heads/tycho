@@ -47,7 +47,7 @@ pub struct ClientFeeParams {
     /// Address that identifies the client and receives any client fee.
     client_fee_receiver: Bytes,
     /// Maximum amount the client will contribute from their vault if the output falls below the
-    /// slippage floor (`amount_out * (1 - slippage_tolerance_bps / MAX_SLIPPAGE_BPS)`).
+    /// router's `minAmountOut` argument.
     #[serde(with = "biguint_string")]
     max_client_contribution: BigUint,
     /// Deadline for the fee signature as a unix timestamp.
@@ -133,11 +133,12 @@ pub struct Solution {
     amount_in: BigUint,
     /// The token being bought
     token_out: Bytes,
-    /// Quoted output amount from simulation. Used as the baseline for slippage:
-    /// effective min = amount_out * (1 - slippage).
+    /// Quoted output amount from simulation. Passed to the router as `expectedAmountOut`,
+    /// the baseline for positive slippage detection.
     #[serde(with = "biguint_string")]
     amount_out: BigUint,
-    /// Maximum slippage as a fraction [0.0, 1.0). The router rejects 1.0 (100%).
+    /// Maximum negative slippage as a fraction [0.0, 1.0). Used off-chain to derive the
+    /// router's `minAmountOut` argument: `amount_out * (1 - slippage)`.
     /// Example: 0.0025 = 0.25%.
     slippage: f64,
     /// List of swaps to fulfill the solution.

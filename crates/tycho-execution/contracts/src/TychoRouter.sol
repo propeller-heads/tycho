@@ -75,7 +75,9 @@ error TychoRouter__MsgValueDoesNotMatchAmountIn(
 error TychoRouter__NegativeSlippage(uint256 amount, uint256 minAmount);
 error TychoRouter__InvalidDataLength();
 error TychoRouter__AmountOutZero();
-error TychoRouter__SlippageBpsTooHigh(uint16 slippageToleranceBps);
+error TychoRouter__InvalidMinAmountOut(
+    uint256 minAmountOut, uint256 expectedAmountOut
+);
 error TychoRouter__InvalidClientSignature();
 error TychoRouter__NegativeOutputDelta(int256 amount);
 error TychoRouter__ExpiredClientSignature(
@@ -116,13 +118,12 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
 
     uint256 public constant DELAY_FEE_CALCULATOR_ACTIVATION = 3 days;
-    uint16 private constant MAX_SLIPPAGE_BPS = 10_000;
 
     bytes32 public constant CLIENT_FEE_TYPEHASH = keccak256(
         "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
         "uint256 maxClientContribution,uint256 deadline,"
         "uint256 amountIn,address tokenIn,address tokenOut,"
-        "uint256 expectedAmountOut,uint16 slippageToleranceBps,address receiver,bytes swaps)"
+        "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
 
     event Withdrawal(
@@ -183,13 +184,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -202,7 +203,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         uint256 nTokens,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -214,7 +215,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swaps
         );
@@ -226,7 +227,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             nTokens,
             receiver,
             clientFeeParams,
@@ -241,13 +242,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -260,7 +261,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         uint256 nTokens,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -272,7 +273,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swaps
         );
@@ -283,7 +284,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             nTokens,
             receiver,
             clientFeeParams,
@@ -298,13 +299,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @dev
      * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -319,7 +320,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         uint256 nTokens,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -333,7 +334,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swaps
         );
@@ -348,7 +349,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             nTokens,
             receiver,
             clientFeeParams,
@@ -363,13 +364,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -381,7 +382,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
@@ -392,7 +393,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swaps
         );
@@ -404,7 +405,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             clientFeeParams,
             swaps
@@ -418,13 +419,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - Swaps are executed sequentially using the `_swap` function.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -436,7 +437,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
@@ -447,7 +448,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swaps
         );
@@ -458,7 +459,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             clientFeeParams,
             swaps
@@ -471,13 +472,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
@@ -491,7 +492,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         IAllowanceTransfer.PermitSingle calldata permitSingle,
@@ -504,7 +505,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swaps
         );
@@ -520,7 +521,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             clientFeeParams,
             swaps
@@ -533,13 +534,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *         Takes funds from the user's wallet using transferFrom.
      *
      * @dev
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swapData Encoded swap details.
@@ -551,7 +552,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
@@ -562,7 +563,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swapData
         );
@@ -574,7 +575,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             clientFeeParams,
             swapData
@@ -587,13 +588,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *         Takes funds from the user's vault balance.
      *
      * @dev
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swapData Encoded swap details.
@@ -605,7 +606,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
@@ -616,7 +617,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swapData
         );
@@ -627,7 +628,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             clientFeeParams,
             swapData
@@ -640,13 +641,13 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      *
      * @dev
      * - For ERC20 tokens, Permit2 is used to approve and transfer tokens from the caller to the router.
-     * - Reverts with `TychoRouter__NegativeSlippage` if slippage exceeds `slippageToleranceBps`.
+     * - Reverts with `TychoRouter__NegativeSlippage` if the final output is below `minAmountOut`.
      *
      * @param amountIn The input token amount to be swapped.
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
-     * @param expectedAmountOut The quoted output amount used to compute slippage.
-     * @param slippageToleranceBps Maximum slippage in basis points (0-10_000).
+     * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
@@ -660,7 +661,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         IAllowanceTransfer.PermitSingle calldata permitSingle,
@@ -673,7 +674,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swapData
         );
@@ -688,7 +689,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             clientFeeParams,
             swapData
@@ -710,7 +711,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         uint256 nTokens,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
@@ -728,12 +729,11 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (slippageToleranceBps >= MAX_SLIPPAGE_BPS) {
-            revert TychoRouter__SlippageBpsTooHigh(slippageToleranceBps);
+        if (minAmountOut == 0 || minAmountOut > expectedAmountOut) {
+            revert TychoRouter__InvalidMinAmountOut(
+                minAmountOut, expectedAmountOut
+            );
         }
-        uint256 minAmountOut =
-            (expectedAmountOut * (MAX_SLIPPAGE_BPS - slippageToleranceBps))
-                / MAX_SLIPPAGE_BPS;
 
         address client = clientFeeParams.clientFeeReceiver;
         // Stack pressure in this function prevents keeping finalReceiver in scope
@@ -804,7 +804,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swap_
@@ -821,12 +821,11 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (slippageToleranceBps >= MAX_SLIPPAGE_BPS) {
-            revert TychoRouter__SlippageBpsTooHigh(slippageToleranceBps);
+        if (minAmountOut == 0 || minAmountOut > expectedAmountOut) {
+            revert TychoRouter__InvalidMinAmountOut(
+                minAmountOut, expectedAmountOut
+            );
         }
-        uint256 minAmountOut =
-            (expectedAmountOut * (MAX_SLIPPAGE_BPS - slippageToleranceBps))
-                / MAX_SLIPPAGE_BPS;
 
         address client = clientFeeParams.clientFeeReceiver;
         bool intercepting = _callMustInterceptOutput(
@@ -897,7 +896,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
@@ -914,12 +913,11 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         if (expectedAmountOut == 0) {
             revert TychoRouter__AmountOutZero();
         }
-        if (slippageToleranceBps >= MAX_SLIPPAGE_BPS) {
-            revert TychoRouter__SlippageBpsTooHigh(slippageToleranceBps);
+        if (minAmountOut == 0 || minAmountOut > expectedAmountOut) {
+            revert TychoRouter__InvalidMinAmountOut(
+                minAmountOut, expectedAmountOut
+            );
         }
-        uint256 minAmountOut =
-            (expectedAmountOut * (MAX_SLIPPAGE_BPS - slippageToleranceBps))
-                / MAX_SLIPPAGE_BPS;
         if (swaps.length == 0) {
             revert TychoRouter__EmptySwaps();
         }
@@ -1379,7 +1377,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The input token address.
      * @param tokenOut The output token address.
      * @param expectedAmountOut The quoted output amount.
-     * @param slippageToleranceBps Maximum slippage in basis points.
+     * @param minAmountOut The minimum acceptable output amount.
      * @param receiver The address to receive the output tokens.
      * @param swapData The encoded swap routing data.
      */
@@ -1389,7 +1387,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         bytes calldata swapData
     ) internal view {
@@ -1417,7 +1415,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
                     tokenIn,
                     tokenOut,
                     expectedAmountOut,
-                    slippageToleranceBps,
+                    minAmountOut,
                     receiver,
                     keccak256(swapData)
                 )

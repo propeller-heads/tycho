@@ -260,7 +260,7 @@ contract TychoRouterForLunarBaseTest is TychoRouterTestSetup {
 
         vm.prank(BOB);
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
-            amountIn, ETH_ADDRESS, BASE_USDC, 1, 200, BOB, noClientFee(), swap
+            amountIn, ETH_ADDRESS, BASE_USDC, 1, 1, BOB, noClientFee(), swap
         );
 
         uint256 balanceAfter = IERC20(BASE_USDC).balanceOf(BOB);
@@ -283,7 +283,7 @@ contract TychoRouterForLunarBaseTest is TychoRouterTestSetup {
         vm.startPrank(BOB);
         IERC20(BASE_USDC).approve(tychoRouterAddr, amountIn);
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, BASE_USDC, ETH_ADDRESS, 1, 200, BOB, noClientFee(), swap
+            amountIn, BASE_USDC, ETH_ADDRESS, 1, 1, BOB, noClientFee(), swap
         );
         vm.stopPrank();
 

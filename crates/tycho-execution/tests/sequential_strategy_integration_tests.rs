@@ -150,12 +150,12 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
     let hex_calldata = encode(&calldata);
 
     let expected = String::from(concat!(
-        "8d1eaea0", // selector (sequentialSwap)
+        "3c226834", // selector (sequentialSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "00000000000000000000000000000000000000000000000000000000018f61ec", // expectedAmountOut
-        "00000000000000000000000000000000000000000000000000000000000000c8", /* slippage_tolerance_bps=200 */
+        "0000000000000000000000000000000000000000000000000000000001876515", /* minAmountOut (2% below expected) */
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         // clientFeeParams offset = 256
         "0000000000000000000000000000000000000000000000000000000000000100",
@@ -277,12 +277,12 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     .data;
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "b6bfa3c2", // selector (sequentialSwapPermit2)
+        "631eecea", // selector (sequentialSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "0000000000000000000000000000000000000000000000000000000005ec8f6e", // expectedAmountOut
-        "00000000000000000000000000000000000000000000000000000000000000c8", // slippage_tolerance_bps=200
+        "0000000000000000000000000000000000000000000000000000000005ce3aa4", // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
     ]
     .join("");
@@ -398,12 +398,12 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
     .data;
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "463c8373", // selector (sequentialSwapUsingVault)
+        "ae890e77", // selector (sequentialSwapUsingVault)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "0000000000000000000000000000000000000000000000000000000005ec8f6e", // expectedAmountOut
-        "00000000000000000000000000000000000000000000000000000000000000c8", // slippage_tolerance_bps=200
+        "0000000000000000000000000000000000000000000000000000000005ce3aa4", // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         "0000000000000000000000000000000000000000000000000000000000000100", // clientFeeParams offset = 256
         "00000000000000000000000000000000000000000000000000000000000001c0", // swapData offset = 448

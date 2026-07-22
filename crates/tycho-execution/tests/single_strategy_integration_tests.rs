@@ -67,14 +67,17 @@ fn test_evm_single_swap_strategy_encoder() {
     )
     .unwrap()
     .data;
-    let expected_min_amount_encoded = encode(U256::abi_encode(&biguint_to_u256(&checked_amount)));
+    let expected_amount_out_encoded = encode(U256::abi_encode(&biguint_to_u256(&checked_amount)));
+    let min_amount_out_encoded = encode(U256::abi_encode(
+        &(biguint_to_u256(&checked_amount) * U256::from(9800u64) / U256::from(10_000u64)),
+    ));
     let expected_input = [
-        "04df9f39", // selector (singleSwapPermit2)
+        "ca931073", // selector (singleSwapPermit2)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out
-        &expected_min_amount_encoded, // amount out
-        "00000000000000000000000000000000000000000000000000000000000000c8", // slippage_tolerance_bps=200
+        &expected_amount_out_encoded, // expectedAmountOut
+        &min_amount_out_encoded, // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         // clientFeeParams offset = 480
         "00000000000000000000000000000000000000000000000000000000000001e0",
@@ -109,7 +112,7 @@ fn test_single_swap_strategy_encoder_transfer_from() {
     let dai = dai();
 
     let checked_amount = BigUint::from_str("1_640_000000000000000000").unwrap();
-    let expected_min_amount = U256::from_str("1_640_000000000000000000").unwrap();
+    let expected_amount_out = U256::from_str("1_640_000000000000000000").unwrap();
 
     let swap = Swap::new(
         ProtocolComponent {
@@ -150,14 +153,17 @@ fn test_single_swap_strategy_encoder_transfer_from() {
     )
     .unwrap()
     .data;
-    let expected_min_amount_encoded = encode(U256::abi_encode(&expected_min_amount));
+    let expected_amount_out_encoded = encode(U256::abi_encode(&expected_amount_out));
+    let min_amount_out_encoded = encode(U256::abi_encode(
+        &(expected_amount_out * U256::from(9800u64) / U256::from(10_000u64)),
+    ));
     let expected_input = [
-        "a1499391", // Function selector (singleSwap)
+        "0c1a0ee7", // Function selector (singleSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out
-        &expected_min_amount_encoded, // amount out
-        "00000000000000000000000000000000000000000000000000000000000000c8", // slippage_tolerance_bps=200
+        &expected_amount_out_encoded, // expectedAmountOut
+        &min_amount_out_encoded,      // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         "0000000000000000000000000000000000000000000000000000000000000100", // clientFeeParams offset = 256
         "00000000000000000000000000000000000000000000000000000000000001c0", // swapData offset = 448

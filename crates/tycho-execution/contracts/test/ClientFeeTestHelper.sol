@@ -9,7 +9,7 @@ contract ClientFeeTestHelper is Test, Constants {
         "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
         "uint256 maxClientContribution,uint256 deadline,"
         "uint256 amountIn,address tokenIn,address tokenOut,"
-        "uint256 expectedAmountOut,uint16 slippageToleranceBps,address receiver,bytes swaps)"
+        "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
 
     /**
@@ -22,7 +22,7 @@ contract ClientFeeTestHelper is Test, Constants {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         bytes memory swapData,
         address routerAddress,
@@ -34,7 +34,7 @@ contract ClientFeeTestHelper is Test, Constants {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swapData,
             routerAddress,
@@ -53,7 +53,7 @@ contract ClientFeeTestHelper is Test, Constants {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         bytes memory swapData,
         address routerAddress,
@@ -83,7 +83,7 @@ contract ClientFeeTestHelper is Test, Constants {
                 tokenIn,
                 tokenOut,
                 expectedAmountOut,
-                slippageToleranceBps,
+                minAmountOut,
                 receiver,
                 keccak256(swapData)
             )
@@ -123,7 +123,7 @@ contract ClientFeeTestHelper is Test, Constants {
         address tokenIn,
         address tokenOut,
         uint256 expectedAmountOut,
-        uint16 slippageToleranceBps,
+        uint256 minAmountOut,
         address receiver,
         bytes memory swapData,
         address routerAddress,
@@ -143,7 +143,7 @@ contract ClientFeeTestHelper is Test, Constants {
             tokenIn,
             tokenOut,
             expectedAmountOut,
-            slippageToleranceBps,
+            minAmountOut,
             receiver,
             swapData,
             routerAddress,

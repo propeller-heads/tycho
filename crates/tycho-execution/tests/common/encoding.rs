@@ -59,24 +59,24 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
 /// - Proper validation and setting of critical inputs such as `expectedAmountOut` and
-///   `slippageToleranceBps`.
+///   `minAmountOut`.
 /// - Signing of permit2 objects.
 ///
 /// While Tycho is responsible for encoding the swap paths themselves, the input arguments
 /// to the router's methods act as **guardrails** for on-chain execution safety.
 /// Thus, the user must **take responsibility** for ensuring correctness of all input parameters,
-/// including `expectedAmountOut`, `slippageToleranceBps`, `receiver`, and permit2 logic.
+/// including `expectedAmountOut`, `minAmountOut`, `receiver`, and permit2 logic.
 ///
 /// # Amount Out and Slippage
 ///
-/// The `expectedAmountOut` and `slippageToleranceBps` values used here are just an example.
+/// The `expectedAmountOut` and `minAmountOut` values used here are just an example.
 /// You should ideally:
 /// - Query an external service (e.g., DEX aggregators, oracle, off-chain price feed).
 /// - Use your own strategy to determine an accurate and safe expected output and slippage
 ///   tolerance.
 ///
-/// ⚠️ If `slippageToleranceBps` is too high, your swap may be front-run or sandwiched, resulting in
-/// loss of funds.
+/// ⚠️ If `minAmountOut` is set too far below `expectedAmountOut`, your swap may be front-run or
+/// sandwiched, resulting in loss of funds.
 ///
 /// # Parameters
 /// - `encoded_solution`: The solution already encoded by Tycho.
@@ -88,9 +88,8 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 ///   = 100%)
 /// - `client_fee_receiver`: Address to receive the client fee
 /// - `max_client_contribution`: Maximum amount the client is willing to contribute from their vault
-///   to top up the output if it falls below the slippage floor (`amount_out * (1 -
-///   slippage_tolerance_bps / MAX_SLIPPAGE_BPS)`). If the shortfall exceeds this value, the tx
-///   reverts.
+///   to top up the output if it falls below `minAmountOut` (derived here as `amount_out * (1 -
+///   slippage)`). If the shortfall exceeds this value, the tx reverts.
 ///
 /// # Returns
 /// A `Result<Transaction, EncodingError>` that either contains the full transaction data (to,
@@ -112,7 +111,9 @@ pub fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.amount_out());
-    let slippage_tolerance_bps: U256 = U256::from((solution.slippage() * 10_000.0).round() as u16);
+    let slippage_bps = (solution.slippage() * 10_000.0).round() as u64;
+    let min_amount_out: U256 =
+        amount_out * U256::from(10_000 - slippage_bps) / U256::from(10_000u64);
     let native_addr = bytes_to_address(native_address)?;
     let router_eth = bytes_to_address(&ROUTER_ETH_ADDRESS)?;
     let given_token = bytes_to_address(solution.token_in())?;
@@ -139,7 +140,7 @@ pub fn encode_tycho_router_call(
             given_token,
             checked_token,
             amount_out,
-            slippage_tolerance_bps,
+            min_amount_out,
             receiver,
             encoded_solution.swaps(),
         )?;
@@ -184,7 +185,7 @@ pub fn encode_tycho_router_call(
                 given_token,
                 checked_token,
                 amount_out,
-                slippage_tolerance_bps,
+                min_amount_out,
                 n_tokens,
                 receiver,
                 client_fee_params,
@@ -199,7 +200,7 @@ pub fn encode_tycho_router_call(
                 given_token,
                 checked_token,
                 amount_out,
-                slippage_tolerance_bps,
+                min_amount_out,
                 receiver,
                 client_fee_params,
                 permit,
@@ -214,7 +215,7 @@ pub fn encode_tycho_router_call(
             given_token,
             checked_token,
             amount_out,
-            slippage_tolerance_bps,
+            min_amount_out,
             n_tokens,
             receiver,
             client_fee_params,
@@ -229,7 +230,7 @@ pub fn encode_tycho_router_call(
             given_token,
             checked_token,
             amount_out,
-            slippage_tolerance_bps,
+            min_amount_out,
             receiver,
             client_fee_params,
             swaps,
@@ -275,7 +276,7 @@ fn sign_client_fee(
     token_in: Address,
     token_out: Address,
     amount_out: U256,
-    slippage_tolerance_bps: U256,
+    min_amount_out: U256,
     receiver: Address,
     swaps: &[u8],
 ) -> Result<Vec<u8>, EncodingError> {
@@ -288,7 +289,7 @@ fn sign_client_fee(
         b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
 uint256 maxClientContribution,uint256 deadline,\
 uint256 amountIn,address tokenIn,address tokenOut,\
-uint256 expectedAmountOut,uint16 slippageToleranceBps,address receiver,bytes swaps)",
+uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
     );
 
     // EIP-712 domain separator for TychoRouter ("TychoRouter", "1")
@@ -318,7 +319,7 @@ uint256 expectedAmountOut,uint16 slippageToleranceBps,address receiver,bytes swa
             token_in,
             token_out,
             amount_out,
-            slippage_tolerance_bps,
+            min_amount_out,
             receiver,
             swaps_hash,
         )
