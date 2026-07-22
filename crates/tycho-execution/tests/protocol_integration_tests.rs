@@ -2631,14 +2631,14 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
 #[test]
 fn test_single_encoding_strategy_metric() {
     // Generates calldata for TychoRouterForMetricTest Solidity integration test.
-    // WETH -> USDC via Metric RFQ on Base (wethusdc pool 0x770004fE).
-    // Under the v1 heartbeat model the pool relies on its on-chain price at the fork block, so no
+    // WETH -> USDC via Metric RFQ on Base (WETH/USDC pool 0x600668, MetricOmm interface).
+    // Under the heartbeat model the pool relies on its on-chain price at the fork block, so no
     // signed oracle update is encoded.
     let weth_base = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
     let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
 
     let metric_component = ProtocolComponent {
-        id: String::from("0x770004fE4411E42eA51a7fcAca32b267d791f3D4"),
+        id: String::from("0x600668566fc5E9d471A1A235937221e39aC0ed04"),
         protocol_system: String::from("rfq:metric"),
         // Token order must match the pool's token0/token1 so the encoder can
         // derive the swap direction (WETH = token0, USDC = token1).
@@ -2660,6 +2660,7 @@ fn test_single_encoding_strategy_metric() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         weth_base,
         usdc_base,
+        // 1 WETH, well within the pool's USDC-side inventory at the fork block.
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
         vec![swap],

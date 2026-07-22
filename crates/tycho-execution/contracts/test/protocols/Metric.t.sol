@@ -299,7 +299,11 @@ contract TychoRouterForMetricTest is TychoRouterTestSetup {
     }
 
     function getForkBlock() public pure override returns (uint256) {
-        return 46498514;
+        // Block with a successful interaction on the WETH/USDC MetricOmm pool
+        // 0x600668, so its heartbeat oracle is fresh at this height and the
+        // swap does not revert FeedStalled. The pool must also hold inventory
+        // here (drained pools consume input and return zero output).
+        return 48957697;
     }
 
     function testSingleMetricIntegration() public {
