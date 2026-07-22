@@ -64,6 +64,9 @@ contract MetricExecutor is IExecutor, ICallback {
         int128 amountSpecified = int128(amountIn128);
 
         _setCurrentPool(pool);
+        // The returned deltas are intentionally unused: the Dispatcher derives
+        // the output from balance diffs and never trusts protocol return values.
+        // slither-disable-next-line unused-return
         IMetricPool(pool)
             .swap(
                 receiver,
