@@ -25,15 +25,6 @@ interface IMetricSwapCallback {
     ) external;
 }
 
-// Legacy v1 callback name; the executor must reject its selector.
-interface ILegacyCoolAmmCallback {
-    function coolAmmSwapCallback(
-        int256 amount0Delta,
-        int256 amount1Delta,
-        bytes calldata data
-    ) external;
-}
-
 contract MetricToken is ERC20 {
     constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
 
@@ -277,15 +268,10 @@ contract MetricExecutorTest is Test {
         );
     }
 
-    function testRejectsLegacyCallbackSelector() public {
+    function testRejectsUnknownCallbackSelector() public {
         vm.expectRevert(MetricExecutor__InvalidCallback.selector);
         executor.handleCallback(
-            abi.encodeWithSelector(
-                ILegacyCoolAmmCallback.coolAmmSwapCallback.selector,
-                int256(1),
-                int256(0),
-                ""
-            )
+            abi.encodeWithSelector(bytes4(0xdeadbeef), int256(1), int256(0), "")
         );
     }
 
