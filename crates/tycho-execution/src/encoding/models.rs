@@ -137,9 +137,10 @@ pub struct Solution {
     /// the baseline for positive slippage detection.
     #[serde(with = "biguint_string")]
     amount_out: BigUint,
-    /// Maximum negative slippage as a fraction [0.0, 1.0). Used off-chain to derive the
+    /// Maximum negative slippage as a fraction. Used off-chain to derive the
     /// router's `minAmountOut` argument: `amount_out * (1 - slippage)`.
-    /// Example: 0.0025 = 0.25%.
+    /// The router rejects a `minAmountOut` more than 20% below `expectedAmountOut`,
+    /// so values above 0.2 produce reverting calldata. Example: 0.0025 = 0.25%.
     slippage: f64,
     /// List of swaps to fulfill the solution.
     swaps: Vec<Swap>,

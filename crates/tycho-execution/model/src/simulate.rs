@@ -39,10 +39,13 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     // assumption: all swap methods revert if `expected_amount_out = 0`.
     // no need to simulate it.
     let expected_amount_out = params.request("expected_amount_out", [1, 10000])?;
-    // assumption: all swap methods revert if `min_amount_out = 0` or
-    // `min_amount_out > expected_amount_out`. no need to simulate it.
-    // 1 is the loosest valid guardrail, `expected_amount_out` the tightest.
-    let min_amount_out = params.request("min_amount_out", [1, expected_amount_out])?;
+    // assumption: all swap methods revert if `min_amount_out > expected_amount_out`
+    // or if it is more than MAX_SLIPPAGE_TOLERANCE_BPS below it. no need to simulate it.
+    // The 20% floor (rounded up) is the loosest valid guardrail,
+    // `expected_amount_out` the tightest.
+    let floor_numerator = expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS);
+    let slippage_floor = (floor_numerator + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
+    let min_amount_out = params.request("min_amount_out", [slippage_floor, expected_amount_out])?;
     // assumption: all swap methods revert if `receiver = address(0)`.
     // no need to simulate it.
     let receiver = params.request("receiver", Address::VARIANTS_EXCEPT_ZERO)?;

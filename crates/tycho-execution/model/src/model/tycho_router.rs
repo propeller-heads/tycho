@@ -16,6 +16,10 @@ use crate::{
     state::State,
 };
 
+/// Guardrail: `min_amount_out` may be at most 20% below `expected_amount_out`.
+pub const MAX_SLIPPAGE_TOLERANCE_BPS: i64 = 2_000;
+pub const BPS_DENOMINATOR: i64 = 10_000;
+
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TychoRouter.sol#L184>
 pub fn split_swap(
     params: &Params,
@@ -322,7 +326,10 @@ fn _split_swap_checked(
     if expected_amount_out == 0 {
         return Err(Error::revert("_split_swap_checked: expected_amount_out == 0"));
     }
-    if min_amount_out == 0 || min_amount_out > expected_amount_out {
+    if min_amount_out > expected_amount_out ||
+        min_amount_out * BPS_DENOMINATOR <
+            expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
+    {
         return Err(Error::revert("_split_swap_checked: invalid min_amount_out"));
     }
 
@@ -411,7 +418,10 @@ fn _single_swap(
     if expected_amount_out == 0 {
         return Err(Error::revert("_single_swap: expected_amount_out == 0"));
     }
-    if min_amount_out == 0 || min_amount_out > expected_amount_out {
+    if min_amount_out > expected_amount_out ||
+        min_amount_out * BPS_DENOMINATOR <
+            expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
+    {
         return Err(Error::revert("_single_swap: invalid min_amount_out"));
     }
 
@@ -505,7 +515,10 @@ fn _sequential_swap_checked(
     if expected_amount_out == 0 {
         return Err(Error::revert("_sequential_swap_checked: expected_amount_out == 0"));
     }
-    if min_amount_out == 0 || min_amount_out > expected_amount_out {
+    if min_amount_out > expected_amount_out ||
+        min_amount_out * BPS_DENOMINATOR <
+            expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
+    {
         return Err(Error::revert("_sequential_swap_checked: invalid min_amount_out"));
     }
 

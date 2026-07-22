@@ -204,6 +204,65 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         );
     }
 
+    function testSingleSwapMinAmountOutBelowSlippageFloor() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        // minAmountOut more than 20% below expectedAmountOut is rejected
+        uint256 belowFloor = 0.8 ether - 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__InvalidMinAmountOut.selector, belowFloor, 1 ether
+            )
+        );
+        tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1 ether,
+            belowFloor,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+    }
+
+    function testSingleSwapMinAmountOutAtSlippageFloor() public {
+        // A minAmountOut exactly 20% below expectedAmountOut is accepted
+        uint256 amountIn = 1 ether;
+
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        uint256 expectedAmountOut = 2000 * 1e18;
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            expectedAmountOut,
+            expectedAmountOut * 8000 / 10000,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+
+        assertEq(amountOut, 2018817438608734439722);
+        vm.stopPrank();
+    }
+
     function testSingleSwapZeroInput() public {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
