@@ -170,5 +170,23 @@
       "contract": "NativeWrapExecutor",
       "args": ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
     }
+  },
+  "plasma": {
+    "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
+    "fluid_v1": {
+      "contract": "FluidV1Executor",
+      "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
+    },
+    "vm:curve": {
+      "contract": "CurveExecutor",
+      "args": [
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "0x0000000000000000000000000000000000000000"
+      ]
+    },
+    "native_wrapper": {
+      "contract": "NativeWrapExecutor",
+      "args": ["0x6100E367285b01F48D07953803A2d8dCA5D19873"]
+    }
   }
 }

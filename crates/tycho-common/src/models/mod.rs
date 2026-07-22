@@ -93,6 +93,7 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    Plasma,
     /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
     Custom(CustomChainId),
 }
@@ -115,6 +116,7 @@ impl Chain {
             "bsc" => Some(Chain::Bsc),
             "unichain" => Some(Chain::Unichain),
             "polygon" => Some(Chain::Polygon),
+            "plasma" => Some(Chain::Plasma),
             _ => None,
         }
     }
@@ -152,6 +154,7 @@ impl Display for Chain {
             Chain::Bsc => f.write_str("bsc"),
             Chain::Unichain => f.write_str("unichain"),
             Chain::Polygon => f.write_str("polygon"),
+            Chain::Plasma => f.write_str("plasma"),
             Chain::Custom(name) => f.write_str(name.as_str()),
         }
     }
@@ -168,6 +171,7 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Bsc => Chain::Bsc,
             dto::Chain::Unichain => Chain::Unichain,
             dto::Chain::Polygon => Chain::Polygon,
+            dto::Chain::Plasma => Chain::Plasma,
             dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
                 panic!(
                     "received custom chain '{name}' with no registered config: {e}; install it via \
@@ -230,6 +234,18 @@ fn native_pol(chain: Chain) -> Token {
     )
 }
 
+fn native_xpl(chain: Chain) -> Token {
+    Token::new(
+        &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+        "XPL",
+        18,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
 /// Looks up a custom chain's config in the registry, returning [`ChainConfigError::UnknownChain`]
 /// when it is absent.
 fn try_resolve_custom<'a>(
@@ -274,6 +290,10 @@ fn wrapped_native_pol(chain: Chain, address: &str) -> Token {
     Token::new(&Bytes::from_str(address).unwrap(), "WMATIC", 18, 0, &[Some(2300)], chain, 100)
 }
 
+fn wrapped_native_xpl(chain: Chain, address: &str) -> Token {
+    Token::new(&Bytes::from_str(address).unwrap(), "WXPL", 18, 0, &[Some(2300)], chain, 100)
+}
+
 fn wrapped_native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
     let addr = Bytes::from(
         cfg.wrapped_native
@@ -312,6 +332,7 @@ impl Chain {
             Chain::Bsc => 56,
             Chain::Unichain => 130,
             Chain::Polygon => 137,
+            Chain::Plasma => 9745,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
         })
     }
@@ -361,6 +382,10 @@ impl Chain {
             (Chain::Polygon, TvlThresholdTier::Low) => 200_000.0,
             (Chain::Polygon, TvlThresholdTier::Medium) => 2_000_000.0,
 
+            // Plasma (XPL ≈ $0.10): 200_000 XPL ≈ $20K, 2_000_000 XPL ≈ $200K
+            (Chain::Plasma, TvlThresholdTier::Low) => 200_000.0,
+            (Chain::Plasma, TvlThresholdTier::Medium) => 2_000_000.0,
+
             // BSC (BNB ≈ $630): 32 BNB ≈ $20K, 320 BNB ≈ $200K
             (Chain::Bsc, TvlThresholdTier::Low) => 32.0,
             (Chain::Bsc, TvlThresholdTier::Medium) => 320.0,
@@ -398,6 +423,7 @@ impl Chain {
             Chain::Bsc => native_bsc(Chain::Bsc),
             Chain::Unichain => native_eth(Chain::Unichain),
             Chain::Polygon => native_pol(Chain::Polygon),
+            Chain::Plasma => native_xpl(Chain::Plasma),
             Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
         })
     }
@@ -437,6 +463,9 @@ impl Chain {
             Chain::Polygon => {
                 wrapped_native_pol(Chain::Polygon, "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
             }
+            Chain::Plasma => {
+                wrapped_native_xpl(Chain::Plasma, "0x6100E367285b01F48D07953803A2d8dCA5D19873")
+            }
             Chain::Custom(id) => {
                 wrapped_native_custom(*self, try_resolve_custom(id, chain_registry())?)
             }
@@ -461,6 +490,7 @@ impl Chain {
             Chain::Bsc => 1,
             Chain::Unichain => 1,
             Chain::Polygon => 2,
+            Chain::Plasma => 1,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
         })
     }

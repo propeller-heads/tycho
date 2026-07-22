@@ -72,6 +72,12 @@ const deploy_protocols = {
         "native_wrapper",
         "rfq:metric",
     ],
+    "plasma": [
+        "uniswap_v3",
+        "fluid_v1",
+        "vm:curve",
+        "native_wrapper",
+    ],
 };
 
 async function main() {

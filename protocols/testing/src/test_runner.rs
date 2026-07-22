@@ -94,6 +94,7 @@ pub struct TestRunner {
     test_type: TestType,
     chain: Chain,
     db_url: String,
+    tycho_server_port: u16,
     substreams_path: PathBuf,
     config_file_path: PathBuf,
     vm_simulation_traces: bool,
@@ -113,6 +114,7 @@ impl TestRunner {
         protocol: String,
         db_url: String,
         rpc_url: String,
+        tycho_server_port: u16,
         vm_simulation_traces: bool,
         reuse_last_sync: bool,
     ) -> miette::Result<Self> {
@@ -143,6 +145,7 @@ impl TestRunner {
             test_type,
             chain,
             db_url,
+            tycho_server_port,
             substreams_path,
             config_file_path,
             vm_simulation_traces,
@@ -257,7 +260,7 @@ impl TestRunner {
         });
 
         // Wait for protocol to be synced before starting live testing
-        let tycho_client = TychoClient::new("http://localhost:4242", Some("dummy".to_string()))
+        let tycho_client = TychoClient::new(&self.tycho_http_url(), Some("dummy".to_string()))
             .into_diagnostic()
             .wrap_err("Failed to create Tycho client for sync check")?;
 
@@ -281,7 +284,7 @@ impl TestRunner {
         let chain = self.chain;
         // Load tokens for the stream
         let all_tokens = tycho_simulation::utils::load_all_tokens(
-            "localhost:4242",
+            &self.tycho_host(),
             true,
             Some("dummy"),
             true,
@@ -296,7 +299,8 @@ impl TestRunner {
         let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
 
         let protocol_stream_builder =
-            ProtocolStreamBuilder::new("localhost:4242/", chain).skip_state_decode_failures(true);
+            ProtocolStreamBuilder::new(&format!("{}/", self.tycho_host()), chain)
+                .skip_state_decode_failures(true);
 
         let adapter_contract_path = self.get_adapter_contract_path(
             &config.adapter_contract,
@@ -637,14 +641,33 @@ impl TestRunner {
         Ok(())
     }
 
-    async fn empty_database(&self) -> Result<(), tokio_postgres::Error> {
-        // Remove db name from URL. This is required because we cannot drop a database that we are
-        // currently connected to.
-        let base_url = match self.db_url.rfind('/') {
-            Some(pos) => &self.db_url[..pos],
-            None => self.db_url.as_str(),
+    /// Host and port of the spawned tycho-indexer server, e.g. `localhost:4242`.
+    fn tycho_host(&self) -> String {
+        format!("localhost:{}", self.tycho_server_port)
+    }
+
+    /// HTTP URL of the spawned tycho-indexer server, e.g. `http://localhost:4242`.
+    fn tycho_http_url(&self) -> String {
+        format!("http://{}", self.tycho_host())
+    }
+
+    async fn empty_database(&self) -> miette::Result<()> {
+        // Split the URL into the server part and the database name. We must connect without the
+        // database name because we cannot drop a database that we are currently connected to.
+        let (base_url, db_name) = match self.db_url.rfind('/') {
+            Some(pos) => (&self.db_url[..pos], &self.db_url[pos + 1..]),
+            None => (self.db_url.as_str(), ""),
         };
-        let (client, connection) = tokio_postgres::connect(base_url, NoTls).await?;
+        if db_name.is_empty() {
+            return Err(miette!(
+                "Database URL '{}' has no database name; expected e.g. \
+                 postgres://user:password@host:port/db_name",
+                self.db_url
+            ));
+        }
+        let (client, connection) = tokio_postgres::connect(base_url, NoTls)
+            .await
+            .into_diagnostic()?;
 
         // Spawn the connection handler
         tokio::spawn(async move {
@@ -653,12 +676,16 @@ impl TestRunner {
             }
         });
 
+        // Identifiers cannot be bound as query parameters; quote them, escaping embedded quotes.
+        let quoted_name = format!("\"{}\"", db_name.replace('"', "\"\""));
         client
-            .execute("DROP DATABASE IF EXISTS \"tycho_indexer_0\" WITH (FORCE)", &[])
-            .await?;
+            .execute(&format!("DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"), &[])
+            .await
+            .into_diagnostic()?;
         client
-            .execute("CREATE DATABASE \"tycho_indexer_0\"", &[])
-            .await?;
+            .execute(&format!("CREATE DATABASE {quoted_name}"), &[])
+            .await
+            .into_diagnostic()?;
 
         Ok(())
     }
@@ -667,10 +694,14 @@ impl TestRunner {
         if !self.reuse_last_sync {
             self.empty_database()
                 .await
-                .into_diagnostic()
                 .wrap_err("Failed to empty the database")?;
         }
-        Ok(TychoRunner::new(self.chain, self.db_url.to_string(), initialized_accounts))
+        Ok(TychoRunner::new(
+            self.chain,
+            self.db_url.to_string(),
+            self.tycho_server_port,
+            initialized_accounts,
+        ))
     }
 
     fn run_tvl_import(&self) -> miette::Result<()> {
@@ -768,7 +799,7 @@ impl TestRunner {
         info!("Fetching protocol data from Tycho with stop block {}...", stop_block);
 
         // Create Tycho client for the RPC server
-        let tycho_client = TychoClient::new("http://localhost:4242", None)
+        let tycho_client = TychoClient::new(&self.tycho_http_url(), None)
             .into_diagnostic()
             .wrap_err("Failed to create Tycho client")?;
 
@@ -1478,6 +1509,7 @@ mod tests {
             "test-protocol".to_string(),
             "".to_string(),
             rpc_url,
+            4242,
             false,
             false,
         )

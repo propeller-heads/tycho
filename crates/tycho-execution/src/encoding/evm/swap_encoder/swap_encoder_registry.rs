@@ -201,3 +201,32 @@ impl SwapEncoderRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_encoders_build_for_every_configured_chain() {
+        let chains = [
+            Chain::Ethereum,
+            Chain::Base,
+            Chain::Unichain,
+            Chain::Arbitrum,
+            Chain::Bsc,
+            Chain::Polygon,
+            Chain::Plasma,
+        ];
+        for chain in chains {
+            let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {
+                panic!("default encoders failed to build for chain {chain}: {e}")
+            });
+            assert!(
+                registry
+                    .get_encoder("uniswap_v3")
+                    .is_some(),
+                "chain {chain} is missing the uniswap_v3 encoder"
+            );
+        }
+    }
+}

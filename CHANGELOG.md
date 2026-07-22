@@ -1,3 +1,30 @@
+## [0.341.0](https://github.com/propeller-heads/tycho/compare/0.340.0...0.341.0) (2026-07-22)
+
+
+### Features
+
+* **testing:** support custom ports to run beside another tycho stack ([cdb6e4b](https://github.com/propeller-heads/tycho/commit/cdb6e4bff6630599c82c86755b437f54f9fd3a4b))
+* **testing:** support custom ports to run beside another tycho stack ([#1221](https://github.com/propeller-heads/tycho/issues/1221)) ([3fc41b7](https://github.com/propeller-heads/tycho/commit/3fc41b7034add38b8a869aa170a76bf4fb9a3621))
+
+## [0.340.0](https://github.com/propeller-heads/tycho/compare/0.339.1...0.340.0) (2026-07-20)
+
+
+### Features
+
+* add Plasma as a first-class chain ([99596e3](https://github.com/propeller-heads/tycho/commit/99596e3c24081731bbbcaf6963fc27f71439d147))
+* add Plasma chain support ([#1202](https://github.com/propeller-heads/tycho/issues/1202)) ([7126b7e](https://github.com/propeller-heads/tycho/commit/7126b7e6650147e717f1ec4ad522fc42cfe5fff4))
+* **execution:** add plasma deploy config and read fee setter from roles ([1c3e8cb](https://github.com/propeller-heads/tycho/commit/1c3e8cb97dba1ab20cb7b0b067e409f265cc3acf))
+* **execution:** register plasma contract addresses ([bd9fe33](https://github.com/propeller-heads/tycho/commit/bd9fe33ae9625023db3162546ce3d58ae3386358))
+
+## [0.339.1](https://github.com/propeller-heads/tycho/compare/0.339.0...0.339.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **tycho-common:** stop AccountUpdate::merge erasing code and balance ([634488e](https://github.com/propeller-heads/tycho/commit/634488ea3165020197603a07286fed12ddfdb8c5))
+* **tycho-simulation:** decode proxy-token updates as Update, not Creation ([0a7a317](https://github.com/propeller-heads/tycho/commit/0a7a31724ba94c4d50959ff3554e965d5b74448c))
+* **tycho:** stop producing code-less Creation account updates ([#1218](https://github.com/propeller-heads/tycho/issues/1218)) ([b9a5375](https://github.com/propeller-heads/tycho/commit/b9a537525fdae2318dcfd134b5110393b9895d65))
+
 ## [0.339.0](https://github.com/propeller-heads/tycho/compare/0.338.1...0.339.0) (2026-07-17)
 
 

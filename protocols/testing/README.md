@@ -32,6 +32,23 @@ cargo run -- range --package "base-aerodrome-slipstreams" --chain base
 docker compose down
 ```
 
+### Running alongside another Tycho stack
+
+The defaults collide with a locally running Tycho stack (Postgres on host port 5431, indexer
+on port 4242). Worse, each run drops and recreates the database named in `DATABASE_URL` — so
+never point it at a database another instance is using. To run in parallel, isolate all ports:
+
+```bash
+# Start a dedicated Postgres on a free host port
+DB_HOST_PORT=5433 docker compose up db -d
+
+# Point the test runner at it and pick a free indexer port
+export DATABASE_URL=postgres://postgres:mypassword@localhost:5433/tycho_indexer_0
+export TYCHO_SERVER_PORT=4243   # or pass --tycho-server-port 4243
+
+cargo run -- range --package "ethereum-balancer-v2"
+```
+
 ## How to Run with Docker
 
 ```bash

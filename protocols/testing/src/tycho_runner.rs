@@ -13,6 +13,7 @@ use tycho_simulation::tycho_common::models::Chain;
 pub struct TychoRunner {
     chain: Chain,
     db_url: String,
+    server_port: u16,
     initialized_accounts: Vec<String>,
 }
 
@@ -22,8 +23,13 @@ pub struct TychoRpcServer {
 }
 
 impl TychoRunner {
-    pub fn new(chain: Chain, db_url: String, initialized_accounts: Vec<String>) -> Self {
-        Self { chain, db_url, initialized_accounts }
+    pub fn new(
+        chain: Chain,
+        db_url: String,
+        server_port: u16,
+        initialized_accounts: Vec<String>,
+    ) -> Self {
+        Self { chain, db_url, server_port, initialized_accounts }
     }
 
     pub fn run_tycho(
@@ -46,6 +52,8 @@ impl TychoRunner {
         cmd.args([
             "--database-url",
             self.db_url.as_str(),
+            "--server-port",
+            &self.server_port.to_string(),
             "--endpoint",
             get_default_endpoint(&self.chain)
                 .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))
@@ -109,11 +117,18 @@ impl TychoRunner {
     pub fn start_rpc_server(&self) -> miette::Result<TychoRpcServer> {
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let db_url = self.db_url.clone();
+        let server_port = self.server_port.to_string();
 
         // Start the RPC server in a separate thread
         let thread_handle = thread::spawn(move || {
             let mut cmd = Command::new("tycho-indexer")
-                .args(["--database-url", db_url.as_str(), "rpc"])
+                .args([
+                    "--database-url",
+                    db_url.as_str(),
+                    "--server-port",
+                    server_port.as_str(),
+                    "rpc",
+                ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .env(
@@ -202,6 +217,8 @@ impl TychoRunner {
         cmd.args([
             "--database-url",
             self.db_url.as_str(),
+            "--server-port",
+            &self.server_port.to_string(),
             "--endpoint",
             get_default_endpoint(&self.chain)
                 .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))

@@ -15,8 +15,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: tycho_indexer_0
     command: postgres -c shared_preload_libraries=pg_partman_bgw,pg_cron -c cron.database_name=tycho_indexer_0
+    # Host port for Postgres. Override when 5431 is taken, e.g. by another tycho stack:
+    # DB_HOST_PORT=5433 docker compose up db -d
     ports:
-      - "5431:5432"
+      - "${DB_HOST_PORT:-5431}:5432"
     shm_size: "1gb"
     volumes:
       - postgres_data:/var/lib/postgresql/data

@@ -46,6 +46,7 @@ class Chain(str, Enum):
     zksync = "zksync"
     unichain = "unichain"
     polygon = "polygon"
+    plasma = "plasma"
 
 
 class CustomChain(BaseModel):
