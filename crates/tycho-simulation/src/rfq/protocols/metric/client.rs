@@ -409,10 +409,11 @@ mod tests {
         .unwrap()
     }
 
+    // Base: the only supported chain with pools published on the live API so far.
     fn live_client() -> MetricClient {
         let config = crate::rfq::constants::get_metric_config();
         MetricClient::new(
-            Chain::Ethereum,
+            Chain::Base,
             HashSet::new(),
             0.0,
             config.base_url,

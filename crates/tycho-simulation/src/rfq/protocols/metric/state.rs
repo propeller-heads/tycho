@@ -478,6 +478,30 @@ mod tests {
         )
     }
 
+    fn base_weth() -> Token {
+        Token::new(
+            &Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(2300)],
+            Chain::Base,
+            100,
+        )
+    }
+
+    fn base_usdc() -> Token {
+        Token::new(
+            &Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap(),
+            "USDC",
+            6,
+            0,
+            &[Some(1)],
+            Chain::Base,
+            100,
+        )
+    }
+
     fn state() -> MetricState {
         let weth = weth();
         let usdc = usdc();
@@ -858,15 +882,16 @@ mod tests {
     async fn test_live_metric_api_state_get_amount_out_and_signed_quote() {
         use crate::rfq::protocols::metric::models::PaginatedMetadataResponse;
 
-        let weth = weth();
-        let usdc = usdc();
+        // Base: the only supported chain with pools published on the live API so far.
+        let weth = base_weth();
+        let usdc = base_usdc();
         let config = crate::rfq::constants::get_metric_config();
         let base_url = config
             .base_url
             .trim_end_matches('/')
             .to_string();
         let client = MetricClient::new(
-            Chain::Ethereum,
+            Chain::Base,
             HashSet::from([weth.address.clone(), usdc.address.clone()]),
             0.0,
             base_url.clone(),
@@ -878,7 +903,7 @@ mod tests {
 
         let http_client = reqwest::Client::new();
         let metadata: PaginatedMetadataResponse = http_client
-            .get(format!("{base_url}/public/v1/evm/1/metadata"))
+            .get(format!("{base_url}/public/v1/evm/8453/metadata"))
             .header("accept", "application/json")
             .query(&[("count", "500")])
             .send()
@@ -897,7 +922,7 @@ mod tests {
             let checksummed =
                 alloy::primitives::Address::from_slice(&pool.pool_address).to_checksum(None);
             let mut request = http_client
-                .get(format!("{base_url}/public/v1/evm/1/{checksummed}/bid_ask"))
+                .get(format!("{base_url}/public/v1/evm/8453/{checksummed}/bid_ask"))
                 .header("accept", "application/json");
             if let Some(api_key) = &config.api_key {
                 request = request.bearer_auth(api_key);
@@ -920,7 +945,7 @@ mod tests {
         }
 
         let Some((metadata, bid_ask)) = selected else {
-            eprintln!("Metric live API returned no liquid Ethereum WETH/USDC pool; skipping");
+            eprintln!("Metric live API returned no liquid Base WETH/USDC pool; skipping");
             return;
         };
 
