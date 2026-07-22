@@ -70,10 +70,10 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
             tvl_fiat: None,
         };
         let bid_ask = MetricBidAskResponse {
-            bid_adj: read_string_attr(&attrs, "bid_adj")?,
-            ask_adj: read_string_attr(&attrs, "ask_adj")?,
-            total_token0_available: Some(read_string_attr(&attrs, "total_token0_available")?),
-            total_token1_available: Some(read_string_attr(&attrs, "total_token1_available")?),
+            bid_adj: read_biguint_attr(&attrs, "bid_adj")?,
+            ask_adj: read_biguint_attr(&attrs, "ask_adj")?,
+            total_token0_available: Some(read_biguint_attr(&attrs, "total_token0_available")?),
+            total_token1_available: Some(read_biguint_attr(&attrs, "total_token1_available")?),
             server_ts: read_u64_attr(&attrs, "server_ts")?,
             depth: read_optional_depth_attr(&attrs, "depth")?,
         };
@@ -98,6 +98,15 @@ fn read_string_attr(
     })?;
     String::from_utf8(bytes.to_vec())
         .map_err(|_| InvalidSnapshotError::ValueError(format!("Invalid {name} encoding")))
+}
+
+fn read_biguint_attr(
+    attrs: &HashMap<String, Bytes>,
+    name: &str,
+) -> Result<num_bigint::BigUint, InvalidSnapshotError> {
+    read_string_attr(attrs, name)?
+        .parse()
+        .map_err(|_| InvalidSnapshotError::ValueError(format!("Invalid {name} integer")))
 }
 
 fn read_u64_attr(attrs: &HashMap<String, Bytes>, name: &str) -> Result<u64, InvalidSnapshotError> {

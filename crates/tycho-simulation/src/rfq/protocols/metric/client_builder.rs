@@ -30,6 +30,10 @@ impl MetricClientBuilder {
         }
     }
 
+    /// Restricts the emitted components to pools whose token0 and token1 are both in `tokens`.
+    ///
+    /// Leaving this unset (or passing an empty set) disables the filter: every pool the API
+    /// returns is emitted.
     pub fn tokens(mut self, tokens: HashSet<Bytes>) -> Self {
         self.tokens = tokens;
         self

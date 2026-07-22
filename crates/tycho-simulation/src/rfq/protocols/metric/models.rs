@@ -3,12 +3,50 @@ use std::str::FromStr;
 use alloy::primitives::Address;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tycho_common::Bytes;
 
 use crate::rfq::errors::RFQError;
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
+
+/// Metric returns numeric fields as decimal strings. Parse them once at deserialization so the
+/// hot pricing paths never re-parse, and serialize back to the same string form.
+mod biguint_string {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(value: &BigUint, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BigUint, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        BigUint::from_str(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// `Option` variant of [`biguint_string`] for nullable numeric fields.
+mod option_biguint_string {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<BigUint>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => serializer.collect_str(value),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<BigUint>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|raw| BigUint::from_str(&raw).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
 
 /// The `PaginatedMetadataResponse` envelope returned by `GET /public/v1/evm/{chain_id}/metadata`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -45,16 +83,18 @@ where
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricBidAskResponse {
-    #[serde(rename = "bidAdj")]
-    pub bid_adj: String,
-    #[serde(rename = "askAdj")]
-    pub ask_adj: String,
+    /// Fee-adjusted bid price, Q64.64.
+    #[serde(rename = "bidAdj", with = "biguint_string")]
+    pub bid_adj: BigUint,
+    /// Fee-adjusted ask price, Q64.64.
+    #[serde(rename = "askAdj", with = "biguint_string")]
+    pub ask_adj: BigUint,
     /// Token0 available for the quote (raw units). `None` when the pool cannot currently quote.
-    #[serde(rename = "totalToken0Available", default)]
-    pub total_token0_available: Option<String>,
+    #[serde(rename = "totalToken0Available", default, with = "option_biguint_string")]
+    pub total_token0_available: Option<BigUint>,
     /// Token1 available for the quote (raw units). `None` when the pool cannot currently quote.
-    #[serde(rename = "totalToken1Available", default)]
-    pub total_token1_available: Option<String>,
+    #[serde(rename = "totalToken1Available", default, with = "option_biguint_string")]
+    pub total_token1_available: Option<BigUint>,
     /// Server Unix timestamp (seconds) when the quote was produced.
     #[serde(rename = "serverTs")]
     pub server_ts: u64,
@@ -74,79 +114,56 @@ pub struct MetricDepth {
 pub struct MetricDepthBin {
     #[serde(rename = "binIdx")]
     pub bin_idx: i64,
-    pub price: String,
+    /// Fee-adjusted price at this bin boundary, Q64.64.
+    #[serde(with = "biguint_string")]
+    pub price: BigUint,
     /// Cumulative output-token volume from the current position to this boundary (raw units).
-    #[serde(rename = "cumulativeVolume")]
-    pub cumulative_volume: String,
+    #[serde(rename = "cumulativeVolume", with = "biguint_string")]
+    pub cumulative_volume: BigUint,
     /// Cumulative input-token amount required to reach this boundary (raw units). Used to drive
     /// the input-based depth walk so pricing matches Metric's own accounting.
-    #[serde(rename = "cumulativeInputVolume")]
-    pub cumulative_input_volume: String,
+    #[serde(rename = "cumulativeInputVolume", with = "biguint_string")]
+    pub cumulative_input_volume: BigUint,
 }
 
 impl MetricBidAskResponse {
     pub fn bid_price(&self) -> Result<f64, RFQError> {
-        q64_decimal_to_f64(&self.bid_adj)
+        q64_to_f64(&self.bid_adj)
     }
 
     pub fn ask_price(&self) -> Result<f64, RFQError> {
-        q64_decimal_to_f64(&self.ask_adj)
+        q64_to_f64(&self.ask_adj)
     }
 
     pub fn total_token0_available(&self) -> Result<BigUint, RFQError> {
-        parse_optional_biguint(&self.total_token0_available, "totalToken0Available")
+        self.total_token0_available
+            .clone()
+            .ok_or_else(|| RFQError::ParsingError("totalToken0Available is null".to_string()))
     }
 
     pub fn total_token1_available(&self) -> Result<BigUint, RFQError> {
-        parse_optional_biguint(&self.total_token1_available, "totalToken1Available")
+        self.total_token1_available
+            .clone()
+            .ok_or_else(|| RFQError::ParsingError("totalToken1Available is null".to_string()))
     }
 
     /// Whether the pool can currently be quoted. The API has no `quoteAvailable` flag, so
-    /// availability is inferred from parseable bid/ask prices, both non-null availability figures,
-    /// and a non-empty order book. Pools with empty depth (e.g. `bidAdj=0` / `askAdj` sentinel and
-    /// no bins) are treated as not quotable, since depth-based pricing has no bins to walk.
+    /// availability is inferred from both non-null availability figures and a non-empty order
+    /// book. Pools with empty depth (e.g. `bidAdj=0` / `askAdj` sentinel and no bins) are treated
+    /// as not quotable, since depth-based pricing has no bins to walk.
     pub fn is_quotable(&self) -> bool {
-        self.bid_price().is_ok() &&
-            self.ask_price().is_ok() &&
-            self.total_token0_available().is_ok() &&
-            self.total_token1_available().is_ok() &&
+        self.total_token0_available.is_some() &&
+            self.total_token1_available.is_some() &&
             !(self.depth.bids.is_empty() && self.depth.asks.is_empty())
     }
 }
 
-impl MetricDepthBin {
-    pub fn price(&self) -> Result<f64, RFQError> {
-        q64_decimal_to_f64(&self.price)
-    }
-
-    pub fn cumulative_volume(&self) -> Result<BigUint, RFQError> {
-        parse_biguint(&self.cumulative_volume, "depth.cumulativeVolume")
-    }
-
-    pub fn cumulative_input_volume(&self) -> Result<BigUint, RFQError> {
-        parse_biguint(&self.cumulative_input_volume, "depth.cumulativeInputVolume")
-    }
-}
-
-// Metric's APIs return Q64 values as decimal strings. Convert only when pricing.
-pub fn q64_decimal_to_f64(value: &str) -> Result<f64, RFQError> {
-    let raw = parse_biguint(value, "Q64 price")?;
-    let raw = raw
+/// Converts a Q64.64 fixed-point value to an f64 price.
+pub fn q64_to_f64(value: &BigUint) -> Result<f64, RFQError> {
+    let raw = value
         .to_f64()
         .ok_or_else(|| RFQError::ParsingError(format!("Q64 price does not fit in f64: {value}")))?;
     Ok(raw / Q64_FLOAT)
-}
-
-fn parse_biguint(value: &str, field: &str) -> Result<BigUint, RFQError> {
-    BigUint::from_str(value)
-        .map_err(|_| RFQError::ParsingError(format!("Failed to parse {field}: {value}")))
-}
-
-fn parse_optional_biguint(value: &Option<String>, field: &str) -> Result<BigUint, RFQError> {
-    let value = value
-        .as_deref()
-        .ok_or_else(|| RFQError::ParsingError(format!("{field} is null")))?;
-    parse_biguint(value, field)
 }
 
 #[cfg(test)]
@@ -154,9 +171,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_q64_decimal_to_f64() {
-        let one = "18446744073709551616";
-        assert_eq!(q64_decimal_to_f64(one).unwrap(), 1.0);
+    fn test_q64_to_f64() {
+        let one = BigUint::from_str("18446744073709551616").unwrap();
+        assert_eq!(q64_to_f64(&one).unwrap(), 1.0);
     }
 
     #[test]
@@ -188,19 +205,18 @@ mod tests {
 
         assert_eq!(response.depth.asks.len(), 1);
         assert_eq!(response.depth.bids[0].bin_idx, -1);
-        assert_eq!(response.depth.asks[0].price().unwrap(), 3100.0);
+        assert_eq!(q64_to_f64(&response.depth.asks[0].price).unwrap(), 3100.0);
+        assert_eq!(response.depth.bids[0].cumulative_volume, BigUint::from(3_000_000_000u64));
         assert_eq!(
-            response.depth.bids[0]
-                .cumulative_volume()
-                .unwrap(),
-            BigUint::from(3_000_000_000u64)
-        );
-        assert_eq!(
-            response.depth.bids[0]
-                .cumulative_input_volume()
-                .unwrap(),
+            response.depth.bids[0].cumulative_input_volume,
             BigUint::from(1_000_000_000_000_000_000u64)
         );
+
+        // Numeric fields round-trip back to the same decimal-string JSON form.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["bidAdj"], "55340232221128654848000");
+        assert_eq!(serialized["totalToken1Available"], "3000000000");
+        assert_eq!(serialized["depth"]["asks"][0]["cumulativeInputVolume"], "3100000000");
     }
 
     #[test]

@@ -20,6 +20,9 @@ use crate::rfq::protocols::metric::{
     models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
 };
 
+/// Gas estimate for one MetricExecutor swap (pool swap + callback settlement).
+const METRIC_SWAP_GAS: u64 = 170_000;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MetricState {
     pub base_token: Token,
@@ -84,7 +87,7 @@ impl MetricState {
 
         // Some pools still return an empty depth object. In that case the top-of-book quote is
         // the best signal we have, so keep the flat-price path.
-        let Some(depth_max_output) = depth_max_output(bins)? else {
+        let Some(depth_max_output) = depth_max_output(bins) else {
             return Ok(None);
         };
 
@@ -170,7 +173,7 @@ impl ProtocolSim for MetricState {
         if let Some(quote) = self.quote_with_depth(direction, &amount_in, &max_output)? {
             let res = GetAmountOutResult {
                 amount: quote.amount_out,
-                gas: BigUint::from(170_000u64),
+                gas: BigUint::from(METRIC_SWAP_GAS),
                 new_state: self.clone_box(),
             };
             if quote.exhausted {
@@ -203,7 +206,7 @@ impl ProtocolSim for MetricState {
             amount: amount_out
                 .clone()
                 .min(max_output.clone()),
-            gas: BigUint::from(170_000u64),
+            gas: BigUint::from(METRIC_SWAP_GAS),
             new_state: self.clone_box(),
         };
         if amount_out > max_output {
@@ -247,16 +250,18 @@ impl ProtocolSim for MetricState {
         // last bin's cumulativeInputVolume. Prefer it over reconstructing the input from the
         // top-of-book price, which understates the limit by the cumulative price impact.
         if let Some(last_bin) = bins.last() {
-            let depth_output = last_bin.cumulative_volume()?;
-            if depth_output <= aggregate {
-                return Ok((last_bin.cumulative_input_volume()?, depth_output));
+            if last_bin.cumulative_volume <= aggregate {
+                return Ok((
+                    last_bin.cumulative_input_volume.clone(),
+                    last_bin.cumulative_volume.clone(),
+                ));
             }
         }
 
         // No depth bins, or the aggregate inventory truncates the walkable depth: cap the output
         // at the aggregate and estimate the matching input from the top-of-book price. Mirrors
         // get_amount_out, which rejects anything beyond this cap as depth-exhausted.
-        let buy_limit = cap_to_depth(aggregate, bins)?;
+        let buy_limit = cap_to_depth(aggregate, bins);
         let buy_limit_human = buy_limit.to_f64().ok_or_else(|| {
             SimulationError::RecoverableError("Can't convert buy limit to f64".into())
         })? / 10_f64.powi(buy_decimals as i32);
@@ -311,13 +316,9 @@ impl ProtocolSim for MetricState {
     }
 }
 
-fn depth_max_output(bins: &[MetricDepthBin]) -> Result<Option<BigUint>, SimulationError> {
+fn depth_max_output(bins: &[MetricDepthBin]) -> Option<BigUint> {
     bins.last()
-        .map(|bin| {
-            bin.cumulative_volume()
-                .map_err(SimulationError::from)
-        })
-        .transpose()
+        .map(|bin| bin.cumulative_volume.clone())
 }
 
 /// Caps an aggregate-inventory output limit by the published depth, when present.
@@ -325,10 +326,10 @@ fn depth_max_output(bins: &[MetricDepthBin]) -> Result<Option<BigUint>, Simulati
 /// Returns the smaller of `aggregate` and the cumulative depth volume so the reported limit
 /// never exceeds what a depth walk can actually fill. Pools that expose no depth bins fall back
 /// to `aggregate`.
-fn cap_to_depth(aggregate: BigUint, bins: &[MetricDepthBin]) -> Result<BigUint, SimulationError> {
-    match depth_max_output(bins)? {
-        Some(depth) => Ok(depth.min(aggregate)),
-        None => Ok(aggregate),
+fn cap_to_depth(aggregate: BigUint, bins: &[MetricDepthBin]) -> BigUint {
+    match depth_max_output(bins) {
+        Some(depth) => depth.min(aggregate),
+        None => aggregate,
     }
 }
 
@@ -357,17 +358,17 @@ fn depth_output_for_input(
         // Metric reports both sides cumulatively to each boundary: output volume in output-token
         // raw units and the input required to reach it in input-token raw units. Adjacent
         // differences give the per-bin amounts.
-        let cumulative_output = bin.cumulative_volume()?;
-        let cumulative_input = bin.cumulative_input_volume()?;
-        if cumulative_output < previous_output || cumulative_input < previous_input {
+        let cumulative_output = &bin.cumulative_volume;
+        let cumulative_input = &bin.cumulative_input_volume;
+        if cumulative_output < &previous_output || cumulative_input < &previous_input {
             return Err(SimulationError::RecoverableError(
                 "Metric depth cumulative volumes are not monotonic".into(),
             ));
         }
-        let volume_in_bin = &cumulative_output - &previous_output;
-        let input_in_bin = &cumulative_input - &previous_input;
-        previous_output = cumulative_output;
-        previous_input = cumulative_input;
+        let volume_in_bin = cumulative_output - &previous_output;
+        let input_in_bin = cumulative_input - &previous_input;
+        previous_output = cumulative_output.clone();
+        previous_input = cumulative_input.clone();
 
         // Price-grid bins without liquidity carry neither volume nor input.
         if volume_in_bin.is_zero() && input_in_bin.is_zero() {
@@ -449,6 +450,10 @@ mod tests {
     use super::*;
     use crate::rfq::protocols::metric::{client::MetricClient, models::MetricDepth};
 
+    fn big(value: &str) -> BigUint {
+        value.parse().unwrap()
+    }
+
     fn weth() -> Token {
         Token::new(
             &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
@@ -484,11 +489,11 @@ mod tests {
         };
         let bid_ask = MetricBidAskResponse {
             // 3000 * 2^64
-            bid_adj: "55340232221128654848000".to_string(),
+            bid_adj: big("55340232221128654848000"),
             // 3010 * 2^64
-            ask_adj: "55524699661865750400000".to_string(),
-            total_token0_available: Some("10000000000000000000".to_string()),
-            total_token1_available: Some("30000000000".to_string()),
+            ask_adj: big("55524699661865750400000"),
+            total_token0_available: Some(big("10000000000000000000")),
+            total_token1_available: Some(big("30000000000")),
             server_ts: 100,
             depth: MetricDepth::default(),
         };
@@ -532,7 +537,7 @@ mod tests {
     #[test]
     fn test_get_amount_out_caps_to_available_liquidity() {
         let mut state = state();
-        state.bid_ask.total_token1_available = Some("1500000000".to_string());
+        state.bid_ask.total_token1_available = Some(big("1500000000"));
         let err = state
             .get_amount_out(
                 BigUint::from(1_000_000_000_000_000_000u128),
@@ -550,11 +555,11 @@ mod tests {
         state.bid_ask.depth.bids = vec![MetricDepthBin {
             bin_idx: 0,
             // 2900 * 2^64
-            price: "53495557813757699686400".to_string(),
+            price: big("53495557813757699686400"),
             // Only 3000 USDC of depth, far less than the 30000 USDC aggregate inventory.
-            cumulative_volume: "3000000000".to_string(),
+            cumulative_volume: big("3000000000"),
             // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
-            cumulative_input_volume: "1016949152542372881".to_string(),
+            cumulative_input_volume: big("1016949152542372881"),
         }];
 
         let err = state
@@ -583,11 +588,11 @@ mod tests {
         state.bid_ask.depth.asks = vec![MetricDepthBin {
             bin_idx: 0,
             // 3100 * 2^64
-            price: "57184906628499610009600".to_string(),
-            cumulative_volume: cap.to_string(),
+            price: big("57184906628499610009600"),
+            cumulative_volume: big(cap),
             // Full-bin input at avg price 3055 (~6.5756 WETH * 3055) ≈ 20088 USDC, below the
             // 30000 USDC input so the whole bin is consumed and the trade is depth-exhausted.
-            cumulative_input_volume: "20088000000".to_string(),
+            cumulative_input_volume: big("20088000000"),
         }];
 
         let err = state
@@ -615,11 +620,11 @@ mod tests {
         state.bid_ask.depth.bids = vec![MetricDepthBin {
             bin_idx: 0,
             // 2900 * 2^64
-            price: "53495557813757699686400".to_string(),
+            price: big("53495557813757699686400"),
             // 1500 USDC of depth, below the 30000 USDC aggregate inventory.
-            cumulative_volume: "1500000000".to_string(),
+            cumulative_volume: big("1500000000"),
             // 1500 USDC / avg price 2950 ≈ 0.508 WETH.
-            cumulative_input_volume: "508474576271186440".to_string(),
+            cumulative_input_volume: big("508474576271186440"),
         }];
 
         let (sell_limit, buy_limit) = state
@@ -638,13 +643,13 @@ mod tests {
         let mut state = state();
         // Aggregate inventory (1000 USDC) is below the 3000 USDC depth total, so the exact
         // last-bin input no longer applies and the limit falls back to the top-of-book estimate.
-        state.bid_ask.total_token1_available = Some("1000000000".to_string());
+        state.bid_ask.total_token1_available = Some(big("1000000000"));
         state.bid_ask.depth.bids = vec![MetricDepthBin {
             bin_idx: 0,
             // 2900 * 2^64
-            price: "53495557813757699686400".to_string(),
-            cumulative_volume: "3000000000".to_string(),
-            cumulative_input_volume: "1016949152542372881".to_string(),
+            price: big("53495557813757699686400"),
+            cumulative_volume: big("3000000000"),
+            cumulative_input_volume: big("1016949152542372881"),
         }];
 
         let (sell_limit, buy_limit) = state
@@ -676,10 +681,10 @@ mod tests {
         state.bid_ask.depth.bids = vec![MetricDepthBin {
             bin_idx: 0,
             // 2900 * 2^64
-            price: "53495557813757699686400".to_string(),
-            cumulative_volume: "3000000000".to_string(),
+            price: big("53495557813757699686400"),
+            cumulative_volume: big("3000000000"),
             // Full-bin input at avg price 2950 (3000 USDC / 2950) ≈ 1.0169 WETH.
-            cumulative_input_volume: "1016949152542372881".to_string(),
+            cumulative_input_volume: big("1016949152542372881"),
         }];
 
         let result = state
@@ -701,10 +706,10 @@ mod tests {
         state.bid_ask.depth.asks = vec![MetricDepthBin {
             bin_idx: 0,
             // 3100 * 2^64
-            price: "57184906628499610009600".to_string(),
-            cumulative_volume: "1000000000000000000".to_string(),
+            price: big("57184906628499610009600"),
+            cumulative_volume: big("1000000000000000000"),
             // Full-bin input at avg price 3055 (1 WETH * 3055) = 3055 USDC.
-            cumulative_input_volume: "3055000000".to_string(),
+            cumulative_input_volume: big("3055000000"),
         }];
 
         let result = state
@@ -719,9 +724,9 @@ mod tests {
         MetricDepthBin {
             bin_idx: 0,
             // 2900 * 2^64; the integer walk prices from the volume/input columns, not this field.
-            price: "53495557813757699686400".to_string(),
-            cumulative_volume: cumulative_volume.to_string(),
-            cumulative_input_volume: cumulative_input_volume.to_string(),
+            price: big("53495557813757699686400"),
+            cumulative_volume: big(cumulative_volume),
+            cumulative_input_volume: big(cumulative_input_volume),
         }
     }
 

@@ -1,3 +1,8 @@
+//! Metric RFQ client for the `api.metric.xyz` API.
+//!
+//! API and integration docs: <https://oracle-based-omm.gitbook.io/metric>
+//! (Developers -> API for the endpoint reference, Aggregators/Solvers for the integration guide).
+
 use std::{
     collections::{HashMap, HashSet},
     sync::LazyLock,
@@ -103,13 +108,14 @@ impl MetricClient {
         let mut attributes = HashMap::new();
 
         let entries: [(&str, Vec<u8>); 6] = [
-            ("bid_adj", bid_ask.bid_adj.as_bytes().to_vec()),
-            ("ask_adj", bid_ask.ask_adj.as_bytes().to_vec()),
+            ("bid_adj", bid_ask.bid_adj.to_string().into_bytes()),
+            ("ask_adj", bid_ask.ask_adj.to_string().into_bytes()),
             (
                 "total_token0_available",
                 bid_ask
                     .total_token0_available
-                    .clone()
+                    .as_ref()
+                    .map(ToString::to_string)
                     .unwrap_or_default()
                     .into_bytes(),
             ),
@@ -117,7 +123,8 @@ impl MetricClient {
                 "total_token1_available",
                 bid_ask
                     .total_token1_available
-                    .clone()
+                    .as_ref()
+                    .map(ToString::to_string)
                     .unwrap_or_default()
                     .into_bytes(),
             ),
@@ -380,7 +387,14 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use crate::rfq::protocols::metric::{client_builder::MetricClientBuilder, models::MetricDepth};
+    use crate::rfq::protocols::metric::{
+        client_builder::MetricClientBuilder,
+        models::{q64_to_f64, MetricDepth},
+    };
+
+    fn big(value: &str) -> BigUint {
+        value.parse().unwrap()
+    }
 
     fn client() -> MetricClient {
         MetricClient::new(
@@ -420,10 +434,10 @@ mod tests {
 
     fn bid_ask() -> MetricBidAskResponse {
         MetricBidAskResponse {
-            bid_adj: "55340232221128654848000".to_string(),
-            ask_adj: "55358678965202364400000".to_string(),
-            total_token0_available: Some("1000000000000000000".to_string()),
-            total_token1_available: Some("3000000000".to_string()),
+            bid_adj: big("55340232221128654848000"),
+            ask_adj: big("55358678965202364400000"),
+            total_token0_available: Some(big("1000000000000000000")),
+            total_token1_available: Some(big("3000000000")),
             server_ts: 1_770_053_095,
             depth: MetricDepth::default(),
         }
@@ -546,10 +560,12 @@ mod tests {
             .chain(bid_ask.depth.bids.iter())
             .take(6)
         {
-            assert!(bin.price().unwrap().is_finite());
-            assert!(bin.cumulative_volume().is_ok());
-            // The input-driven depth walk depends on this field being present in live responses.
-            assert!(bin.cumulative_input_volume().is_ok());
+            assert!(q64_to_f64(&bin.price)
+                .unwrap()
+                .is_finite());
+            // Deserialization already parsed the volumes; assert the input-driven depth walk's
+            // key field is populated in live responses.
+            assert!(bin.cumulative_input_volume > BigUint::ZERO);
         }
     }
 }
