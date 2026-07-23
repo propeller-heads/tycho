@@ -85,7 +85,7 @@ pub fn calculate_fee(
     ])
 }
 
-/// Mirrors `FeeCalculator.mustInterceptOutput` in Solidity.
+/// Mirrors `FeeCalculator.mustOutputThroughRouter` in Solidity.
 ///
 /// Returns true if funds must pass through the router after the final swap
 /// instead of going directly to the receiver.

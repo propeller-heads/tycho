@@ -30,10 +30,9 @@ interface IFeeCalculator {
      *         fee distribution. Returns [] when there is nothing to
      *         capture (no fees, no surplus, or toggle off).
      */
-    function calculateFee(FeeInput memory feeInput)
-        external
-        view
-        returns (FeeRecipient[] memory feeRecipients);
+    function calculateFee(
+        FeeInput memory feeInput
+    ) external view returns (FeeRecipient[] memory feeRecipients);
 
     /**
      * @notice Whether the router must receive swap output before forwarding
@@ -43,10 +42,10 @@ interface IFeeCalculator {
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustInterceptOutput(uint32 clientFeeBps, address client)
-        external
-        view
-        returns (bool);
+    function mustOutputThroughRouter(
+        uint32 clientFeeBps,
+        address client
+    ) external view returns (bool);
 
     /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
@@ -55,7 +54,10 @@ interface IFeeCalculator {
      * @return clients Addresses of clients with at least one custom fee
      * @return fees Custom fee configuration for each client (parallel array)
      */
-    function getAllClientFees(uint256 start, uint256 count)
+    function getAllClientFees(
+        uint256 start,
+        uint256 count
+    )
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);

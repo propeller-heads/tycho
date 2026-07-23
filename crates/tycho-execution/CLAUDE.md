@@ -50,8 +50,7 @@ Entry (e.g. splitSwap)
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes amountIn, client, clientFeeBps], getEffectiveRouterFeeOnOutput,
-getEffectiveRouterFeeOnOutputScaled [takes client → uint32],
+calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
 
 ### Vault (`Vault.sol`)
@@ -99,10 +98,9 @@ Three fee layers, deducted from swap output:
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
 removed to revert to defaults.
 
-**Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied), all fee
-read methods (`calculateFee`, `getEffectiveRouterFeeOnOutput`, `getEffectiveRouterFeeOnOutputScaled`) fall back to
-`tx.origin` for the custom fee lookup. This lets unsigned calls still benefit from a custom rate when the originating
-EOA is a registered client.
+**Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
+`calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets
+unsigned calls still benefit from a custom rate when the originating EOA is a registered client.
 
 **Fee scale**: Fees use 8-decimal-BPS units (1 unit = 0.0001 BPS; 100% = 100 000 000). Two public constants are
 queryable via RPC:

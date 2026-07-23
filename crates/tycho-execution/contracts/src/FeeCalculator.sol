@@ -119,7 +119,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustInterceptOutput(uint32 clientFeeBps, address client)
+    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
         external
         view
         returns (bool)
