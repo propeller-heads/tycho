@@ -98,9 +98,7 @@ error TychoRouter__TimelockNotExpired(
     uint256 activationTimestamp, uint256 blockTimestamp
 );
 error TychoRouter__NoPendingFeeCalculator();
-error TychoRouter__FeesExceedOutput(
-    uint256 totalFees, uint256 actualAmountOut
-);
+error TychoRouter__FeesExceedOutput(uint256 totalFees, uint256 actualAmountOut);
 
 contract TychoRouter is AccessControl, Dispatcher, EIP712 {
     address private _feeCalculator; // Fee calculator contract
