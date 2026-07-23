@@ -768,6 +768,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             );
         }
 
+        // DUPLICATE: exact copy in _singleSwap and
+        // _sequentialSwapChecked. Not extracted due to
+        // stack-too-deep. Edit all three together.
         if (intercepting) {
             amountOutAfterFees = _takeFees(
                 FeeInput({
@@ -804,7 +807,8 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
-     * @notice Internal implementation of the core swap logic shared between singleSwap() and singleSwapPermit2().
+     * @notice Internal implementation of the core swap logic shared
+     *         between singleSwap() and singleSwapPermit2().
      *
      * @notice This function centralizes the swap execution logic.
      * @notice For detailed documentation on parameters and behavior, see the documentation for
@@ -866,6 +870,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             );
         }
 
+        // DUPLICATE: exact copy in _splitSwapChecked and
+        // _sequentialSwapChecked. Not extracted due to
+        // stack-too-deep. Edit all three together.
         if (intercepting) {
             amountOutAfterFees = _takeFees(
                 FeeInput({
@@ -957,6 +964,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn, swaps, intercepting ? address(this) : receiver
         );
 
+        // DUPLICATE: exact copy in _splitSwapChecked and
+        // _singleSwap. Not extracted due to stack-too-deep.
+        // Edit all three together.
         if (intercepting) {
             amountOutAfterFees = _takeFees(
                 FeeInput({
