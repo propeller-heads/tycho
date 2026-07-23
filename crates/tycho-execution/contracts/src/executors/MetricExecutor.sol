@@ -6,7 +6,8 @@ import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "../TransferManager.sol";
 
 // MetricOmmPool swap interface; see
-// https://oracle-based-omm.gitbook.io/metric -> Developers -> Smart Contracts Reference.
+// https://oracle-based-omm.gitbook.io/metric/RSm94m71kqtGICv4iKRj
+// -> Developers -> Smart Contracts Reference.
 // The returned deltas are intentionally ignored: the Dispatcher verifies output
 // via balance-diff.
 interface IMetricPool {

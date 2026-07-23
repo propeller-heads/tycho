@@ -49,9 +49,8 @@ contract MockMetricPool {
         int128 amountSpecified,
         uint128 priceLimitX64,
         bytes calldata callbackData,
-        bytes calldata extensionData
+        bytes calldata /* extensionData */
     ) external returns (int128 amount0Delta, int128 amount1Delta) {
-        extensionData;
         lastPriceLimitX64 = priceLimitX64;
         uint256 amountIn = uint256(uint128(amountSpecified));
         uint256 amountOut = amountIn * 2;
