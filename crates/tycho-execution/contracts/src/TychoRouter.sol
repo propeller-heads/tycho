@@ -1303,7 +1303,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             IFeeCalculator(_feeCalculator).calculateFee(feeInput);
         amountOutAfterFees = feeInput.actualAmountOut;
 
-        uint256 totalFees;
+        uint256 totalFees = 0;
         for (uint256 i = 0; i < fees.length; i++) {
             totalFees += fees[i].feeAmount;
         }
