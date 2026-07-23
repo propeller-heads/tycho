@@ -256,6 +256,28 @@ For dashboards, logs, and traces, enable the `observability` profile alongside `
 
 - **Cold start takes a long time.** `START_BLOCK` is the Firehose poller's start block (where it begins fetching from the RPC), separate from each extractor's `start_block`. A fresh chain must fetch and merge every block from `START_BLOCK` before your protocols' deployment blocks appear. Set `START_BLOCK` at or just below your earliest protocol `start_block` so the poller skips irrelevant history.
 
+- **Consumers report the extractor as `Stale`, or the indexer's committed height stops climbing.** The block stream from the self-hosted Firehose stopped advancing.
+
+  Rule out two benign causes first: a cold start that has not yet reached your extractor's `start_block` (normal — see above), and a Firehose that never became healthy (`:10016` closed).
+
+  Otherwise, the poller — not the merger — is stuck. The merger only bundles blocks 200 behind the newest block the poller delivered, and waits for more **silently by design** — so a stalled poller freezes `merged-blocks` at a fixed height with no error in any log. The known trigger is an RPC node that mishandled a reorg and serves an inconsistent view of a few heights: the poller retries the bad block forever (its default retry count is infinite) while still following the chain head, so the process looks alive.
+
+  Confirm it:
+
+  ```bash
+  # 1. highest block the poller processed — look for one block number repeating in fetch errors
+  docker compose --profile substreams-endpoint logs substreams-endpoint 2>&1 \
+    | grep '"processing block"' | tail -3
+  # 2. where one-block files stop (filename = num-time-hash-parenthash-libnum);
+  #    expect the highest ~200-300 blocks above the frozen bundle
+  docker compose --profile substreams-endpoint exec substreams-endpoint \
+    sh -c 'ls /data/storage/one-blocks/ | sort | tail -3'
+  ```
+
+  Then compare your node against an independent RPC around that height (`eth_getBlockByNumber`, ~20 blocks): a `hash` mismatch between endpoints, or a `parentHash` on your node that does not match its own previous block, confirms your node serves a non-canonical view.
+
+  **Fix:** switch `RPC_URL` to a healthy endpoint (everywhere the stack uses it) and restart; the poller resumes from the last stored one-block file, so no resync is needed. Unwind the broken node to below the divergent range, or resync it, separately.
+
 ## Performance tuning
 
 - **`--interval-between-fetch`** (poller) — delay between RPC fetches. The compose file sets `0ms` (no delay) for maximum throughput. Raise it to throttle a rate-limited RPC.
