@@ -25,6 +25,7 @@ import {LibSwap} from "../lib/LibSwap.sol";
 import {TransferManager} from "./TransferManager.sol";
 import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
+import {IFeeCalculator} from "@interfaces/IFeeCalculator.sol";
 
 //                                         ✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷
 //                                   ✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷✷
@@ -749,9 +750,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address client = clientFeeParams.clientFeeReceiver;
         // Stack pressure in this function prevents keeping finalReceiver in scope
         // outside the block, so we cache the interception decision as a bool instead.
-        bool intercepting = _callMustInterceptOutput(
-            _feeCalculator, clientFeeParams.clientFeeBps, client
-        );
+        // slither-disable-next-line calls-loop
+        bool intercepting = IFeeCalculator(_feeCalculator)
+            .mustInterceptOutput(clientFeeParams.clientFeeBps, client);
 
         uint256 actualAmountOut;
         {
@@ -846,9 +847,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        bool intercepting = _callMustInterceptOutput(
-            _feeCalculator, clientFeeParams.clientFeeBps, client
-        );
+        // slither-disable-next-line calls-loop
+        bool intercepting = IFeeCalculator(_feeCalculator)
+            .mustInterceptOutput(clientFeeParams.clientFeeBps, client);
 
         uint256 actualAmountOut;
         {
@@ -948,9 +949,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        bool intercepting = _callMustInterceptOutput(
-            _feeCalculator, clientFeeParams.clientFeeBps, client
-        );
+        // slither-disable-next-line calls-loop
+        bool intercepting = IFeeCalculator(_feeCalculator)
+            .mustInterceptOutput(clientFeeParams.clientFeeBps, client);
 
         uint256 actualAmountOut = _sequentialSwap(
             amountIn, swaps, intercepting ? address(this) : receiver
@@ -1290,7 +1291,9 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         internal
         returns (uint256 amountOutAfterFees)
     {
-        FeeRecipient[] memory fees = _callCalculateFee(_feeCalculator, feeInput);
+        // slither-disable-next-line calls-loop
+        FeeRecipient[] memory fees =
+            IFeeCalculator(_feeCalculator).calculateFee(feeInput);
         amountOutAfterFees = feeInput.actualAmountOut;
 
         for (uint256 i = 0; i < fees.length; i++) {
