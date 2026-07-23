@@ -98,6 +98,9 @@ error TychoRouter__TimelockNotExpired(
     uint256 activationTimestamp, uint256 blockTimestamp
 );
 error TychoRouter__NoPendingFeeCalculator();
+error TychoRouter__FeesExceedOutput(
+    uint256 totalFees, uint256 actualAmountOut
+);
 
 contract TychoRouter is AccessControl, Dispatcher, EIP712 {
     address private _feeCalculator; // Fee calculator contract
@@ -1291,6 +1294,16 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         FeeRecipient[] memory fees =
             IFeeCalculator(_feeCalculator).calculateFee(feeInput);
         amountOutAfterFees = feeInput.actualAmountOut;
+
+        uint256 totalFees;
+        for (uint256 i = 0; i < fees.length; i++) {
+            totalFees += fees[i].feeAmount;
+        }
+        if (totalFees > feeInput.actualAmountOut) {
+            revert TychoRouter__FeesExceedOutput(
+                totalFees, feeInput.actualAmountOut
+            );
+        }
 
         for (uint256 i = 0; i < fees.length; i++) {
             if (fees[i].feeAmount > 0) {
