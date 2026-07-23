@@ -260,7 +260,7 @@ For dashboards, logs, and traces, enable the `observability` profile alongside `
 
   Rule out two benign causes first: a cold start that has not yet reached your extractor's `start_block` (normal — see above), and a Firehose that never became healthy (`:10016` closed).
 
-  Otherwise, the poller — not the merger — is stuck. The merger only bundles blocks 200 behind the newest block the poller delivered, and waits for more **silently by design** — so a stalled poller freezes `merged-blocks` at a fixed height with no error in any log. The known trigger is an RPC node that mishandled a reorg and serves an inconsistent view of a few heights: the poller retries the bad block forever (its default retry count is infinite) while still following the chain head, so the process looks alive.
+  Otherwise, the poller — not the merger — is stuck. The merger only bundles blocks 200 behind the newest block the poller delivered, and waits for more **silently by design** — so a stalled poller freezes `merged-blocks` at a fixed height with no error in any log. The trigger is an RPC endpoint that returns wrong or inconsistent data for specific heights — seen in the wild with a caching RPC proxy (eRPC) mishandling **empty blocks**, and equally possible with a node serving a non-canonical view after a mishandled reorg. The poller retries the bad block forever (its default retry count is infinite) while still following the chain head, so the process looks alive.
 
   Confirm it:
 
@@ -274,9 +274,9 @@ For dashboards, logs, and traces, enable the `observability` profile alongside `
     sh -c 'ls /data/storage/one-blocks/ | sort | tail -3'
   ```
 
-  Then compare your node against an independent RPC around that height (`eth_getBlockByNumber`, ~20 blocks): a `hash` mismatch between endpoints, or a `parentHash` on your node that does not match its own previous block, confirms your node serves a non-canonical view.
+  Then compare your endpoint against an independent RPC around that height (`eth_getBlockByNumber` and `eth_getBlockReceipts`, ~20 blocks): a `hash` mismatch between endpoints, receipts that disagree, or a `parentHash` that does not match your endpoint's own previous block all confirm the endpoint serves a wrong view. Note the bad data can poison your own debugging — query the independent endpoint, not the suspect one, when checking what a block "really" contains.
 
-  **Fix:** switch `RPC_URL` to a healthy endpoint (everywhere the stack uses it) and restart; the poller resumes from the last stored one-block file, so no resync is needed. Unwind the broken node to below the divergent range, or resync it, separately.
+  **Fix:** switch `RPC_URL` to a healthy endpoint (everywhere the stack uses it) and restart; the poller resumes from the last stored one-block file, so no resync is needed. Then repair the original source separately: fix the proxy's empty-block/cache handling if a proxy sits in front of your node, or unwind the node to below the divergent range (or resync it) if the node itself diverged.
 
 ## Performance tuning
 
