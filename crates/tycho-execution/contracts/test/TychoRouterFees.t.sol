@@ -9,9 +9,45 @@ import {
 import {
     TychoRouter__InvalidClientSignature,
     TychoRouter__ExpiredClientSignature,
+    TychoRouter__FeesExceedOutput,
     ClientFeeParams
 } from "@src/TychoRouter.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
+import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
+
+/// @dev Malicious FeeCalculator that claims one wei more in fees than the
+///      swap produced. Mirrors the real implementation's [router, client]
+///      return shape so the only deviation under test is the total amount.
+contract OverchargingFeeCalculator is IFeeCalculator {
+    function calculateFee(FeeInput memory feeInput)
+        external
+        pure
+        returns (FeeRecipient[] memory feeRecipients)
+    {
+        feeRecipients = new FeeRecipient[](2);
+        feeRecipients[0] = FeeRecipient({
+            recipient: address(0xFEE), feeAmount: feeInput.actualAmountOut
+        });
+        feeRecipients[1] =
+            FeeRecipient({recipient: feeInput.client, feeAmount: 1});
+    }
+
+    function mustOutputThroughRouter(uint32, address)
+        external
+        pure
+        returns (bool)
+    {
+        return true;
+    }
+
+    function getAllClientFees(uint256, uint256)
+        external
+        pure
+        returns (address[] memory clients, CustomFees[] memory fees)
+    {
+        return (new address[](0), new CustomFees[](0));
+    }
+}
 
 contract TychoRouterFeesTest is TychoRouterTestSetup {
     event FeesTaken(address indexed token, FeeRecipient[] fees);
@@ -639,5 +675,46 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         // Full output minus zero fees goes to ALICE
         assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), amountOut);
+    }
+
+    function testFeesExceedingOutputRevert() public {
+        // A malicious or buggy FeeCalculator claiming more fees than the swap
+        // produced must revert instead of underflowing the fee accounting.
+        OverchargingFeeCalculator badCalc = new OverchargingFeeCalculator();
+        vm.startPrank(FEE_SETTER);
+        tychoRouter.setFeeCalculator(address(badCalc));
+        vm.warp(block.timestamp + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION());
+        tychoRouter.activateFeeCalculator();
+        vm.stopPrank();
+
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        uint256 actualAmountOut = 2018817438608734439722;
+        uint256 expectedAmountOut = 2000 * 1e18;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__FeesExceedOutput.selector,
+                actualAmountOut + 1,
+                actualAmountOut
+            )
+        );
+        tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+        vm.stopPrank();
     }
 }
