@@ -750,7 +750,6 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         address client = clientFeeParams.clientFeeReceiver;
         // Stack pressure in this function prevents keeping finalReceiver in scope
         // outside the block, so we cache the interception decision as a bool instead.
-        // slither-disable-next-line calls-loop
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -847,7 +846,6 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        // slither-disable-next-line calls-loop
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -949,7 +947,6 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         }
 
         address client = clientFeeParams.clientFeeReceiver;
-        // slither-disable-next-line calls-loop
         bool intercepting = IFeeCalculator(_feeCalculator)
             .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
 
@@ -1291,7 +1288,6 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         internal
         returns (uint256 amountOutAfterFees)
     {
-        // slither-disable-next-line calls-loop
         FeeRecipient[] memory fees =
             IFeeCalculator(_feeCalculator).calculateFee(feeInput);
         amountOutAfterFees = feeInput.actualAmountOut;
