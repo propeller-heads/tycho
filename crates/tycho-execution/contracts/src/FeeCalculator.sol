@@ -75,10 +75,11 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @dev Called from TychoRouter. Does not perform any accounting.
      *
      *      Deduction order:
-     *      1. Positive slippage surplus (actualAmountOut - expectedAmountOut) is
-     *         taken by the router first.
+     *      1. When positive slippage capture is enabled, the surplus
+     *         (actualAmountOut - expectedAmountOut) is taken by the router first.
      *      2. Fees (client fee + router fees) are then calculated on
-     *         expectedAmountOut, i.e. on the amount *after* surplus extraction.
+     *         the amount *after* surplus extraction (expectedAmountOut when
+     *         surplus was taken, actualAmountOut otherwise).
      *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.

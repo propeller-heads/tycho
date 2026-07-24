@@ -21,14 +21,16 @@ interface IFeeCalculator {
      * @notice Calculates all fees and slippage surplus from swap output
      * @dev Called from TychoRouter. Does not perform any accounting.
      *      Handles both regular fees and positive slippage surplus
-     *      in a single call. The full surplus goes to the router.
+     *      in a single call. When positive slippage capture is
+     *      enabled, the full surplus is assigned to the router;
+     *      otherwise the surplus stays in the swap output.
      *      Router fee parameters are retrieved from contract storage
      *      based on the client address; client fee parameters are
      *      passed as function arguments.
      * @param feeInput Struct containing all fee calculation inputs
-     * @return feeRecipients Array of (address, feeAmount) tuples for
-     *         fee distribution. Returns [] when there is nothing to
-     *         capture (no fees, no surplus, or toggle off).
+     * @return feeRecipients Two recipients: [router, client]. Amounts
+     *         are zero when there is nothing to capture (no fees, no
+     *         surplus, or capture disabled).
      */
     function calculateFee(
         FeeInput memory feeInput
