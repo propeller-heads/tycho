@@ -39,7 +39,7 @@ pub enum Command {
     /// Starts a job to analyze stored tokens for tax and gas cost.
     AnalyzeTokens(AnalyzeTokenArgs),
     /// Starts Tycho RPC only. No extractors.
-    Rpc,
+    Rpc(RpcServerArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -262,6 +262,17 @@ impl RunSpkgArgs {
             None
         }
     }
+}
+
+#[derive(Args, Debug, Clone, PartialEq)]
+pub struct RpcServerArgs {
+    /// The blockchain the database is dedicated to
+    #[clap(long, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Custom chains configuration file
+    #[clap(long, env = "TYCHO_CHAINS_CONFIG", default_value = "./chains.yaml")]
+    pub chain_config: String,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
