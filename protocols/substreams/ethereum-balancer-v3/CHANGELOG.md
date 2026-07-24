@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.3
+
+- Update `tycho-substreams` from `0.8.0` to `0.8.1`. Contract changes carrying only
+  token balance updates are no longer dropped by `TransactionChangesBuilder` (#1056).
+  The vault regularly nets storage writes out to no-ops while token balances still
+  change, so those balance updates were silently lost with `0.8.0`.
+
 ## v0.4.2
 
 - Pin the Rust toolchain to 1.96.0 for reproducible wasm builds. The package

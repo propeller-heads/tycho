@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-balancer-v3"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 
 [lib]
@@ -14,7 +14,7 @@ ethabi = "18.0.0"
 hex = "0.4.3"
 anyhow = "1.0.75"
 num-bigint = "0.4.4"
-tycho-substreams = "0.8.0"
+tycho-substreams = "0.8.1"
 itertools = "0.13.0"
 keccak-hash = "0.11.0"
 

@@ -32,3 +32,11 @@ The engine address is also hardcoded as `FERMISWAP_TARGET_ADDRESS` in
 `crates/tycho-test/src/execution/encoding.rs` (updated together with this release) — it must be
 kept in sync with `engine_address` on every future migration, or the execution harness's lane
 staleness overwrite patches a dead registry slot.
+
+## v0.1.2
+
+- Switch `tycho-substreams` from a path dependency on the in-tree crate to the
+  published `0.8.1`, so releases build against a fixed, published version. The
+  package relies on the token balance retention fix (#1056) included in `0.8.1`:
+  the trader vault contract change often carries only token balance updates,
+  which `0.8.0` dropped as empty.

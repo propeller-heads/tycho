@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.3
+
+- Update `tycho-substreams` from `0.8.0` to `0.8.1`. Contract changes carrying only
+  token balance updates are no longer dropped by `TransactionChangesBuilder` (#1056).
+
 ## v0.4.2
 
 - Update `tycho-substreams` from `0.5.1` to `0.8.0`. `get_block_storage_changes` now

@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "base-lunarbase"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -316,7 +316,7 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-balancer-v2"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -785,12 +785,12 @@ dependencies = [
  "num-bigint",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "ethereum-balancer-v3"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -802,7 +802,7 @@ dependencies = [
  "regex",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -819,7 +819,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-curve"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -857,7 +857,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -911,7 +911,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.5.0)",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -934,12 +934,12 @@ dependencies = [
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2",
  "tiny-keccak",
- "tycho-substreams 0.8.1",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "ethereum-fluid_v1"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -952,7 +952,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?rev=b8aeaa3)",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1033,7 +1033,7 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -3169,23 +3169,6 @@ dependencies = [
 
 [[package]]
 name = "tycho-substreams"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8158444c99f55b314f5d63837b794f4842975d148feb03ea8e2720ecab957eba"
-dependencies = [
- "ethabi 18.0.0",
- "hex",
- "itertools 0.12.1",
- "num-bigint",
- "prost 0.11.9",
- "serde",
- "serde_json",
- "substreams 0.5.22",
- "substreams-ethereum 0.9.13",
-]
-
-[[package]]
-name = "tycho-substreams"
 version = "0.8.1"
 dependencies = [
  "base64 0.22.1",
@@ -3195,6 +3178,23 @@ dependencies = [
  "num-bigint",
  "prost 0.11.9",
  "rstest",
+ "serde",
+ "serde_json",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+]
+
+[[package]]
+name = "tycho-substreams"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e12c39162e44705f28402e2f114da2694e01a466a80dc6f7dca9af0b49f92c76"
+dependencies = [
+ "ethabi 18.0.0",
+ "hex",
+ "itertools 0.12.1",
+ "num-bigint",
+ "prost 0.11.9",
  "serde",
  "serde_json",
  "substreams 0.5.22",

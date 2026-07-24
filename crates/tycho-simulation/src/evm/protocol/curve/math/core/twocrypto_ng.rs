@@ -122,6 +122,9 @@ pub fn newton_y_2_ng(
     i: usize,
     lim_mul: U256,
 ) -> Option<U256> {
+    if i >= 2 {
+        return None;
+    }
     let n = U256::from(2u64);
     let x_j = x[1 - i];
     let mut y = d * d / (x_j * U256::from(4u64));
@@ -171,6 +174,9 @@ pub fn newton_y_2_ng(
 }
 
 pub fn get_y_2_ng(ann: U256, gamma: U256, x: [U256; 2], d: U256, i: usize) -> Option<(U256, U256)> {
+    if i >= 2 {
+        return None;
+    }
     // These closures convert known small constants from the Vyper Cardano solver into I256.
     // All values are hardcoded literals (max 10^36 << 2^255), so try_from never fails.
     let s = |v: u128| -> I256 { I256::try_from(v).expect("i256 const") };
@@ -391,6 +397,18 @@ mod tests {
         let result = cbrt(x);
         // result should be approximately 2e18 (depending on scaling)
         assert!(result > U256::ZERO);
+    }
+
+    #[test]
+    fn get_y_2_ng_rejects_out_of_range_index() {
+        let wad = WAD;
+        let ann = U256::from(540_000u64) * A_MULTIPLIER;
+        let gamma = U256::from(11_809_167_828_997u64);
+        let x = [U256::from(5000u64) * wad, U256::from(5000u64) * wad];
+        let d = U256::from(10000u64) * wad;
+        let lim_mul = U256::from(100u64) * wad;
+        assert!(get_y_2_ng(ann, gamma, x, d, 2).is_none());
+        assert!(newton_y_2_ng(ann, gamma, x, d, 2, lim_mul).is_none());
     }
 
     #[test]
