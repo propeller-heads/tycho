@@ -1,3 +1,10 @@
+## [0.341.3](https://github.com/propeller-heads/tycho/compare/0.341.2...0.341.3) (2026-07-24)
+
+
+### Bug Fixes
+
+* **adapter-integration:** align curve manifest capabilities with contract ([#1227](https://github.com/propeller-heads/tycho/issues/1227)) ([7e2b05d](https://github.com/propeller-heads/tycho/commit/7e2b05d8af02cbe2ae809c635f9dec05407eaac3))
+
 ## [0.341.2](https://github.com/propeller-heads/tycho/compare/0.341.1...0.341.2) (2026-07-24)
 
 
