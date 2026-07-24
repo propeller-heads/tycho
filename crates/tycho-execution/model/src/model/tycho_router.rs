@@ -317,21 +317,8 @@ fn _split_swap_checked(
     n_tokens: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if amount_in == 0 {
-        return Err(Error::revert("_split_swap_checked: amount_in == 0"));
-    }
-    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
-        return Err(Error::revert("_split_swap_checked: address(0)"));
-    }
-    if expected_amount_out == 0 {
-        return Err(Error::revert("_split_swap_checked: expected_amount_out == 0"));
-    }
-    if min_amount_out > expected_amount_out ||
-        min_amount_out * BPS_DENOMINATOR <
-            expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
-    {
-        return Err(Error::revert("_split_swap_checked: invalid min_amount_out"));
-    }
+    _validate_amounts(amount_in, expected_amount_out, min_amount_out)?;
+    _validate_addresses(receiver, token_in, token_out)?;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -387,21 +374,8 @@ fn _single_swap(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if amount_in == 0 {
-        return Err(Error::revert("_single_swap: amount_in == 0"));
-    }
-    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
-        return Err(Error::revert("_single_swap: address(0)"));
-    }
-    if expected_amount_out == 0 {
-        return Err(Error::revert("_single_swap: expected_amount_out == 0"));
-    }
-    if min_amount_out > expected_amount_out ||
-        min_amount_out * BPS_DENOMINATOR <
-            expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
-    {
-        return Err(Error::revert("_single_swap: invalid min_amount_out"));
-    }
+    _validate_amounts(amount_in, expected_amount_out, min_amount_out)?;
+    _validate_addresses(receiver, token_in, token_out)?;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -462,21 +436,8 @@ fn _sequential_swap_checked(
     min_amount_out: i64,
     receiver: Address,
 ) -> Result<(), Error> {
-    if amount_in == 0 {
-        return Err(Error::revert("_sequential_swap_checked: amount_in == 0"));
-    }
-    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
-        return Err(Error::revert("_sequential_swap_checked: address(0)"));
-    }
-    if expected_amount_out == 0 {
-        return Err(Error::revert("_sequential_swap_checked: expected_amount_out == 0"));
-    }
-    if min_amount_out > expected_amount_out ||
-        min_amount_out * BPS_DENOMINATOR <
-            expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
-    {
-        return Err(Error::revert("_sequential_swap_checked: invalid min_amount_out"));
-    }
+    _validate_amounts(amount_in, expected_amount_out, min_amount_out)?;
+    _validate_addresses(receiver, token_in, token_out)?;
 
     let client_fee_bps = if crate::config::ENABLE_NONZERO_FEE_BPS {
         params.request(
@@ -508,6 +469,44 @@ fn _sequential_swap_checked(
         receiver,
         client_fee_bps,
     )
+}
+
+/// Mirrors `TychoRouter._validateAmounts` in Solidity.
+fn _validate_amounts(
+    amount_in: i64,
+    expected_amount_out: i64,
+    min_amount_out: i64,
+) -> Result<(), Error> {
+    if amount_in == 0 {
+        return Err(Error::revert("_validate_amounts: amount_in == 0"));
+    }
+    if expected_amount_out == 0 {
+        return Err(Error::revert("_validate_amounts: expected_amount_out == 0"));
+    }
+    // Lowest acceptable output: at most MAX_SLIPPAGE_TOLERANCE_BPS below expected.
+    // The division rounds down, which can make the floor 0 for tiny expected
+    // amounts — hence the explicit zero check.
+    let min_amount_out_floor =
+        expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS) / BPS_DENOMINATOR;
+    if min_amount_out == 0 ||
+        min_amount_out < min_amount_out_floor ||
+        min_amount_out > expected_amount_out
+    {
+        return Err(Error::revert("_validate_amounts: invalid min_amount_out"));
+    }
+    Ok(())
+}
+
+/// Mirrors `TychoRouter._validateAddresses` in Solidity.
+fn _validate_addresses(
+    receiver: Address,
+    token_in: Address,
+    token_out: Address,
+) -> Result<(), Error> {
+    if receiver == Address::Zero || token_in == Address::Zero || token_out == Address::Zero {
+        return Err(Error::revert("_validate_addresses: address(0)"));
+    }
+    Ok(())
 }
 
 /// Mirrors `TychoRouter._finalizeSwap` in Solidity: shared post-swap

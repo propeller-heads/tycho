@@ -723,30 +723,8 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
     ) internal returns (uint256 amountOutAfterFees) {
-        if (amountIn == 0) {
-            revert TychoRouter__ZeroInput();
-        }
-        if (
-            receiver == address(0) || tokenIn == address(0)
-                || tokenOut == address(0)
-        ) {
-            revert TychoRouter__AddressZero();
-        }
-        if (expectedAmountOut == 0) {
-            revert TychoRouter__AmountOutZero();
-        }
-        // Rejects minAmountOut == 0 implicitly: expectedAmountOut is non-zero,
-        // so the slippage floor is always positive.
-        if (
-            minAmountOut > expectedAmountOut
-                || minAmountOut * BPS_DENOMINATOR
-                    < expectedAmountOut
-                        * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
-        ) {
-            revert TychoRouter__InvalidMinAmountOut(
-                minAmountOut, expectedAmountOut
-            );
-        }
+        _validateAmounts(amountIn, expectedAmountOut, minAmountOut);
+        _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
         // Stack pressure in this function prevents keeping finalReceiver in scope
@@ -803,30 +781,8 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swap_
     ) internal returns (uint256 amountOutAfterFees) {
-        if (amountIn == 0) {
-            revert TychoRouter__ZeroInput();
-        }
-        if (
-            receiver == address(0) || tokenIn == address(0)
-                || tokenOut == address(0)
-        ) {
-            revert TychoRouter__AddressZero();
-        }
-        if (expectedAmountOut == 0) {
-            revert TychoRouter__AmountOutZero();
-        }
-        // Rejects minAmountOut == 0 implicitly: expectedAmountOut is non-zero,
-        // so the slippage floor is always positive.
-        if (
-            minAmountOut > expectedAmountOut
-                || minAmountOut * BPS_DENOMINATOR
-                    < expectedAmountOut
-                        * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
-        ) {
-            revert TychoRouter__InvalidMinAmountOut(
-                minAmountOut, expectedAmountOut
-            );
-        }
+        _validateAmounts(amountIn, expectedAmountOut, minAmountOut);
+        _validateAddresses(receiver, tokenIn, tokenOut);
 
         address client = clientFeeParams.clientFeeReceiver;
         bool intercepting = IFeeCalculator(_feeCalculator)
@@ -883,30 +839,8 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
     ) internal returns (uint256 amountOutAfterFees) {
-        if (amountIn == 0) {
-            revert TychoRouter__ZeroInput();
-        }
-        if (
-            receiver == address(0) || tokenIn == address(0)
-                || tokenOut == address(0)
-        ) {
-            revert TychoRouter__AddressZero();
-        }
-        if (expectedAmountOut == 0) {
-            revert TychoRouter__AmountOutZero();
-        }
-        // Rejects minAmountOut == 0 implicitly: expectedAmountOut is non-zero,
-        // so the slippage floor is always positive.
-        if (
-            minAmountOut > expectedAmountOut
-                || minAmountOut * BPS_DENOMINATOR
-                    < expectedAmountOut
-                        * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS)
-        ) {
-            revert TychoRouter__InvalidMinAmountOut(
-                minAmountOut, expectedAmountOut
-            );
-        }
+        _validateAmounts(amountIn, expectedAmountOut, minAmountOut);
+        _validateAddresses(receiver, tokenIn, tokenOut);
         if (swaps.length == 0) {
             revert TychoRouter__EmptySwaps();
         }
@@ -934,6 +868,54 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             clientFeeParams.maxClientContribution,
             receiver
         );
+    }
+
+    /**
+     * @dev Validates the swap amount inputs shared by all swap strategies.
+     *      Reverts unless `amountIn` and `expectedAmountOut` are non-zero and
+     *      `minAmountOutFloor <= minAmountOut <= expectedAmountOut`.
+     */
+    function _validateAmounts(
+        uint256 amountIn,
+        uint256 expectedAmountOut,
+        uint256 minAmountOut
+    ) internal pure {
+        if (amountIn == 0) {
+            revert TychoRouter__ZeroInput();
+        }
+        if (expectedAmountOut == 0) {
+            revert TychoRouter__AmountOutZero();
+        }
+        // Lowest acceptable output: at most MAX_SLIPPAGE_TOLERANCE_BPS below
+        // expected. The division rounds down, which can make the floor 0 for
+        // tiny expected amounts — hence the explicit zero check.
+        uint256 minAmountOutFloor =
+            (expectedAmountOut * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS))
+                / BPS_DENOMINATOR;
+        if (
+            minAmountOut == 0 || minAmountOut < minAmountOutFloor
+                || minAmountOut > expectedAmountOut
+        ) {
+            revert TychoRouter__InvalidMinAmountOut(
+                minAmountOut, expectedAmountOut
+            );
+        }
+    }
+
+    /**
+     * @dev Validates the address inputs shared by all swap strategies.
+     */
+    function _validateAddresses(
+        address receiver,
+        address tokenIn,
+        address tokenOut
+    ) internal pure {
+        if (
+            receiver == address(0) || tokenIn == address(0)
+                || tokenOut == address(0)
+        ) {
+            revert TychoRouter__AddressZero();
+        }
     }
 
     /**
