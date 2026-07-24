@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.3
+
+- Use the deployed Robinhood Ve33 extension address.
+
 ## v0.1.2
 
 - Track Ve33 pool swap-fee changes for accurate off-chain quotes.

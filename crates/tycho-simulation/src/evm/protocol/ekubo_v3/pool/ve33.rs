@@ -232,7 +232,7 @@ mod tests {
                         token1: TOKEN1,
                         config: PoolConfig {
                             fee: 0,
-                            extension: address!("0xd100000000000000000000000000000000000000"),
+                            extension: address!("0xD18685a514E59b06d59824e16Db07e73345d9953"),
                             pool_type_config: FullRangePoolTypeConfig,
                         },
                     },

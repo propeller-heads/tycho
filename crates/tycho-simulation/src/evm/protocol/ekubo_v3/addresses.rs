@@ -9,5 +9,4 @@ pub const BOOSTED_FEES_CONCENTRATED_ADDRESS: Address =
 // EkuboProtocol/evm-contracts#319 lands.
 pub const SIGNED_EXCLUSIVE_SWAP_ADDRESS: Address =
     address!("0x5519eD5e5e5E5E5e5E5E5e5e5e5E5e5e5e5E5E5E");
-// TODO: replace with the deployed Ve33 extension address on Robinhood.
-pub const VE33_ADDRESS: Address = address!("0xd100000000000000000000000000000000000000");
+pub const VE33_ADDRESS: Address = address!("0xD18685a514E59b06d59824e16Db07e73345d9953");
