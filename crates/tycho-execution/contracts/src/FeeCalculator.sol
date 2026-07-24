@@ -372,22 +372,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Returns the effective router fee on client fee for a specific client in fee units
-     * @param client The client address to check
-     * @return The fee in fee units (custom if set, otherwise default)
-     */
-    function getEffectiveRouterFeeOnClientFee(address client)
-        external
-        view
-        returns (uint32)
-    {
-        CustomFees memory customFees = _customRouterFees[client];
-        return customFees.hasCustomFeeOnClientFee
-            ? customFees.feeBpsOnClientFee
-            : _routerFeeOnClientFeeBps;
-    }
-
-    /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
      * @param start Index to start reading from (0-indexed)
      * @param count Maximum number of entries to return

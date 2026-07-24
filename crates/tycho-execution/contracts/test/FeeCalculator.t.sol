@@ -172,6 +172,31 @@ contract FeeCalculatorTest is Constants {
         assertEq(feeRecipients[0].feeAmount, 0.01 ether);
     }
 
+    function testCalculateAfterCustomClientFeeRemovalUsesDefault() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnClientFee(_10_PCT);
+        feeCalculator.setCustomRouterFeeOnClientFee(BOB, _5_PCT);
+        feeCalculator.removeCustomRouterFeeOnClientFee(BOB);
+        vm.stopPrank();
+
+        FeeRecipient[] memory feeRecipients = feeCalculator.calculateFee(
+            FeeInput({
+                actualAmountOut: 1 ether,
+                expectedAmountOut: 1 ether,
+                amountIn: 0.5 ether,
+                tokenIn: address(0),
+                tokenOut: address(0),
+                clientFeeBps: 2_000_000, // 2%
+                client: BOB
+            })
+        );
+
+        // clientFee = 0.02 ether; with the override removed the router's cut
+        // is the 10% default again: 0.002 ether (custom 5% would give 0.001)
+        assertEq(feeRecipients[0].feeAmount, 0.002 ether);
+        assertEq(feeRecipients[1].feeAmount, 0.018 ether);
+    }
+
     function testCalculateNoFeesSet() public view {
         // No fees set, should return full amount
         uint256 amountIn = 0.5 ether;
@@ -657,12 +682,15 @@ contract FeeCalculatorConfigTest is Constants {
         vm.prank(FEE_SETTER);
         feeCalculator.setCustomRouterFeeOnClientFee(BOB, userFee);
 
-        // Check user gets custom fee
-        assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(BOB), userFee);
-        // Check other users still get default fee
-        assertEq(
-            feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), defaultFee
-        );
+        // BOB has the override; no one else does
+        (address[] memory clients, CustomFees[] memory fees) =
+            feeCalculator.getAllClientFees(0, 10);
+        assertEq(clients.length, 1);
+        assertEq(clients[0], BOB);
+        assertTrue(fees[0].hasCustomFeeOnClientFee);
+        assertEq(fees[0].feeBpsOnClientFee, userFee);
+        // The default is unchanged
+        assertEq(feeCalculator.getRouterFeeOnClientFee(), defaultFee);
     }
 
     function testSetCustomRouterFeeOnClientFeeUnauthorized() public {
@@ -674,9 +702,11 @@ contract FeeCalculatorConfigTest is Constants {
     function testSetCustomRouterFeeOnClientFeeWithoutDefault() public {
         vm.prank(FEE_SETTER);
         feeCalculator.setCustomRouterFeeOnClientFee(ALICE, 7_500_000); // 7.5%
-        assertEq(
-            feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), 7_500_000
-        );
+
+        (, CustomFees[] memory fees) = feeCalculator.getAllClientFees(0, 10);
+        assertTrue(fees[0].hasCustomFeeOnClientFee);
+        assertEq(fees[0].feeBpsOnClientFee, 7_500_000);
+        assertEq(feeCalculator.getRouterFeeOnClientFee(), 0);
     }
 
     function testRemoveCustomRouterFeeOnClientFee() public {
@@ -689,16 +719,17 @@ contract FeeCalculatorConfigTest is Constants {
         feeCalculator.setCustomRouterFeeOnClientFee(ALICE, userFee);
         vm.stopPrank();
 
-        assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), userFee);
+        (address[] memory clients,) = feeCalculator.getAllClientFees(0, 10);
+        assertEq(clients.length, 1);
 
         // Remove custom fee
         vm.prank(FEE_SETTER);
         feeCalculator.removeCustomRouterFeeOnClientFee(ALICE);
 
-        // Should now return default fee
-        assertEq(
-            feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), defaultFee
-        );
+        // Override cleared; default untouched
+        (clients,) = feeCalculator.getAllClientFees(0, 10);
+        assertEq(clients.length, 0);
+        assertEq(feeCalculator.getRouterFeeOnClientFee(), defaultFee);
     }
 
     function testRemoveCustomRouterFeeOnClientFeeUnauthorized() public {
@@ -764,17 +795,15 @@ contract FeeCalculatorConfigTest is Constants {
         assertEq(clients.length, 2);
         assertEq(clients[0], user1);
         assertEq(fees[0].feeBpsOnOutput, _HALF_PCT);
-        assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(user1), _5_PCT);
+        assertEq(fees[0].feeBpsOnClientFee, _5_PCT);
 
         assertEq(clients[1], user2);
         assertEq(fees[1].feeBpsOnOutput, 1_500_000);
-        assertEq(
-            feeCalculator.getEffectiveRouterFeeOnClientFee(user2), 15_000_000
-        );
+        assertEq(fees[1].feeBpsOnClientFee, 15_000_000);
 
         // User3 has no overrides and falls back to the defaults
         assertEq(feeCalculator.getRouterFeeOnOutput(), _1_PCT);
-        assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(user3), _10_PCT);
+        assertEq(feeCalculator.getRouterFeeOnClientFee(), _10_PCT);
     }
 
     function testUpdateDefaultFeeDoesNotAffectCustomFees() public {
@@ -797,7 +826,6 @@ contract FeeCalculatorConfigTest is Constants {
         // Default fees should be zero
         assertEq(feeCalculator.getRouterFeeOnOutput(), 0);
         assertEq(feeCalculator.getRouterFeeOnClientFee(), 0);
-        assertEq(feeCalculator.getEffectiveRouterFeeOnClientFee(ALICE), 0);
         // Default fee receiver should be the contract deployer
         assertEq(feeCalculator.getRouterFeeReceiver(), address(this));
         assertFalse(feeCalculator.getPositiveSlippageEnabled());
