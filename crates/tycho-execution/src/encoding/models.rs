@@ -139,8 +139,9 @@ pub struct Solution {
     amount_out: BigUint,
     /// Maximum negative slippage as a fraction. Used off-chain to derive the
     /// router's `minAmountOut` argument: `amount_out * (1 - slippage)`.
-    /// The router rejects a `minAmountOut` more than 20% below `expectedAmountOut`,
-    /// so values above 0.2 produce reverting calldata. Example: 0.0025 = 0.25%.
+    /// The router rejects a `minAmountOut` more than `MAX_SLIPPAGE_TOLERANCE_BPS`
+    /// (as configured on `TychoRouter`) below `expectedAmountOut`, so larger
+    /// values produce reverting calldata.
     slippage: f64,
     /// List of swaps to fulfill the solution.
     swaps: Vec<Swap>,

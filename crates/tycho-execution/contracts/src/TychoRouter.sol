@@ -121,7 +121,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
 
     uint256 public constant DELAY_FEE_CALCULATOR_ACTIVATION = 3 days;
 
-    // Guardrail: minAmountOut may be at most 20% below expectedAmountOut
+    // Guardrail: minAmountOut may be at most this many bps below expectedAmountOut
     uint256 public constant MAX_SLIPPAGE_TOLERANCE_BPS = 2_000;
     uint256 private constant BPS_DENOMINATOR = 10_000;
 
@@ -196,7 +196,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -254,7 +254,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -311,7 +311,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
@@ -376,7 +376,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -431,7 +431,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -484,7 +484,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
@@ -546,7 +546,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swapData Encoded swap details.
@@ -600,7 +600,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param swapData Encoded swap details.
@@ -653,7 +653,7 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
      * @param tokenIn The address of the input token. Use `ETH_ADDRESS` for native ETH
      * @param tokenOut The address of the output token. Use `ETH_ADDRESS` for native ETH
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
-     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most 20% below it.
+     * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must not exceed `expectedAmountOut` and be at most `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
      * @param receiver The address to receive the output tokens.
      * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
