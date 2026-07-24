@@ -330,6 +330,7 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Base => Some("https://base-mainnet.streamingfast.io:443".to_string()),
         Chain::Unichain => Some("https://mainnet.unichain.streamingfast.io:443".to_string()),
         Chain::Polygon => Some("https://polygon.streamingfast.io:443".to_string()),
+        Chain::Arbitrum => Some("https://arb-one.streamingfast.io:443".to_string()),
         _ => None,
     }
 }

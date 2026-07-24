@@ -1,10 +1,10 @@
 specVersion: v0.1.0
 package:
-  name: "polygon_ramses_v3"
+  name: "arbitrum_ramses_v3"
   version: v0.1.1
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/polygon-ramses-v3"
 
-network: polygon
+network: arbitrum-one
 
 protobuf:
   files:
@@ -29,7 +29,7 @@ binaries:
 modules:
   - name: map_pools_created
     kind: map
-    initialBlock: 82221683 # First PoolCreated event
+    initialBlock: 421077300 # First PoolCreated event
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -120,4 +120,4 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_pools_created: "0x2Bef16A0081565E72100D73CBe19B1Bd2d802380"
+  map_pools_created: "0xd0019e86edB35E1fedaaB03aED5c3c60f115d28b"

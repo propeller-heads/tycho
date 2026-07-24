@@ -1,0 +1,26 @@
+substreams_yaml_path: ./arbitrum-ramses-v3.yaml
+protocol_system: "ramses_v3"
+protocol_type_names:
+  - "ramses_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # High-volume USDC / USDT pool.
+  - name: test_usdc_usdt_pool
+    start_block: 421109066
+    # Stop once Mint, Swap, Burn, and Collect have all been emitted at least once:
+    #   Mint:    block 421109066 (pool creation)
+    #   Swap:    block 421110067
+    #   Burn:    block 421154743
+    #   Collect: block 421154743
+    stop_block: 421155243
+    expected_components:
+      - id: "0x13E8a63DeaEE0b1A6eb7d706e18CF46ea1e66ED5"
+        tokens:
+          - "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+          - "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
+        static_attributes:
+          tick_spacing: "0x01"
+        creation_tx: "0x0bbf4c0f2bec08a30fe171891ef241b486f68eb281e06c3f0bd5da56e2d29583"
+        skip_simulation: false
