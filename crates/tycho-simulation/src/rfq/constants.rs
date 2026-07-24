@@ -6,6 +6,8 @@ use crate::rfq::errors::RFQError;
 
 pub const DEFAULT_METRIC_API_URL: &str = "http://54.199.103.16:8080";
 
+pub const DEFAULT_BICONOMY_PROPAMM_API_URL: &str = "https://propamm.biconomy.io/v1";
+
 /// Hashflow authentication configuration
 pub struct HashflowAuth {
     pub user: String,
@@ -95,6 +97,28 @@ pub fn get_bebop_origins() -> Result<BebopOrigins, RFQError> {
     })
 }
 
+/// Biconomy PropAMM API configuration
+pub struct PropAmmConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+/// Read Biconomy PropAMM API configuration from environment variables.
+/// BICONOMY_PROPAMM_API_URL defaults to the production endpoint;
+/// BICONOMY_PROPAMM_API_KEY is required by the hosted API (issued by the Biconomy team) and
+/// sent as the `x-api-key` header when present.
+pub fn get_biconomy_propamm_config() -> PropAmmConfig {
+    let base_url = env::var("BICONOMY_PROPAMM_API_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_BICONOMY_PROPAMM_API_URL.to_string());
+    let api_key = env::var("BICONOMY_PROPAMM_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+
+    PropAmmConfig { base_url, api_key }
+}
+
 /// Read Metric API configuration from environment variables.
 /// METRIC_API_URL defaults to the public Metric endpoint; METRIC_SECRET_KEY is optional.
 pub fn get_metric_config() -> MetricConfig {
@@ -166,6 +190,21 @@ mod tests {
 
         let result = get_bebop_auth();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_propamm_config_defaults_and_reads_env() {
+        env::remove_var("PROPAMM_API_URL");
+
+        let config = get_propamm_config();
+        assert_eq!(config.base_url, DEFAULT_PROPAMM_API_URL);
+
+        env::set_var("PROPAMM_API_URL", "https://propamm.example");
+
+        let config = get_propamm_config();
+        assert_eq!(config.base_url, "https://propamm.example");
+
+        env::remove_var("PROPAMM_API_URL");
     }
 
     #[test]

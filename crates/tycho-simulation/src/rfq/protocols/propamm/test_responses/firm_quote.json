@@ -1,0 +1,21 @@
+{
+    "quoteId": "0x3f8a1b2c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+    "gasEstimate": "265000",
+    "chainId": 8453,
+    "amountIn": "15000000000000000000",
+    "amountOut": "28164999999",
+    "receiver": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35",
+    "calls": [
+        {
+            "to": "0xaaaa00000000000000000000000000000000aaaa",
+            "value": "0",
+            "data": "0xdeadbeef00000000000000000000000000000000000000000000000000000001"
+        },
+        {
+            "to": "0xbbbb00000000000000000000000000000000bbbb",
+            "value": "0",
+            "data": "0x0102"
+        }
+    ],
+    "validUntil": 1751536030
+}
