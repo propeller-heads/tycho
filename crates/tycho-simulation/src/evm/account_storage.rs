@@ -53,8 +53,12 @@ impl AccountStorage {
     /// # Notes
     ///
     /// This function checks if the `address` is already present in the `accounts`
-    /// collection. If so, it logs a warning and returns without modifying the instance.
+    /// collection. If so, it logs a trace message and returns without modifying the instance.
     /// Otherwise, it stores a new `Account` instance with the provided data at the given address.
+    ///
+    /// Init-if-absent is only safe for seeding placeholder accounts during engine setup;
+    /// authoritative data that can arrive again for a known account (e.g. a re-fetched contract
+    /// snapshot) must use [`overwrite_account`](Self::overwrite_account) instead.
     pub fn init_account(
         &mut self,
         address: Address,

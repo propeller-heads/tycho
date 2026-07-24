@@ -242,12 +242,23 @@ impl SynchronizerStream {
             rx,
         }
     }
+
+    /// Advance a synchronizer by one step.
+    ///
+    /// - `block_history`: validated chain of recent blocks used to classify incoming headers.
+    /// - `block_time`: expected time between blocks; sets the base timeout for Ready streams.
+    /// - `latency_buffer`: added on top of `block_time` to absorb network/processing jitter.
+    /// - `stale_threshold`: how long a stream can make no progress before it is marked Stale and
+    ///   skipped.
+    /// - `skip_wait`: skip the blocking wait for all protocol state synchronizers - only advance
+    ///   those that have waiting messages.
     async fn try_advance(
         &mut self,
         block_history: &BlockHistory,
         block_time: std::time::Duration,
         latency_buffer: std::time::Duration,
         stale_threshold: std::time::Duration,
+        skip_wait: bool,
     ) -> BlockSyncResult<Option<StateSyncMessage<BlockHeader>>> {
         let extractor_id = self.extractor_id.clone();
         let latest_block = block_history.latest();
@@ -281,7 +292,9 @@ impl SynchronizerStream {
                     %extractor_id,
                     "Trying to catch up to latest block"
                 );
-                self.try_catch_up(block_history, block_time + latency_buffer, stale_threshold)
+                let timeout =
+                    if skip_wait { std::time::Duration::ZERO } else { block_time + latency_buffer };
+                self.try_catch_up(block_history, timeout, stale_threshold)
                     .await
             }
             SynchronizerState::Stale(old_block) => {
@@ -292,7 +305,8 @@ impl SynchronizerStream {
                     %extractor_id,
                     "Trying to catch up stale synchronizer to latest block"
                 );
-                self.try_catch_up(block_history, block_time, stale_threshold)
+                let timeout = if skip_wait { std::time::Duration::ZERO } else { block_time };
+                self.try_catch_up(block_history, timeout, stale_threshold)
                     .await
             }
         }
@@ -869,6 +883,12 @@ where
         ready_sync_msgs: &mut HashMap<String, StateSyncMessage<BlockHeader>>,
         block_history: &mut BlockHistory,
     ) -> BlockSyncResult<()> {
+        // If any synchronizer already has a future block, Delayed/Stale streams should not
+        // wait their full catch-up timeout — a reinit is about to fire and the wait would
+        // only lock-step the consumer further behind the chain head.
+        let any_advanced = sync_streams
+            .iter()
+            .any(SynchronizerStream::is_advanced);
         let mut recv_futures = Vec::new();
         for stream in sync_streams.iter_mut() {
             // If stream is in ended state, do not check for any messages (it's receiver
@@ -893,6 +913,7 @@ where
                         self.latency_buffer,
                         self.block_time
                             .mul_f64(self.max_missed_blocks as f64),
+                        any_advanced,
                     )
                     .await?;
                 Ok::<_, BlockSynchronizerError>(

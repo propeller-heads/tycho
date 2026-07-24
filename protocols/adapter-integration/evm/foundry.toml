@@ -8,9 +8,6 @@ optimizer_runs = 200
 solc_version = "0.8.27" # 0.8.25 and 0.8.26 are broken with via-ir (see https://github.com/ethereum/solidity/issues/15004)
 evm_version = 'cancun'
 
-[profile.ci]
-size_check = false
-
 [rpc_endpoints]
 mainnet = "${ETH_RPC_URL}"
 sepolia = "${SEPOLIA_RPC_URL}"
@@ -26,4 +23,3 @@ mainnet = { key = "${ETHERSCAN_MAINNET_KEY}" }
 [[profile.default.fs_permissions]]
 access = "read-write"
 path = "out"
-

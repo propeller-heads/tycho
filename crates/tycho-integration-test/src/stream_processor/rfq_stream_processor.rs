@@ -22,6 +22,7 @@ use tycho_simulation::rfq::{
         liquorice::{
             client::LiquoriceClient, client_builder::LiquoriceClientBuilder, state::LiquoriceState,
         },
+        metric::{client::MetricClient, client_builder::MetricClientBuilder, state::MetricState},
     },
     stream::RFQStreamBuilder,
 };
@@ -33,6 +34,7 @@ pub enum RFQProtocol {
     Bebop,
     Hashflow,
     Liquorice,
+    Metric,
 }
 
 impl Display for RFQProtocol {
@@ -41,6 +43,7 @@ impl Display for RFQProtocol {
             RFQProtocol::Bebop => write!(f, "{}", BebopClient::PROTOCOL_SYSTEM),
             RFQProtocol::Hashflow => write!(f, "{}", HashflowClient::PROTOCOL_SYSTEM),
             RFQProtocol::Liquorice => write!(f, "{}", LiquoriceClient::PROTOCOL_SYSTEM),
+            RFQProtocol::Metric => write!(f, "{}", MetricClient::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -50,6 +53,7 @@ pub struct RFQStreamProcessor {
     tvl_threshold: f64,
     rfq_credentials: HashMap<RFQProtocol, (String, String)>,
     sample_size: usize,
+    run_pamm_protocols: bool,
     /// The protocol's stream will skip messages for this duration after processing a message
     skip_messages_duration: Duration,
 }
@@ -60,14 +64,14 @@ impl RFQStreamProcessor {
         tvl_threshold: f64,
         sample_size: usize,
         skip_messages_duration: Duration,
+        run_pamm_protocols: bool,
     ) -> miette::Result<Self> {
         let mut rfq_credentials = HashMap::new();
-        let (bebop_user, bebop_key) = (env::var("BEBOP_USER").ok(), env::var("BEBOP_KEY").ok());
-        if let (Some(user), Some(key)) = (bebop_user, bebop_key) {
+        if let Ok(key) = env::var("BEBOP_KEY") {
             info!("Bebop RFQ credentials found");
-            rfq_credentials.insert(RFQProtocol::Bebop, (user, key));
+            rfq_credentials.insert(RFQProtocol::Bebop, (String::new(), key));
         } else {
-            info!("Bebop RFQ credentials not found. Expected environment variables: BEBOP_USER, BEBOP_KEY");
+            info!("Bebop RFQ credentials not found. Expected environment variable: BEBOP_KEY");
         }
         let (hashflow_user, hashflow_key) =
             (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
@@ -87,9 +91,22 @@ impl RFQStreamProcessor {
         }
 
         if rfq_credentials.is_empty() {
-            return Err(miette!("No RFQ credentials found. Please set BEBOP_USER and BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables"));
+            if run_pamm_protocols {
+                info!(
+                    "No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only."
+                );
+            } else {
+                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols."));
+            }
         }
-        Ok(Self { chain, tvl_threshold, rfq_credentials, sample_size, skip_messages_duration })
+        Ok(Self {
+            chain,
+            tvl_threshold,
+            rfq_credentials,
+            sample_size,
+            run_pamm_protocols,
+            skip_messages_duration,
+        })
     }
 
     pub async fn run_stream(
@@ -103,17 +120,39 @@ impl RFQStreamProcessor {
         let mut rfq_stream_builder = RFQStreamBuilder::new()
             .set_tokens(all_tokens.clone())
             .await;
+        let metric_enabled = if self.run_pamm_protocols {
+            match MetricClientBuilder::new(self.chain)
+                .tokens(rfq_tokens.clone())
+                .token_metadata(all_tokens.clone())
+                .tvl_threshold(self.tvl_threshold)
+                .poll_time(Duration::from_secs(30))
+                .build()
+            {
+                Ok(metric_client) => {
+                    info!("Adding {} RFQ client...", RFQProtocol::Metric);
+                    rfq_stream_builder = rfq_stream_builder
+                        .add_client::<MetricState>("metric", Box::new(metric_client));
+                    true
+                }
+                Err(e) => {
+                    warn!("Metric RFQ not supported on chain {:?}, skipping: {e}", self.chain);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
         for (protocol, (user, key)) in &self.rfq_credentials {
             info!("Adding {protocol} RFQ client...");
             match protocol {
                 RFQProtocol::Bebop => {
-                    let bebop_client =
-                        BebopClientBuilder::new(self.chain, user.clone(), key.clone())
-                            .tokens(rfq_tokens.clone())
-                            .tvl_threshold(self.tvl_threshold)
-                            .build()
-                            .into_diagnostic()
-                            .wrap_err("Failed to create Bebop RFQ client")?;
+                    let bebop_client = BebopClientBuilder::new(self.chain, key.clone())
+                        .tokens(rfq_tokens.clone())
+                        .tvl_threshold(self.tvl_threshold)
+                        .build()
+                        .into_diagnostic()
+                        .wrap_err("Failed to create Bebop RFQ client")?;
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<BebopState>("bebop", Box::new(bebop_client));
                 }
@@ -141,6 +180,7 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
                 }
+                RFQProtocol::Metric => unreachable!("Metric RFQ does not use credential storage"),
             }
         }
 
@@ -155,6 +195,9 @@ impl RFQStreamProcessor {
             .keys()
             .map(|protocol| (protocol.to_string(), tokio::time::Instant::now()))
             .collect();
+        if metric_enabled {
+            next_stream_times.insert(RFQProtocol::Metric.to_string(), tokio::time::Instant::now());
+        }
         let handle = tokio::spawn(async move {
             info!("RFQ stream processor started");
             while let Some(mut update) = rx.recv().await {

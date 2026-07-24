@@ -1,0 +1,25 @@
+[package]
+name = "polygon-ramses-v3"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "polygon_ramses_v3"
+crate-type = ["cdylib"]
+
+[dependencies]
+ethabi = "18.0.0"
+hex = "0.4.3"
+itertools = "0.13.0"
+prost = "0.11"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.4.0" }
+tycho-substreams = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.4.0" }
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+
+[build-dependencies]
+anyhow = "1.0.75"
+substreams-ethereum = "0.9.9"

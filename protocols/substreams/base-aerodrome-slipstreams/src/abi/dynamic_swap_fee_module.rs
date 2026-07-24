@@ -463,6 +463,65 @@ pub mod functions {
         }
     }
     #[derive(Debug, Clone, PartialEq)]
+    pub struct DisableInitialFee {
+        pub pool: Vec<u8>,
+    }
+    impl DisableInitialFee {
+        const METHOD_ID: [u8; 4] = [85u8, 51u8, 134u8, 205u8];
+        pub fn decode(
+            call: &substreams_ethereum::pb::eth::v2::Call,
+        ) -> Result<Self, String> {
+            let maybe_data = call.input.get(4..);
+            if maybe_data.is_none() {
+                return Err("no data to decode".to_string());
+            }
+            let mut values = ethabi::decode(
+                    &[ethabi::ParamType::Address],
+                    maybe_data.unwrap(),
+                )
+                .map_err(|e| format!("unable to decode call.input: {:?}", e))?;
+            values.reverse();
+            Ok(Self {
+                pool: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+            })
+        }
+        pub fn encode(&self) -> Vec<u8> {
+            let data = ethabi::encode(
+                &[ethabi::Token::Address(ethabi::Address::from_slice(&self.pool))],
+            );
+            let mut encoded = Vec::with_capacity(4 + data.len());
+            encoded.extend(Self::METHOD_ID);
+            encoded.extend(data);
+            encoded
+        }
+        pub fn match_call(call: &substreams_ethereum::pb::eth::v2::Call) -> bool {
+            match call.input.get(0..4) {
+                Some(signature) => Self::METHOD_ID == signature,
+                None => false,
+            }
+        }
+    }
+    impl substreams_ethereum::Function for DisableInitialFee {
+        const NAME: &'static str = "disableInitialFee";
+        fn match_call(call: &substreams_ethereum::pb::eth::v2::Call) -> bool {
+            Self::match_call(call)
+        }
+        fn decode(
+            call: &substreams_ethereum::pb::eth::v2::Call,
+        ) -> Result<Self, String> {
+            Self::decode(call)
+        }
+        fn encode(&self) -> Vec<u8> {
+            self.encode()
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub struct Discounted {
         pub param0: Vec<u8>,
     }
@@ -616,6 +675,8 @@ pub mod functions {
                 substreams::scalar::BigInt,
                 substreams::scalar::BigInt,
                 substreams::scalar::BigInt,
+                bool,
+                substreams::scalar::BigInt,
             ),
             String,
         > {
@@ -628,6 +689,8 @@ pub mod functions {
                 substreams::scalar::BigInt,
                 substreams::scalar::BigInt,
                 substreams::scalar::BigInt,
+                bool,
+                substreams::scalar::BigInt,
             ),
             String,
         > {
@@ -636,6 +699,8 @@ pub mod functions {
                         ethabi::ParamType::Uint(24usize),
                         ethabi::ParamType::Uint(24usize),
                         ethabi::ParamType::Uint(64usize),
+                        ethabi::ParamType::Bool,
+                        ethabi::ParamType::Uint(24usize),
                     ],
                     data.as_ref(),
                 )
@@ -672,6 +737,17 @@ pub mod functions {
                         .to_big_endian(v.as_mut_slice());
                     substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
                 },
+                values.pop().expect(INTERNAL_ERR).into_bool().expect(INTERNAL_ERR),
+                {
+                    let mut v = [0 as u8; 32];
+                    values
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
             ))
         }
         pub fn match_call(call: &substreams_ethereum::pb::eth::v2::Call) -> bool {
@@ -687,6 +763,8 @@ pub mod functions {
             (
                 substreams::scalar::BigInt,
                 substreams::scalar::BigInt,
+                substreams::scalar::BigInt,
+                bool,
                 substreams::scalar::BigInt,
             ),
         > {
@@ -731,6 +809,8 @@ pub mod functions {
             substreams::scalar::BigInt,
             substreams::scalar::BigInt,
             substreams::scalar::BigInt,
+            bool,
+            substreams::scalar::BigInt,
         ),
     > for DynamicFeeConfig {
         fn output(
@@ -739,6 +819,8 @@ pub mod functions {
             (
                 substreams::scalar::BigInt,
                 substreams::scalar::BigInt,
+                substreams::scalar::BigInt,
+                bool,
                 substreams::scalar::BigInt,
             ),
             String,
@@ -2096,6 +2178,90 @@ pub mod functions {
         }
     }
     #[derive(Debug, Clone, PartialEq)]
+    pub struct SetInitialFee {
+        pub pool: Vec<u8>,
+        pub fee: substreams::scalar::BigInt,
+    }
+    impl SetInitialFee {
+        const METHOD_ID: [u8; 4] = [123u8, 127u8, 187u8, 246u8];
+        pub fn decode(
+            call: &substreams_ethereum::pb::eth::v2::Call,
+        ) -> Result<Self, String> {
+            let maybe_data = call.input.get(4..);
+            if maybe_data.is_none() {
+                return Err("no data to decode".to_string());
+            }
+            let mut values = ethabi::decode(
+                    &[ethabi::ParamType::Address, ethabi::ParamType::Uint(24usize)],
+                    maybe_data.unwrap(),
+                )
+                .map_err(|e| format!("unable to decode call.input: {:?}", e))?;
+            values.reverse();
+            Ok(Self {
+                pool: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+                fee: {
+                    let mut v = [0 as u8; 32];
+                    values
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+            })
+        }
+        pub fn encode(&self) -> Vec<u8> {
+            let data = ethabi::encode(
+                &[
+                    ethabi::Token::Address(ethabi::Address::from_slice(&self.pool)),
+                    ethabi::Token::Uint(
+                        ethabi::Uint::from_big_endian(
+                            match self.fee.clone().to_bytes_be() {
+                                (num_bigint::Sign::Plus, bytes) => bytes,
+                                (num_bigint::Sign::NoSign, bytes) => bytes,
+                                (num_bigint::Sign::Minus, _) => {
+                                    panic!("negative numbers are not supported")
+                                }
+                            }
+                                .as_slice(),
+                        ),
+                    ),
+                ],
+            );
+            let mut encoded = Vec::with_capacity(4 + data.len());
+            encoded.extend(Self::METHOD_ID);
+            encoded.extend(data);
+            encoded
+        }
+        pub fn match_call(call: &substreams_ethereum::pb::eth::v2::Call) -> bool {
+            match call.input.get(0..4) {
+                Some(signature) => Self::METHOD_ID == signature,
+                None => false,
+            }
+        }
+    }
+    impl substreams_ethereum::Function for SetInitialFee {
+        const NAME: &'static str = "setInitialFee";
+        fn match_call(call: &substreams_ethereum::pb::eth::v2::Call) -> bool {
+            Self::match_call(call)
+        }
+        fn decode(
+            call: &substreams_ethereum::pb::eth::v2::Call,
+        ) -> Result<Self, String> {
+            Self::decode(call)
+        }
+        fn encode(&self) -> Vec<u8> {
+            self.encode()
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub struct SetScalingFactor {
         pub pool: Vec<u8>,
         pub scaling_factor: substreams::scalar::BigInt,
@@ -2972,6 +3138,188 @@ pub mod events {
     }
     impl substreams_ethereum::Event for FeeCapSet {
         const NAME: &'static str = "FeeCapSet";
+        fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            Self::match_log(log)
+        }
+        fn decode(log: &substreams_ethereum::pb::eth::v2::Log) -> Result<Self, String> {
+            Self::decode(log)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct InitialFeeDisabled {
+        pub pool: Vec<u8>,
+    }
+    impl InitialFeeDisabled {
+        const TOPIC_ID: [u8; 32] = [
+            229u8,
+            83u8,
+            60u8,
+            45u8,
+            236u8,
+            81u8,
+            182u8,
+            185u8,
+            82u8,
+            153u8,
+            83u8,
+            215u8,
+            98u8,
+            129u8,
+            139u8,
+            166u8,
+            234u8,
+            4u8,
+            19u8,
+            0u8,
+            184u8,
+            40u8,
+            38u8,
+            225u8,
+            198u8,
+            52u8,
+            234u8,
+            234u8,
+            42u8,
+            86u8,
+            177u8,
+            233u8,
+        ];
+        pub fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            if log.topics.len() != 2usize {
+                return false;
+            }
+            if log.data.len() != 0usize {
+                return false;
+            }
+            return log.topics.get(0).expect("bounds already checked").as_ref()
+                == Self::TOPIC_ID;
+        }
+        pub fn decode(
+            log: &substreams_ethereum::pb::eth::v2::Log,
+        ) -> Result<Self, String> {
+            Ok(Self {
+                pool: ethabi::decode(
+                        &[ethabi::ParamType::Address],
+                        log.topics[1usize].as_ref(),
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "unable to decode param 'pool' from topic of type 'address': {:?}",
+                            e
+                        )
+                    })?
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+            })
+        }
+    }
+    impl substreams_ethereum::Event for InitialFeeDisabled {
+        const NAME: &'static str = "InitialFeeDisabled";
+        fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            Self::match_log(log)
+        }
+        fn decode(log: &substreams_ethereum::pb::eth::v2::Log) -> Result<Self, String> {
+            Self::decode(log)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct InitialFeeSet {
+        pub pool: Vec<u8>,
+        pub initial_fee: substreams::scalar::BigInt,
+    }
+    impl InitialFeeSet {
+        const TOPIC_ID: [u8; 32] = [
+            68u8,
+            83u8,
+            29u8,
+            129u8,
+            175u8,
+            17u8,
+            108u8,
+            12u8,
+            127u8,
+            117u8,
+            47u8,
+            202u8,
+            216u8,
+            147u8,
+            145u8,
+            185u8,
+            137u8,
+            199u8,
+            10u8,
+            27u8,
+            135u8,
+            157u8,
+            83u8,
+            254u8,
+            45u8,
+            119u8,
+            62u8,
+            128u8,
+            47u8,
+            69u8,
+            200u8,
+            113u8,
+        ];
+        pub fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            if log.topics.len() != 3usize {
+                return false;
+            }
+            if log.data.len() != 0usize {
+                return false;
+            }
+            return log.topics.get(0).expect("bounds already checked").as_ref()
+                == Self::TOPIC_ID;
+        }
+        pub fn decode(
+            log: &substreams_ethereum::pb::eth::v2::Log,
+        ) -> Result<Self, String> {
+            Ok(Self {
+                pool: ethabi::decode(
+                        &[ethabi::ParamType::Address],
+                        log.topics[1usize].as_ref(),
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "unable to decode param 'pool' from topic of type 'address': {:?}",
+                            e
+                        )
+                    })?
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+                initial_fee: {
+                    let mut v = [0 as u8; 32];
+                    ethabi::decode(
+                            &[ethabi::ParamType::Uint(24usize)],
+                            log.topics[2usize].as_ref(),
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "unable to decode param 'initial_fee' from topic of type 'uint24': {:?}",
+                                e
+                            )
+                        })?
+                        .pop()
+                        .expect(INTERNAL_ERR)
+                        .into_uint()
+                        .expect(INTERNAL_ERR)
+                        .to_big_endian(v.as_mut_slice());
+                    substreams::scalar::BigInt::from_unsigned_bytes_be(&v)
+                },
+            })
+        }
+    }
+    impl substreams_ethereum::Event for InitialFeeSet {
+        const NAME: &'static str = "InitialFeeSet";
         fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
             Self::match_log(log)
         }

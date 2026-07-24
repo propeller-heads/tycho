@@ -1,4 +1,5 @@
 pub mod blockchain;
+pub mod chain_config;
 pub mod contract;
 pub mod error;
 pub mod protocol;
@@ -6,9 +7,13 @@ pub mod token;
 
 use std::{collections::HashMap, fmt::Display, str::FromStr};
 
+pub use blockchain::{BlockChanges, TxWithContractChanges};
+use chain_config::{
+    chain_registry, ChainConfigError, ChainConfigRegistry, CustomChainConfig, CustomChainId,
+    TvlThresholdTier,
+};
 use deepsize::DeepSizeOf;
 use serde::{Deserialize, Serialize};
-use strum_macros::{Display, EnumString};
 use thiserror::Error;
 use token::Token;
 
@@ -58,35 +63,26 @@ pub type ProtocolSystem = String;
 /// Entry point id literal type to uniquely identify an entry point.
 pub type EntryPointId = String;
 
-/// TVL threshold tiers for chain-aware filtering defaults.
+/// A blockchain Tycho indexes or simulates over.
 ///
-/// TVL is denominated in each chain's native token. Since native tokens have different USD values,
-/// the same numeric threshold produces wildly different USD-equivalent filters across chains.
-/// These tiers provide sensible defaults targeting equivalent USD values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TvlThresholdTier {
-    /// Filters out dust pools (~$20K USD equivalent in native token).
-    Low,
-    /// Filters for pools with meaningful liquidity (~$200K USD equivalent in native token).
-    Medium,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumString,
-    Display,
-    Default,
-    DeepSizeOf,
-)]
+/// Built-in chains are first-class variants: their config (id, native token, block time, TVL
+/// tiers) is compile-time and total, so they never fail to resolve. `Custom` is the escape hatch
+/// for a chain a self-hoster runs without upstreaming a variant — its config lives in the
+/// process-wide registry (see [`chain_config`]) rather than in the enum.
+///
+/// `Custom` wraps a [`CustomChainId`] whose inner name is private, so a `Chain::Custom` can only be
+/// built through the crate's registry-validating constructors ([`Chain::custom`],
+/// [`Chain::from_str`], `From<dto::Chain>`) — it cannot be fabricated directly. Because the
+/// registry is set-once, a validated `Chain::Custom` stays resolvable for its whole lifetime, so
+/// the config accessors only panic on an unreachable invariant; [`Chain::try_id`] and its siblings
+/// expose non-panicking variants. The one reachable failure is decoding wire data for a chain the
+/// local registry lacks (`From<dto::Chain>`), which panics at the decode boundary.
+///
+/// Prefer adding a first-class variant for any chain Tycho officially supports; reserve `Custom`
+/// for the self-host case. Full rationale in the custom-chain decision record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+#[non_exhaustive]
 pub enum Chain {
     #[default]
     Ethereum,
@@ -97,6 +93,71 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    Plasma,
+    /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
+    Custom(CustomChainId),
+}
+
+impl DeepSizeOf for Chain {
+    fn deep_size_of_children(&self, _context: &mut deepsize::Context) -> usize {
+        0
+    }
+}
+
+impl Chain {
+    /// Parses only the built-in chains, ignoring any custom-chain registry.
+    pub fn builtin_from_str(s: &str) -> Option<Self> {
+        match s {
+            "ethereum" => Some(Chain::Ethereum),
+            "starknet" => Some(Chain::Starknet),
+            "zksync" => Some(Chain::ZkSync),
+            "arbitrum" => Some(Chain::Arbitrum),
+            "base" => Some(Chain::Base),
+            "bsc" => Some(Chain::Bsc),
+            "unichain" => Some(Chain::Unichain),
+            "polygon" => Some(Chain::Polygon),
+            "plasma" => Some(Chain::Plasma),
+            _ => None,
+        }
+    }
+
+    /// Builds a custom-chain identity, validating that `name` has a config in the chain registry.
+    /// Returns [`ChainConfigError::UnknownChain`] when it is absent so typos never silently become
+    /// custom chains.
+    pub fn custom(name: &str) -> Result<Self, ChainConfigError> {
+        CustomChainId::checked(name, chain_registry()).map(Chain::Custom)
+    }
+}
+
+impl FromStr for Chain {
+    type Err = ChainConfigError;
+
+    /// Resolves a chain name. Built-in chains parse directly; any other name is accepted only if it
+    /// is registered in the global chain config registry, otherwise
+    /// [`ChainConfigError::UnknownChain`] is returned so typos never silently become custom chains.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(chain) = Self::builtin_from_str(s) {
+            return Ok(chain);
+        }
+        Self::custom(s)
+    }
+}
+
+impl Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Chain::Ethereum => f.write_str("ethereum"),
+            Chain::Starknet => f.write_str("starknet"),
+            Chain::ZkSync => f.write_str("zksync"),
+            Chain::Arbitrum => f.write_str("arbitrum"),
+            Chain::Base => f.write_str("base"),
+            Chain::Bsc => f.write_str("bsc"),
+            Chain::Unichain => f.write_str("unichain"),
+            Chain::Polygon => f.write_str("polygon"),
+            Chain::Plasma => f.write_str("plasma"),
+            Chain::Custom(name) => f.write_str(name.as_str()),
+        }
+    }
 }
 
 impl From<dto::Chain> for Chain {
@@ -110,6 +171,14 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Bsc => Chain::Bsc,
             dto::Chain::Unichain => Chain::Unichain,
             dto::Chain::Polygon => Chain::Polygon,
+            dto::Chain::Plasma => Chain::Plasma,
+            dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
+                panic!(
+                    "received custom chain '{name}' with no registered config: {e}; install it via \
+                     the chain config file (TYCHO_CHAINS_CONFIG, default ./chains.yaml) or \
+                     init_chain_registry before decoding wire data"
+                )
+            }),
         }
     }
 }
@@ -165,6 +234,54 @@ fn native_pol(chain: Chain) -> Token {
     )
 }
 
+fn native_xpl(chain: Chain) -> Token {
+    Token::new(
+        &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+        "XPL",
+        18,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
+/// Looks up a custom chain's config in the registry, returning [`ChainConfigError::UnknownChain`]
+/// when it is absent.
+fn try_resolve_custom<'a>(
+    id: &CustomChainId,
+    registry: &'a ChainConfigRegistry,
+) -> Result<&'a CustomChainConfig, ChainConfigError> {
+    registry
+        .get(id.as_str())
+        .ok_or_else(|| ChainConfigError::UnknownChain(id.as_str().to_owned()))
+}
+
+/// Unwraps a registry lookup that cannot fail for a validly-constructed `Chain::Custom`: a
+/// [`CustomChainId`] is only minted after registry validation and the registry is set-once, so a
+/// missing entry is an internal invariant violation rather than bad input.
+fn expect_registered<T>(result: Result<T, ChainConfigError>) -> T {
+    result.unwrap_or_else(|e| {
+        panic!(
+            "internal invariant violation resolving custom chain config: {e}; Chain::Custom is \
+             validated against the set-once chain registry at construction"
+        )
+    })
+}
+
+fn native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
+    let addr = Bytes::from(cfg.native.address.as_bytes().to_vec());
+    Token::new(
+        &addr,
+        cfg.native.symbol.as_str(),
+        cfg.native.decimals as u32,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
 fn wrapped_native_bsc(chain: Chain, address: &str) -> Token {
     Token::new(&Bytes::from_str(address).unwrap(), "WBNB", 18, 0, &[Some(2300)], chain, 100)
 }
@@ -173,9 +290,40 @@ fn wrapped_native_pol(chain: Chain, address: &str) -> Token {
     Token::new(&Bytes::from_str(address).unwrap(), "WMATIC", 18, 0, &[Some(2300)], chain, 100)
 }
 
+fn wrapped_native_xpl(chain: Chain, address: &str) -> Token {
+    Token::new(&Bytes::from_str(address).unwrap(), "WXPL", 18, 0, &[Some(2300)], chain, 100)
+}
+
+fn wrapped_native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
+    let addr = Bytes::from(
+        cfg.wrapped_native
+            .address
+            .as_bytes()
+            .to_vec(),
+    );
+    Token::new(
+        &addr,
+        cfg.wrapped_native.symbol.as_str(),
+        cfg.wrapped_native.decimals as u32,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
 impl Chain {
+    /// Returns the numeric chain id. Panics if a custom chain has no registered config — an
+    /// unreachable invariant for a validly-constructed `Chain::Custom`; use [`Chain::try_id`] for a
+    /// non-panicking variant.
     pub fn id(&self) -> u64 {
-        match self {
+        expect_registered(self.try_id())
+    }
+
+    /// Returns the numeric chain id, or [`ChainConfigError::UnknownChain`] when a custom chain has
+    /// no registered config.
+    pub fn try_id(&self) -> Result<u64, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => 1,
             Chain::ZkSync => 324,
             Chain::Arbitrum => 42161,
@@ -184,7 +332,9 @@ impl Chain {
             Chain::Bsc => 56,
             Chain::Unichain => 130,
             Chain::Polygon => 137,
-        }
+            Chain::Plasma => 9745,
+            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
+        })
     }
 
     /// Returns a default TVL threshold in native token units for the given tier.
@@ -193,8 +343,20 @@ impl Chain {
     /// Native token prices used: ETH ~$2,000, POL ~$0.10, BNB ~$630.
     /// These prices are volatile, and used as a reference. They should not be updated often,
     /// unless big price movements occour, making an update necessary.
+    ///
+    /// Panics if a custom chain has no registered config; use [`Chain::try_default_tvl_threshold`]
+    /// for a non-panicking variant.
     pub fn default_tvl_threshold(&self, tier: TvlThresholdTier) -> f64 {
-        match (self, tier) {
+        expect_registered(self.try_default_tvl_threshold(tier))
+    }
+
+    /// Like [`Chain::default_tvl_threshold`] but returns [`ChainConfigError::UnknownChain`] when a
+    /// custom chain has no registered config.
+    pub fn try_default_tvl_threshold(
+        &self,
+        tier: TvlThresholdTier,
+    ) -> Result<f64, ChainConfigError> {
+        Ok(match (self, tier) {
             // ETH-native chains: 10 ETH ≈ $20K, 100 ETH ≈ $200K.
             // Starknet uses ETH-denominated TVL in Tycho (STRK tracked separately).
             (
@@ -220,15 +382,37 @@ impl Chain {
             (Chain::Polygon, TvlThresholdTier::Low) => 200_000.0,
             (Chain::Polygon, TvlThresholdTier::Medium) => 2_000_000.0,
 
+            // Plasma (XPL ≈ $0.10): 200_000 XPL ≈ $20K, 2_000_000 XPL ≈ $200K
+            (Chain::Plasma, TvlThresholdTier::Low) => 200_000.0,
+            (Chain::Plasma, TvlThresholdTier::Medium) => 2_000_000.0,
+
             // BSC (BNB ≈ $630): 32 BNB ≈ $20K, 320 BNB ≈ $200K
             (Chain::Bsc, TvlThresholdTier::Low) => 32.0,
             (Chain::Bsc, TvlThresholdTier::Medium) => 320.0,
-        }
+
+            (Chain::Custom(id), TvlThresholdTier::Low) => {
+                try_resolve_custom(id, chain_registry())?
+                    .default_tvl_thresholds
+                    .low
+            }
+            (Chain::Custom(id), TvlThresholdTier::Medium) => {
+                try_resolve_custom(id, chain_registry())?
+                    .default_tvl_thresholds
+                    .medium
+            }
+        })
     }
 
-    /// Returns the native token for the chain.
+    /// Returns the native token for the chain. Panics if a custom chain has no registered config;
+    /// use [`Chain::try_native_token`] for a non-panicking variant.
     pub fn native_token(&self) -> Token {
-        match self {
+        expect_registered(self.try_native_token())
+    }
+
+    /// Like [`Chain::native_token`] but returns [`ChainConfigError::UnknownChain`] when a custom
+    /// chain has no registered config.
+    pub fn try_native_token(&self) -> Result<Token, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => native_eth(Chain::Ethereum),
             // It was decided that STRK token will be tracked as a dedicated AccountBalance on
             // Starknet accounts and ETH balances will be tracked as a native balance.
@@ -239,12 +423,21 @@ impl Chain {
             Chain::Bsc => native_bsc(Chain::Bsc),
             Chain::Unichain => native_eth(Chain::Unichain),
             Chain::Polygon => native_pol(Chain::Polygon),
-        }
+            Chain::Plasma => native_xpl(Chain::Plasma),
+            Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
+        })
     }
 
-    /// Returns the wrapped native token for the chain.
+    /// Returns the wrapped native token for the chain. Panics if a custom chain has no registered
+    /// config; use [`Chain::try_wrapped_native_token`] for a non-panicking variant.
     pub fn wrapped_native_token(&self) -> Token {
-        match self {
+        expect_registered(self.try_wrapped_native_token())
+    }
+
+    /// Like [`Chain::wrapped_native_token`] but returns [`ChainConfigError::UnknownChain`] when a
+    /// custom chain has no registered config.
+    pub fn try_wrapped_native_token(&self) -> Result<Token, ChainConfigError> {
+        Ok(match self {
             Chain::Ethereum => {
                 wrapped_native_eth(Chain::Ethereum, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
             }
@@ -270,7 +463,36 @@ impl Chain {
             Chain::Polygon => {
                 wrapped_native_pol(Chain::Polygon, "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
             }
-        }
+            Chain::Plasma => {
+                wrapped_native_xpl(Chain::Plasma, "0x6100E367285b01F48D07953803A2d8dCA5D19873")
+            }
+            Chain::Custom(id) => {
+                wrapped_native_custom(*self, try_resolve_custom(id, chain_registry())?)
+            }
+        })
+    }
+
+    /// Returns the expected block time in seconds for the chain. Panics if a custom chain has no
+    /// registered config; use [`Chain::try_block_time_secs`] for a non-panicking variant.
+    pub fn block_time_secs(&self) -> u64 {
+        expect_registered(self.try_block_time_secs())
+    }
+
+    /// Like [`Chain::block_time_secs`] but returns [`ChainConfigError::UnknownChain`] when a custom
+    /// chain has no registered config.
+    pub fn try_block_time_secs(&self) -> Result<u64, ChainConfigError> {
+        Ok(match self {
+            Chain::Ethereum => 12,
+            Chain::Starknet => 2,
+            Chain::ZkSync => 3,
+            Chain::Arbitrum => 1,
+            Chain::Base => 2,
+            Chain::Bsc => 1,
+            Chain::Unichain => 1,
+            Chain::Polygon => 2,
+            Chain::Plasma => 1,
+            Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
+        })
     }
 }
 
@@ -431,4 +653,168 @@ pub enum MergeError {
     TransactionOrderError(String, u64, u64),
     #[error("Cannot merge: {0}")]
     InvalidState(String),
+}
+
+// The custom-chain tests below install the process-wide chain registry, which is a set-once
+// `OnceLock`. They must run in isolated processes (we use nextest), so each test gets a fresh
+// registry; under a shared-process runner they would contend over the same global.
+#[cfg(test)]
+mod tests {
+    use arrayvec::ArrayString;
+
+    use super::{
+        chain_config::{
+            init_chain_registry, ChainAddress, ChainConfigError, ChainTokenConfig, TvlThresholds,
+        },
+        *,
+    };
+
+    fn test_config() -> CustomChainConfig {
+        CustomChainConfig::try_new(
+            "testchain",
+            9999,
+            5,
+            ChainTokenConfig::try_new("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "TST", 18)
+                .unwrap(),
+            ChainTokenConfig::try_new("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "WTST", 18)
+                .unwrap(),
+            TvlThresholds::new(50.0, 500.0),
+        )
+        .unwrap()
+    }
+
+    fn init_test_registry() {
+        init_chain_registry(ChainConfigRegistry::from_configs([test_config()]).unwrap())
+            .expect("chain registry already initialised; run tests under nextest");
+    }
+
+    #[test]
+    fn test_custom_chain_display() {
+        init_test_registry();
+        assert_eq!(
+            Chain::custom("testchain")
+                .unwrap()
+                .to_string(),
+            "testchain"
+        );
+    }
+
+    #[test]
+    fn test_from_str_custom_returns_err() {
+        assert!("custom".parse::<Chain>().is_err());
+        assert!("unknown".parse::<Chain>().is_err());
+    }
+
+    #[test]
+    fn test_custom_unregistered_returns_err() {
+        init_test_registry();
+        assert_eq!(Chain::custom("nope"), Err(ChainConfigError::UnknownChain("nope".to_owned())));
+    }
+
+    #[test]
+    fn test_from_dto_registered_custom_roundtrips() {
+        init_test_registry();
+        let dto_chain: dto::Chain = Chain::custom("testchain")
+            .unwrap()
+            .into();
+        let chain: Chain = dto_chain.into();
+        assert_eq!(chain.id(), 9999);
+    }
+
+    #[test]
+    #[should_panic(expected = "no registered config")]
+    fn test_from_dto_unregistered_custom_panics() {
+        let dto_chain = dto::Chain::Custom(ArrayString::from("nope").unwrap());
+        let _: Chain = dto_chain.into();
+    }
+
+    #[test]
+    fn test_try_accessors_ok_for_registered_custom() {
+        init_test_registry();
+        let chain = Chain::custom("testchain").unwrap();
+        assert_eq!(chain.try_id().unwrap(), 9999);
+        assert_eq!(chain.try_block_time_secs().unwrap(), 5);
+        assert_eq!(
+            chain
+                .try_default_tvl_threshold(TvlThresholdTier::Low)
+                .unwrap(),
+            50.0
+        );
+        assert_eq!(chain.try_native_token().unwrap().symbol, "TST");
+        assert_eq!(
+            chain
+                .try_wrapped_native_token()
+                .unwrap()
+                .symbol,
+            "WTST"
+        );
+    }
+
+    #[test]
+    fn test_try_accessors_err_for_unregistered_custom() {
+        // A `CustomChainId` that bypassed registry validation (only reachable via direct
+        // deserialization) surfaces as an error rather than a panic through the `try_*` accessors.
+        let ghost: Chain = serde_json::from_str(r#"{"custom":"ghostchain"}"#).unwrap();
+        assert_eq!(ghost.try_id(), Err(ChainConfigError::UnknownChain("ghostchain".to_owned())));
+        assert!(ghost.try_native_token().is_err());
+    }
+
+    #[test]
+    fn test_chain_stays_small() {
+        // Regression: Custom carries only a 32-char name, so Chain stays a small Copy enum rather
+        // than embedding the full config (~200 bytes) as it did when Custom held CustomChainConfig.
+        assert!(
+            std::mem::size_of::<Chain>() <= 40,
+            "Chain is {} bytes",
+            std::mem::size_of::<Chain>()
+        );
+    }
+
+    #[test]
+    fn test_custom_chain_id() {
+        init_test_registry();
+        let chain = Chain::custom("testchain").unwrap();
+        assert_eq!(chain.id(), 9999);
+    }
+
+    #[test]
+    fn test_custom_chain_tvl_thresholds() {
+        init_test_registry();
+        let chain = Chain::custom("testchain").unwrap();
+        assert_eq!(chain.default_tvl_threshold(TvlThresholdTier::Low), 50.0);
+        assert_eq!(chain.default_tvl_threshold(TvlThresholdTier::Medium), 500.0);
+    }
+
+    #[test]
+    fn test_custom_chain_native_token() {
+        init_test_registry();
+        let chain = Chain::custom("testchain").unwrap();
+        let token = chain.native_token();
+        assert_eq!(token.symbol, "TST");
+        assert_eq!(token.decimals, 18);
+        assert_eq!(token.chain, chain);
+        assert_eq!(token.address, Bytes::from(vec![0xAA; 20]));
+    }
+
+    #[test]
+    fn test_custom_chain_wrapped_native_token() {
+        init_test_registry();
+        let chain = Chain::custom("testchain").unwrap();
+        let token = chain.wrapped_native_token();
+        assert_eq!(token.symbol, "WTST");
+        assert_eq!(token.chain, chain);
+        assert_eq!(token.address, Bytes::from(vec![0xBB; 20]));
+    }
+
+    #[test]
+    fn test_chain_address_new_rejects_oversized_input() {
+        assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainConfigError::AddressTooLong(33)));
+    }
+
+    #[test]
+    fn test_chain_address_as_bytes_returns_active_slice() {
+        let addr = ChainAddress::new(&[0xAA; 20]).unwrap();
+        assert_eq!(addr.as_bytes(), &[0xAA; 20]);
+        assert_eq!(addr.as_bytes().len(), 20);
+    }
 }

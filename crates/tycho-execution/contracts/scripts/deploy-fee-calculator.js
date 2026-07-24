@@ -1,18 +1,14 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
+const {resolveRolesNetwork} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
 
     // The routerFeeSetter is the address that will be granted
     // ROUTER_FEE_SETTER_ROLE to manage fee configuration.
-    const routerFeeSetter = process.env.ROUTER_FEE_SETTER;
-    if (!routerFeeSetter) {
-        throw new Error(
-            "ROUTER_FEE_SETTER env var is required"
-        );
-    }
+    const routerFeeSetter = resolveRolesNetwork(network).ROUTER_FEE_SETTER[0];
 
     console.log(`Deploying FeeCalculator to ${network} with:`);
     console.log(`- routerFeeSetter: ${routerFeeSetter}`);

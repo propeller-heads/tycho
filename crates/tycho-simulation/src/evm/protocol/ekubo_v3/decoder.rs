@@ -23,26 +23,21 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
+    addresses::{
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS,
+    },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
     pool::{
-        concentrated::ConcentratedPool, full_range::FullRangePool, oracle::OraclePool,
+        boosted_fees::BoostedFeesPool, concentrated::ConcentratedPool, full_range::FullRangePool,
+        mev_capture::MevCapturePool, oracle::OraclePool, stableswap::StableswapPool,
         twamm::TwammPool,
     },
     state::EkuboV3State,
 };
-use crate::{
-    evm::protocol::ekubo_v3::{
-        addresses::{
-            BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS, TWAMM_ADDRESS,
-        },
-        pool::{
-            boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
-        },
-    },
-    protocol::{
-        errors::InvalidSnapshotError,
-        models::{DecoderContext, TryFromWithBlock},
-    },
+use crate::protocol::{
+    errors::InvalidSnapshotError,
+    models::{DecoderContext, TryFromWithBlock},
 };
 
 pub enum ExtensionType {
@@ -51,6 +46,31 @@ pub enum ExtensionType {
     Twamm,
     MevCapture,
     BoostedFees,
+    SignedExclusiveSwap,
+}
+
+fn has_no_swap_call_points(extension: Address) -> bool {
+    // Call points are encoded in the first byte of the extension address.
+    // Bit 6 == beforeSwap, bit 5 == afterSwap.
+    extension[0] & 0b0110_0000 == 0
+}
+
+pub fn extension_type(extension: Address) -> Option<ExtensionType> {
+    Some(if has_no_swap_call_points(extension) {
+        ExtensionType::NoSwapCallPoints
+    } else if extension == ORACLE_ADDRESS {
+        ExtensionType::Oracle
+    } else if extension == TWAMM_ADDRESS {
+        ExtensionType::Twamm
+    } else if extension == MEV_CAPTURE_ADDRESS {
+        ExtensionType::MevCapture
+    } else if extension == BOOSTED_FEES_CONCENTRATED_ADDRESS {
+        ExtensionType::BoostedFees
+    } else if extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+        ExtensionType::SignedExclusiveSwap
+    } else {
+        return None;
+    })
 }
 
 struct TimedStateDetails {
@@ -226,6 +246,18 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
                 Self::MevCapture(MevCapturePool::new(key, tick, concentrated_state, ticks)?)
             }
+            ExtensionType::SignedExclusiveSwap => {
+                let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
+                    return Err(InvalidSnapshotError::ValueError(
+                        "expected concentrated pool type config for SignedExclusiveSwap pool"
+                            .to_string(),
+                    ));
+                };
+
+                let (key, state, tick, ticks) = concentrated_pool(&state_attrs, pool_type_config)?;
+
+                Self::Concentrated(ConcentratedPool::new(key, state, tick, ticks)?)
+            }
             ExtensionType::BoostedFees => {
                 let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
                     return Err(InvalidSnapshotError::ValueError(
@@ -283,22 +315,6 @@ fn extension_type_from_attributes_or_address(
     })
 }
 
-pub fn extension_type(extension: Address) -> Option<ExtensionType> {
-    Some(if has_no_swap_call_points(extension) {
-        ExtensionType::NoSwapCallPoints
-    } else if extension == ORACLE_ADDRESS {
-        ExtensionType::Oracle
-    } else if extension == TWAMM_ADDRESS {
-        ExtensionType::Twamm
-    } else if extension == MEV_CAPTURE_ADDRESS {
-        ExtensionType::MevCapture
-    } else if extension == BOOSTED_FEES_CONCENTRATED_ADDRESS {
-        ExtensionType::BoostedFees
-    } else {
-        return None;
-    })
-}
-
 fn attribute<'a>(
     map: &'a HashMap<String, Bytes>,
     key: &str,
@@ -348,12 +364,6 @@ fn timed_state_details(
         .sorted_unstable_by_key(|delta| delta.time)
         .collect(),
     })
-}
-
-fn has_no_swap_call_points(extension: Address) -> bool {
-    // Call points are encoded in the first byte of the extension address.
-    // Bit 6 == beforeSwap, bit 5 == afterSwap.
-    extension[0] & 0b0110_0000 == 0
 }
 
 #[cfg(test)]

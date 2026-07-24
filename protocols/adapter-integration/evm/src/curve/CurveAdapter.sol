@@ -114,15 +114,12 @@ contract CurveAdapter is ISwapAdapter {
                 );
         }
 
-        uint256 gasBefore = gasleft();
-
         if (side == OrderSide.Sell) {
-            trade.calculatedAmount = sell(sellParams);
+            (trade.calculatedAmount, trade.gasUsed) = sell(sellParams);
         } else {
             revert Unavailable("OrderSide.Buy is not available for this adapter");
         }
 
-        trade.gasUsed = gasBefore - gasleft();
         trade.price = getPriceAt(sellParams, true);
     }
 
@@ -267,7 +264,6 @@ contract CurveAdapter is ISwapAdapter {
                             / PRECISION)
                     : sellParams.specifiedAmount;
             }
-
             return Fraction(
                 ICurveStableSwapPool(sellParams.poolAddress)
                     .get_dy(
@@ -299,9 +295,11 @@ contract CurveAdapter is ISwapAdapter {
     /// support them too.
     /// @param sellParams Params for the trade(see: struct SellParamsCache).
     /// @return calculatedAmount The amount of tokens received.
+    /// @return gasUsed Gas consumed by the pool exchange only (excludes
+    /// token transfers and approvals).
     function sell(SellParamsCache memory sellParams)
         internal
-        returns (uint256 calculatedAmount)
+        returns (uint256 calculatedAmount, uint256 gasUsed)
     {
         IERC20 buyToken = IERC20(sellParams.buyToken);
         IERC20 sellToken = IERC20(sellParams.sellToken);
@@ -313,6 +311,7 @@ contract CurveAdapter is ISwapAdapter {
         if (sellParams.isInt128Pool) {
             if (sellParams.sellToken == ETH_ADDRESS) {
                 // ETH Pool
+                uint256 gasBefore = gasleft();
                 ICurveStableSwapPoolEth(sellParams.poolAddress)
                 .exchange{value: sellParams.specifiedAmount}(
                     sellParams.sellTokenIndex,
@@ -320,6 +319,7 @@ contract CurveAdapter is ISwapAdapter {
                     sellParams.specifiedAmount,
                     0
                 );
+                gasUsed = gasBefore - gasleft();
             } else {
                 sellToken.safeTransferFrom(
                     msg.sender, address(this), sellParams.specifiedAmount
@@ -327,6 +327,7 @@ contract CurveAdapter is ISwapAdapter {
                 sellToken.safeIncreaseAllowance(
                     sellParams.poolAddress, sellParams.specifiedAmount
                 );
+                uint256 gasBefore = gasleft();
                 ICurveStableSwapPool(sellParams.poolAddress)
                     .exchange(
                         sellParams.sellTokenIndex,
@@ -334,6 +335,7 @@ contract CurveAdapter is ISwapAdapter {
                         sellParams.specifiedAmount,
                         0
                     );
+                gasUsed = gasBefore - gasleft();
             }
         } else {
             uint256 sellTokenIndexUint =
@@ -341,6 +343,7 @@ contract CurveAdapter is ISwapAdapter {
             uint256 buyTokenIndexUint =
                 uint256(uint128(sellParams.buyTokenIndex));
             if (sellParams.sellToken == ETH_ADDRESS) {
+                uint256 gasBefore = gasleft();
                 ICurveCryptoSwapPoolEth(sellParams.poolAddress)
                 .exchange{value: sellParams.specifiedAmount}(
                     sellTokenIndexUint,
@@ -350,6 +353,7 @@ contract CurveAdapter is ISwapAdapter {
                     true,
                     address(this)
                 );
+                gasUsed = gasBefore - gasleft();
             } else {
                 sellToken.safeTransferFrom(
                     msg.sender, address(this), sellParams.specifiedAmount
@@ -358,6 +362,7 @@ contract CurveAdapter is ISwapAdapter {
                     sellParams.poolAddress, sellParams.specifiedAmount
                 );
                 // @dev if available try to swap with use_eth set to true.
+                uint256 gasBefore = gasleft();
                 try ICurveCryptoSwapPoolEth(sellParams.poolAddress)
                     .exchange(
                         sellTokenIndexUint,
@@ -367,6 +372,7 @@ contract CurveAdapter is ISwapAdapter {
                         true,
                         address(this)
                     ) {
+                    gasUsed = gasBefore - gasleft();
                     // @dev we can't use catch here because some Curve pool have
                     // a fallback function implemented. So this call succeed
                     // without doing anything.
@@ -387,10 +393,11 @@ contract CurveAdapter is ISwapAdapter {
                         );
                     }
                     if (calculatedAmount > 0) {
-                        return calculatedAmount;
+                        return (calculatedAmount, gasUsed);
                     }
                 } catch {}
                 // @dev else use the generic interface.
+                gasBefore = gasleft();
                 ICurveCryptoSwapPool(sellParams.poolAddress)
                     .exchange(
                         sellTokenIndexUint,
@@ -398,6 +405,7 @@ contract CurveAdapter is ISwapAdapter {
                         sellParams.specifiedAmount,
                         0
                     );
+                gasUsed = gasBefore - gasleft();
             }
         }
 

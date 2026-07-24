@@ -166,9 +166,16 @@ impl TokenOwnerFinding for TokenOwnerStore {
     async fn find_owner(
         &self,
         token: Address,
-        _min_balance: Balance,
+        min_balance: Balance,
     ) -> Result<Option<(Address, Balance)>, String> {
-        Ok(self.values.get(&token).cloned())
+        Ok(self
+            .values
+            .get(&token)
+            .filter(|(_, balance)| {
+                BigUint::from_bytes_be(balance.as_ref()) >=
+                    BigUint::from_bytes_be(min_balance.as_ref())
+            })
+            .cloned())
     }
 }
 
@@ -245,5 +252,50 @@ mod tests {
         );
 
         assert_eq!(usdc.one(), BigUint::from(1000000u64));
+    }
+
+    #[tokio::test]
+    async fn test_find_owner_respects_min_balance() {
+        let token = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let owner = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        // Owner holds 1000 (unsigned big-endian).
+        let store = TokenOwnerStore::new(HashMap::from([(
+            token.clone(),
+            (owner.clone(), Bytes::from(1_000u64)),
+        )]));
+
+        // Below the requested minimum -> no adequate owner.
+        assert_eq!(
+            store
+                .find_owner(token.clone(), Bytes::from(2_000u64))
+                .await
+                .unwrap(),
+            None
+        );
+        // Exactly at the minimum -> returned.
+        assert_eq!(
+            store
+                .find_owner(token.clone(), Bytes::from(1_000u64))
+                .await
+                .unwrap(),
+            Some((owner.clone(), Bytes::from(1_000u64)))
+        );
+        // Above the minimum -> returned.
+        assert_eq!(
+            store
+                .find_owner(token.clone(), Bytes::from(500u64))
+                .await
+                .unwrap(),
+            Some((owner, Bytes::from(1_000u64)))
+        );
+        // Unknown token -> None.
+        let other = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+        assert_eq!(
+            store
+                .find_owner(other, Bytes::from(1u64))
+                .await
+                .unwrap(),
+            None
+        );
     }
 }

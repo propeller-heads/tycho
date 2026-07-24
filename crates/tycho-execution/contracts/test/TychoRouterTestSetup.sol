@@ -8,6 +8,8 @@ import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
 import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
+import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
+import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
 import {
     LiquidityPartyExecutor
 } from "../src/executors/LiquidityPartyExecutor.sol";
@@ -26,6 +28,7 @@ import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
+import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
@@ -121,6 +124,9 @@ contract TychoRouterTestSetup is
     LiquidityPartyExecutor public liquidityPartyExecutor;
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
+    FermiSwapExecutor public fermiSwapExecutor;
+    MetricExecutor public metricExecutor;
+    BopAMMExecutor public bopAMMExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -200,7 +206,7 @@ contract TychoRouterTestSetup is
         curveExecutor = new CurveExecutor(ETH_ADDR, STETH_ADDR);
         maverickv2Executor = new MaverickV2Executor();
         balancerV3Executor = new BalancerV3Executor();
-        bebopExecutor = new BebopExecutor(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutor(BEBOP_SETTLEMENT, BEBOP_ROUTER);
         hashflowExecutor = new HashflowExecutor(HASHFLOW_ROUTER);
         fluidV1Executor = new FluidV1Executor(FLUIDV1_LIQUIDITY);
         slipstreamsExecutor = new SlipstreamsExecutor();
@@ -208,6 +214,16 @@ contract TychoRouterTestSetup is
         erc4626Executor = new ERC4626Executor();
         nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
         ekuboV3Executor = new EkuboV3Executor();
+        // Etch placeholder bytecode if Etherfi contracts are not yet deployed
+        // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
+        if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
+        if (LIQUIDITY_POOL_ADDR.code.length == 0) {
+            vm.etch(LIQUIDITY_POOL_ADDR, bytes("1"));
+        }
+        if (WEETH_ADDR.code.length == 0) vm.etch(WEETH_ADDR, bytes("1"));
+        if (REDEMPTION_MANAGER_ADDR.code.length == 0) {
+            vm.etch(REDEMPTION_MANAGER_ADDR, bytes("1"));
+        }
         etherfiExecutor = new EtherfiExecutor(
             ETH_ADDR,
             EETH_ADDR,
@@ -215,13 +231,24 @@ contract TychoRouterTestSetup is
             WEETH_ADDR,
             REDEMPTION_MANAGER_ADDR
         );
+        // Etch placeholder bytecode if Liquorice contracts are not yet
+        // deployed at this fork block.
+        if (LIQUORICE_SETTLEMENT.code.length == 0) {
+            vm.etch(LIQUORICE_SETTLEMENT, bytes("1"));
+        }
+        if (LIQUORICE_BALANCE_MANAGER.code.length == 0) {
+            vm.etch(LIQUORICE_BALANCE_MANAGER, bytes("1"));
+        }
         liquoriceExecutor = new LiquoriceExecutor(
             LIQUORICE_SETTLEMENT, LIQUORICE_BALANCE_MANAGER
         );
         liquidityPartyExecutor = new LiquidityPartyExecutor();
         aerodromeV1Executor = new AerodromeV1Executor();
+        fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
+        metricExecutor = new MetricExecutor(METRIC_ORACLE);
+        bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
 
-        address[] memory executors = new address[](21);
+        address[] memory executors = new address[](24);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -243,6 +270,9 @@ contract TychoRouterTestSetup is
         executors[18] = address(liquoriceExecutor);
         executors[19] = address(liquidityPartyExecutor);
         executors[20] = address(aerodromeV1Executor);
+        executors[21] = address(fermiSwapExecutor);
+        executors[22] = address(metricExecutor);
+        executors[23] = address(bopAMMExecutor);
         return executors;
     }
 

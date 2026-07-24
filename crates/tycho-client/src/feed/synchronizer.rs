@@ -72,6 +72,7 @@ pub enum SynchronizerError {
 }
 
 pub type SyncResult<T> = Result<T, SynchronizerError>;
+pub type SyncError = (SynchronizerError, Option<oneshot::Receiver<()>>);
 
 impl SynchronizerError {
     /// Returns true if the error is transient and the failing operation can be retried.
@@ -474,7 +475,7 @@ where
         &mut self,
         block_tx: &mut Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
         mut end_rx: oneshot::Receiver<()>,
-    ) -> Result<(), (SynchronizerError, Option<oneshot::Receiver<()>>)> {
+    ) -> Result<(), Box<SyncError>> {
         // initialisation
         let subscription_options = SubscriptionOptions::new()
             .with_state(self.include_snapshots)
@@ -486,7 +487,7 @@ where
             .await
         {
             Ok(result) => result,
-            Err(e) => return Err((e.into(), Some(end_rx))),
+            Err(e) => return Err(Box::new((e.into(), Some(end_rx)))),
         };
 
         let result = async {
@@ -878,7 +879,7 @@ where
                 // The error came from the inner async block. Since the async block
                 // can receive close signals (which would return Ok), any error means
                 // the close signal was NOT received, so we can return the end_rx for retry
-                Err((e, Some(end_rx)))
+                Err(Box::new((e, Some(end_rx))))
             }
         }
     }
@@ -1137,7 +1138,8 @@ where
                         );
                         return;
                     }
-                    Err((e, maybe_end_rx)) => {
+                    Err(e) => {
+                        let (e, maybe_end_rx) = *e;
                         warn!(
                             extractor_id=%&self.extractor_id,
                             retry_count,

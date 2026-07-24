@@ -11,24 +11,29 @@
     "vm:curve": "0xF7561795536Ede0f4122BeD2Cc9328511E1f7135",
     "vm:maverick_v2": "0xeCD7D651C0D5E477018c0949a01a46350461c8ED",
     "vm:balancer_v3": "0xf9AE8127E35612DA9d750058fCf61f326E00cA10",
-    "rfq:bebop": "0x1f6ECC09b7753B1f637Ed702Ade44B5Ba034DD5A",
+    "rfq:bebop": "0x69eae6eb2C924567912fBC435b915663c9D3D11e",
     "rfq:hashflow": "0xBc7C1E078865bb81938aDDDf24582EeDD17324c7",
     "fluid_v1": "0xAB081CBB3c88219A030928Ece277feAd99cAB742",
     "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
     "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
     "ekubo_v3": "0xc77A1a9B8ebecc6bFB386720E0A37Bc900860f5b",
-    "native_wrapper": "0x67DD87c719D0EA8499346693978CBEE1a743eEC9",
-    "rfq:liquorice": "0x3Bd39a3606b9DC0afD07Ea1c865C4583d94cBa60",
-    "vm:liquidityparty": "0x1F8b52899DCf1Be69eaFc754cA3E099Ff15F03aE"
+    "native_wrapper": "0x8FD892DD5F8E153fe15cc3A7567E18ed6f7b1E0A",
+    "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
+    "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
+    "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C",
+    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
     "uniswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
     "pancakeswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
     "uniswap_v4": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
-    "rfq:bebop": "0xcDf4E28676b9f2e8C6a722Eb163e0c2f9c0716B7",
+    "rfq:bebop": "0xF35839C54A33FE88867ACB3deac9dB3AdB9bFA78",
     "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
-    "native_wrapper": "0x8aE978713c6952041d058D8a3fe3a2568f1e1aE1"
+    "native_wrapper": "0x68AF9cDcc2e177e9D75c60f132b8DC52EAF1adBf",
+    "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
+    "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
+    "rfq:metric": "0xb8644a264a4b765E60C4A65Fb8049EAE1A791D97"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -36,14 +41,15 @@
     "uniswap_v4": "0x3AE67e7DCFa6c5aB36DA9dE3B67B7496956E0874",
     "velodrome_slipstreams": "0xd9Ee40C6895De968b41b96253970B48Fe852e5eF",
     "vm:curve": "0x685733eDB7654e540aB537eabC28b554646b69d0",
-    "native_wrapper": "0x50905E0f94350f9e533Cd275667AFC728265960D"
+    "native_wrapper": "0x32Ed490Fb53cc66C3cBDdC74aB8B7088F11d6289"
   },
   "arbitrum": {
     "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
-    "native_wrapper": "0x0000000000000000000000000000000000000000"
+    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
+    "rfq:metric": "0xCe5af637bFfe0C34A37f34471Ab6a3E90adf8Ffb"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -51,13 +57,22 @@
     "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
-    "native_wrapper": "0x0000000000000000000000000000000000000000"
+    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
+    "rfq:metric": "0x8A61866f7F9c979beE4426247e144aDD46cD21Aa"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
     "quickswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
     "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
+    "ramses_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
-    "native_wrapper": "0x0000000000000000000000000000000000000000"
+    "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
+    "rfq:metric": "0x746Cdaf8Ef08A9d023155Dddc95291Ab8C9A7936"
+  },
+  "plasma": {
+    "uniswap_v3": "0xA6D43EFEc7870ac6e27c81232C2B5E11b17d40d4",
+    "fluid_v1": "0x5020a5012cDC3545d2E98B6fb3EA4b9dc90552a6",
+    "vm:curve": "0xC015Bc2f482b6CF31D6C30e663a57417A6761949",
+    "native_wrapper": "0x1D9220eA65cA79997C532ba8fbC79b1c463Bd505"
   }
 }

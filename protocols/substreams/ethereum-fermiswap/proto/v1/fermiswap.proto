@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package fermiswap.v1;
+
+message Pair {
+  bytes base_asset = 1;
+  bytes quote_asset = 2;
+}

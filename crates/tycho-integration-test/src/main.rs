@@ -1,3 +1,4 @@
+mod fee_fetcher;
 mod metrics;
 mod statistics;
 mod stream_processor;
@@ -27,7 +28,8 @@ use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
-use tycho_common::simulation::protocol_sim::ProtocolSim;
+use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
+use tycho_execution::encoding::evm::get_router_address;
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
@@ -35,7 +37,7 @@ use tycho_simulation::{
         hashflow::{client::HashflowClient, state::HashflowState},
         liquorice::{client::LiquoriceClient, state::LiquoriceState},
     },
-    tycho_common::models::{Chain, TvlThresholdTier},
+    tycho_common::models::{chain_config::TvlThresholdTier, Chain},
     utils::load_all_tokens,
 };
 use tycho_test::{
@@ -44,10 +46,13 @@ use tycho_test::{
         models::{TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction, tenderly,
     },
+    is_block_not_found,
+    token_prices::{cap_amount_to_eth_value, load_token_prices},
     validation::{batch_validate_components, get_validator, Validator},
 };
 
 use crate::{
+    fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     statistics::TestStatistics,
     stream_processor::{
         protocol_stream_processor::ProtocolStreamProcessor,
@@ -80,6 +85,11 @@ struct Cli {
     #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
+    /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
+    /// dev instance (e.g. http://127.0.0.1:4242).
+    #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
+    no_tls: bool,
+
     /// Disable on-chain protocols
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
@@ -87,6 +97,10 @@ struct Cli {
     /// Disable RFQ protocols
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
+
+    /// Run PAMM RFQ protocols.
+    #[arg(long, default_value_t = true)]
+    run_pamm_protocols: bool,
 
     /// Port for the Prometheus metrics server
     #[arg(long, default_value_t = 9898)]
@@ -163,10 +177,6 @@ struct Cli {
     #[arg(long, default_value_t = 30)]
     stale_threshold_secs: u64,
 
-    /// Router fee on output in bps (defaults to 10 bps)
-    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..))]
-    router_fee: u16,
-
     /// Disable on-chain swap execution validation (RPC simulation only, no swap encoding or
     /// execution). Useful for diagnosing stream latency without execution overhead.
     #[arg(long, default_value_t = false)]
@@ -192,6 +202,19 @@ struct TychoState {
     components: HashMap<String, ProtocolComponent>,
     component_ids_by_protocol: HashMap<String, HashSet<String>>,
 }
+
+/// Shared, periodically-refreshed token-price snapshot (raw token units per ETH).
+type SharedTokenPrices = Arc<RwLock<Arc<HashMap<Bytes, f64>>>>;
+
+/// How often to reload the token-price snapshot. The S3 dump is refreshed weekly; reloading every
+/// day picks up a new dump without restarting this long-running binary.
+const TOKEN_PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Swap input value used for simulation, denominated in ETH. Tick-based protocols (Uniswap V3/V4)
+/// report near-infinite `get_limits`, so swapping the raw limit produces unrealistic input amounts
+/// and gas estimates. Capping the input to a realistic value (~10k USD at recent ETH prices) keeps
+/// simulation and the dashboard gas estimates representative.
+const MAX_INPUT_VALUE_ETH: f64 = 5.0;
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -273,11 +296,25 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
 
+    // Read the router fee on output from the on-chain FeeCalculator once at start-up. Slippage is
+    // computed after backing this fee out of the simulated amount out, so a stale or wrong fee
+    // would skew every slippage result.
+    let router_address = get_router_address(&chain)
+        .map_err(|e| miette!("No Tycho router address configured for chain {chain:?}: {e}"))?;
+    let router_fee = fetch_router_fee_on_output(&rpc_tools.provider, router_address)
+        .await
+        .wrap_err("Failed to read router fee on output from the on-chain FeeCalculator")?;
+    info!(
+        numerator = router_fee.numerator(),
+        denominator = router_fee.denominator(),
+        "Loaded router fee on output from on-chain FeeCalculator"
+    );
+
     // Load tokens from Tycho
     info!(%cli.tycho_url, "Loading tokens...");
     let all_tokens = load_all_tokens(
         &cli.tycho_url,
-        false,
+        cli.no_tls,
         Some(cli.tycho_api_key.as_str()),
         true,
         chain,
@@ -287,6 +324,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
     .await
     .map_err(|e| miette!("Failed to load tokens: {e:?}"))?;
     info!("Loaded {} tokens", all_tokens.len());
+
+    let initial_prices = load_token_prices(chain)
+        .await
+        .wrap_err("Failed to load token prices for input capping")?;
+    info!("Loaded {} token prices", initial_prices.len());
+    let token_prices: SharedTokenPrices = Arc::new(RwLock::new(Arc::new(initial_prices)));
+    tokio::spawn(refresh_token_prices(chain, token_prices.clone(), TOKEN_PRICE_REFRESH_INTERVAL));
 
     // Run streams in background tasks with separate channels so RFQ processing
     // cannot block protocol update consumption
@@ -305,6 +349,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.tvl_buffer_ratio,
             cli.protocols.clone(),
             cli.partial_blocks,
+            cli.no_tls,
         ) {
             protocol_handle = Some(
                 protocol_stream_processor
@@ -314,18 +359,19 @@ async fn run(cli: Cli) -> miette::Result<()> {
         }
     }
     if !cli.disable_rfq {
-        if let Ok(rfq_stream_processor) = RFQStreamProcessor::new(
+        let rfq_stream_processor = RFQStreamProcessor::new(
             chain,
             tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
-        ) {
-            rfq_handle = Some(
-                rfq_stream_processor
-                    .run_stream(&all_tokens, rfq_tx)
-                    .await?,
-            );
-        }
+            cli.run_pamm_protocols,
+        )
+        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        rfq_handle = Some(
+            rfq_stream_processor
+                .run_stream(&all_tokens, rfq_tx)
+                .await?,
+        );
     }
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
@@ -462,6 +508,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let rpc_tools = rpc_tools.clone();
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
+                        let token_prices = token_prices.clone();
                         let permit = protocol_semaphore
                             .clone()
                             .acquire_owned()
@@ -469,7 +516,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -498,6 +545,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let rpc_tools = rpc_tools.clone();
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
+                        let token_prices = token_prices.clone();
                         let permit = rfq_semaphore
                             .clone()
                             .acquire_owned()
@@ -505,7 +553,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire RFQ permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -540,6 +588,34 @@ enum BlockPollResult {
     Stale { target_block_timestamp: Option<u64> },
     /// RPC never reached the target block within the allowed attempts.
     Timeout,
+}
+
+/// Periodically reloads the token-price snapshot so a freshly published weekly dump is picked up
+/// without restarting the test. On a failed reload the previous snapshot is kept.
+async fn refresh_token_prices(chain: Chain, prices: SharedTokenPrices, interval: Duration) {
+    loop {
+        tokio::time::sleep(interval).await;
+        match load_token_prices(chain).await {
+            Ok(new_prices) => {
+                let count = new_prices.len();
+                match prices.write() {
+                    Ok(mut guard) => {
+                        *guard = Arc::new(new_prices);
+                        info!("Refreshed token prices ({count} entries)");
+                    }
+                    Err(e) => {
+                        error!("Failed to acquire write lock to refresh token prices: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to refresh token prices, keeping previous snapshot: {}",
+                    format_error_chain(&e)
+                );
+            }
+        }
+    }
 }
 
 /// Polls the RPC until the queried block (`Latest` or `Pending`) matches `target_block`.
@@ -625,12 +701,15 @@ async fn poll_rpc_for_block(
     Ok(BlockPollResult::Timeout)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_update(
     cli: Arc<Cli>,
     chain: Chain,
     rpc_tools: tycho_test::RPCTools,
     tycho_state: Arc<RwLock<TychoState>>,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
+    token_prices: SharedTokenPrices,
+    router_fee: RouterFeeOnOutput,
     update: &StreamUpdate,
 ) -> miette::Result<()> {
     info!(
@@ -639,6 +718,11 @@ async fn process_update(
         update.update.new_pairs.len(),
         update.update.states.len()
     );
+
+    let token_prices = token_prices
+        .read()
+        .map_err(|e| miette!("Failed to acquire read lock on token prices: {e}"))?
+        .clone();
 
     let block = if let UpdateType::Protocol = update.update_type {
         // Update state cache before block alignment check
@@ -670,6 +754,10 @@ async fn process_update(
                     .component_ids_by_protocol
                     .get_mut(&removed_component.protocol_system)
                     .map(|id_set| id_set.remove(removed_id));
+            }
+
+            for (protocol, component_ids) in &current_state.component_ids_by_protocol {
+                metrics::record_protocol_pool_count(protocol, component_ids.len());
             }
         }
 
@@ -819,6 +907,17 @@ async fn process_update(
                     }
                 }
                 Err(e) => {
+                    if is_block_not_found(&e.to_string()) {
+                        // The RPC node still lags behind Tycho after the batch-validation retries
+                        // exhausted: the block genuinely isn't available yet. This is infra
+                        // latency, not a state mismatch, so skip it rather than polluting the
+                        // validation-failure metric.
+                        warn!(
+                            component_id = %component_id,
+                            "Skipping validation: RPC block not yet available after retries"
+                        );
+                        continue;
+                    }
                     error!(
                         component_id = %component_id,
                         error = %e,
@@ -843,6 +942,7 @@ async fn process_update(
     for (id, component, state) in components_to_process {
         let block = block.clone();
         let statistics = statistics.clone();
+        let token_prices = token_prices.clone();
         let permit = semaphore
             .clone()
             .acquire_owned()
@@ -852,9 +952,17 @@ async fn process_update(
 
         let task = tokio::spawn(async move {
             let simulation_id = generate_simulation_id(&component.protocol_system, &id);
-            let result =
-                process_state(&simulation_id, chain, component, &block, id, state, statistics)
-                    .await;
+            let result = process_state(
+                &simulation_id,
+                chain,
+                component,
+                &block,
+                id,
+                state,
+                statistics,
+                token_prices,
+            )
+            .await;
             drop(permit);
             result
         });
@@ -935,7 +1043,7 @@ async fn process_update(
             &mut n_reverts,
             &mut n_failures,
             statistics.clone(),
-            cli.router_fee,
+            router_fee,
         );
 
         // Record statistics
@@ -947,7 +1055,10 @@ async fn process_update(
         }
     }
     if n_reverts > 0 || n_failures > 0 {
-        warn!("For block {}, simulated {total_simulations} executions, {n_reverts} simulations reverted, {n_failures} executions setup failed", block.number())
+        warn!(
+            "For block {}, simulated {total_simulations} executions, {n_reverts} simulations reverted, {n_failures} executions setup failed",
+            block.number()
+        )
     }
 
     Ok(())
@@ -1086,6 +1197,7 @@ fn select_components_to_process(
         block_number = %block.header.number,
     )
 )]
+#[allow(clippy::too_many_arguments)]
 async fn process_state(
     simulation_id: &str,
     chain: Chain,
@@ -1094,6 +1206,7 @@ async fn process_state(
     state_id: String,
     state: Box<dyn ProtocolSim>,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
+    token_prices: Arc<HashMap<Bytes, f64>>,
 ) -> HashMap<String, TychoExecutionInput> {
     let tokens_len = component.tokens.len();
     if tokens_len < 2 {
@@ -1196,19 +1309,23 @@ async fn process_state(
             token_in.symbol, token_out.symbol
         );
 
-        // Calculate amount_in as percentage of max_input
-        const PERCENTAGE: f64 = 0.001; // 0.1%
-        const PRECISION: u64 = 1_000; // Supports up to 3 decimal places
-        let numerator = (PERCENTAGE * PRECISION as f64) as u64;
-        let mut amount_in = (&max_input * numerator) / PRECISION;
+        // Cap the limit to a realistic input value (~10k USD) using the weekly token prices.
+        // Tick-based protocols (Uniswap V3/V4) report near-infinite limits; tokens missing
+        // from the price snapshot are left to the 96-bit safety bound below.
+        let mut amount_in = cap_amount_to_eth_value(
+            max_input,
+            &token_in.address,
+            &token_prices,
+            MAX_INPUT_VALUE_ETH,
+        );
         if amount_in.is_zero() {
             debug!("Calculated amount_in is zero, skipping...");
             continue;
         }
         amount_in = amount_in.max(min_amount.clone());
 
-        // Cap amount_in to avoid "amount exceeds 96 bits" error (it happens for uniswap v3 and v4
-        // sometimes because the returned limits can be very high)
+        // Safety bound for tokens missing from the price snapshot, whose limit is left uncapped:
+        // avoids the "amount exceeds 96 bits" error seen on Uniswap V3/V4 with very high limits.
         let max_96_bit = BigUint::from(2u128.pow(96) - 1);
         amount_in = amount_in.min(max_96_bit);
 
@@ -1218,8 +1335,7 @@ async fn process_state(
             .get_amount_out(amount_in.clone(), token_in, token_out)
             .into_diagnostic()
             .wrap_err(format!(
-                "Error calculating amount out at {:.1}% with input of {amount_in} {}.",
-                PERCENTAGE * 100.0,
+                "Error calculating amount out with input of {amount_in} {}.",
                 token_in.symbol,
             )) {
             Ok(res) => {
@@ -1341,7 +1457,7 @@ fn process_execution_result(
     n_reverts: &mut i32,
     n_failures: &mut i32,
     statistics: Option<Arc<RwLock<TestStatistics>>>,
-    router_fee: u16,
+    router_fee: RouterFeeOnOutput,
 ) {
     match result {
         TychoExecutionResult::Success {
@@ -1359,12 +1475,13 @@ fn process_execution_result(
 
             metrics::record_simulation_execution_success(&execution_info.protocol_system);
 
-            // Remove the router fee from the expected simulated amount out.
-            let simulated_amount_out_without_fee = execution_info
-                .expected_amount_out
-                .clone() -
-                (execution_info.expected_amount_out * BigUint::from(router_fee)) /
-                    BigUint::from(10000u64);
+            // Remove the router fee from the expected simulated amount out. The on-chain router
+            // deducts this fee from the swap output, so the simulated amount out (which is
+            // fee-free) must be reduced by the same fraction before comparing against the
+            // executed amount.
+            let simulated_amount_out_without_fee = &execution_info.expected_amount_out -
+                (&execution_info.expected_amount_out * BigUint::from(router_fee.numerator())) /
+                    BigUint::from(router_fee.denominator());
 
             // Calculate slippage: positive = simulated > expected, negative = simulated <
             // expected

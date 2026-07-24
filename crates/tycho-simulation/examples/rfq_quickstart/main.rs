@@ -33,7 +33,7 @@ use tycho_execution::encoding::{
         utils::biguint_to_u256,
     },
     models,
-    models::{EncodedSolution, Solution, Swap, UserTransferType},
+    models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
     protocol::models::{ProtocolComponent, Update},
@@ -42,6 +42,7 @@ use tycho_simulation::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
             liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
+            metric::{client_builder::MetricClientBuilder, state::MetricState},
         },
         stream::RFQStreamBuilder,
     },
@@ -70,6 +71,9 @@ struct Cli {
     tvl_threshold: f64,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
+    /// Run PAMM RFQ protocols.
+    #[arg(long, default_value_t = true)]
+    run_pamm_protocols: bool,
 }
 
 impl Cli {
@@ -121,16 +125,20 @@ async fn main() {
         env::var("TYCHO_API_KEY").unwrap_or_else(|_| "sampletoken".to_string());
 
     // Get credentials for any RFQ(s) we are using
-    let (bebop_user, bebop_key) = (env::var("BEBOP_USER").ok(), env::var("BEBOP_KEY").ok());
+    let bebop_key = env::var("BEBOP_KEY").ok();
     let (hashflow_user, hashflow_key) =
         (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
-    if (bebop_user.is_none() || bebop_key.is_none()) &&
+    if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
         (liquorice_user.is_none() || liquorice_key.is_none())
     {
-        panic!("No RFQ credentials found. Please set BEBOP_USER and BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables.");
+        if cli.run_pamm_protocols {
+            println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
+        } else {
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
+        }
     }
 
     println!("Loading tokens from Tycho... {url}", url = tycho_url.as_str());
@@ -194,9 +202,9 @@ async fn main() {
     let mut rfq_stream_builder = RFQStreamBuilder::new()
         .set_tokens(all_tokens.clone())
         .await;
-    if let (Some(user), Some(key)) = (bebop_user, bebop_key) {
+    if let Some(key) = bebop_key {
         println!("Setting up Bebop RFQ client...\n");
-        let bebop_client = BebopClientBuilder::new(chain, user, key)
+        let bebop_client = BebopClientBuilder::new(chain, key)
             .tokens(rfq_tokens.clone())
             .tvl_threshold(cli.tvl_threshold)
             .build()
@@ -224,6 +232,21 @@ async fn main() {
             .expect("Failed to create Liquorice RFQ client");
         rfq_stream_builder =
             rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+    }
+    if cli.run_pamm_protocols {
+        println!("Setting up Metric RFQ client...\n");
+        match MetricClientBuilder::new(chain)
+            .tokens(rfq_tokens.clone())
+            .token_metadata(all_tokens.clone())
+            .tvl_threshold(cli.tvl_threshold)
+            .build()
+        {
+            Ok(metric_client) => {
+                rfq_stream_builder =
+                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
+            }
+            Err(e) => eprintln!("Skipping Metric RFQ client: {e}"),
+        }
     }
 
     // Start the RFQ stream in a background task
@@ -813,12 +836,17 @@ fn encode_tycho_router_call(
         .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
     let signature = sign_permit(chain_id, &p, signer)?;
 
+    // The router's singleSwapPermit2 expects a ClientFeeParams struct after `receiver`.
+    // This quickstart charges no client fee, so pass the zeroed default.
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
+
     let method_calldata = (
         given_amount,
         given_token,
         checked_token,
         min_amount_out,
         receiver,
+        client_fee_params,
         permit,
         signature.as_bytes().to_vec(),
         encoded_solution.swaps().to_vec(),

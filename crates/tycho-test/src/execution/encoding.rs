@@ -4,7 +4,7 @@ use alloy::{
     eips::BlockNumberOrTag,
     primitives::{keccak256, map::AddressHashMap, Address, FixedBytes, Keccak256, B256, U256},
     providers::Provider,
-    rpc::types::{state::AccountOverride, Block, TransactionRequest},
+    rpc::types::{state::AccountOverride, Block, BlockId, TransactionRequest},
     sol_types::SolValue,
 };
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -39,6 +39,12 @@ const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
+const FERMISWAP_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
+const FERMISWAP_TARGET_ADDRESS: &str = "0xe514A3c48DA8B233f65b5d15BA1905d6d35BFE48";
+// BopAMM prices its books from the same PrioUpdateRegistry as FermiSwap; only the registry
+// `target` differs — it is the pricing module, and the lane index is the book's `assetId`.
+const BOPAMM_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
+const BOPAMM_MODULE_ADDRESS: &str = "0xbc60639345dfa607d73b74e88c2d54d8b8ad7cc3";
 
 /// Contains the detected storage slots for a token.
 #[derive(Debug, Clone, Default)]
@@ -480,6 +486,148 @@ pub fn setup_angstrom_overwrites(
     overwrites
 }
 
+/// Sets up FermiSwap registry storage overwrites for simulation.
+///
+/// FermiSwap reads oracle state from PrioUpdateRegistry using a lane keyed by
+/// `keccak256(abi.encode(target, laneIndex))`. The first 4 bytes of that lane's
+/// slot store the update timestamp. To keep the lane payload intact, this reads
+/// each current slot value at the simulation block and only replaces the
+/// timestamp prefix with `block.timestamp`.
+pub async fn setup_fermiswap_overwrites(
+    rpc_tools: &RPCTools,
+    block: &Block,
+    pairs: &[(Address, Address)],
+) -> miette::Result<AddressHashMap<AccountOverride>> {
+    let registry_address = Address::from_str(FERMISWAP_REGISTRY_ADDRESS).into_diagnostic()?;
+    let target_address = Address::from_str(FERMISWAP_TARGET_ADDRESS).into_diagnostic()?;
+    let timestamp = u32::try_from(block.header.timestamp)
+        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
+    let block_id = if block.header.hash == B256::ZERO {
+        BlockId::from(BlockNumberOrTag::Pending)
+    } else {
+        BlockId::from(block.number())
+    };
+
+    let mut state_diff = Vec::new();
+    for &(base_asset, quote_asset) in pairs {
+        let lane_index = calculate_fermiswap_lane_index(base_asset, quote_asset);
+        let storage_slot = calculate_fermiswap_registry_storage_slot(target_address, lane_index);
+        let stored_value = rpc_tools
+            .provider
+            .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
+            .block_id(block_id)
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to fetch FermiSwap registry storage slot 0x{storage_slot:x} for pair {base_asset:?}/{quote_asset:?}"
+                )
+            })?;
+        let storage_value = overwrite_fermiswap_lane_timestamp(
+            B256::from_slice(&stored_value.to_be_bytes::<32>()),
+            timestamp,
+        );
+
+        state_diff.push((storage_slot, storage_value));
+    }
+
+    let mut overwrites = AddressHashMap::default();
+    if !state_diff.is_empty() {
+        overwrites.insert(registry_address, AccountOverride::default().with_state_diff(state_diff));
+    }
+    Ok(overwrites)
+}
+
+fn calculate_fermiswap_lane_index(base_asset: Address, quote_asset: Address) -> B256 {
+    // Mirrors `keccak256(abi.encode(baseAsset, quoteAsset))`.
+    let mut encoded = [0u8; 64];
+    encoded[12..32].copy_from_slice(base_asset.as_slice());
+    encoded[44..64].copy_from_slice(quote_asset.as_slice());
+    keccak256(encoded)
+}
+
+fn calculate_fermiswap_registry_storage_slot(target: Address, lane_index: B256) -> B256 {
+    // Mirrors `keccak256(abi.encode(target, laneIndex))`.
+    let mut encoded = [0u8; 64];
+    encoded[12..32].copy_from_slice(target.as_slice());
+    encoded[32..64].copy_from_slice(lane_index.as_slice());
+    keccak256(encoded)
+}
+
+fn overwrite_fermiswap_lane_timestamp(stored_value: B256, timestamp: u32) -> B256 {
+    let mut value = [0u8; 32];
+    value.copy_from_slice(stored_value.as_slice());
+    value[..4].copy_from_slice(&timestamp.to_be_bytes());
+    B256::from(value)
+}
+
+/// Sets up BopAMM registry storage overwrites for simulation.
+///
+/// BopAMM prices each book from the same PrioUpdateRegistry as FermiSwap, but its lane is keyed
+/// by `keccak256(abi.encode(module, assetId))` — the pricing module is the registry `target` and
+/// the book's `assetId` is the lane index. The first 4 bytes of that lane's slot store the update
+/// timestamp; the registry's exact-window `getState` gate reverts (`StaleUpdate`) unless
+/// `block.timestamp` matches it. This reads each lane's current value at the simulation block and
+/// only replaces the timestamp prefix with `block.timestamp`, leaving the quote payload intact.
+pub async fn setup_bopamm_overwrites(
+    rpc_tools: &RPCTools,
+    block: &Block,
+    asset_ids: &[U256],
+) -> miette::Result<AddressHashMap<AccountOverride>> {
+    let registry_address = Address::from_str(BOPAMM_REGISTRY_ADDRESS).into_diagnostic()?;
+    let module_address = Address::from_str(BOPAMM_MODULE_ADDRESS).into_diagnostic()?;
+    let timestamp = u32::try_from(block.header.timestamp)
+        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
+    let block_id = if block.header.hash == B256::ZERO {
+        BlockId::from(BlockNumberOrTag::Pending)
+    } else {
+        BlockId::from(block.number())
+    };
+
+    let mut state_diff = Vec::new();
+    for asset_id in asset_ids {
+        let storage_slot = calculate_bopamm_registry_storage_slot(module_address, *asset_id);
+        let stored_value = rpc_tools
+            .provider
+            .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
+            .block_id(block_id)
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to fetch BopAMM registry storage slot 0x{storage_slot:x} for asset id {asset_id}"
+                )
+            })?;
+        let storage_value = overwrite_bopamm_lane_timestamp(
+            B256::from_slice(&stored_value.to_be_bytes::<32>()),
+            timestamp,
+        );
+
+        state_diff.push((storage_slot, storage_value));
+    }
+
+    let mut overwrites = AddressHashMap::default();
+    if !state_diff.is_empty() {
+        overwrites.insert(registry_address, AccountOverride::default().with_state_diff(state_diff));
+    }
+    Ok(overwrites)
+}
+
+fn calculate_bopamm_registry_storage_slot(target: Address, asset_id: U256) -> B256 {
+    // Mirrors `keccak256(abi.encode(target, laneIndex))` where `laneIndex == assetId`.
+    let mut encoded = [0u8; 64];
+    encoded[12..32].copy_from_slice(target.as_slice());
+    encoded[32..64].copy_from_slice(&asset_id.to_be_bytes::<32>());
+    keccak256(encoded)
+}
+
+fn overwrite_bopamm_lane_timestamp(stored_value: B256, timestamp: u32) -> B256 {
+    let mut value = [0u8; 32];
+    value.copy_from_slice(stored_value.as_slice());
+    value[..4].copy_from_slice(&timestamp.to_be_bytes());
+    B256::from(value)
+}
+
 /// Sets up state overwrites for the Tycho router and its associated executor.
 ///
 /// This function prepares the router for execution simulation by applying bytecode overwrites
@@ -549,4 +697,63 @@ pub async fn setup_router_overwrites(
     );
 
     Ok(state_overwrites)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fermiswap_lane_timestamp_preserves_payload() {
+        let stored_value = B256::from_slice(
+            &hex::decode("1111111122222222333333334444444455555555666666667777777788888888")
+                .unwrap(),
+        );
+        let updated = overwrite_fermiswap_lane_timestamp(stored_value, 0x01020304);
+
+        let updated_bytes = updated.as_slice();
+        assert_eq!(&updated_bytes[..4], &[0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(&updated_bytes[4..], &stored_value.as_slice()[4..]);
+    }
+
+    #[test]
+    fn test_fermiswap_storage_slot_matches_solidity_layout() {
+        let target = Address::from_str(FERMISWAP_TARGET_ADDRESS).unwrap();
+        let weth = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+
+        let lane_index = calculate_fermiswap_lane_index(weth, usdc);
+        let storage_slot = calculate_fermiswap_registry_storage_slot(target, lane_index);
+
+        let expected_lane_index = keccak256((weth, usdc).abi_encode());
+        let expected_storage_slot =
+            keccak256((target, U256::from_be_slice(lane_index.as_slice())).abi_encode());
+
+        assert_eq!(lane_index, expected_lane_index);
+        assert_eq!(storage_slot, expected_storage_slot);
+    }
+
+    #[test]
+    fn test_bopamm_lane_timestamp_preserves_payload() {
+        let stored_value = B256::from_slice(
+            &hex::decode("1111111122222222333333334444444455555555666666667777777788888888")
+                .unwrap(),
+        );
+        let updated = overwrite_bopamm_lane_timestamp(stored_value, 0x01020304);
+
+        let updated_bytes = updated.as_slice();
+        assert_eq!(&updated_bytes[..4], &[0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(&updated_bytes[4..], &stored_value.as_slice()[4..]);
+    }
+
+    #[test]
+    fn test_bopamm_storage_slot_matches_solidity_layout() {
+        let module = Address::from_str(BOPAMM_MODULE_ADDRESS).unwrap();
+        let asset_id = U256::from(2);
+
+        let storage_slot = calculate_bopamm_registry_storage_slot(module, asset_id);
+        let expected_storage_slot = keccak256((module, asset_id).abi_encode());
+
+        assert_eq!(storage_slot, expected_storage_slot);
+    }
 }

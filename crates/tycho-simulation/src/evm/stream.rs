@@ -66,7 +66,6 @@
 //! use futures::StreamExt;
 //! use tycho_client::feed::component_tracker::ComponentFilter;
 //! use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
-//! use std::collections::HashSet;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -89,7 +88,6 @@
 //!             .exchange::<UniswapV2State>(
 //!                 "uniswap_v2", ComponentFilter::with_tvl_range(5.0, 10.0), None
 //!             )
-//!             .blocklist_components(HashSet::new())
 //!             .set_tokens(all_tokens)
 //!             .await
 //!             .build()
@@ -129,8 +127,10 @@ use tycho_common::{
 use crate::{
     evm::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
+        override_stream::{self, StateOverrideProvider},
         pending::PendingBlockProcessor,
         protocol::{
+            filters::uniswap_v4_non_angstrom_hook_pool_filter,
             native_wrapper::state::NativeWrapperState,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
@@ -139,9 +139,26 @@ use crate::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock, Update},
     },
+    utils::default_blocklist,
 };
 
-const EXCHANGES_REQUIRING_FILTER: [&str; 2] = ["vm:balancer_v2", "vm:curve"];
+const EXCHANGES_REQUIRING_FILTER: [&str; 4] = ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3"];
+
+/// The client-side filter applied to exchange `name` when the caller provides none.
+///
+/// `uniswap_v4_hooks`: without `ANGSTROM_API_KEY`, Angstrom swaps cannot be encoded (encoding
+/// fetches per-block attestations from the Angstrom API), so Angstrom pools are excluded up
+/// front rather than failing every route that selects them at encoding time.
+fn default_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
+    if name == "uniswap_v4_hooks" && std::env::var("ANGSTROM_API_KEY").is_err() {
+        warn!(
+            "ANGSTROM_API_KEY is not set: excluding Angstrom pools from '{name}'. \
+             Set the key to include them."
+        );
+        return Some(uniswap_v4_non_angstrom_hook_pool_filter);
+    }
+    None
+}
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum StreamEndPolicy {
@@ -235,21 +252,35 @@ pub struct ProtocolStreamBuilder {
     /// Receiver half of the trigger channel. Held here until `build()` / `build_with_pending()`
     /// transfers ownership to the gating task. `Some` iff step-control mode is active.
     step_trigger_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    /// State-override providers explicitly registered by the consumer, keyed by `protocol_system`.
+    /// These take precedence over the built-in default registry and are installed onto the decoder
+    /// at build time.
+    override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
+    /// Names of all exchanges registered on the builder, used to decide which built-in override
+    /// providers to auto-register at build time.
+    registered_exchanges: HashSet<String>,
 }
 
 impl ProtocolStreamBuilder {
     /// Creates a new builder for a multi-protocol stream.
     ///
+    /// The shipped pool blocklist is applied by default, excluding components known to break
+    /// simulation. Use [`blocklist_components`](Self::blocklist_components) to exclude additional
+    /// components.
+    ///
     /// See the [module-level docs](self) for full details on stream behavior and configuration.
     pub fn new(tycho_url: &str, chain: Chain) -> Self {
         Self {
             decoder: TychoStreamDecoder::new(),
-            stream_builder: TychoStreamBuilder::new(tycho_url, chain),
+            stream_builder: TychoStreamBuilder::new(tycho_url, chain)
+                .blocklisted_ids(default_blocklist()),
             stream_end_policy: StreamEndPolicy::default(),
             chain,
             pending_indexers: HashMap::new(),
             step_peek_tx: None,
             step_trigger_rx: None,
+            override_providers: HashMap::new(),
+            registered_exchanges: HashSet::new(),
         }
     }
 
@@ -288,8 +319,13 @@ impl ProtocolStreamBuilder {
         self.stream_builder = self
             .stream_builder
             .exchange(name, filter);
+        self.registered_exchanges
+            .insert(name.to_string());
         self.decoder.register_decoder::<T>(name);
         if let Some(predicate) = filter_fn {
+            self.decoder
+                .register_filter(name, predicate);
+        } else if let Some(predicate) = default_filter_fn(name) {
             self.decoder
                 .register_filter(name, predicate);
         }
@@ -342,9 +378,14 @@ impl ProtocolStreamBuilder {
         self.stream_builder = self
             .stream_builder
             .exchange(name, filter);
+        self.registered_exchanges
+            .insert(name.to_string());
         self.decoder
             .register_decoder_with_context::<T>(name, decoder_context);
         if let Some(predicate) = filter_fn {
+            self.decoder
+                .register_filter(name, predicate);
+        } else if let Some(predicate) = default_filter_fn(name) {
             self.decoder
                 .register_filter(name, predicate);
         }
@@ -419,6 +460,24 @@ impl ProtocolStreamBuilder {
         self
     }
 
+    /// Adds client-metadata entries forwarded to the server in the `X-Tycho-Client-Metadata`
+    /// header.
+    ///
+    /// See [`TychoStreamBuilder::add_client_metadata`]. Values are self-reported and may surface in
+    /// the server's metrics and logs — do not include secrets or personally identifiable
+    /// information.
+    pub fn add_client_metadata<I, K, V>(mut self, metadata: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.stream_builder = self
+            .stream_builder
+            .add_client_metadata(metadata);
+        self
+    }
+
     /// Disables TLS/ SSL for the connection, using http and ws protocols.
     ///
     /// This is not recommended for production use.
@@ -443,7 +502,10 @@ impl ProtocolStreamBuilder {
         self
     }
 
-    /// Exclude specific component IDs from all registered exchanges.
+    /// Exclude additional component IDs from all registered exchanges.
+    ///
+    /// These IDs are added to the shipped blocklist that is already applied by default (see
+    /// [`new`](Self::new)).
     pub fn blocklist_components(mut self, ids: HashSet<String>) -> Self {
         if !ids.is_empty() {
             tracing::info!("Blocklisting {} components", ids.len());
@@ -629,6 +691,42 @@ impl ProtocolStreamBuilder {
         });
     }
 
+    /// Registers `provider` as the live override source for `protocol_system`.
+    ///
+    /// Explicit registrations take precedence over the built-in default registry, so this is how
+    /// you swap a venue (e.g. `vm:bopamm`) onto a different provider. Registering the same provider
+    /// for several protocols is cheap — it is shared via `Arc`, not duplicated.
+    pub fn with_override_provider(
+        mut self,
+        protocol_system: impl Into<String>,
+        provider: Arc<dyn StateOverrideProvider>,
+    ) -> Self {
+        self.override_providers
+            .insert(protocol_system.into(), provider);
+        self
+    }
+
+    /// Installs override providers onto the decoder before the stream is built.
+    ///
+    /// Explicit consumer registrations win; the built-in default registry (see
+    /// [`default_override_providers`](crate::evm::override_stream::default_override_providers))
+    /// then fills every remaining protocol it can serve.
+    fn install_override_providers(&mut self) {
+        let explicit = std::mem::take(&mut self.override_providers);
+        // Protocols eligible for a built-in default provider: registered exchanges not explicitly
+        // overridden by the consumer.
+        let uncovered = self
+            .registered_exchanges
+            .clone()
+            .into_iter()
+            .filter(|exchange| !explicit.contains_key(exchange));
+        let defaults = override_stream::default_override_providers(uncovered);
+        for (protocol_system, provider) in defaults.into_iter().chain(explicit) {
+            self.decoder
+                .set_override_provider(protocol_system, provider);
+        }
+    }
+
     /// Builds the confirmed protocol stream and a [`PendingBlockProcessor`] that stays
     /// in sync with it automatically.
     ///
@@ -641,7 +739,7 @@ impl ProtocolStreamBuilder {
     /// Call [`generate_pending_update`](PendingBlockProcessor::generate_pending_update) to
     /// simulate a candidate bundle; it drains the channel automatically before computing.
     pub async fn build_with_pending(
-        self,
+        mut self,
     ) -> Result<
         (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
         StreamError,
@@ -649,6 +747,7 @@ impl ProtocolStreamBuilder {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
 
@@ -717,11 +816,12 @@ impl ProtocolStreamBuilder {
     /// See the module-level docs for details on stream behavior and emitted messages.
     /// This method applies all builder settings and starts the stream.
     pub async fn build(
-        self,
+        mut self,
     ) -> Result<impl Stream<Item = Result<Update, StreamDecodeError>>, StreamError> {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
         let chain = self.chain;
@@ -784,10 +884,7 @@ fn inject_native_wrapper(
     chain: Chain,
 ) -> impl Stream<Item = Result<Update, StreamDecodeError>> + Send {
     let has_distinct_wrapper = chain.native_token().address != chain.wrapped_native_token().address;
-    // TODO: enable for all chains once native_wrapper executors are deployed
-    let has_executor = chain == Chain::Ethereum;
-
-    if !has_distinct_wrapper || !has_executor {
+    if !has_distinct_wrapper {
         return Either::Left(inner);
     }
 

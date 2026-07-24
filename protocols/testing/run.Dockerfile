@@ -103,7 +103,7 @@ RUN resolve_base() { \
 # =========== Final Runtime Image ===========
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates libssl3 libpq5 && \
+RUN apt-get update && apt-get install -y ca-certificates curl libssl3 libpq5 postgresql-client && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /usr/share/locale/* && \
     find /usr/lib -name "*.a" -delete && \
     find /usr/lib -name "*.la" -delete
@@ -116,10 +116,12 @@ RUN chmod +x /entrypoint.sh
 
 # Create minimal directory structure matching expected layout:
 # The test runner looks for <root>/substreams/ and <root>/adapter-integration/evm/
-RUN mkdir -p /app/proto /app/adapter-integration/evm
+RUN mkdir -p /app/adapter-integration/evm
 
-# Copy proto files (needed for substreams pack)
-COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/proto /app/proto
+# Copy proto files (needed for `substreams pack`). Packages live at /app/substreams/<pkg> and their
+# substreams.yaml uses `importPaths: ../../../proto`, which from there resolves to /proto (the repo
+# layout is protocols/substreams/<pkg>, one level deeper). So the tycho protos must sit at /proto.
+COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/proto /proto
 
 # Copy EVM directory
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/adapter-integration/evm/out /app/adapter-integration/evm/out

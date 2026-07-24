@@ -10,6 +10,10 @@ for any protocol indexed by Tycho.
 - **`evm/engine_db/`**: Database backends (`SimulationDB` in-memory, `TychoDB` RPC-backed)
 - **`evm/stream.rs`**: Tycho feed integration — decodes live `FeedMessage` state into protocol
   instances ready for simulation
+- **`evm/override_stream/`**: live per-block VM state overrides for pAMMs — generic
+  `StateOverrideProvider`/`OverrideSnapshot` core plus the Titan quote-stream provider; pools
+  resolve the latest snapshot on every simulation and can fall back to indexed state per the
+  snapshot's `FailurePolicy`
 - **`evm/protocol/`**: Protocol implementations
   - **Native** (`uniswap_v2/`, `uniswap_v3/`, `uniswap_v4/`, `ekubo/`, `cowamm/`, `fluid/`,
     `aerodrome_v1/`, `aerodrome_slipstreams/`, `pancakeswap_v2/`, `etherfi/`, `erc4626/`,

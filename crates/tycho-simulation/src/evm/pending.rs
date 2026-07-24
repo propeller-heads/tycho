@@ -256,6 +256,7 @@ fn snapshot_to_block_changes(
                 component_id: id.clone(),
                 updated_attributes: comp_with_state.state.attributes.clone(),
                 deleted_attributes: HashSet::new(),
+                created_attributes: HashSet::new(),
             },
         );
 

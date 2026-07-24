@@ -1,18 +1,7 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const roles = require("./roles.json");
-
-function resolveRolesNetwork(network) {
-    // Strip tenderly_ prefix to match roles.json keys
-    const base = network.replace(/^tenderly_/, "");
-    if (!roles[base]) {
-        throw new Error(
-            `No roles defined for network "${base}" in roles.json`
-        );
-    }
-    return roles[base];
-}
+const {resolveRolesNetwork} = require("./utils");
 
 async function main() {
     const network = hre.network.name;

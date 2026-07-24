@@ -1,7 +1,6 @@
+use decoder::extension_type;
 use revm::primitives::Address;
 use tycho_client::feed::synchronizer::ComponentWithState;
-
-use crate::evm::protocol::ekubo_v3::decoder::extension_type;
 
 mod addresses;
 mod attributes;
@@ -12,7 +11,7 @@ pub mod state;
 #[cfg(test)]
 mod test_cases;
 
-/// Filters out unsupported extensions.
+/// Filters out unsupported ekubo_v3 extensions.
 pub fn filter_fn(component: &ComponentWithState) -> bool {
     component
         .component

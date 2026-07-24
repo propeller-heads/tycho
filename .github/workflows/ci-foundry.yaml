@@ -1,13 +1,13 @@
 name: Foundry CI
 
 on:
-  pull_request:
-    # No path filter here. Path filtering is handled inside the `changes` job so
-    # that the skip-* jobs below always execute on every PR. GitHub branch
-    # protection requires a check to appear (pass or skip) on each commit — if
-    # the workflow never runs, required checks remain pending and block the PR.
+  pull_request_target:
+  # No path filter here. Path filtering is handled inside the `changes` job so
+  # that the skip-* jobs below always execute on every PR. GitHub branch
+  # protection requires a check to appear (pass or skip) on each commit — if
+  # the workflow never runs, required checks remain pending and block the PR.
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - 'crates/tycho-execution/contracts/**'
       - 'protocols/adapter-integration/evm/**'
@@ -31,10 +31,12 @@ jobs:
     continue-on-error: true
     outputs:
       foundry: ${{ steps.filter.outputs.any_changed }}
+      bytecode: ${{ steps.filter-bytecode.outputs.any_changed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
         id: filter
@@ -45,12 +47,25 @@ jobs:
             crates/tycho-simulation/token-proxy-contracts/**
             .github/workflows/ci-foundry.yaml
 
+      # Inputs to the protocol-testing runtime bytecode fixtures.
+      - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        id: filter-bytecode
+        with:
+          files: |
+            crates/tycho-execution/contracts/src/**
+            crates/tycho-execution/config/executor_deployments.json
+            protocols/testing/fixtures/**
+            protocols/testing/scripts/update_runtime_bytecode.sh
+
   forge-test:
     name: Forge build, fmt, test (${{ matrix.project.path }})
-    needs: [changes]
-    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request'
+    needs: [ changes ]
+    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # forge test runs fork-controlled Solidity (and can shell out via ffi) with
+    # RPC secrets in scope; gate fork PRs behind required-reviewer approval.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
     strategy:
       matrix:
         project:
@@ -72,6 +87,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           submodules: false
       - name: Checkout submodules (shallow, project-scoped)
@@ -98,38 +114,41 @@ jobs:
   # protection requires ("Foundry CI / Forge build, fmt, test (<path>)").
   forge-test-skip-execution:
     name: Forge build, fmt, test (crates/tycho-execution/contracts)
-    needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    needs: [ changes ]
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
 
   forge-test-skip-adapter:
     name: Forge build, fmt, test (protocols/adapter-integration/evm)
-    needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    needs: [ changes ]
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
 
   forge-test-skip-token-proxy:
     name: Forge build, fmt, test (crates/tycho-simulation/token-proxy-contracts)
-    needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    needs: [ changes ]
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping forge-test"
 
   slither:
     name: Slither static analysis
-    needs: [changes]
-    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request'
+    needs: [ changes ]
+    if: needs.changes.outputs.foundry == 'true' || github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # No secrets here, but it compiles fork code; gate for consistency.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           submodules: false
       - name: Checkout submodules (shallow)
@@ -146,8 +165,50 @@ jobs:
 
   slither-skip:
     name: Slither static analysis
-    needs: [changes]
-    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request'
+    needs: [ changes ]
+    if: needs.changes.outputs.foundry != 'true' && github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Foundry changes detected, skipping Slither"
+
+  # Verifies the protocol-testing runtime bytecode fixtures still match the
+  # contracts + executor_deployments.json. Only runs on PRs targeting main that
+  # touch a bytecode input, so contract changes can't silently leave the
+  # fixtures stale. Regenerate with protocols/testing/scripts/update_runtime_bytecode.sh.
+  runtime-bytecode-check:
+    name: Runtime bytecode fixtures up to date
+    needs: [ changes ]
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'main' && needs.changes.outputs.bytecode == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
+    env:
+      RPC_URL: ${{ secrets.ETH_RPC_URL }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          submodules: false
+      - name: Checkout contracts submodules (shallow)
+        run: |
+          git config --file .gitmodules --get-regexp path \
+            | awk '{print $2}' \
+            | grep "^crates/tycho-execution/contracts/" \
+            | xargs -r git submodule update --init --depth 1 --recursive --
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@de808b1eea699e761c404bda44ba8f21aba30b2c  # v1
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Install contract deps
+        working-directory: crates/tycho-execution/contracts
+        run: npm ci
+
+      - name: Check runtime bytecode fixtures are up to date
+        run: ./protocols/testing/scripts/update_runtime_bytecode.sh --check

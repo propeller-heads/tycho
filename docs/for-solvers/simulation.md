@@ -197,6 +197,8 @@ let mut protocol_stream = ProtocolStreamBuilder::new("tycho-beta.propellerheads.
 
 Some protocols, such as Balancer V2 and Curve, require a pool filter to be defined to filter out unsupported pools. If a protocol needs a pool filter and the user does not provide one, a warning will be raised during the stream setup process.
 
+`ProtocolStreamBuilder` applies a curated blocklist of pools that are known to break simulation (for example, rebasing-token and insolvent pools) by default, so the stream excludes them automatically. To exclude additional components, pass their IDs to `blocklist_components(...)`.
+
 The stream created emits `Update` messages which consist of:
 
 * `block number_or_timestamp`- the block this update message refers to
@@ -214,6 +216,24 @@ For a full list of supported protocols and the simulation state implementations 
 
 {% hint style="info" %}
 `ProtocolStreamBuilder` supports the same <a href="https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-client#streaming-options" target="_blank" rel="noopener noreferrer">streaming options</a> as the Tycho Client, with one difference: TVL estimates are **always included** in the simulation package and cannot be disabled.
+{% endhint %}
+
+### Partial Blocks (Flashblocks)
+
+Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ — pre-confirmation updates that contain parts of a future block before its construction is finished. Enable this on your stream to receive sub-block latency updates as they arrive. On chains without flash block support, enabling this flag is unsupported.
+
+```rust
+let mut protocol_stream = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Base)
+    // ... other builder options ...
+    .enable_partial_blocks()
+    .await
+    .build()
+    .await
+    .expect("Failed building protocol stream");
+```
+
+{% hint style="warning" %}
+Block hashes in partial block messages are **unstable** — they change between partial updates and will differ from the final block hash. Do not use them as persistent identifiers or cache keys. See the <a href="https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks" target="_blank" rel="noopener noreferrer">Substreams documentation</a> for details.
 {% endhint %}
 
 <details>
