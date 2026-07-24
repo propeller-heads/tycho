@@ -45,6 +45,7 @@ pub(crate) struct MakerState {
     pub max_reserves: BigInt,
     pub convexity_exp: BigInt,
     pub last_invariant: BigInt,
+    pub blv_frozen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +110,7 @@ pub(crate) fn decode_pool(slots: &[[u8; SLOT_LEN]; 8]) -> PoolState {
     }
 }
 
-pub(crate) fn decode_maker(slots: &[[u8; SLOT_LEN]; 4]) -> MakerState {
+pub(crate) fn decode_maker(slots: &[[u8; SLOT_LEN]; 5]) -> MakerState {
     MakerState {
         initialized: byte_from_right(&slots[0], 0) != 0,
         blv_price: mid_uint128(&slots[0], 1),
@@ -118,6 +119,7 @@ pub(crate) fn decode_maker(slots: &[[u8; SLOT_LEN]; 4]) -> MakerState {
         max_reserves: low_uint128(&slots[2]),
         convexity_exp: high_uint128(&slots[2]),
         last_invariant: uint256(&slots[3]),
+        blv_frozen: byte_from_right(&slots[4], 0) != 0,
     }
 }
 
@@ -316,11 +318,12 @@ mod tests {
 
     #[test]
     fn decodes_maker_state_from_live_storage_slots() {
-        let slots = [
+        let mut slots = [
             slot("000000000000000000000000000000000000000000000000000000009756e501"),
             slot("00000000204fce5e3e250261100000000000000000000000000aa87bee538000"),
             slot("00000000000000001bc16d674ec800000000000000000000016345785d8a0000"),
             slot("00000000000000000000000000000000000000000000000000eb734c0d02cc00"),
+            slot("0000000000000000000000000000000000000000000000000000000000000000"),
         ];
 
         let maker = decode_maker(&slots);
@@ -332,6 +335,10 @@ mod tests {
         assert_eq!(maker.max_reserves, dec("100000000000000000"));
         assert_eq!(maker.convexity_exp, dec("2000000000000000000"));
         assert_eq!(maker.last_invariant, dec("66273390000000000"));
+        assert!(!maker.blv_frozen);
+
+        slots[4][SLOT_LEN - 1] = 1;
+        assert!(decode_maker(&slots).blv_frozen);
     }
 
     #[test]

@@ -1,3 +1,12 @@
+//! Reconstructs Baseline quote-state attributes from raw relay storage slots.
+//!
+//! The relay settles maker state lazily: the first swap of a block settles the previous
+//! block's accumulated deltas (surplus, BLV ratchet, convexity translation) before quoting.
+//! Storage therefore holds pre-settlement values whenever the last swap happened in an
+//! earlier block. To let the simulation quote without on-chain calls, this module previews
+//! that settlement off-chain: it applies the same transformations the contract would apply
+//! on the next interaction and emits the resulting post-settlement curve as attributes.
+
 use super::{
     slot_layout::{
         decode_block_pricing, decode_maker, decode_pool, BlockPricingState, MakerState, PoolState,
@@ -94,7 +103,7 @@ fn load_state(
     read_ordinal: Option<u64>,
 ) -> Option<(PoolState, MakerState, BlockPricingState)> {
     let pool = read_slots::<8>(store, component_id, StateArea::Pool, read_ordinal)?;
-    let maker = read_slots::<4>(store, component_id, StateArea::Maker, read_ordinal)?;
+    let maker = read_slots::<5>(store, component_id, StateArea::Maker, read_ordinal)?;
     let block_pricing =
         read_slots::<4>(store, component_id, StateArea::BlockPricing, read_ordinal)?;
     Some((decode_pool(&pool), decode_maker(&maker), decode_block_pricing(&block_pricing)))
@@ -159,6 +168,15 @@ fn attributes_from_state(
     Some(attributes)
 }
 
+/// Builds the curve snapshot the relay would quote against, handling the three pricing
+/// states:
+///
+/// 1. No swap has ever happened (`pricing.block_number == 0`): quote against committed state.
+/// 2. The last swap was in the current block: quote against the block-start snapshot the contract
+///    recorded, and carry the block's buy/sell deltas for same-block quoting.
+/// 3. The last swap was in an earlier block: its deltas are still unsettled, so preview the
+///    deferred maker update (BLV ratchet or convexity translation) the contract will apply on the
+///    next interaction.
 fn preview_block_pricing(
     pool: &PoolState,
     maker: &MakerState,
@@ -200,6 +218,9 @@ fn preview_block_pricing(
     })
 }
 
+/// Stored curve state plus the pending-surplus settlement the contract applies before
+/// quoting: in safety mode the excess above the invariant-implied reserves is skimmed,
+/// otherwise the accumulated pending surplus is folded into reserves.
 fn committed_curve_params(
     pool: &PoolState,
     maker: &MakerState,
@@ -242,6 +263,9 @@ fn stored_curve_params(pool: &PoolState, maker: &MakerState) -> CurveParams {
     }
 }
 
+/// Curve state as it was at the start of the pricing block, from the snapshot the contract
+/// records on the first swap of a block. Same-block quotes price against this snapshot, not
+/// the current storage values.
 fn apply_pool_snapshot(committed: &CurveParams, pricing: &BlockPricingState) -> CurveParams {
     CurveParams {
         blv: committed.blv.clone(),
@@ -279,6 +303,10 @@ fn curve_params_from_deferred_state(
     }
 }
 
+/// Previews the maker update the contract defers to the first interaction after a block
+/// with swaps: above the minimum convexity the curve is flattened via convexity
+/// translation, at the minimum the BLV is ratcheted up instead, and the invariant is
+/// recomputed from the resulting curve. Skipped entirely while the pool is in safety mode.
 fn preview_deferred_maker_state(
     pool: &PoolState,
     maker: &MakerState,
@@ -302,10 +330,12 @@ fn preview_deferred_maker_state(
     current.last_invariant = previous.last_invariant.clone();
 
     if !in_safety(pool) {
-        if current.convexity_exp > BigInt::from(MIN_CONVEXITY_EXP) {
-            preview_translate_convexity(&mut next, &current, &previous)?;
-        } else {
-            next.blv_price = compute_next_blv(&current, &previous.supply, &previous.reserves)?;
+        if !maker.blv_frozen {
+            if current.convexity_exp > BigInt::from(MIN_CONVEXITY_EXP) {
+                preview_translate_convexity(&mut next, &current, &previous)?;
+            } else {
+                next.blv_price = compute_next_blv(&current, &previous.supply, &previous.reserves)?;
+            }
         }
 
         current.blv = next.blv_price.clone();
@@ -316,6 +346,10 @@ fn preview_deferred_maker_state(
     Some(next)
 }
 
+/// Lowers the convexity exponent towards the largest of several floors (price continuity
+/// with the previous block, curve-buffer coverage, ATH dominance, xyk dominance), updating
+/// the ATH high-water marks (`max_circ`/`max_reserves`) along the way. Leaves the state
+/// untouched when no floor allows a reduction, mirroring the contract's no-op paths.
 fn preview_translate_convexity(
     next: &mut DeferredMakerState,
     params: &CurveParams,
@@ -399,6 +433,8 @@ fn preview_translate_convexity(
     Some(())
 }
 
+/// Marginal (active) price: the BLV floor plus the premium implied by the buffer above it,
+/// scaled by the convexity exponent. Falls back to the bare BLV with zero circulating.
 fn compute_active_price(params: &CurveParams) -> Option<BigInt> {
     if params.circ.is_zero() {
         return Some(params.blv.clone());
@@ -416,6 +452,8 @@ fn compute_active_price(params: &CurveParams) -> Option<BigInt> {
     Some(params.blv.clone() + premium)
 }
 
+/// Reserves above what the last invariant implies for the current supply/circ split, in
+/// native reserve decimals. This is what safety mode skims off before quoting.
 fn safety_surplus_native(pool: &PoolState, params: &CurveParams) -> Option<BigInt> {
     if params.circ.is_zero() {
         return Some(BigInt::zero());
@@ -454,6 +492,9 @@ fn compute_invariant(params: &CurveParams) -> Option<BigInt> {
     }
 }
 
+/// BLV ratchet applied once the curve is already at minimum convexity: raise the floor
+/// towards the book price, capped by a sell-penalty bound and a target derived from the
+/// supply split, and never below the current BLV.
 fn compute_next_blv(
     params: &CurveParams,
     previous_supply: &BigInt,
@@ -501,6 +542,8 @@ fn compute_next_blv(
     )
 }
 
+/// Convexity floor guaranteeing the curve stays above the equivalent xyk curve
+/// (quadratic-formula solution of the dominance condition).
 fn compute_xyk_dominance_floor(params: &CurveParams) -> Option<BigInt> {
     if params.circ.is_zero() || params.reserves.is_zero() {
         return Some(BigInt::zero());
@@ -520,6 +563,8 @@ fn compute_xyk_dominance_floor(params: &CurveParams) -> Option<BigInt> {
     Some((-linear_coeff + root) / 2u8)
 }
 
+/// Convexity floor keeping the curve dominant over the all-time-high curve while below the
+/// ATH: solves `position_ratio ^ n >= max_buffer / buffer` for `n` via logs.
 fn compute_minimum_convexity_exp(
     params: &CurveParams,
     max_reserves: &BigInt,
@@ -543,6 +588,9 @@ fn compute_minimum_convexity_exp(
     div_wad(&ln_buffer_ratio, &ln_position_ratio)
 }
 
+/// Re-derives the ATH reserve mark for a lowered convexity exponent, bailing out (`false`)
+/// on the same overflow guards the contract uses so the translation is skipped rather than
+/// producing an out-of-range mark.
 fn try_recompute_max_reserves(
     next: &mut DeferredMakerState,
     params: &CurveParams,
@@ -589,6 +637,9 @@ fn try_recompute_max_reserves(
     Some(true)
 }
 
+/// Remaining bTokens sellable in the current block: the snapshot's circulating supply minus
+/// what this block's swaps already moved. The relay caps same-block sells at the block-start
+/// circulating supply.
 fn max_sell_delta(context: &BlockQuoteContext, b_token_decimals: u8) -> BigInt {
     let snapshot_circ = denormalize_wad(&context.snapshot.circ, b_token_decimals);
     if context.block_sell_delta_circ >= snapshot_circ {
@@ -611,6 +662,8 @@ fn should_settle_pending_surplus(
         pool.pending_surplus > BigInt::zero()
 }
 
+/// Safety mode: 95% or more of the total supply is held by the pool (barely any tokens
+/// circulating), which switches surplus handling from accrual to skimming.
 fn in_safety(pool: &PoolState) -> bool {
     &pool.total_b_tokens * BUFFER_SAFETY_THRESHOLD_DENOMINATOR >=
         &pool.total_supply * BUFFER_SAFETY_THRESHOLD_NUMERATOR
@@ -891,6 +944,7 @@ mod tests {
             slot("000000000009d012d510b59e2de0b2050000000000000000002386f26fc10000"),
             slot("0000000000000001ff92b9e15ad389e7000000000000031ab5212e1eb33bbd56"),
             slot("000000000000000000000000000000000000000000000000000dae04f1d4853c"),
+            slot("0000000000000000000000000000000000000000000000000000000000000000"),
         ])
     }
 
@@ -934,6 +988,7 @@ mod tests {
             max_reserves: BigInt::zero(),
             convexity_exp: dec("2000000000000000000"),
             last_invariant: dec("100000000000000000000"),
+            blv_frozen: false,
         }
     }
 
@@ -967,6 +1022,7 @@ mod tests {
             slot("00000000204fce5e3e250261100000000000000000000000000aa87bee538000"),
             slot("00000000000000001bc16d674ec800000000000000000000016345785d8a0000"),
             slot("00000000000000000000000000000000000000000000000002106d18cfd71e33"),
+            slot("0000000000000000000000000000000000000000000000000000000000000000"),
         ])
     }
 
@@ -1180,6 +1236,36 @@ mod tests {
                 .unwrap(),
             &vec![0]
         );
+    }
+
+    #[test]
+    fn frozen_maker_skips_stale_block_curve_adjustment() {
+        let mut pool = base_pool();
+        pool.total_supply = dec("100000000000000000000");
+        pool.total_b_tokens = dec("50000000000000000000");
+        pool.total_reserves = dec("100000000000000000000");
+        pool.pending_surplus = BigInt::zero();
+
+        let mut maker = safety_maker();
+        maker.blv_price = BigInt::zero();
+        maker.blv_frozen = true;
+        let pricing = BlockPricingState {
+            start_reserves: dec("20000000000000000000"),
+            start_supply: dec("60000000000000000000"),
+            block_buy_delta_circ: dec("10000000000000000000"),
+            block_sell_delta_circ: BigInt::zero(),
+            start_last_invariant: BigInt::one(),
+            block_number: 1,
+        };
+        let committed = stored_curve_params(&pool, &maker);
+
+        let frozen = preview_deferred_maker_state(&pool, &maker, &committed, &pricing).unwrap();
+        assert_eq!(frozen.blv_price, committed.blv);
+        assert_eq!(frozen.convexity_exp, committed.convexity_exp);
+
+        maker.blv_frozen = false;
+        let unfrozen = preview_deferred_maker_state(&pool, &maker, &committed, &pricing).unwrap();
+        assert_ne!(unfrozen.blv_price, committed.blv);
     }
 
     #[test]

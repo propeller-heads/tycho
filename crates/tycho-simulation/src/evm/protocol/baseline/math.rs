@@ -64,6 +64,13 @@ pub fn quote_sell_exact_in(
     })
 }
 
+/// Spot price following the `ProtocolSim::spot_price` convention: the amount of quote
+/// required to buy 1 unit of base, so the fee always increases the returned price.
+///
+/// `is_buy` means the base being priced is the bToken. For `is_buy == false` the base is the
+/// reserve token, which is bought by selling bTokens at the fee-reduced price, hence the
+/// inversion of the discounted price. Baseline applies twice the stored `swapFee` per swap
+/// (see the `wad + 2 * swap_fee` payment term in `compute_zero_circ_swap`).
 pub(super) fn spot_price(state: &BaselineQuoteState, is_buy: bool) -> Result<f64, SimulationError> {
     let price = compute_active_price(&state.snapshot_curve)?;
     let fee_adjustment = u_to_bi(state.snapshot_curve.swap_fee) * 2u8;
@@ -1070,6 +1077,16 @@ mod tests {
                 .parse::<BigUint>()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn spot_price_includes_adverse_fee_in_both_directions() {
+        let state = mainnet_block_25036613_state();
+        let mut no_fee = state.clone();
+        no_fee.snapshot_curve.swap_fee = U256::ZERO;
+
+        assert!(spot_price(&state, true).unwrap() > spot_price(&no_fee, true).unwrap());
+        assert!(spot_price(&state, false).unwrap() > spot_price(&no_fee, false).unwrap());
     }
 
     #[test]

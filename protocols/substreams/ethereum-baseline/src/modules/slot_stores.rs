@@ -11,7 +11,7 @@ use substreams::store::{
 use substreams_ethereum::pb::eth;
 
 const POOL_SLOT_COUNT: u8 = 8;
-const MAKER_SLOT_COUNT: u8 = 4;
+const MAKER_SLOT_COUNT: u8 = 5;
 const BLOCK_PRICING_SLOT_COUNT: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,7 +231,7 @@ mod tests {
     fn indexes_all_state_slots_for_component() {
         let slots = indexed_slots_for_component(MAINNET_BTOKEN);
 
-        assert_eq!(slots.len(), 16);
+        assert_eq!(slots.len(), 17);
         assert_eq!(slots[0].area, StateArea::Pool);
         assert_eq!(slots[0].offset, 0);
         assert_eq!(
@@ -243,7 +243,9 @@ mod tests {
             "slot:f1cd69f10b5666b5159332deb03b47dda410f99f82374307d8483c61b3bad850"
         );
         assert_eq!(slots[8].area, StateArea::Maker);
-        assert_eq!(slots[12].area, StateArea::BlockPricing);
+        assert_eq!(slots[12].area, StateArea::Maker);
+        assert_eq!(slots[12].offset, 4);
+        assert_eq!(slots[13].area, StateArea::BlockPricing);
     }
 
     #[test]
@@ -279,7 +281,7 @@ mod tests {
 
         let index = same_block_slot_index(&block);
 
-        assert_eq!(index.len(), 16);
+        assert_eq!(index.len(), 17);
         assert_eq!(
             index
                 .get("slot:f1cd69f10b5666b5159332deb03b47dda410f99f82374307d8483c61b3bad849")
