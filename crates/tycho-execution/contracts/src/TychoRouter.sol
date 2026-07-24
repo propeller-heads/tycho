@@ -766,47 +766,25 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             );
         }
 
-        // DUPLICATE: exact copy in _singleSwap and
-        // _sequentialSwapChecked. Not extracted due to
-        // stack-too-deep. Edit all three together.
-        if (intercepting) {
-            amountOutAfterFees = _takeFees(
-                FeeInput({
-                    actualAmountOut: actualAmountOut,
-                    expectedAmountOut: expectedAmountOut,
-                    amountIn: amountIn,
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    clientFeeBps: clientFeeParams.clientFeeBps,
-                    client: client
-                })
-            );
-        } else {
-            amountOutAfterFees = actualAmountOut;
-        }
-
-        amountOutAfterFees = _maybeAddClientContribution(
-            amountOutAfterFees,
+        amountOutAfterFees = _finalizeSwap(
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                clientFeeBps: clientFeeParams.clientFeeBps,
+                client: client
+            }),
+            intercepting,
             minAmountOut,
             clientFeeParams.maxClientContribution,
-            tokenOut,
-            receiver,
-            client
-        );
-
-        amountOutAfterFees = _settleOutput(
-            amountOutAfterFees,
-            minAmountOut,
-            amountIn,
-            tokenIn,
-            tokenOut,
             receiver
         );
     }
 
     /**
-     * @notice Internal implementation of the core swap logic shared
-     *         between singleSwap() and singleSwapPermit2().
+     * @notice Internal implementation of the core swap logic shared between singleSwap() and singleSwapPermit2().
      *
      * @notice This function centralizes the swap execution logic.
      * @notice For detailed documentation on parameters and behavior, see the documentation for
@@ -868,40 +846,19 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             );
         }
 
-        // DUPLICATE: exact copy in _splitSwapChecked and
-        // _sequentialSwapChecked. Not extracted due to
-        // stack-too-deep. Edit all three together.
-        if (intercepting) {
-            amountOutAfterFees = _takeFees(
-                FeeInput({
-                    actualAmountOut: actualAmountOut,
-                    expectedAmountOut: expectedAmountOut,
-                    amountIn: amountIn,
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    clientFeeBps: clientFeeParams.clientFeeBps,
-                    client: client
-                })
-            );
-        } else {
-            amountOutAfterFees = actualAmountOut;
-        }
-
-        amountOutAfterFees = _maybeAddClientContribution(
-            amountOutAfterFees,
+        amountOutAfterFees = _finalizeSwap(
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                clientFeeBps: clientFeeParams.clientFeeBps,
+                client: client
+            }),
+            intercepting,
             minAmountOut,
             clientFeeParams.maxClientContribution,
-            tokenOut,
-            receiver,
-            client
-        );
-
-        amountOutAfterFees = _settleOutput(
-            amountOutAfterFees,
-            minAmountOut,
-            amountIn,
-            tokenIn,
-            tokenOut,
             receiver
         );
     }
@@ -962,40 +919,58 @@ contract TychoRouter is AccessControl, Dispatcher, EIP712 {
             amountIn, swaps, intercepting ? address(this) : receiver
         );
 
-        // DUPLICATE: exact copy in _splitSwapChecked and
-        // _singleSwap. Not extracted due to stack-too-deep.
-        // Edit all three together.
-        if (intercepting) {
-            amountOutAfterFees = _takeFees(
-                FeeInput({
-                    actualAmountOut: actualAmountOut,
-                    expectedAmountOut: expectedAmountOut,
-                    amountIn: amountIn,
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    clientFeeBps: clientFeeParams.clientFeeBps,
-                    client: client
-                })
-            );
-        } else {
-            amountOutAfterFees = actualAmountOut;
-        }
+        amountOutAfterFees = _finalizeSwap(
+            FeeInput({
+                actualAmountOut: actualAmountOut,
+                expectedAmountOut: expectedAmountOut,
+                amountIn: amountIn,
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                clientFeeBps: clientFeeParams.clientFeeBps,
+                client: client
+            }),
+            intercepting,
+            minAmountOut,
+            clientFeeParams.maxClientContribution,
+            receiver
+        );
+    }
+
+    /**
+     * @dev Shared post-swap finalization for all swap strategies: takes fees
+     *      (when the output was intercepted by the router), tops the output
+     *      up with a client contribution if it fell below `minAmountOut`,
+     *      and settles the final amount to the receiver.
+     *      `feeInput` doubles as the carrier for the swap context (amounts,
+     *      tokens, client), keeping caller stacks flat.
+     * @return amountOutAfterFees The settled output amount.
+     */
+    function _finalizeSwap(
+        FeeInput memory feeInput,
+        bool intercepting,
+        uint256 minAmountOut,
+        uint256 maxClientContribution,
+        address receiver
+    ) internal returns (uint256 amountOutAfterFees) {
+        amountOutAfterFees = intercepting
+            ? _takeFees(feeInput)
+            : feeInput.actualAmountOut;
 
         amountOutAfterFees = _maybeAddClientContribution(
             amountOutAfterFees,
             minAmountOut,
-            clientFeeParams.maxClientContribution,
-            tokenOut,
+            maxClientContribution,
+            feeInput.tokenOut,
             receiver,
-            client
+            feeInput.client
         );
 
         amountOutAfterFees = _settleOutput(
             amountOutAfterFees,
             minAmountOut,
-            amountIn,
-            tokenIn,
-            tokenOut,
+            feeInput.amountIn,
+            feeInput.tokenIn,
+            feeInput.tokenOut,
             receiver
         );
     }

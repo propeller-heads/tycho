@@ -357,43 +357,21 @@ fn _split_swap_checked(
         token_in == token_out,
     )?;
 
-    let amount_out = if !must_intercept {
-        actual_amount_out
-    } else {
-        _take_fees(
-            params,
-            vault,
-            log,
-            token_out,
-            actual_amount_out,
-            expected_amount_out,
-            client_fee_bps,
-        )?
-    };
-
-    let amount_out = _maybe_add_client_contribution(
+    _finalize_swap(
         params,
         state,
         vault,
         log,
-        amount_out,
-        min_amount_out,
-        token_out,
-        receiver,
-    )?;
-
-    _settle_output(
-        state,
-        vault,
-        log,
-        amount_out,
-        min_amount_out,
+        must_intercept,
+        actual_amount_out,
+        expected_amount_out,
         amount_in,
+        min_amount_out,
         token_in,
         token_out,
         receiver,
-    )?;
-    Ok(())
+        client_fee_bps,
+    )
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L651>
@@ -454,43 +432,21 @@ fn _single_swap(
         swap_index,
     )?;
 
-    let amount_out = if !must_intercept {
-        actual_amount_out
-    } else {
-        _take_fees(
-            params,
-            vault,
-            log,
-            token_out,
-            actual_amount_out,
-            expected_amount_out,
-            client_fee_bps,
-        )?
-    };
-
-    let amount_out = _maybe_add_client_contribution(
+    _finalize_swap(
         params,
         state,
         vault,
         log,
-        amount_out,
-        min_amount_out,
-        token_out,
-        receiver,
-    )?;
-
-    _settle_output(
-        state,
-        vault,
-        log,
-        amount_out,
-        min_amount_out,
+        must_intercept,
+        actual_amount_out,
+        expected_amount_out,
         amount_in,
+        min_amount_out,
         token_in,
         token_out,
         receiver,
-    )?;
-    Ok(())
+        client_fee_bps,
+    )
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TychoRouter.sol#L717>
@@ -537,6 +493,40 @@ fn _sequential_swap_checked(
 
     let actual_amount_out = _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
 
+    _finalize_swap(
+        params,
+        state,
+        vault,
+        log,
+        must_intercept,
+        actual_amount_out,
+        expected_amount_out,
+        amount_in,
+        min_amount_out,
+        token_in,
+        token_out,
+        receiver,
+        client_fee_bps,
+    )
+}
+
+/// Mirrors `TychoRouter._finalizeSwap` in Solidity: shared post-swap
+/// finalization (fees, client contribution top-up, output settlement).
+fn _finalize_swap(
+    params: &Params,
+    state: &mut State,
+    vault: &mut Vault,
+    log: &mut impl Log,
+    must_intercept: bool,
+    actual_amount_out: i64,
+    expected_amount_out: i64,
+    amount_in: i64,
+    min_amount_out: i64,
+    token_in: Address,
+    token_out: Address,
+    receiver: Address,
+    client_fee_bps: i64,
+) -> Result<(), Error> {
     let amount_out = if !must_intercept {
         actual_amount_out
     } else {
