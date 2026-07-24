@@ -92,21 +92,22 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     {
         address resolvedClient = _resolveClient(feeInput.client);
 
-        uint256 routerSurplus = _calculatePositiveSlippage(
+        uint256 positiveSlippage = _calculatePositiveSlippage(
             feeInput.actualAmountOut, feeInput.expectedAmountOut
         );
 
         // Fee base = actual output minus any extracted surplus.
         // When surplus is taken: feeBase = expectedAmountOut.
-        // When no surplus (disabled or actual <= expected): the cut is zero.
-        uint256 feeBase = feeInput.actualAmountOut - routerSurplus;
+        // When no surplus (disabled or actual <= expected): it is zero.
+        uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
 
         (uint256 routerFee, uint256 clientFee) =
             _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
 
         feeRecipients = new FeeRecipient[](2);
         feeRecipients[0] = FeeRecipient({
-            recipient: _routerFeeReceiver, feeAmount: routerFee + routerSurplus
+            recipient: _routerFeeReceiver,
+            feeAmount: routerFee + positiveSlippage
         });
         feeRecipients[1] =
             FeeRecipient({recipient: resolvedClient, feeAmount: clientFee});
@@ -200,17 +201,17 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     /**
      * @dev Calculates the positive slippage surplus, all of which goes to the router
-     * @return routerCut The full surplus (zero if disabled or no surplus)
+     * @return positiveSlippage The surplus (zero if disabled or no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
         uint256 expectedAmountOut
-    ) internal view returns (uint256 routerCut) {
+    ) internal view returns (uint256 positiveSlippage) {
         if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
             return 0;
         }
 
-        routerCut = actualAmountOut - expectedAmountOut;
+        positiveSlippage = actualAmountOut - expectedAmountOut;
     }
 
     /**

@@ -69,17 +69,17 @@ pub fn calculate_fee(
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    let router_surplus =
+    let positive_slippage =
         _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
 
-    let fee_base = actual_amount_out - router_surplus;
+    let fee_base = actual_amount_out - positive_slippage;
 
     let (router_fee, client_fee) = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
 
     Ok(vec![
         FeeRecipient {
             recipient: Address::RouterFeeReceiver,
-            fee_amount: router_fee + router_surplus,
+            fee_amount: router_fee + positive_slippage,
         },
         FeeRecipient { recipient: Address::ClientFeeReceiver, fee_amount: client_fee },
     ])
@@ -148,7 +148,8 @@ fn _calculate_fee(
 
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
-/// Returns the router's surplus cut (the full surplus); zero if disabled or no surplus.
+/// Returns the positive slippage surplus, all of which goes to the router;
+/// zero if disabled or no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
