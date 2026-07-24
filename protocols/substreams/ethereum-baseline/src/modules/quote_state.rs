@@ -1239,6 +1239,48 @@ mod tests {
     }
 
     #[test]
+    fn uses_burned_pool_state_after_block_pricing_reset() {
+        let mut pool = mainnet_pool();
+        let maker_before = mainnet_maker();
+        let circ_before = &pool.total_supply - &pool.total_b_tokens;
+        let price_before =
+            compute_active_price(&stored_curve_params(&pool, &maker_before)).unwrap();
+
+        let burn_amount = dec("1000000000000000000000");
+        pool.total_supply -= &burn_amount;
+        pool.total_b_tokens -= &burn_amount;
+        let mut maker_after = maker_before;
+        maker_after.last_invariant =
+            compute_invariant(&stored_curve_params(&pool, &maker_after)).unwrap();
+        let pricing = BlockPricingState {
+            start_reserves: BigInt::zero(),
+            start_supply: BigInt::zero(),
+            block_buy_delta_circ: BigInt::zero(),
+            block_sell_delta_circ: BigInt::zero(),
+            start_last_invariant: BigInt::zero(),
+            block_number: 0,
+        };
+
+        let attributes = attr_map(
+            attributes_from_state(&pool, &maker_after, &pricing, 25_329_977, ChangeType::Update)
+                .unwrap(),
+        );
+
+        assert_eq!(&pool.total_supply - &pool.total_b_tokens, circ_before);
+        assert_eq!(uint_value(&attributes, "total_supply"), pool.total_supply);
+        assert_eq!(uint_value(&attributes, "total_b_tokens"), pool.total_b_tokens);
+        assert_eq!(uint_value(&attributes, "snapshot_curve_supply"), pool.total_b_tokens);
+        assert_eq!(uint_value(&attributes, "max_sell_delta"), circ_before);
+        assert_eq!(
+            uint_value(&attributes, "snapshot_curve_last_invariant"),
+            maker_after.last_invariant
+        );
+        assert_eq!(uint_value(&attributes, "quote_block_buy_delta_circ"), BigInt::zero());
+        assert_eq!(uint_value(&attributes, "quote_block_sell_delta_circ"), BigInt::zero());
+        assert!(uint_value(&attributes, "snapshot_active_price") > price_before);
+    }
+
+    #[test]
     fn frozen_maker_skips_stale_block_curve_adjustment() {
         let mut pool = base_pool();
         pool.total_supply = dec("100000000000000000000");
