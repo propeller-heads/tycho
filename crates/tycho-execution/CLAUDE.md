@@ -259,7 +259,7 @@ forge fmt                       # auto-format
 forge snapshot                  # gas snapshots
 ```
 
-Config: `contracts/foundry.toml` -- Cancun EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
+Config: `contracts/foundry.toml` -- Osaka EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
 Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
@@ -283,8 +283,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 
 ### CI
 
-- **evm-foundry-ci.yml**: Format check + forge test + gas snapshot on PRs and main pushes
-- **slither.yml**: Static analysis
+- **ci-foundry.yaml**: Foundry format, build, test, gas snapshot, runtime-bytecode fixture,
+  and Slither checks
 
 ## Adding a New Executor
 
