@@ -89,7 +89,7 @@ pub fn calculate_fee(
 ///
 /// Returns true if funds must pass through the router after the final swap
 /// instead of going directly to the receiver.
-pub fn must_intercept_output(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
+pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
     if fee_info.positive_slippage_enabled {

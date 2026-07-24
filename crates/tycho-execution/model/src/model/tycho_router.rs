@@ -8,7 +8,7 @@ use crate::{
     model::{
         dispatcher::_call_swap_on_executor,
         executors::Executor,
-        fee_calculator::{calculate_fee, must_intercept_output},
+        fee_calculator::{calculate_fee, must_output_through_router},
         transfer_manager::{_transfer_out, _tstore_transfer_from_info},
         vault::Vault,
     },
@@ -329,9 +329,9 @@ fn _split_swap_checked(
         0
     };
 
-    let must_intercept = must_intercept_output(params, client_fee_bps)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
-    let final_receiver = if must_intercept { Address::Router } else { receiver };
+    let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
     let actual_amount_out = _split_swap(
         params,
@@ -349,7 +349,7 @@ fn _split_swap_checked(
         state,
         vault,
         log,
-        must_intercept,
+        must_output_through_router,
         actual_amount_out,
         expected_amount_out,
         amount_in,
@@ -386,9 +386,9 @@ fn _single_swap(
         0
     };
 
-    let must_intercept = must_intercept_output(params, client_fee_bps)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
-    let final_receiver = if must_intercept { Address::Router } else { receiver };
+    let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
     let swap_index = 0;
     let executor = params.request(ParamKey::Executor { swap_index }, Executor::VARIANTS)?;
@@ -411,7 +411,7 @@ fn _single_swap(
         state,
         vault,
         log,
-        must_intercept,
+        must_output_through_router,
         actual_amount_out,
         expected_amount_out,
         amount_in,
@@ -448,9 +448,9 @@ fn _sequential_swap_checked(
         0
     };
 
-    let must_intercept = must_intercept_output(params, client_fee_bps)?;
+    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
 
-    let final_receiver = if must_intercept { Address::Router } else { receiver };
+    let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
     let actual_amount_out = _sequential_swap(params, state, vault, log, amount_in, final_receiver)?;
 
@@ -459,7 +459,7 @@ fn _sequential_swap_checked(
         state,
         vault,
         log,
-        must_intercept,
+        must_output_through_router,
         actual_amount_out,
         expected_amount_out,
         amount_in,
@@ -516,7 +516,7 @@ fn _finalize_swap(
     state: &mut State,
     vault: &mut Vault,
     log: &mut impl Log,
-    must_intercept: bool,
+    must_output_through_router: bool,
     actual_amount_out: i64,
     expected_amount_out: i64,
     amount_in: i64,
@@ -526,7 +526,7 @@ fn _finalize_swap(
     receiver: Address,
     client_fee_bps: i64,
 ) -> Result<(), Error> {
-    let amount_out = if !must_intercept {
+    let amount_out = if !must_output_through_router {
         actual_amount_out
     } else {
         _take_fees(
