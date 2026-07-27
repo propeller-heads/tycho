@@ -22,7 +22,7 @@ The RPC poller produces **base blocks** (no contract storage — VM protocols an
 
 The poller reads blocks over plain JSON-RPC, which exposes logs and receipts but not storage writes or internal calls. It therefore produces <a href="https://docs.substreams.dev/reference-material/chain-support/chains-and-endpoints#evm-extended-vs-base-block-model" target="_blank" rel="noopener noreferrer">base blocks</a> — the protobuf fields for storage and call data arrive empty. Hosted endpoints backed by instrumented nodes serve **extended** blocks that carry all of it.
 
-To overcome it, run your own instrumented node: a <a href="https://github.com/streamingfast/go-ethereum/releases" target="_blank" rel="noopener noreferrer">Firehose-patched build</a> of the chain's execution client (available for geth, op-geth, BNB, Polygon, Arbitrum) under `fireeth start reader-node`, in place of the poller.
+To overcome it, run your own instrumented node: a <a href="https://github.com/streamingfast/go-ethereum/releases" target="_blank" rel="noopener noreferrer">Firehose-patched build</a> of the chain's execution client (available for geth, op-geth, BNB, Polygon, Arbitrum) under `fireeth start reader-node`, in place of the poller — see the <a href="https://firehose.streamingfast.io/firehose/overview/chains/ethereum" target="_blank" rel="noopener noreferrer">Firehose EVM node setup guide</a>.
 
 ### Single machine — meant for dev/test usage
 
