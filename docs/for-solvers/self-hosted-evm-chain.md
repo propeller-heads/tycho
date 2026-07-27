@@ -13,8 +13,20 @@ Some EVM chains have no hosted Substreams endpoint. To index one of those, run y
 Choose self-hosted when **no hosted Substreams endpoint exists for your chain**. If a hosted endpoint exists, prefer it — it needs no extra infrastructure.
 
 {% hint style="warning" %}
-The `substreams-endpoint` profile is a single-machine deployment: every Firehose component runs in one container. It suits development and testing, not production workloads that need high availability. For a distributed, fault-tolerant setup see the <a href="https://firehose.streamingfast.io/firehose/overview/deployment-and-scaling" target="_blank" rel="noopener noreferrer">Firehose deployment and scaling guide</a>.
+The RPC poller produces **base blocks** (no contract storage — VM protocols and DCI do not work). Read [Limitations](#limitations) first.
 {% endhint %}
+
+## Limitations
+
+### Base block model — VM protocols and DCI do not work
+
+The poller reads blocks over plain JSON-RPC, which exposes logs and receipts but not storage writes or internal calls. It therefore produces <a href="https://docs.substreams.dev/reference-material/chain-support/chains-and-endpoints#evm-extended-vs-base-block-model" target="_blank" rel="noopener noreferrer">base blocks</a> — the protobuf fields for storage and call data arrive empty. Hosted endpoints backed by instrumented nodes serve **extended** blocks that carry all of it.
+
+To overcome it, run your own instrumented node: a <a href="https://github.com/streamingfast/go-ethereum/releases" target="_blank" rel="noopener noreferrer">Firehose-patched build</a> of the chain's execution client (available for geth, op-geth, BNB, Polygon, Arbitrum) under `fireeth start reader-node`, in place of the poller.
+
+### Single machine — meant for dev/test usage
+
+Every component runs in one container against one RPC endpoint — no high availability, no failover. For production, consider a distributed topology following the <a href="https://firehose.streamingfast.io/firehose/overview/distributed-deployment" target="_blank" rel="noopener noreferrer">Firehose deployment and scaling guide</a>.
 
 ## Prerequisites
 
@@ -140,7 +152,7 @@ chains:
 
 ### Building a Substreams package
 
-Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>ethereum-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one.
+Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>ethereum-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one — from a logs-only module such as `ethereum-uniswap-v2` or `ethereum-uniswap-v3-logs-only` (see [Limitations](#limitations)).
 
 To index a Uniswap-V2-style DEX on a new chain, reuse the `ethereum-uniswap-v2` module and add a manifest for your chain:
 
