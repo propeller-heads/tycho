@@ -26,7 +26,7 @@ To overcome it, run your own instrumented node: a <a href="https://github.com/st
 
 ### Single machine — meant for dev/test usage
 
-Every component runs in one container against one RPC endpoint — no high availability, no failover. For production, consider a distributed topology following the <a href="https://firehose.streamingfast.io/firehose/overview/distributed-deployment" target="_blank" rel="noopener noreferrer">Firehose deployment and scaling guide</a>.
+This limitation comes from the compose profile, not Firehose: it starts every Firehose component in one container against one RPC endpoint — no high availability, no failover. For production, replace the profile with a distributed topology following the <a href="https://firehose.streamingfast.io/firehose/overview/distributed-deployment" target="_blank" rel="noopener noreferrer">Firehose deployment and scaling guide</a>.
 
 ## Prerequisites
 
