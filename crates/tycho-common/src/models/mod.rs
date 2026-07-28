@@ -94,6 +94,7 @@ pub enum Chain {
     Unichain,
     Polygon,
     Plasma,
+    Robinhood,
     /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
     Custom(CustomChainId),
 }
@@ -117,6 +118,7 @@ impl Chain {
             "unichain" => Some(Chain::Unichain),
             "polygon" => Some(Chain::Polygon),
             "plasma" => Some(Chain::Plasma),
+            "robinhood" => Some(Chain::Robinhood),
             _ => None,
         }
     }
@@ -155,6 +157,7 @@ impl Display for Chain {
             Chain::Unichain => f.write_str("unichain"),
             Chain::Polygon => f.write_str("polygon"),
             Chain::Plasma => f.write_str("plasma"),
+            Chain::Robinhood => f.write_str("robinhood"),
             Chain::Custom(name) => f.write_str(name.as_str()),
         }
     }
@@ -172,6 +175,7 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Unichain => Chain::Unichain,
             dto::Chain::Polygon => Chain::Polygon,
             dto::Chain::Plasma => Chain::Plasma,
+            dto::Chain::Robinhood => Chain::Robinhood,
             dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
                 panic!(
                     "received custom chain '{name}' with no registered config: {e}; install it via \
@@ -333,6 +337,7 @@ impl Chain {
             Chain::Unichain => 130,
             Chain::Polygon => 137,
             Chain::Plasma => 9745,
+            Chain::Robinhood => 4663,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
         })
     }
@@ -360,21 +365,23 @@ impl Chain {
             // ETH-native chains: 10 ETH ≈ $20K, 100 ETH ≈ $200K.
             // Starknet uses ETH-denominated TVL in Tycho (STRK tracked separately).
             (
-                Chain::Ethereum |
-                Chain::Starknet |
-                Chain::ZkSync |
-                Chain::Arbitrum |
-                Chain::Base |
-                Chain::Unichain,
+                Chain::Ethereum
+                | Chain::Starknet
+                | Chain::ZkSync
+                | Chain::Arbitrum
+                | Chain::Base
+                | Chain::Unichain
+                | Chain::Robinhood,
                 TvlThresholdTier::Low,
             ) => 10.0,
             (
-                Chain::Ethereum |
-                Chain::Starknet |
-                Chain::ZkSync |
-                Chain::Arbitrum |
-                Chain::Base |
-                Chain::Unichain,
+                Chain::Ethereum
+                | Chain::Starknet
+                | Chain::ZkSync
+                | Chain::Arbitrum
+                | Chain::Base
+                | Chain::Unichain
+                | Chain::Robinhood,
                 TvlThresholdTier::Medium,
             ) => 100.0,
 
@@ -424,6 +431,7 @@ impl Chain {
             Chain::Unichain => native_eth(Chain::Unichain),
             Chain::Polygon => native_pol(Chain::Polygon),
             Chain::Plasma => native_xpl(Chain::Plasma),
+            Chain::Robinhood => native_eth(Chain::Robinhood),
             Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
         })
     }
@@ -466,6 +474,9 @@ impl Chain {
             Chain::Plasma => {
                 wrapped_native_xpl(Chain::Plasma, "0x6100E367285b01F48D07953803A2d8dCA5D19873")
             }
+            Chain::Robinhood => {
+                wrapped_native_eth(Chain::Robinhood, "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73")
+            }
             Chain::Custom(id) => {
                 wrapped_native_custom(*self, try_resolve_custom(id, chain_registry())?)
             }
@@ -491,6 +502,7 @@ impl Chain {
             Chain::Unichain => 1,
             Chain::Polygon => 2,
             Chain::Plasma => 1,
+            Chain::Robinhood => 1,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
         })
     }

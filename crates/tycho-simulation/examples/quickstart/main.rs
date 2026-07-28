@@ -98,6 +98,7 @@ impl Cli {
                 "base" => "0x4200000000000000000000000000000000000006".to_string(),
                 "unichain" => "0x4200000000000000000000000000000000000006".to_string(),
                 "arbitrum" => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".to_string(),
+                "robinhood" => "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -108,6 +109,7 @@ impl Cli {
                 "base" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
                 "unichain" => "0x078d782b760474a361dda0af3839290b0ef57ad6".to_string(),
                 "arbitrum" => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
+                "robinhood" => "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -250,6 +252,11 @@ async fn main() {
         Chain::Polygon => {
             protocol_stream =
                 protocol_stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
+        Chain::Robinhood => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
         }
         _ => {}
     }
