@@ -1,3 +1,10 @@
+## [0.341.8](https://github.com/propeller-heads/tycho/compare/0.341.7...0.341.8) (2026-07-28)
+
+
+### Bug Fixes
+
+* **fermiswap:** handle engine quote refusals in adapter ([#1238](https://github.com/propeller-heads/tycho/issues/1238)) ([f935047](https://github.com/propeller-heads/tycho/commit/f93504781773859ed344479e054ab5c0f2e1657c))
+
 ## [0.341.7](https://github.com/propeller-heads/tycho/compare/0.341.6...0.341.7) (2026-07-27)
 
 
