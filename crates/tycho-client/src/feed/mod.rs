@@ -33,6 +33,11 @@ pub mod component_tracker;
 pub mod dto;
 pub mod synchronizer;
 
+/// Number of block headers retained by the `BlockHistory` ring buffer. Bounds how deep a revert
+/// can unwind before the fork point is evicted. Used both on startup and on reinitialization so
+/// the retained depth stays consistent across an `Advanced`-triggered reinit.
+const BLOCK_HISTORY_SIZE: usize = 15;
+
 /// A trait representing a minimal interface for types that behave like a block header.
 ///
 /// This abstraction allows working with either full block headers (`BlockHeader`)
@@ -783,7 +788,7 @@ where
 
         // Fail fast if no synchronizer produced a ready first message.
         Self::require_active_stream(&sync_streams)?;
-        let mut block_history = BlockHistory::new(initial_headers, 15)?;
+        let mut block_history = BlockHistory::new(initial_headers, BLOCK_HISTORY_SIZE)?;
         // Determine the starting header for synchronization.
         // Safe: require_active_stream above guarantees at least one Ready stream,
         // so initial_headers is non-empty and block_history.latest() is Some.
@@ -968,13 +973,26 @@ where
         let previous = block_history
             .latest()
             // Old block history should not be empty, startup should have populated it at this point
-            .ok_or(BlockHistoryError::EmptyHistory)?;
-        let blocks = sync_streams
-            .iter()
-            .filter_map(SynchronizerStream::get_current_header)
+            .ok_or(BlockHistoryError::EmptyHistory)?
+            .clone();
+        // Preserve the previously retained history so a revert to a block below the advanced tip
+        // can still find its fork point. Seeding only from current stream headers roots the new
+        // history at the oldest header the streams happen to hold, dropping the ancestors a later
+        // revert needs: a revert targeting that root drains the deque looking for its parent and
+        // fails with `RevertPositionNotFound` ("History exceeded"). `BlockHistory::new` keeps the
+        // connected chain ending at the highest-numbered header, so detached older blocks (a
+        // genuine gap, e.g. after a restart) are still discarded.
+        let mut blocks: Vec<BlockHeader> = block_history
+            .blocks()
             .cloned()
             .collect();
-        let new_block_history = BlockHistory::new(blocks, 10)?;
+        blocks.extend(
+            sync_streams
+                .iter()
+                .filter_map(SynchronizerStream::get_current_header)
+                .cloned(),
+        );
+        let new_block_history = BlockHistory::new(blocks, BLOCK_HISTORY_SIZE)?;
         let latest = new_block_history
             .latest()
             // Block history should not be empty, we just populated it.
@@ -1261,6 +1279,29 @@ mod tests {
         }
     }
 
+    /// Builds a full (non-partial) block header. Hash and parent_hash are derived from the given
+    /// numbers so that a chain can be built by setting `parent = number - 1`.
+    fn full_header(number: u64, hash: u64, parent: u64) -> BlockHeader {
+        BlockHeader {
+            number,
+            hash: Bytes::from(hash.to_be_bytes()),
+            parent_hash: Bytes::from(parent.to_be_bytes()),
+            revert: false,
+            timestamp: 1000,
+            partial_block_index: None,
+        }
+    }
+
+    /// Builds a `SynchronizerStream` pinned to a given state, for exercising state-transition
+    /// logic without a live synchronizer. The receiver is never polled by these tests.
+    fn stream_in_state(name: &str, state: SynchronizerState) -> SynchronizerStream {
+        let (_tx, rx) = mpsc::channel(1);
+        let id = ExtractorIdentity { chain: Chain::Ethereum, name: name.to_string() };
+        let mut stream = SynchronizerStream::new(&id, rx);
+        stream.state = state;
+        stream
+    }
+
     async fn receive_message(rx: &mut Receiver<BlockSyncResult<FeedMessage>>) -> FeedMessage {
         timeout(Duration::from_millis(100), rx.recv())
             .await
@@ -1409,6 +1450,87 @@ mod tests {
         assert_eq!(second_feed_msg, exp2);
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// Regression test for the "Reverting block's insert position not found! History exceeded"
+    /// crash seen on Base with flashblocks enabled.
+    ///
+    /// When one synchronizer races ahead (e.g. one partial block), it is classified `Advanced`
+    /// and the block history is reinitialized. If the reinit discards the previously retained
+    /// history, a subsequent revert to a block *below* the advanced tip can no longer find its
+    /// fork point and the whole stream terminates. Reinit must preserve the prior history so the
+    /// revert still resolves.
+    #[test]
+    fn test_reinit_preserves_history_for_revert_below_advanced_tip() {
+        // Old history: connected chain 323 -> 324 -> 325 (hash == number).
+        let old_blocks = vec![
+            full_header(323, 323, 322),
+            full_header(324, 324, 323),
+            full_header(325, 325, 324),
+        ];
+        let mut old_history = BlockHistory::new(old_blocks, 15).unwrap();
+
+        // One stream raced ahead to 326 (connected to 325) -> Advanced, triggering reinit.
+        // Another stream is still at 325 (Delayed).
+        let mut streams = vec![
+            stream_in_state("aerodrome", SynchronizerState::Advanced(full_header(326, 326, 325))),
+            stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(325, 325, 324))),
+        ];
+
+        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &mut old_history,
+        )
+        .expect("reinit failed");
+
+        // A revert to block 325 must still find its fork point (324) in the retained history.
+        let revert = BlockHeader {
+            number: 325,
+            hash: Bytes::from(325u64.to_be_bytes()),
+            parent_hash: Bytes::from(324u64.to_be_bytes()),
+            revert: true,
+            timestamp: 1000,
+            partial_block_index: None,
+        };
+        new_history
+            .push(revert)
+            .expect("revert below advanced tip must not exceed history");
+    }
+
+    /// Preserving history must not resurrect blocks across a real gap. When the advanced block is
+    /// genuinely detached (e.g. a synchronizer restarted and jumped ahead), the retained blocks do
+    /// not connect to it and must still be discarded, leaving the history rooted at the advanced
+    /// block rather than stitching together a discontinuous chain.
+    #[test]
+    fn test_reinit_discards_retained_history_on_detached_advanced_block() {
+        let old_blocks = vec![
+            full_header(323, 323, 322),
+            full_header(324, 324, 323),
+            full_header(325, 325, 324),
+        ];
+        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+
+        // Advanced block is far ahead and its parent is unknown to the retained history.
+        let mut streams = vec![stream_in_state(
+            "aerodrome",
+            SynchronizerState::Advanced(full_header(400, 400, 399)),
+        )];
+
+        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &mut old_history,
+        )
+        .expect("reinit failed");
+
+        let retained: Vec<u64> = new_history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(
+            retained,
+            vec![400],
+            "detached advanced block must not be stitched to old history"
+        );
     }
 
     #[test(tokio::test)]

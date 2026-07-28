@@ -1,3 +1,35 @@
+## [0.341.7](https://github.com/propeller-heads/tycho/compare/0.341.6...0.341.7) (2026-07-27)
+
+
+### Bug Fixes
+
+* **slipstreams:** default fee when dynamic-fee module marker absent ([a5c0e4a](https://github.com/propeller-heads/tycho/commit/a5c0e4ab10b2839f26155de7c3de110dc33f6036))
+* **slipstreams:** default fee when dynamic-fee module marker absent ([#1239](https://github.com/propeller-heads/tycho/issues/1239)) ([a06afc7](https://github.com/propeller-heads/tycho/commit/a06afc734d58679f2f2fa884f3671754da7bdc82))
+* **slipstreams:** treat a failed observation as zero dynamic fee ([f6391ea](https://github.com/propeller-heads/tycho/commit/f6391eab497f60f340c2c06d92d983a762eca66a))
+
+## [0.341.6](https://github.com/propeller-heads/tycho/compare/0.341.5...0.341.6) (2026-07-27)
+
+
+### Bug Fixes
+
+* support slipstreams initial fees in simulation ([8f4dcca](https://github.com/propeller-heads/tycho/commit/8f4dcca5daf6976ea4192e9e343fcbee379dacc4))
+* support Slipstreams initial fees in simulation ([#1196](https://github.com/propeller-heads/tycho/issues/1196)) ([49ba1c4](https://github.com/propeller-heads/tycho/commit/49ba1c486b0652bdfa9b72831c11e664adfa8d2b))
+
+## [0.341.5](https://github.com/propeller-heads/tycho/compare/0.341.4...0.341.5) (2026-07-27)
+
+
+### Bug Fixes
+
+* preserve block history across reinit for flashblock reverts ([f1d7cee](https://github.com/propeller-heads/tycho/commit/f1d7cee3d0bf59e7e5541810f401195363dca6e3))
+* preserve block history across reinit for flashblock reverts ([#1224](https://github.com/propeller-heads/tycho/issues/1224)) ([86821a8](https://github.com/propeller-heads/tycho/commit/86821a868b2356ec9b08fed00ae1e08bbc964f9a))
+
+## [0.341.4](https://github.com/propeller-heads/tycho/compare/0.341.3...0.341.4) (2026-07-24)
+
+
+### Bug Fixes
+
+* **fermiswap:** follow engine migration to 0x90f73fEA ([#1228](https://github.com/propeller-heads/tycho/issues/1228)) ([9606fc1](https://github.com/propeller-heads/tycho/commit/9606fc12a50b1d81d85365f9ac40737c2d369ffc))
+
 ## [0.341.3](https://github.com/propeller-heads/tycho/compare/0.341.2...0.341.3) (2026-07-24)
 
 

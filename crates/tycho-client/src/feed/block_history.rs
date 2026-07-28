@@ -66,6 +66,11 @@ impl BlockHistory {
 
             // Find connected blocks in sequence
             for block in history.iter().skip(1) {
+                // Skip duplicates or same-height forks. The input may contain overlapping blocks
+                // (e.g. when merging retained history with current stream headers on reinit).
+                if block.number >= current_number {
+                    continue;
+                }
                 // If we find a gap in block numbers, stop building the chain
                 if block.number != current_number - 1 {
                     break;
@@ -262,7 +267,8 @@ impl BlockHistory {
                 // sibling is canonical, so we do not flip the tip here. Classify it as Delayed:
                 // if it is the losing fork it simply waits, and if it is canonical the next block
                 // (number > tip) arrives as Advanced and triggers a block-history reinit that
-                // rebuilds from the synchronizers' converged headers.
+                // rebuilds from the retained history merged with the synchronizers' converged
+                // headers.
                 BlockPosition::Delayed
             } else {
                 // anything else raises e.g. a completely detached, revert=false block
@@ -289,6 +295,11 @@ impl BlockHistory {
 
     pub fn oldest(&self) -> Option<&BlockHeader> {
         self.history.front()
+    }
+
+    /// Returns the retained block headers, oldest first.
+    pub fn blocks(&self) -> impl Iterator<Item = &BlockHeader> {
+        self.history.iter()
     }
 }
 
@@ -400,6 +411,21 @@ mod test {
         assert_eq!(history.history, exp_history);
         assert!(history.reverts.contains(&int_hash(3)));
         assert!(history.reverts.contains(&int_hash(4)));
+    }
+
+    #[test]
+    fn test_new_tolerates_duplicate_blocks() {
+        // Reinit seeds `new` with retained history plus current stream headers, so the same block
+        // number can appear more than once. A duplicate must not truncate the connected chain.
+        let mut blocks = generate_blocks(4, 5, None); // blocks 5,6,7,8
+        blocks.push(blocks[2].clone()); // duplicate block 7
+
+        let history = BlockHistory::new(blocks, 10).expect("failed to create history");
+
+        // All four connected blocks are retained despite the duplicate.
+        assert_eq!(history.history.len(), 4);
+        assert_eq!(history.oldest().unwrap().number, 5);
+        assert_eq!(history.latest().unwrap().number, 8);
     }
 
     #[test]
