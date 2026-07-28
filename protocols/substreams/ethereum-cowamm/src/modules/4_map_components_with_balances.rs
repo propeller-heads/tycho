@@ -122,7 +122,11 @@ pub fn map_components_with_balances(
                 };
 
                 let parsed_binds = parse_binds(&bind_data)?;
-                if parsed_binds.is_empty() {
+                // Mirror the map_cowpools guard: pools without exactly two active bindings
+                // are never stored, so any other count must skip here as well — otherwise the
+                // store lookup below reports a legitimately skipped pool as missing and halts
+                // the stream.
+                if parsed_binds.len() != 2 {
                     continue;
                 }
 
