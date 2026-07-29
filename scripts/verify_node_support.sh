@@ -108,6 +108,7 @@ test_endpoint() {
     local url=$2
     local request=$3
     local description=$4
+    local expected_result=$5
 
     if [ "$BATCH_MODE" = false ]; then
         echo -e "\n${BLUE}Testing: $description${NC}"
@@ -125,6 +126,17 @@ test_endpoint() {
         store_result "$name" "FAILED" "$error_msg"
         return 1
     elif echo "$response" | jq -e '.result' > /dev/null 2>&1; then
+        if [ -n "$expected_result" ]; then
+            actual_result=$(echo "$response" | jq -r '.result')
+            if [ "$actual_result" != "$expected_result" ]; then
+                error_msg="Unexpected result: $actual_result (expected $expected_result)"
+                if [ "$BATCH_MODE" = false ]; then
+                    echo -e "${RED}✗ FAILED: $error_msg${NC}"
+                fi
+                store_result "$name" "FAILED" "$error_msg"
+                return 1
+            fi
+        fi
         if [ "$BATCH_MODE" = false ]; then
             echo -e "${GREEN}✓ PASSED${NC}"
         fi
@@ -223,25 +235,26 @@ test_single_node() {
         echo -e "${YELLOW}========================================${NC}"
     fi
 
-    # Test 3: trace_callMany (RPC_URL)
-    test_endpoint "trace_callMany" "$rpc_url" '{
+    # Test 3: eth_call with bytecode state overrides (RPC_URL) - used by token analysis
+    test_endpoint "eth_call_overrides" "$rpc_url" '{
         "jsonrpc": "2.0",
-        "method": "trace_callMany",
+        "method": "eth_call",
         "params": [
-            [
-                [
-                    {
-                        "from": "0x0000000000000000000000000000000000000000",
-                        "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                        "data": "0x70a08231000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-                    },
-                    ["trace"]
-                ]
-            ],
-            "latest"
+            {
+                "from": "0x0000000000000000000000000000000000000001",
+                "to": "0x0000000000000000000000000000000000000002",
+                "data": "0x"
+            },
+            "latest",
+            {
+                "0x0000000000000000000000000000000000000002": {
+                    "code": "0x602a60005260206000f3"
+                }
+            }
         ],
         "id": 3
-    }' "trace_callMany for transaction simulation"
+    }' "eth_call with state overrides for token analysis" \
+        "0x000000000000000000000000000000000000000000000000000000000000002a"
 
     # Test 4: debug_storageRangeAt (RPC_URL)
     # First get the latest block with full transaction details, then extract a contract address from logs
@@ -469,11 +482,11 @@ if [ "$BATCH_MODE" = true ]; then
         # Store individual endpoint results
         eth_create=$(get_result "eth_createAccessList_overrides")
         debug_trace=$(get_result "debug_traceCall_overrides")
-        trace_call=$(get_result "trace_callMany")
+        eth_call_so=$(get_result "eth_call_overrides")
         debug_storage=$(get_result "debug_storageRangeAt")
 
         # Create a result summary
-        result_summary="${eth_create:0:1}${debug_trace:0:1}${trace_call:0:1}${debug_storage:0:1}"
+        result_summary="${eth_create:0:1}${debug_trace:0:1}${eth_call_so:0:1}${debug_storage:0:1}"
         all_results[$((${#all_results[@]}-1))]="$result_str|$result_summary"
 
         if [ $failed -eq 0 ]; then
@@ -660,7 +673,7 @@ if [ "$BATCH_MODE" = true ]; then
     echo -e "  Position 1: eth_createAccessList with overrides"
     echo -e "  Position 2: debug_traceCall with overrides"
     echo -e "${BLUE}RPC_URL endpoints:${NC}"
-    echo -e "  Position 3: trace_callMany"
+    echo -e "  Position 3: eth_call with state overrides"
     echo -e "  Position 4: debug_storageRangeAt"
     echo -e "\n  ${GREEN}✓${NC} = Supported, ${RED}✗${NC} = Not Supported"
 
@@ -703,12 +716,12 @@ else
 fi
 
 echo -e "\n${YELLOW}RPC_URL endpoints:${NC}"
-result=$(get_result "trace_callMany")
+result=$(get_result "eth_call_overrides")
 if [ "$result" = "PASSED" ]; then
-    echo -e "  ${GREEN}✓${NC} trace_callMany: ${GREEN}SUPPORTED${NC}"
+    echo -e "  ${GREEN}✓${NC} eth_call with state overrides: ${GREEN}SUPPORTED${NC}"
 else
-    echo -e "  ${RED}✗${NC} trace_callMany: ${RED}NOT SUPPORTED${NC}"
-    error=$(get_error "trace_callMany")
+    echo -e "  ${RED}✗${NC} eth_call with state overrides: ${RED}NOT SUPPORTED${NC}"
+    error=$(get_error "eth_call_overrides")
     [ -n "$error" ] && echo -e "    Error: $error"
 fi
 
