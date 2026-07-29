@@ -40,3 +40,11 @@ staleness overwrite patches a dead registry slot.
   package relies on the token balance retention fix (#1056) included in `0.8.1`:
   the trader vault contract change often carries only token balance updates,
   which `0.8.0` dropped as empty.
+
+## v0.1.1
+
+- Isolate self-contained token proxies in the shared database.
+
+## v0.1.0
+
+- Add FermiSwap pair indexing with protobuf-backed stores.

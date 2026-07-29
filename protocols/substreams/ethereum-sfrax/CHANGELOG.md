@@ -6,3 +6,7 @@
   workspace's version-4 `Cargo.lock`, so release builds from the package
   directory failed. The 1.75 pin was never honored in CI anyway — releases
   built from the workspace root with current stable.
+
+## v0.1.2
+
+- Initial release.

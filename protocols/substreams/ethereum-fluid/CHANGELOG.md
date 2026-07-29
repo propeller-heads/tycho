@@ -13,3 +13,7 @@
   stayed frozen at their initial snapshot.
 - Align `Cargo.toml` version (`0.2.0`) with the manifest version (`v0.3.0`); both are
   now `0.3.1`.
+
+## v0.2.0
+
+- Add the Ethereum Fluid indexer.

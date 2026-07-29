@@ -71,3 +71,15 @@ exact reconstruction of the short historical interval between the April 1 snapsh
 rotations. The v0.1.3 package listens only to the replacement modules, so retired-module updates in
 that interval are not replayed, while replacement-module configuration written before Factory
 activation is indexed immediately. Keep Simulation isolated until replay reaches the current head.
+
+## v0.1.2
+
+- Bump the package version for the release.
+
+## v0.1.1
+
+- Add the factory static attribute.
+
+## v0.3.1
+
+- Initial release.

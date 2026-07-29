@@ -20,3 +20,7 @@
   of DCI-tracked contracts stayed frozen at their initial snapshot.
 - Picks up the `previous_value` field and its multi-write fix for storage slot
   changes (tycho-substreams 0.5.0/0.5.1).
+
+## v0.4.0
+
+- Initial release.

@@ -15,3 +15,15 @@
   of DCI-tracked contracts stayed frozen at their initial snapshot.
 - Picks up the `previous_value` fix for storage slots written multiple times in one
   transaction, and drops intra-transaction no-op slot changes (tycho-substreams 0.5.1).
+
+## v0.3.7
+
+- Bump the Curve Substreams package version.
+
+## v0.3.6
+
+- Add the Curve Substreams integration.
+
+## v0.3.4
+
+- Initial release.
