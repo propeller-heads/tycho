@@ -108,6 +108,7 @@ fn register_exchanges(
             builder = builder
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
         _ => {}
     }
