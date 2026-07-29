@@ -16,7 +16,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>pancakeswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base</td><td></td></tr>
 <tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>.</td></tr>
+<tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
 <tr><td><code>vm:maverick_v2</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>vm:bopamm</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>vm:fermiswap</code></td><td>VM (<code>EVMPoolState</code>)</td><td>4 ms</td><td>Ethereum</td><td></td></tr>

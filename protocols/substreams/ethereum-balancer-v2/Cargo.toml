@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-balancer-v2"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 
 [lib]

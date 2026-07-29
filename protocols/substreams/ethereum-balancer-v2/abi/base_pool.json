@@ -1,0 +1,15 @@
+[
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "swapFeePercentage",
+        "type": "uint256"
+      }
+    ],
+    "name": "SwapFeePercentageChanged",
+    "type": "event"
+  }
+]
