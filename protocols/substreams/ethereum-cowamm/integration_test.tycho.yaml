@@ -89,7 +89,7 @@ tests:
           - "0x6810e776880c02933d47db1b9fc05908e5386b96"
           - "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
           - "0xfec04c31b6099ce76c4c5d6d754a34141884fd91"
-        static_attributes: 
+        static_attributes:
           address: "0xfec04c31b6099ce76c4c5d6d754a34141884fd91"
           token_a:  "0x6810e776880c02933d47db1b9fc05908e5386b96"
           token_b:  "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
@@ -98,7 +98,74 @@ tests:
           weight_a: "0x0de0b6b3a7640000"
           fee:      "0x00"
         creation_tx: "0xdf6f141bdd44ef389c9418992ab854567192e25eec7f2bfe4f2057b4e3e9a4de"
-        skip_simulation: false 
-        # Execution happens differently and is in a separate repo because the order needs to be posted to the orderbook 
+        skip_simulation: false
+        # Execution happens differently and is in a separate repo because the order needs to be posted to the orderbook
         # via cow protocol
+        skip_execution: true
+
+  # Two pools deployed atomically: bind + finalize + factory announcement in a single
+  # transaction. Binding history written in the same block was invisible to the
+  # pre-v0.1.4 get_first store reads, so these pools were silently dropped.
+  - name: test_atomic_pool_creation
+    start_block: 20476650
+    stop_block: 20476700
+    expected_components:
+
+      - id: "0xf08d4dea369c456d26a3168ff0024b904f2d8b91" #USDC/WETH
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          - "0xf08d4dea369c456d26a3168ff0024b904f2d8b91"
+        static_attributes:
+          address: "0xf08d4dea369c456d26a3168ff0024b904f2d8b91"
+          token_a: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          token_b: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          lp_token: "0xf08d4dea369c456d26a3168ff0024b904f2d8b91"
+          weight_a: "0x0de0b6b3a7640000" #50
+          weight_b: "0x0de0b6b3a7640000" #50
+          fee: "0x0"
+        creation_tx: "0x99c98bd180a85dd01fcf2252d7219cc99866a46862942a178c53fbe26e808b07"
+        skip_simulation: false
+        skip_execution: true
+
+      - id: "0x6ff0531ee19272675b3c7d30401a5b2b2c7b0c67" #WETH/COW
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          - "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB"
+          - "0x6ff0531ee19272675b3c7d30401a5b2b2c7b0c67"
+        static_attributes:
+          address: "0x6ff0531ee19272675b3c7d30401a5b2b2c7b0c67"
+          token_a: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          token_b: "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB"
+          lp_token: "0x6ff0531ee19272675b3c7d30401a5b2b2c7b0c67"
+          weight_a: "0x0de0b6b3a7640000" #50
+          weight_b: "0x0de0b6b3a7640000" #50
+          fee: "0x0"
+        creation_tx: "0x99c98bd180a85dd01fcf2252d7219cc99866a46862942a178c53fbe26e808b07"
+        skip_simulation: false
+        skip_execution: true
+
+  # Pool that unbound and rebound both tokens before finalizing. Stores written before
+  # v0.1.4 kept every historical bind, so this pool was skipped at creation and the
+  # balance mapper halted on the missing pool (July 2026 incident).
+  - name: test_rebind_pool_creation
+    start_block: 25489000
+    stop_block: 25489150
+    expected_components:
+
+      - id: "0x368319a60c9a980707117f2bac21d70b93a19ea4" #LIL/WETH
+        tokens:
+          - "0xb603b3fc4b5ad885e26298b7862bb6074dff32a9"
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          - "0x368319a60c9a980707117f2bac21d70b93a19ea4"
+        static_attributes:
+          address: "0x368319a60c9a980707117f2bac21d70b93a19ea4"
+          token_a: "0xb603b3fc4b5ad885e26298b7862bb6074dff32a9"
+          token_b: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          lp_token: "0x368319a60c9a980707117f2bac21d70b93a19ea4"
+          weight_a: "0x015af1d78b58c40000" # denorm 25e18 from the rebind, 50% normalized
+          weight_b: "0x015af1d78b58c40000" # denorm 25e18 from the rebind, 50% normalized
+          fee: "0x0"
+        creation_tx: "0x134989e04c7abf3f776767b1afd630a496e6304c987dd55b5aac26ac2490f9df"
+        skip_simulation: false
         skip_execution: true
