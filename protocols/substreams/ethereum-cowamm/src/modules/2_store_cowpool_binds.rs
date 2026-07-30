@@ -28,17 +28,12 @@ pub fn store_cowpool_binds(binds: CowPoolBinds, store: StoreAppend<String>) {
         let pool_key = hex::encode(&bind.address);
         // Format the bind as a JSON string, we use an AppendString store so that
         // the binds can persist across block state and we can create pools with the binds
-        // in map_cowpools
-        let bind_string = match serialize_binding_change(bind) {
-            Ok(bind_string) => bind_string,
-            Err(error) => {
-                substreams::log::info!(
-                    "skipping CowAMM binding change for pool {}: {error:#}",
-                    pool_key
-                );
-                continue;
-            }
-        };
+        // in map_cowpools.
+        // Serialization only fails when the map module emitted a bind without its
+        // transaction, which is a bug; skipping the change would silently corrupt the
+        // active-binding history, so fail loudly instead.
+        let bind_string = serialize_binding_change(bind)
+            .expect("map_cowpool_binds emitted a binding change without its transaction");
         store.append(bind.ordinal, pool_key, bind_string);
     }
 }
