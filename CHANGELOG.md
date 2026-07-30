@@ -1,3 +1,74 @@
+## [0.346.0](https://github.com/propeller-heads/tycho/compare/0.345.1...0.346.0) (2026-07-30)
+
+
+### Features
+
+* add Balancer V3 reClamm pool support (V3 factory) ([532a398](https://github.com/propeller-heads/tycho/commit/532a398d58d2917d88e4e39af02628fd6a713720))
+* add Balancer V3 reclamm pool types ([#1049](https://github.com/propeller-heads/tycho/issues/1049)) ([eae36de](https://github.com/propeller-heads/tycho/commit/eae36de52e17c11028d79b7e7140f60eecf419bf))
+* Add multi-network support for Balancer V3 ([c498939](https://github.com/propeller-heads/tycho/commit/c4989392cb0893b3959ba851481a344012e37c74))
+* **balancer-v3:** Add option to skip pools with rate providers ([2d17fdd](https://github.com/propeller-heads/tycho/commit/2d17fdd628b8a66ba8fa7d9600e7ea9fca6ba3a6))
+* **balancer-v3:** derive pool balances from vault storage diffs ([f04f0fb](https://github.com/propeller-heads/tycho/commit/f04f0fb1cd182a060a38ebaab464283de981ee53))
+* update set policy ([0d2a7a6](https://github.com/propeller-heads/tycho/commit/0d2a7a62d77bbfc47f50b564de62f0214e34e605))
+
+
+### Bug Fixes
+
+* **simulation:** refresh both balance maps in VM update_pool_state ([f773346](https://github.com/propeller-heads/tycho/commit/f773346a669c64a0c69dd315a33e1a49cbd43816))
+* substreams ci lint ([ceb011e](https://github.com/propeller-heads/tycho/commit/ceb011e53dbe27130f25c631cc9e8e3a6eff3e08))
+* **substreams:** remove manual_updates from balancer-v3 pools ([18ba7d7](https://github.com/propeller-heads/tycho/commit/18ba7d7f5dd3c7a7652ea45315a05b2fc5d4671e))
+
+## [0.345.1](https://github.com/propeller-heads/tycho/compare/0.345.0...0.345.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* publish spkg under the manifest name, not the source dir ([3159438](https://github.com/propeller-heads/tycho/commit/3159438116931d7464930624f20bec9f9758e6bc))
+* publish spkg under the manifest name, not the source dir ([#1253](https://github.com/propeller-heads/tycho/issues/1253)) ([eb93c14](https://github.com/propeller-heads/tycho/commit/eb93c149873fc388e7e04152247ff1c2510e1484))
+
+## [0.345.0](https://github.com/propeller-heads/tycho/compare/0.344.0...0.345.0) (2026-07-30)
+
+
+### Features
+
+* add Ring Swap v2 integration ([e3dec98](https://github.com/propeller-heads/tycho/commit/e3dec98ed7bf5669f63d6184d7d1ffd422bcbe2f))
+* add Ring Swap v2 protocol integration ([#1083](https://github.com/propeller-heads/tycho/issues/1083)) ([b94d00d](https://github.com/propeller-heads/tycho/commit/b94d00d66e88d6e3a9c7fecbe7c8d8a26f8f1b5b))
+
+
+### Bug Fixes
+
+* address ring substreams review comments ([dba5de9](https://github.com/propeller-heads/tycho/commit/dba5de9b08a7c6ef547955d381bffc1093b6f7bf))
+* address RingSwapV2 review feedback ([81e75ee](https://github.com/propeller-heads/tycho/commit/81e75ee1d04268d149e2ea2bab70343e0753a1f5))
+* align ring swap v2 router transfers ([71df16d](https://github.com/propeller-heads/tycho/commit/71df16d6f461d6afbf7dfa45d111eae379deaea8))
+* cap Ring liquidity by wrapper backing ([0fd7a72](https://github.com/propeller-heads/tycho/commit/0fd7a728aff4a7cedcc110c645dbc0b262950f46))
+* cap ring swap v2 quotes by wrapper backing ([f9af45b](https://github.com/propeller-heads/tycho/commit/f9af45b7ffd4c220f31bdbecf701b02650d93bcb))
+* fail closed on Ring backing snapshots ([f206dba](https://github.com/propeller-heads/tycho/commit/f206dbaa39184edea56876403fefe094702380d8))
+* fail range tests on execution errors ([d380cae](https://github.com/propeller-heads/tycho/commit/d380cae0b45cedeadca268e23e46ea3a38e28f84))
+* format ring swap v2 substream docs ([f987b8d](https://github.com/propeller-heads/tycho/commit/f987b8d411c8d7f9dc12d80d6a1662c6935db18f))
+* keep ring backing snapshots last ([fc2b36d](https://github.com/propeller-heads/tycho/commit/fc2b36d871de25b4d0bbca33445bfc169c23099d))
+* reject zero Ring wrappers and pairs ([c88692a](https://github.com/propeller-heads/tycho/commit/c88692ab3b3b4445aa4b5975fbd9666fcd3e6e6e))
+* silence ring unwrap return warning ([dfac1e8](https://github.com/propeller-heads/tycho/commit/dfac1e8f2671589adea518e634a8a4578790dc01))
+* stop tracking Ring wrappers as component contracts ([7a9d92b](https://github.com/propeller-heads/tycho/commit/7a9d92b705421c2ae90ec2de805f5e838cab00de))
+* track Ring backing as component balances ([c0930da](https://github.com/propeller-heads/tycho/commit/c0930da5cf14a69a9adac5f5dfbe813ed12f9b01))
+* validate ring swap v2 few tokens ([01c5dda](https://github.com/propeller-heads/tycho/commit/01c5dda19d0b219534669f62069d3544f7ecdf90))
+* validate ring swap v2 pairs before transfer ([9531bc4](https://github.com/propeller-heads/tycho/commit/9531bc40d7edbd7fc66e24a06be3a78973b90fc0))
+
+## [0.344.0](https://github.com/propeller-heads/tycho/compare/0.343.0...0.344.0) (2026-07-29)
+
+
+### Features
+
+* **execution:** prefetch Angstrom attestations in the background ([f0c7a06](https://github.com/propeller-heads/tycho/commit/f0c7a06ad5c2b25193983eb1566771e69f8c545c))
+* **execution:** prefetch Angstrom attestations in the background ([#1241](https://github.com/propeller-heads/tycho/issues/1241)) ([88f1696](https://github.com/propeller-heads/tycho/commit/88f169632942987f40eb275539d00135f44feaab))
+
+
+### Bug Fixes
+
+* **execution:** fail on an unparsable ANGSTROM_BLOCKS_IN_FUTURE ([4a72e0e](https://github.com/propeller-heads/tycho/commit/4a72e0e9bb20983aaacff36b6147c7c834b5f87d))
+* **execution:** keep the caller's slack when serving a cached window ([bef440d](https://github.com/propeller-heads/tycho/commit/bef440d55a47ab8f646b9d62c26bb905f48690c8))
+* **execution:** raise the Angstrom API timeout to half the refresh interval ([fa18e35](https://github.com/propeller-heads/tycho/commit/fa18e35bed501aaca8a081a25a2e74d23f2d227d))
+* **execution:** reject an empty Angstrom attestation window ([dd5d8e2](https://github.com/propeller-heads/tycho/commit/dd5d8e2136629bb13789245555605c764cd8504a))
+* **execution:** report a missing API key instead of a cold cache ([b058a5d](https://github.com/propeller-heads/tycho/commit/b058a5d71e32c34e94ffdf4547eea5196878ebd2))
+
 ## [0.343.0](https://github.com/propeller-heads/tycho/compare/0.342.0...0.343.0) (2026-07-29)
 
 

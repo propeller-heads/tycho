@@ -107,9 +107,9 @@ Interested in adding a protocol? Refer to the [Tycho Simulation for DEXs](../for
 
 While most protocols work out of the box, some require additional configuration or have specific considerations you should be aware of.
 
-#### Angstrom (Uniswap V4 Hook)
+#### Angstrom (Uniswap V4 Hook) <a href="#angstrom-uniswap-v4-hook" id="angstrom-uniswap-v4-hook"></a>
 
-Angstrom requires querying their <a href="https://docs.angstrom.xyz/l1/core-mechanisms/pool-unlock#2-user-initiated-off-chain-signature-unlock" target="_blank" rel="noopener noreferrer">API for attestations</a> per block to unlock their contract. If execution comes too late, the contract can no longer be unlocked for that block.
+Angstrom locks its pools at the start of every block. A swap that trades against one in the same block must carry a pool unlock <a href="https://docs.angstrom.xyz/l1/core-mechanisms/pool-unlock#2-user-initiated-off-chain-signature-unlock" target="_blank" rel="noopener noreferrer">attestation</a>, which Tycho fetches from Angstrom's API, as its hook data. If the transaction lands after the attested blocks have passed, the attestation no longer unlocks the pool.
 
 **Required configuration**:
 
@@ -117,3 +117,10 @@ Angstrom requires querying their <a href="https://docs.angstrom.xyz/l1/core-mech
 * Set `ANGSTROM_BLOCKS_IN_FUTURE` environment variable (if you want to override the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/src/encoding/evm/constants.rs" target="_blank" rel="noopener noreferrer">default value</a> of 5 blocks). **Important trade-off**: The more blocks you fetch, the more calldata will be sent to the Tycho Router, making execution more gas expensive.
 
 If `ANGSTROM_API_KEY` is not set, `ProtocolStreamBuilder` excludes Angstrom pools from `uniswap_v4_hooks` by default (unless you pass your own filter function), since routes over these pools would fail at encoding without attestations.
+
+**Attestations are prefetched**, so encoding an Angstrom swap makes no API call. A background thread refreshes the attestation window twice per block and encoding reads the result from a process-wide cache. The thread starts when you build a `SwapEncoderRegistry` for Ethereum with `ANGSTROM_API_KEY` set, and it reads all three environment variables once, at that point.
+
+Two consequences for your setup:
+
+* **Build the encoder once at startup and reuse it.** Encoding still works if you build a new encoder per quote, but the first Angstrom swap it encodes waits for the first fetch to finish.
+* **Watch your logs for `Angstrom attestation cache is cold or stale`.** When the cached window is more than one block old, encoding fetches a fresh one inline and logs that warning. Encoding then pays the API round trip, so a steady stream of these means the background refresh is failing — the refresh logs its own error alongside them.

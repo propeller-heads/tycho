@@ -11,6 +11,7 @@ const executorDeployments = require("../../config/executor_deployments.json");
 const deploy_protocols = {
     "ethereum": [
         "uniswap_v2",
+        "ring_swap_v2",
         "pancakeswap_v2",
         "uniswap_v3",
         "uniswap_v4",

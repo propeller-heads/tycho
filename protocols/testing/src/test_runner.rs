@@ -72,6 +72,9 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
     HashMap::from([
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
+        ("base-balancer-v3", "ethereum-balancer-v3"),
+        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
+        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("unichain-curve", "ethereum-curve"),
     ])
@@ -587,7 +590,9 @@ impl TestRunner {
             .collect();
 
         // Step 1: Validate that all expected components are present on Tycho after indexing
-        self.validate_state(&test.expected_components, protocol_components)?;
+        self.validate_state(&test.expected_components, protocol_components.clone())?;
+
+        self.validate_excluded_components(&test.excluded_components, &protocol_components)?;
 
         // Step 2: Validate Token Balances
         match config.skip_balance_check {
@@ -1012,6 +1017,33 @@ impl TestRunner {
         info!(
             "All expected components were successfully found on Tycho and match the expected state"
         );
+        Ok(())
+    }
+
+    fn validate_excluded_components(
+        &self,
+        excluded_components: &[String],
+        protocol_components: &[ProtocolComponent],
+    ) -> miette::Result<()> {
+        if excluded_components.is_empty() {
+            return Ok(());
+        }
+
+        let indexed_ids: HashSet<String> = protocol_components
+            .iter()
+            .map(|c| c.id.to_lowercase())
+            .collect();
+
+        for excluded_id in excluded_components {
+            let excluded = excluded_id.to_lowercase();
+            if indexed_ids.contains(&excluded) {
+                return Err(miette!(
+                    "Component {excluded_id} was indexed but is listed in excluded_components"
+                ));
+            }
+            info!("Component {excluded_id} correctly absent from Tycho output");
+        }
+
         Ok(())
     }
 
