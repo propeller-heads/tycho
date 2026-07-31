@@ -383,10 +383,10 @@ V3.0 accepted any non-zero `minAmountOut`, including `1`. V3.1 requires it to si
 anchored on `expectedAmountOut`:
 
 ```
-expectedAmountOut * (10_000 - MAX_SLIPPAGE_TOLERANCE_BPS) / 10_000  <=  minAmountOut  <=  expectedAmountOut
+expectedAmountOut * (100 - MAX_SLIPPAGE_TOLERANCE_PERCENT) / 100  <=  minAmountOut  <=  expectedAmountOut
 ```
 
-`MAX_SLIPPAGE_TOLERANCE_BPS` is `2_000`, which puts the floor 20% below the quote. Two things follow
+`MAX_SLIPPAGE_TOLERANCE_PERCENT` is `20`, which puts the floor 20% below the quote. Two things follow
 from this. Calldata that used to pass `minAmountOut = 1` now reverts, so compute a real floor from your
 slippage tolerance. And because `expectedAmountOut` sets both ends of the window, inflating it raises
 your floor rather than relaxing it — pass the amount your simulation actually returned.

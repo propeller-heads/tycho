@@ -16,9 +16,8 @@ use crate::{
     state::State,
 };
 
-/// Guardrail: `min_amount_out` may be at most 20% below `expected_amount_out`.
-pub const MAX_SLIPPAGE_TOLERANCE_BPS: i64 = 2_000;
-pub const BPS_DENOMINATOR: i64 = 10_000;
+/// Guardrail: `min_amount_out` may be at most this many percent below `expected_amount_out`.
+pub const MAX_SLIPPAGE_TOLERANCE_PERCENT: i64 = 20;
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TychoRouter.sol#L184>
 pub fn split_swap(
@@ -483,11 +482,10 @@ fn _validate_amounts(
     if expected_amount_out == 0 {
         return Err(Error::revert("_validate_amounts: expected_amount_out == 0"));
     }
-    // Lowest acceptable output: at most MAX_SLIPPAGE_TOLERANCE_BPS below expected.
     // The division rounds down, which can make the floor 0 for tiny expected
     // amounts — hence the explicit zero check.
     let min_amount_out_floor =
-        expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS) / BPS_DENOMINATOR;
+        expected_amount_out * (100 - MAX_SLIPPAGE_TOLERANCE_PERCENT) / 100;
     if min_amount_out == 0 ||
         min_amount_out < min_amount_out_floor ||
         min_amount_out > expected_amount_out

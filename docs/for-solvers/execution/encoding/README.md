@@ -278,10 +278,10 @@ example to your use case. See the `TychoRouterV3` contract functions for referen
 `minAmountOut` must sit inside a window anchored on `expectedAmountOut`:
 
 ```
-expectedAmountOut * (10_000 - MAX_SLIPPAGE_TOLERANCE_BPS) / 10_000  <=  minAmountOut  <=  expectedAmountOut
+expectedAmountOut * (100 - MAX_SLIPPAGE_TOLERANCE_PERCENT) / 100  <=  minAmountOut  <=  expectedAmountOut
 ```
 
-`MAX_SLIPPAGE_TOLERANCE_BPS` is `2_000`, which puts the floor 20% below your quote. A quote of 1000 USDC
+`MAX_SLIPPAGE_TOLERANCE_PERCENT` is `20`, which puts the floor 20% below your quote. A quote of 1000 USDC
 therefore accepts any `minAmountOut` between `800 * 10**6` and `1000 * 10**6`. The router reverts with
 `TychoRouter__InvalidMinAmountOut` for anything outside that window, zero included.
 

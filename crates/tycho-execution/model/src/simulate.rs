@@ -44,9 +44,8 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     // `_validate_amounts`). no need to simulate it. The floor (clamped to 1,
     // matching the explicit zero check) is the loosest valid guardrail,
     // `expected_amount_out` the tightest.
-    let slippage_floor = (expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS) /
-        BPS_DENOMINATOR)
-        .max(1);
+    let slippage_floor =
+        (expected_amount_out * (100 - MAX_SLIPPAGE_TOLERANCE_PERCENT) / 100).max(1);
     let min_amount_out = params.request("min_amount_out", [slippage_floor, expected_amount_out])?;
     // assumption: all swap methods revert if `receiver = address(0)`.
     // no need to simulate it.
