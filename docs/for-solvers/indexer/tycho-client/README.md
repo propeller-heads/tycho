@@ -36,7 +36,10 @@ We welcome community contributions to expand language support. See our contribut
 
 ## Authentication
 
-Currently, interacting with the hosted Tycho Indexer requires a personalized API Key. Please contact `@tanay_j` on Telegram to get your API key.
+Interacting with the hosted Tycho Indexer requires a personalized API Key.
+
+1. **Get a base key**: Message [@fynd_portal_bot](https://t.me/fynd_portal_bot) on Telegram to receive a Tycho Fynd key. This gives you access to [Tycho Fynd endpoints](../../hosted-endpoints.md#tycho-fynd).
+2. **Need full Tycho Indexer access?** Once you have a base key, DM `@tanay_j` on Telegram to request an upgrade.
 
 ***
 
@@ -58,7 +61,13 @@ You can request individual pools or use a minimum TVL threshold to filter the co
 Tycho indexes all the components in a Protocol. TVL filtering is highly encouraged to speed up data transfer and processing times by reducing the number of returned components.
 {% endhint %}
 
-**TVL is measured in the chain's native currency (e.g., 1 00 ETH on Ethereum Mainnet).**
+**TVL is measured in the chain's native currency.** Since native tokens have different USD values, the CLI default (`--min-tvl`) is chain-dependent:
+
+| Chain | Native Token | Default `--min-tvl` (~$20K USD) |
+| ----- | ------------ | ------------------------------- |
+| Ethereum, Arbitrum, Base, Unichain, Starknet, ZkSync | ETH | 10 |
+| Polygon | POL | 200,000 |
+| BSC | BNB | 32 |
 
 You can filter by TVL in 2 ways:
 
@@ -98,10 +107,10 @@ Tycho Client supports several options to customize the data stream. These are av
 
 <summary><strong>Details:</strong> <strong>Partial Blocks</strong></summary>
 
-Some chains, such as [Base](https://docs.base.org/building-with-base/differences/flashblocks), support _flash blocks_ - pre-confirmation updates that contain parts of a future block before its construction is finished. When `partial blocks` is enabled, Tycho streams these incremental updates as they arrive, giving you sub-block latency. On chains without flash block support, enabling this flag is unsupported.
+Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ - pre-confirmation updates that contain parts of a future block before its construction is finished. When `partial blocks` is enabled, Tycho streams these incremental updates as they arrive, giving you sub-block latency. On chains without flash block support, enabling this flag is unsupported.
 
 {% hint style="warning" %}
-Block hashes in partial block messages are **unstable** — they change between partial updates and will differ from the final block hash. Do not use them as persistent identifiers or cache keys. See the [Substreams documentation](https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks) for details.
+Block hashes in partial block messages are **unstable** — they change between partial updates and will differ from the final block hash. Do not use them as persistent identifiers or cache keys. See the <a href="https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks" target="_blank" rel="noopener noreferrer">Substreams documentation</a> for details.
 {% endhint %}
 
 </details>
@@ -305,7 +314,7 @@ Deltas contain only targeted changes to the component state. They are designed t
 
 Deltas include the following few special attributes:
 
-* `state_updates`: Includes attribute changes, given as a component to state key-value mapping, with keys being strings and values being bytes. The attributes provided are protocol-specific. Tycho occasionally makes use of reserved attributes, see [here](https://docs.propellerheads.xyz/integrations/indexing/reserved-attributes) for more details.
+* `state_updates`: Includes attribute changes, given as a component to state key-value mapping, with keys being strings and values being bytes. The attributes provided are protocol-specific. Tycho occasionally makes use of reserved attributes, see <a href="https://docs.propellerheads.xyz/integrations/indexing/reserved-attributes" target="_blank" rel="noopener noreferrer">here</a> for more details.
 * `account_updates`: Includes contract storage changes given as a contract storage key-value mapping for each involved contract address. Here, both keys and values are bytes.
 * `new_protocol_components`: Components that were created on this block. Must not necessarily pass the tvl filter to appear here.
 * `deleted_protocol_components`: Any components mentioned here have been removed from the protocol and are not available anymore.

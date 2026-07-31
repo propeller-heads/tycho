@@ -9,6 +9,7 @@ This quickstart guide enables you to:
 
 ```bash
 export RPC_URL=<your-rpc-url>
+export TYCHO_API_KEY=<your-api-key>
 cargo run --release --example quickstart
 ```
 

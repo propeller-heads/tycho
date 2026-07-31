@@ -49,7 +49,10 @@ pub(super) fn impl_from_state(
 }
 
 impl BasePool {
-    const BASE_GAS_COST: u64 = 24_000;
+    // The names of the constants reflect the exact method from the tenderly log.
+    const BASE_SWAP_GAS_COST: u64 = 24_000;
+    const PAY_METHOD_GAS_COST: u64 = 46_000;
+    const WITHDRAW_METHOD_GAS_COST: u64 = 20_000;
     const GAS_COST_OF_ONE_TICK_SPACING_CROSSED: u64 = 4_000;
     const GAS_COST_OF_ONE_INITIALIZED_TICK_CROSSED: u64 = 20_000;
 
@@ -118,7 +121,10 @@ impl EkuboPool for BasePool {
         Ok(EkuboPoolQuote {
             consumed_amount: quote.consumed_amount,
             calculated_amount: quote.calculated_amount,
-            gas: Self::BASE_GAS_COST + Self::gas_costs(quote.execution_resources),
+            gas: Self::BASE_SWAP_GAS_COST +
+                Self::PAY_METHOD_GAS_COST +
+                Self::WITHDRAW_METHOD_GAS_COST +
+                Self::gas_costs(quote.execution_resources),
             new_state,
         })
     }

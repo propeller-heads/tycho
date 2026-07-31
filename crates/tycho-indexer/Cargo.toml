@@ -13,6 +13,10 @@ categories.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:jemalloc_pprof"]
+
 [[bin]]
 name = "tycho-indexer"
 path = "src/main.rs"
@@ -48,7 +52,7 @@ tracing-subscriber = { version = "0.3.17", default-features = false, features = 
 tycho-common.workspace = true
 tycho-ethereum.workspace = true
 tycho-storage.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 # Pinned: actix-web 4.12+ uses actix-http methods not present in 3.11.x; keep at last working set
 actix-web = { version = "=4.11.0", default-features = false, features = [
     "macros",
@@ -80,9 +84,12 @@ opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
 rand.workspace = true
 serde_yaml = "0.9.32"
 tracing-opentelemetry = { version = "0.23", default-features = false }
-tycho-substreams = "0.6.0"
+tycho-protobuf.workspace = true
 utoipa = { version = "4.2.0", features = ["chrono"] }
 utoipa-swagger-ui = { version = "6.0.0", features = ["actix-web"] }
+tikv-jemallocator = { version = "0.6", features = ["profiling"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"], optional = true }
+jemalloc_pprof = { version = "0.8", features = ["symbolize"], optional = true }
 zstd = "0.13"
 
 [dev-dependencies]

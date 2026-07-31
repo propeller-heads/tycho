@@ -21,5 +21,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tycho-client = { workspace = true }
 tycho-common = { workspace = true }
+tycho-execution = { workspace = true }
 tycho-simulation = { workspace = true, features = ["evm"] }
 tycho-test = { workspace = true }

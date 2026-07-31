@@ -22,7 +22,7 @@ pub struct Balances {
 }
 
 /// Represents the result of getting the amount out of a trading pair.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GetAmountOutResult {
     /// The output amount
     pub amount: BigUint,

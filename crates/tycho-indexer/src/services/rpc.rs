@@ -1509,6 +1509,11 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 }
 
 #[cfg(test)]
+// mockall::mock! parses method signatures as tokens and does not apply lifetime
+// elision, so the mocked trait methods need explicit lifetime parameters.
+// The allow is on the module because Clippy does not apply this lint allow
+// reliably when it is placed on the macro invocation itself.
+#[allow(clippy::extra_unused_lifetimes)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
@@ -1579,7 +1584,7 @@ mod tests {
                 &self,
                 f: &dyn Fn(&BlockAggregatedChanges) -> bool,
                 protocol_system: &'a str,
-            ) -> Result<Option<BlockAggregatedChanges>,PendingDeltasError>;
+            ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
         }
     }
 

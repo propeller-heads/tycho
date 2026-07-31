@@ -1,6 +1,6 @@
 # Protocol Integration
 
-The [Tycho monorepo](https://github.com/propeller-heads/tycho-indexer) contains everything you need to integrate liquidity layer protocols (DEXs, Staking, Lending, etc.) into Tycho.
+The <a href="https://github.com/propeller-heads/tycho-indexer" target="_blank" rel="noopener noreferrer">Tycho monorepo</a> contains everything you need to integrate liquidity layer protocols (DEXs, Staking, Lending, etc.) into Tycho.
 
 ## Integration Process
 
@@ -14,7 +14,7 @@ We provide a comprehensive [testing](3.-testing.md) suite to ensure you can inte
 
 ### Indexing
 
-You will need a [substreams](https://substreams.streamingfast.io/) package that emits a specified set of messages. If your protocol already has a [substreams package](https://github.com/messari/substreams), you can adjust it to emit the required messages.
+You will need a <a href="https://substreams.streamingfast.io/" target="_blank" rel="noopener noreferrer">substreams</a> package that emits a specified set of messages. If your protocol already has a <a href="https://github.com/messari/substreams" target="_blank" rel="noopener noreferrer">substreams package</a>, you can adjust it to emit the required messages.
 
 It's important to note that simulation happens entirely off-chain. This means everything you need during simulation must be explicitly indexed.
 

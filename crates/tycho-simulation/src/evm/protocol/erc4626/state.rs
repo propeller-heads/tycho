@@ -96,7 +96,7 @@ impl ProtocolSim for ERC4626State {
                     amount_in * self.asset_price /
                         U256::from(10).pow(U256::from(self.asset_token.decimals)),
                 ),
-                gas: 86107.to_biguint().expect("infallible"),
+                gas: 297000.to_biguint().expect("infallible"),
                 new_state: self.clone_box(),
             })
         } else if token_in.address == self.share_token.address &&
@@ -109,7 +109,7 @@ impl ProtocolSim for ERC4626State {
                     amount_in * self.share_price /
                         U256::from(10).pow(U256::from(self.share_token.decimals)),
                 ),
-                gas: 74977.to_biguint().expect("infallible"),
+                gas: 287000.to_biguint().expect("infallible"),
                 new_state: self.clone_box(),
             })
         } else {

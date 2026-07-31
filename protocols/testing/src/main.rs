@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand};
 use dotenv::dotenv;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tracing_subscriber::EnvFilter;
-use tycho_simulation::tycho_common::dto::Chain;
+use tycho_simulation::tycho_common::models::Chain;
 
 use crate::test_runner::{TestRunner, TestType, TestTypeFull, TestTypeRange};
 
@@ -54,6 +54,7 @@ impl FullTestCommand {
             args.package,
             args.db_url,
             args.rpc_url,
+            args.tycho_server_port,
             args.vm_simulation_traces,
             args.reuse_last_sync,
         )?
@@ -82,6 +83,7 @@ impl RangeTestCommand {
             args.package,
             args.db_url,
             args.rpc_url,
+            args.tycho_server_port,
             args.vm_simulation_traces,
             args.reuse_last_sync,
         )?
@@ -113,6 +115,11 @@ struct CommonArgs {
 
     #[arg(long, env = "RPC_URL")]
     rpc_url: String,
+
+    /// Port for the spawned tycho-indexer HTTP/WS server. Set this to a free port when
+    /// another tycho-indexer instance (e.g. a full sync) already occupies the default.
+    #[arg(long, env = "TYCHO_SERVER_PORT", default_value_t = 4242)]
+    tycho_server_port: u16,
 
     /// Enable tracing during vm simulations
     #[arg(long, default_value_t = false)]

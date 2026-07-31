@@ -35,20 +35,35 @@ impl GatewayBuilder {
         self
     }
 
+    // TODO: remove once all interfaces are refactored to be single-chain targeted.
+    fn single_chain(&self) -> Result<Chain, StorageError> {
+        match self.chains.as_slice() {
+            [chain] => Ok(*chain),
+            [] => Err(StorageError::Unexpected("No chain provided".to_string())),
+            _ => Err(StorageError::Unexpected(format!(
+                "Expected exactly one chain, got {}: {:?}",
+                self.chains.len(),
+                self.chains
+            ))),
+        }
+    }
+
     pub async fn build(self) -> Result<(CachedGateway, JoinHandle<()>), StorageError> {
+        let chain = self.single_chain()?;
         let pool = postgres::connect(&self.database_url).await?;
-        postgres::ensure_chains(&self.chains, pool.clone()).await;
-        postgres::ensure_protocol_systems(&self.protocol_systems, pool.clone()).await;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        postgres::ensure_chain(chain, &mut conn).await?;
+        postgres::ensure_protocol_systems(&self.protocol_systems, &mut conn).await;
+        drop(conn);
 
         let inner_gw = PostgresGateway::new(pool.clone(), self.retention_horizon).await?;
         let (tx, rx) = mpsc::channel(10);
-        let chain = self
-            .chains
-            .first()
-            .expect("No chains provided"); //TODO: handle multichain?
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
-            *chain,
+            chain,
             pool.clone(),
             inner_gw.clone(),
             rx,
@@ -71,18 +86,19 @@ impl GatewayBuilder {
     }
 
     pub async fn build_direct_gw(self) -> Result<DirectGateway, StorageError> {
+        let chain = self.single_chain()?;
         let pool = postgres::connect(&self.database_url).await?;
-        postgres::ensure_chains(&self.chains, pool.clone()).await;
-        postgres::ensure_protocol_systems(&self.protocol_systems, pool.clone()).await;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        postgres::ensure_chain(chain, &mut conn).await?;
+        postgres::ensure_protocol_systems(&self.protocol_systems, &mut conn).await;
+        drop(conn);
 
         let inner_gw = PostgresGateway::new(pool.clone(), self.retention_horizon).await?;
 
-        let chain = self
-            .chains
-            .first()
-            .expect("No chains provided"); //TODO: handle multichain?
-
-        let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), *chain);
+        let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
         Ok(direct_gw)
     }
 }

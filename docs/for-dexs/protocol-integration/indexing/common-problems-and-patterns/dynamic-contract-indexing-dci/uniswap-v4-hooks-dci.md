@@ -95,7 +95,7 @@ function beforeSwap(
 * Dynamic fee hooks (calculate fees from pool state)
 * Oracle integration hooks (read from external oracles, no user input needed)
 * Internal liquidity management hooks
-* [Eulerswap's](https://docs.euler.finance/) external liquidity hooks
+* <a href="https://docs.euler.finance/" target="_blank" rel="noopener noreferrer">Eulerswap's</a> external liquidity hooks
 
 **1.2 - Non-Composable Hooks (Future Support)**
 
@@ -148,7 +148,7 @@ This is the **key distinction** that determines what you, as a hook integrator, 
 
 **Characteristics**:
 
-* All liquidity tracked in PoolManager as [ERC6909 claims](https://docs.uniswap.org/contracts/v4/concepts/erc6909)
+* All liquidity tracked in PoolManager as <a href="https://docs.uniswap.org/contracts/v4/concepts/erc6909" target="_blank" rel="noopener noreferrer">ERC6909 claims</a>
 * Balances automatically extracted from blockchain state
 * No external calls needed for Metadata (Pool balances and Limits)
 * Works with default orchestrator out-of-the-box

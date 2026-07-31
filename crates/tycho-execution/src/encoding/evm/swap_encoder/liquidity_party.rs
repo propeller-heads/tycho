@@ -25,8 +25,8 @@ pub struct LiquidityPartySwapEncoder {
 impl LiquidityPartySwapEncoder {
     fn get_token_indexes(&self, swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
         let token_addresses: &Vec<Address> = &swap.component().tokens;
-        let token_in = swap.token_in();
-        let token_out = swap.token_out();
+        let token_in = &swap.token_in().address;
+        let token_out = &swap.token_out().address;
 
         let token_in_idx = token_addresses
             .iter()
@@ -85,10 +85,11 @@ impl SwapEncoder for LiquidityPartySwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::evm::utils::write_calldata_to_file;
+    use crate::encoding::{evm::utils::write_calldata_to_file, models::default_token};
 
     #[test]
     fn test_encode_liquidityparty() {
@@ -119,7 +120,12 @@ mod tests {
 
         let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC (index 1)
         let token_out = Bytes::from("0xD31a59c85aE9D8edEFeC411D448f90841571b89c"); // WSOL (index 5)
-        let swap = Swap::new(liqp_pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            liqp_pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),

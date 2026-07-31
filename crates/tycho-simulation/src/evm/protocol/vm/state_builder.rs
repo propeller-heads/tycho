@@ -26,7 +26,7 @@ use super::{
 use crate::evm::{
     engine_db::{create_engine, engine_db_interface::EngineDatabaseInterface},
     protocol::utils::bytes_to_address,
-    simulation::{SimulationEngine, SimulationParameters},
+    simulation::{BlockEnvOverrides, SimulationEngine, SimulationParameters},
 };
 
 #[derive(Debug)]
@@ -96,6 +96,9 @@ where
     adapter_contract: Option<TychoSimulationContract<D>>,
     adapter_contract_bytecode: Option<Bytecode>,
     disable_overwrite_tokens: HashSet<Address>,
+    self_contained_tokens: HashSet<Address>,
+    block_overrides: Option<BlockEnvOverrides>,
+    spot_price_caller: Option<Address>,
 }
 
 impl<D> EVMPoolStateBuilder<D>
@@ -121,6 +124,9 @@ where
             adapter_contract: None,
             adapter_contract_bytecode: None,
             disable_overwrite_tokens: HashSet::new(),
+            self_contained_tokens: HashSet::new(),
+            block_overrides: None,
+            spot_price_caller: None,
         }
     }
 
@@ -193,6 +199,22 @@ where
         self
     }
 
+    pub fn self_contained_tokens(mut self, self_contained_tokens: HashSet<Address>) -> Self {
+        self.self_contained_tokens = self_contained_tokens;
+        self
+    }
+
+    pub fn block_overrides(mut self, block_overrides: Option<BlockEnvOverrides>) -> Self {
+        self.block_overrides = block_overrides;
+        self
+    }
+
+    /// Sets [`EVMPoolState::spot_price_caller`] (the `price()` query caller); defaults to `None`.
+    pub fn spot_price_caller(mut self, spot_price_caller: Option<Address>) -> Self {
+        self.spot_price_caller = spot_price_caller;
+        self
+    }
+
     /// Build the final EVMPoolState object
     pub async fn build(mut self, db: D) -> Result<EVMPoolState<D>, SimulationError> {
         let engine = if let Some(engine) = &self.engine {
@@ -244,6 +266,9 @@ where
             self.manual_updates.unwrap_or(false),
             adapter_contract,
             self.disable_overwrite_tokens,
+            self.self_contained_tokens,
+            self.block_overrides,
+            self.spot_price_caller,
         ))
     }
 
@@ -406,6 +431,7 @@ where
             value: U256::from(0u64),
             gas_limit: None,
             transient_storage: None,
+            block_overrides: None,
         };
 
         let sim_result = engine

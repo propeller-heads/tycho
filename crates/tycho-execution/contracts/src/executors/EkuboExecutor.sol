@@ -19,6 +19,7 @@ import {
     SqrtRatio
 } from "@ekubo/types/sqrtRatio.sol";
 import {TransferManager} from "../TransferManager.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
@@ -132,6 +133,10 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         uint128 tokenInDebtAmount = uint128(nextAmountIn);
         address receiver = address(bytes20(swapData[16:36]));
         address tokenIn = address(bytes20(swapData[36:56]));
+        // Swap data uses ETH_ADDRESS for native ETH; translate to
+        // address(0) for Ekubo protocol interaction (pool keys, pay,
+        // withdraw).
+        if (tokenIn == ETH_ADDRESS) tokenIn = address(0);
 
         address nextTokenIn = tokenIn;
         address nextTokenOut = address(0);
@@ -144,6 +149,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         for (uint256 i = 0; i < hopsLength; i++) {
             nextTokenOut =
                 address(bytes20(LibBytes.loadCalldata(swapData, offset)));
+            if (nextTokenOut == ETH_ADDRESS) nextTokenOut = address(0);
             Config poolConfig =
                 Config.wrap(LibBytes.loadCalldata(swapData, offset + 20));
 
@@ -249,7 +255,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        pure
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -272,9 +278,13 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         );
     }
 
-    function getCallbackTransferData(bytes calldata data, address tokenIn)
+    function getCallbackTransferData(
+        bytes calldata data,
+        address tokenIn,
+        address /* caller */
+    )
         external
-        payable
+        view
         returns (TransferManager.TransferType transferType, address receiver)
     {
         bytes4 selector = bytes4(data[:4]);
@@ -283,7 +293,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
             receiver = address(_core);
         } else {
             // _LOCKED_SELECTOR
-            if (tokenIn == address(0)) {
+            if (tokenIn == ETH_ADDRESS) {
                 // ETH transfers are handled in the Executor, so we need to set the
                 // transferType to TransferNativeInExecutor to update delta accounting.
                 transferType =

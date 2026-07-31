@@ -33,8 +33,8 @@ impl SwapEncoder for FluidV2SwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let token_in = self.coerce_native_address(swap.token_in());
-        let token_out = self.coerce_native_address(swap.token_out());
+        let token_in = self.coerce_native_address(&swap.token_in().address);
+        let token_out = self.coerce_native_address(&swap.token_out().address);
 
         if token_in == token_out {
             return Err(EncodingError::InvalidInput("Fluid v2 swap tokens must differ".to_string()));
@@ -112,9 +112,11 @@ impl FluidV2SwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
+    use crate::encoding::models::default_token;
 
     #[test]
     fn test_encode_fluid_v2() {
@@ -130,8 +132,13 @@ mod tests {
         };
         let token_in = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
         let token_out = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
-        let swap = Swap::new(component, token_in.clone(), token_out.clone())
-            .with_user_data(Bytes::from("0x1234"));
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_user_data(Bytes::from("0x1234"));
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),

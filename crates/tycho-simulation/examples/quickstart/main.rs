@@ -27,26 +27,30 @@ use futures::StreamExt;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing_subscriber::EnvFilter;
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::{models::token::Token, simulation::protocol_sim::GetAmountOutResult, Bytes};
 use tycho_execution::encoding::{
     errors::EncodingError,
     evm::{
         approvals::permit2::{Permit2, PermitSingle},
         encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-        utils::biguint_to_u256,
+        utils::{biguint_to_u256, convert_to_router_token},
+        ROUTER_ETH_ADDRESS,
     },
     models,
-    models::{EncodedSolution, Solution, Swap, UserTransferType},
+    models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            curve::CurveState,
             ekubo::state::EkuboState,
-            ekubo_v3::{self, state::EkuboV3State},
-            filters::{balancer_v2_pool_filter, curve_pool_filter},
+            ekubo_v3::state::EkuboV3State,
+            filters::{balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter},
             pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -56,8 +60,8 @@ use tycho_simulation::{
     },
     protocol::models::{ProtocolComponent, Update},
     tycho_client::feed::component_tracker::ComponentFilter,
-    tycho_common::models::Chain,
-    utils::{get_default_url, load_all_tokens, load_blocklist},
+    tycho_common::{dto::TvlThresholdTier, models::Chain},
+    utils::{get_default_url, load_all_tokens},
 };
 
 /// Represents a transaction to be executed.
@@ -76,14 +80,12 @@ struct Cli {
     buy_token: Option<String>,
     #[arg(long, default_value_t = 10.0)]
     sell_amount: f64,
-    /// The tvl threshold to filter the graph by
-    #[arg(long, default_value_t = 100.0)]
-    tvl_threshold: f64,
+    /// The tvl threshold to filter the graph by. Defaults to a chain-appropriate
+    /// value targeting ~$200K USD equivalent.
+    #[arg(long)]
+    tvl_threshold: Option<f64>,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
-    /// Path to blocklist TOML config file
-    #[arg(long)]
-    blocklist_file: Option<std::path::PathBuf>,
 }
 
 impl Cli {
@@ -95,6 +97,7 @@ impl Cli {
                 "ethereum" => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
                 "base" => "0x4200000000000000000000000000000000000006".to_string(),
                 "unichain" => "0x4200000000000000000000000000000000000006".to_string(),
+                "arbitrum" => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -104,6 +107,7 @@ impl Cli {
                 "ethereum" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                 "base" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
                 "unichain" => "0x078d782b760474a361dda0af3839290b0ef57ad6".to_string(),
+                "arbitrum" => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
                 _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
             });
         }
@@ -131,7 +135,10 @@ async fn main() {
     let tycho_api_key: String =
         env::var("TYCHO_API_KEY").unwrap_or_else(|_| "sampletoken".to_string());
 
-    let tvl_filter = ComponentFilter::with_tvl_range(cli.tvl_threshold, cli.tvl_threshold);
+    let tvl_threshold = cli
+        .tvl_threshold
+        .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
+    let tvl_filter = ComponentFilter::with_tvl_range(tvl_threshold, tvl_threshold);
 
     let swapper_pk = env::var("PRIVATE_KEY").ok();
 
@@ -177,7 +184,7 @@ async fn main() {
         buy_symbol = buy_token.symbol
     );
     let mut pairs: HashMap<String, ProtocolComponent> = HashMap::new();
-    let mut amounts_out: HashMap<String, BigUint> = HashMap::new();
+    let mut amounts_out: HashMap<String, GetAmountOutResult> = HashMap::new();
 
     let mut protocol_stream = ProtocolStreamBuilder::new(&tycho_url, chain);
 
@@ -195,26 +202,37 @@ async fn main() {
                     Some(balancer_v2_pool_filter),
                 )
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                // Angstrom pools are included only when ANGSTROM_API_KEY is set: encoding
+                // their swaps requires per-block attestations from the Angstrom API.
                 .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(), None)
-                // Only uncomment if you have ANGSTROM_API_KEY set
-                // .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(),
-                // Some(uniswap_v4_angstrom_hook_pool_filter))
                 .exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None)
-                .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3::filter_fn))
-                .exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
+                .exchange::<EkuboV3State>(
+                    "ekubo_v3",
                     tvl_filter.clone(),
-                    Some(curve_pool_filter),
-                );
-            // COMING SOON!
-            // .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(),
-            // Some(uniswap_v4_pool_with_euler_hook_filter));
-            // .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None);
+                    Some(ekubo_v3_extension_filter),
+                )
+                .exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
         }
         Chain::Base => {
             protocol_stream = protocol_stream
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>(
+                    "aerodrome_slipstreams",
+                    tvl_filter.clone(),
+                    None,
+                )
+        }
+        Chain::Bsc => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             protocol_stream = protocol_stream
@@ -222,14 +240,21 @@ async fn main() {
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
+        Chain::Arbitrum => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Polygon => {
+            protocol_stream =
+                protocol_stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
         _ => {}
     }
 
-    let blocklist =
-        load_blocklist(cli.blocklist_file.as_deref()).expect("Failed to load blocklist");
-    protocol_stream = protocol_stream.blocklist_components(blocklist);
-
-    let mut protocol_stream = protocol_stream
+    let protocol_stream = protocol_stream
         .auth_key(Some(tycho_api_key.clone()))
         .skip_state_decode_failures(true)
         .set_tokens(all_tokens.clone())
@@ -237,6 +262,7 @@ async fn main() {
         .build()
         .await
         .expect("Failed building protocol stream");
+    tokio::pin!(protocol_stream);
 
     // Initialize the encoder
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
@@ -266,12 +292,14 @@ async fn main() {
             &mut amounts_out,
         );
 
-        if let Some((best_pool, expected_amount)) = best_swap {
+        if let Some((best_pool, amount_out_result)) = best_swap {
             let component = pairs
                 .get(&best_pool)
                 .expect("Best pool not found")
                 .clone();
 
+            let expected_amount = amount_out_result.amount.clone();
+            let gas_usage = amount_out_result.gas.clone();
             // Clone expected_amount to avoid ownership issues
             let expected_amount_copy = expected_amount.clone();
 
@@ -303,6 +331,7 @@ async fn main() {
                 amount_in.clone(),
                 Bytes::from(signer.address().to_vec()),
                 expected_amount,
+                gas_usage,
             );
 
             // Encode the swaps of the solution
@@ -543,8 +572,8 @@ fn get_best_swap(
     amount_in: BigUint,
     sell_token: Token,
     buy_token: Token,
-    amounts_out: &mut HashMap<String, BigUint>,
-) -> Option<(String, BigUint)> {
+    amounts_out: &mut HashMap<String, GetAmountOutResult>,
+) -> Option<(String, GetAmountOutResult)> {
     println!(
         "\n==================== Received block {block:?} ====================",
         block = message.block_number_or_timestamp
@@ -570,7 +599,7 @@ fn get_best_swap(
                     .ok();
 
                 if let Some(amount_out) = amount_out_result {
-                    amounts_out.insert(id.clone(), amount_out.amount);
+                    amounts_out.insert(id.clone(), amount_out);
                 }
 
                 // If you would like to know how much of each token you are able to swap on the
@@ -586,9 +615,9 @@ fn get_best_swap(
             }
         }
     }
-    if let Some((key, amount_out)) = amounts_out
+    if let Some((key, result)) = amounts_out
         .iter()
-        .max_by_key(|(_, value)| value.to_owned())
+        .max_by_key(|(_, result)| result.amount.clone())
     {
         println!(
             "\nThe best swap (out of {amounts} possible pools) is:",
@@ -603,9 +632,9 @@ fn get_best_swap(
         );
         println!("Pool address: {key:?}");
         let formatted_in = format_token_amount(&amount_in, &sell_token);
-        let formatted_out = format_token_amount(amount_out, &buy_token);
+        let formatted_out = format_token_amount(&result.amount, &buy_token);
         let (forward_price, reverse_price) =
-            format_price_ratios(&amount_in, amount_out, &sell_token, &buy_token);
+            format_price_ratios(&amount_in, &result.amount, &sell_token, &buy_token);
 
         println!(
             "Swap: {formatted_in} {sell_symbol} -> {formatted_out} {buy_symbol} \n
@@ -614,7 +643,7 @@ fn get_best_swap(
             sell_symbol = sell_token.symbol,
             buy_symbol = buy_token.symbol,
         );
-        Some((key.to_string(), amount_out.clone()))
+        Some((key.to_string(), result.clone()))
     } else {
         println!("\nThere aren't pools with the tokens we are looking for");
         None
@@ -629,9 +658,10 @@ fn create_solution(
     sell_amount: BigUint,
     user_address: Bytes,
     expected_amount: BigUint,
+    gas_usage: BigUint,
 ) -> Solution {
     // Prepare data to encode. First we need to create a swap object
-    let simple_swap = Swap::new(component, sell_token.address.clone(), buy_token.address.clone());
+    let simple_swap = Swap::new(component, sell_token.clone(), buy_token.clone(), gas_usage);
 
     // Compute a minimum amount out
     //
@@ -644,6 +674,15 @@ fn create_solution(
     let multiplier = &bps - slippage_percent;
     let min_amount_out = (expected_amount * &multiplier) / &bps;
 
+    // For native ETH we use TransferFrom (payable singleSwap);
+    // for ERC20s we use Permit2.
+    let is_native = sell_token.address == *ROUTER_ETH_ADDRESS || sell_token.address.is_zero();
+    let transfer_type = if is_native {
+        UserTransferType::TransferFrom
+    } else {
+        UserTransferType::TransferFromPermit2
+    };
+
     // Then we create a solution object with the previous swap
     Solution::new(
         user_address.clone(),
@@ -654,15 +693,19 @@ fn create_solution(
         min_amount_out,
         vec![simple_swap],
     )
-    .with_user_transfer_type(UserTransferType::TransferFromPermit2)
+    .with_user_transfer_type(transfer_type)
 }
 
-/// Encodes a transaction for the Tycho Router using the `singleSwapPermit2` method.
+/// Encodes a transaction for the Tycho Router.
+///
+/// Uses `singleSwapPermit2` for ERC-20 inputs and `singleSwap` (payable)
+/// for native ETH. Translates `Address::ZERO` to the router's
+/// `ETH_ADDRESS` (`0xEeee…`).
 ///
 /// # ⚠️ Important Responsibility Note
 ///
-/// This function is intended as **an illustrative example only** and supports only the method of
-/// interest of this quickstart. **Users must implement their own encoding logic** to ensure:
+/// This function is intended as **an illustrative example only**.
+/// **Users must implement their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
 /// - Proper validation and setting of critical inputs such as `minAmountOut`.
 fn encode_tycho_router_call(
@@ -674,39 +717,56 @@ fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
-    let given_token = Address::from_slice(solution.token_in());
-    let checked_token = Address::from_slice(solution.token_out());
+    let given_token = convert_to_router_token(Address::from_slice(solution.token_in()));
+    let checked_token = convert_to_router_token(Address::from_slice(solution.token_out()));
     let receiver = Address::from_slice(solution.receiver());
 
-    let permit2 = Permit2::new()?;
-    let p = permit2.get_permit(
-        encoded_solution.interacting_with(),
-        solution.sender(),
-        solution.token_in(),
-        solution.amount_in(),
-    )?;
-    let permit = PermitSingle::try_from(&p)
-        .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
-    let signature = sign_permit(chain_id, &p, signer)?;
+    let is_native_in =
+        solution.token_in() == &native_address || *solution.token_in() == *ROUTER_ETH_ADDRESS;
 
-    let method_calldata = (
-        given_amount,
-        given_token,
-        checked_token,
-        min_amount_out,
-        receiver,
-        permit,
-        signature.as_bytes().to_vec(),
-        encoded_solution.swaps().to_vec(),
-    )
-        .abi_encode();
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
+
+    let method_calldata = if is_native_in {
+        // singleSwap (payable, no permit2)
+        (
+            given_amount,
+            given_token,
+            checked_token,
+            min_amount_out,
+            receiver,
+            client_fee_params,
+            encoded_solution.swaps().to_vec(),
+        )
+            .abi_encode()
+    } else {
+        // singleSwapPermit2
+        let permit2 = Permit2::new()?;
+        let p = permit2.get_permit(
+            encoded_solution.interacting_with(),
+            solution.sender(),
+            solution.token_in(),
+            solution.amount_in(),
+        )?;
+        let permit = PermitSingle::try_from(&p)
+            .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
+        let signature = sign_permit(chain_id, &p, signer)?;
+
+        (
+            given_amount,
+            given_token,
+            checked_token,
+            min_amount_out,
+            receiver,
+            client_fee_params,
+            permit,
+            signature.as_bytes().to_vec(),
+            encoded_solution.swaps().to_vec(),
+        )
+            .abi_encode()
+    };
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if solution.token_in() == &native_address {
-        solution.amount_in().clone()
-    } else {
-        BigUint::ZERO
-    };
+    let value = if is_native_in { solution.amount_in().clone() } else { BigUint::ZERO };
     Ok(Transaction {
         to: encoded_solution
             .interacting_with()

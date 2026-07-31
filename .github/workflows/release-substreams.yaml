@@ -10,9 +10,8 @@ on:
         required: true
         description: "Package to build and release"
       config_file:
-        required: false
-        description: "Name of the substreams configuration file"
-        default: "substreams"
+        required: true
+        description: "Manifest name without .yaml extension, e.g. ethereum-pancakeswap for ethereum-uniswap-v2/ethereum-pancakeswap.yaml"
 
 permissions:
   contents: read
@@ -42,20 +41,34 @@ jobs:
 
       - name: Publish substreams-helper
         working-directory: protocols/substreams
-        run: cargo publish -p substreams-helper --locked --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io to index substreams-helper
-        run: sleep 30
+        run: |
+          version=$(grep -m1 '^version' crates/substreams-helper/Cargo.toml | cut -d'"' -f2)
+          if curl -sSf -A "tycho-release-ci" "https://crates.io/api/v1/crates/substreams-helper/${version}" > /dev/null; then
+            echo "substreams-helper ${version} is already on crates.io, skipping publish"
+          else
+            cargo publish -p substreams-helper --locked --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+            echo "Waiting for crates.io to index substreams-helper"
+            sleep 30
+          fi
 
       - name: Publish tycho-substreams
         working-directory: protocols/substreams
-        run: cargo publish -p tycho-substreams --locked --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+        run: |
+          version=$(grep -m1 '^version' crates/tycho-substreams/Cargo.toml | cut -d'"' -f2)
+          if curl -sSf -A "tycho-release-ci" "https://crates.io/api/v1/crates/tycho-substreams/${version}" > /dev/null; then
+            echo "tycho-substreams ${version} is already on crates.io, skipping publish"
+          else
+            cargo publish -p tycho-substreams --locked --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+          fi
 
   release-substreams-package:
     name: Release ${{ inputs.package }} substreams package
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -78,6 +91,13 @@ jobs:
           curl -L "$LINK" | tar zxf - -C /usr/local/bin
           chmod +x /usr/local/bin/substreams
           substreams --version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          audience: sts.amazonaws.com
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Build and release substreams package
         working-directory: protocols/substreams

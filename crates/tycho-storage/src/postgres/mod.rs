@@ -139,7 +139,7 @@ use diesel_async::{
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
 use tycho_common::{
-    models::{Chain, TxHash},
+    models::{token::Token, Chain, TxHash},
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -607,85 +607,117 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
     Ok(pool)
 }
 
-/// Ensures the `Chain` enum is present in the database, if not it inserts it.
+/// Ensures the given chain is present in the database, inserting it if absent.
 ///
-/// This function serves as a way to ensure all chains found within the `chains`  
-/// slice are present within the database. It does this by inserting each chain into
-/// the `chain` table. If a conflict arises during this operation (indicating that
-/// the chain already exists in the database), it simply does nothing for that
-/// specific operation and moves on.
-///
-/// It uses a connection from the passed in `Pool<AsyncPgConnection>` asynchronously.
-/// In case of any error during these operations, the function will panic with an
-/// appropriate error message.
-///
+/// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
+/// Also ensures the chain's native and wrapped native tokens are present.
 ///
 /// # Arguments
 ///
-/// - `chains`: A slice containing chains which need to be ensured in the database.
-/// - `pool`: An instance of `Pool` containing `AsyncPgConnection`s used to interact with the
-///   database.
+/// - `chain`: The chain to ensure.
+/// - `conn`: An open database connection.
 ///
-/// # Panics
+/// # Errors
 ///
-/// This function will panic under two circumstances:
-///
-/// - If it failed to get a connection from the provided pool.
-/// - If there was an issue ensuring the presence of chains in the database.
-async fn ensure_chains(chains: &[Chain], pool: Pool<AsyncPgConnection>) {
-    let mut conn = pool.get().await.expect("connection ok");
-
-    // Ensure chains and their native tokens exist
-    for chain in chains {
-        let chain_id_res: Result<i64, _> = diesel::insert_into(schema::chain::table)
-            .values(schema::chain::name.eq(chain.to_string()))
-            .on_conflict_do_nothing()
-            .returning(schema::chain::id)
-            .get_result(&mut conn)
-            .await;
-
-        match chain_id_res {
-            Ok(chain_id) => {
-                let token = chain.native_token();
-                let account_id: i64 = diesel::insert_into(schema::account::table)
-                    .values((
-                        schema::account::chain_id.eq(chain_id),
-                        schema::account::title.eq(format!("{}_{}", token.symbol, token.address)),
-                        schema::account::address.eq(token.address.as_ref()),
-                    ))
-                    .on_conflict_do_nothing()
-                    .returning(schema::account::id)
-                    .get_result(&mut conn)
-                    .await
-                    .expect("Could not ensure native token's account in database");
-                diesel::insert_into(schema::token::table)
-                    .values((
-                        schema::token::account_id.eq(account_id),
-                        schema::token::symbol.eq(token.symbol),
-                        schema::token::decimals.eq(token.decimals as i32),
-                        schema::token::gas.eq(Vec::<Option<i64>>::new()),
-                        schema::token::quality.eq(100),
-                    ))
-                    .on_conflict_do_nothing()
-                    .execute(&mut conn)
-                    .await
-                    .expect("Could not ensure native token in database");
-            }
-            Err(diesel::result::Error::NotFound) => {
-                continue;
-            }
-            Err(err) => {
-                panic!("Could not ensure chain enum in database: {err}");
-            }
+/// - If the database already contains a different chain.
+/// - If any database operation fails.
+async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), StorageError> {
+    // Guard: each database instance must be dedicated to a single chain. Reject initialization if
+    // the database already belongs to a different chain to prevent silent data corruption
+    // (e.g. Ethereum native tokens leaking into a Base database).
+    let existing: Vec<String> = schema::chain::table
+        .select(schema::chain::name)
+        .load(conn)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    let chain_name = chain.to_string();
+    for existing_name in &existing {
+        if *existing_name != chain_name {
+            return Err(StorageError::Unexpected(format!(
+                "Chain table already contains '{}' but attempting to initialize with '{}'. \
+                Each database instance must be dedicated to a single chain.",
+                existing_name, chain_name
+            )));
         }
     }
 
-    debug!("Ensured chain enum and native token presence for: {:?}", chains);
+    diesel::insert_into(schema::chain::table)
+        .values(schema::chain::name.eq(&chain_name))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+    let chain_id: i64 = schema::chain::table
+        .select(schema::chain::id)
+        .filter(schema::chain::name.eq(&chain_name))
+        .first(conn)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+    ensure_token_with_price(chain_id, &chain.native_token(), conn).await;
+    ensure_token_with_price(chain_id, &chain.wrapped_native_token(), conn).await;
+
+    debug!("Ensured chain enum and native token presence for: {:?}", chain);
+    Ok(())
 }
 
-async fn ensure_protocol_systems(protocol_systems: &[String], pool: Pool<AsyncPgConnection>) {
-    let mut conn = pool.get().await.expect("connection ok");
+pub(crate) async fn ensure_token_with_price(
+    chain_id: i64,
+    token: &Token,
+    conn: &mut AsyncPgConnection,
+) {
+    diesel::insert_into(schema::account::table)
+        .values((
+            schema::account::chain_id.eq(chain_id),
+            schema::account::title.eq(format!("{}_{}", token.symbol, token.address)),
+            schema::account::address.eq(token.address.as_ref()),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .expect("Could not ensure token account in database");
 
+    let account_id: i64 = schema::account::table
+        .select(schema::account::id)
+        .filter(schema::account::chain_id.eq(chain_id))
+        .filter(schema::account::address.eq(token.address.as_ref()))
+        .first(conn)
+        .await
+        .expect("Account must exist after insert");
+
+    diesel::insert_into(schema::token::table)
+        .values((
+            schema::token::account_id.eq(account_id),
+            schema::token::symbol.eq(&token.symbol),
+            schema::token::decimals.eq(token.decimals as i32),
+            schema::token::gas.eq(Vec::<Option<i64>>::new()),
+            schema::token::quality.eq(100),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await
+        .expect("Could not ensure token in database");
+
+    let token_id: i64 = schema::token::table
+        .select(schema::token::id)
+        .filter(schema::token::account_id.eq(account_id))
+        .first(conn)
+        .await
+        .expect("Token must exist after insert");
+
+    let price = 10.0_f64.powi(token.decimals as i32);
+    diesel::insert_into(schema::token_price::table)
+        .values((schema::token_price::token_id.eq(token_id), schema::token_price::price.eq(price)))
+        .on_conflict(schema::token_price::token_id)
+        .do_update()
+        .set(schema::token_price::price.eq(price))
+        .execute(conn)
+        .await
+        .expect("Could not ensure token price in database");
+}
+
+async fn ensure_protocol_systems(protocol_systems: &[String], conn: &mut AsyncPgConnection) {
     diesel::insert_into(schema::protocol_system::table)
         .values(
             protocol_systems
@@ -694,7 +726,7 @@ async fn ensure_protocol_systems(protocol_systems: &[String], pool: Pool<AsyncPg
                 .collect::<Vec<_>>(),
         )
         .on_conflict_do_nothing()
-        .execute(&mut conn)
+        .execute(conn)
         .await
         .expect("Could not ensure protocol system enum's in database");
 
@@ -730,6 +762,7 @@ pub mod testing {
         let tables = vec![
             // put block early so most FKs cascade, it would
             // be better to find the correct order tough.
+            "transaction_cleanup_progress",
             "extraction_state",
             "block",
             "contract_storage",
@@ -1427,5 +1460,146 @@ pub mod db_fixtures {
         .execute(conn)
         .await
         .expect("calculating fixture component tvl failed");
+    }
+}
+
+#[cfg(test)]
+mod tests_ensure_chain {
+    use diesel_async::AsyncConnection;
+    use tycho_common::models::Chain;
+
+    use super::ensure_chain;
+
+    async fn setup_conn() -> diesel_async::AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let mut conn = diesel_async::AsyncPgConnection::establish(&db_url)
+            .await
+            .unwrap();
+        conn.begin_test_transaction()
+            .await
+            .unwrap();
+        conn
+    }
+
+    #[tokio::test]
+    async fn test_succeeds_on_empty_table() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_same_chain() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rejects_different_chain() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+        let result = ensure_chain(Chain::Base, &mut conn).await;
+        assert!(result.is_err(), "expected error when inserting a different chain");
+    }
+}
+
+#[cfg(test)]
+mod tests_transaction_cleanup {
+    use std::str::FromStr;
+
+    use diesel::prelude::*;
+    use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
+    use tycho_common::Bytes;
+
+    use super::{db_fixtures, schema, testing::run_against_db};
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_transactions_serial_db() {
+        run_against_db(|connection_pool| async move {
+            let mut conn = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut conn, "ethereum").await;
+            let block_ids = db_fixtures::insert_blocks(&mut conn, chain_id).await;
+            let tx_ids = db_fixtures::insert_txns(
+                &mut conn,
+                &[
+                    (
+                        block_ids[0],
+                        1,
+                        "0xbb7e16d797a9e2fbc537e30f91ed3d9a656b25c8d720c28866fbb242b1b0824d",
+                    ),
+                    (
+                        block_ids[0],
+                        2,
+                        "0x794f7df7a3fe973f1583fbb92536f9a8def3a89902439289315326c04068de54",
+                    ),
+                    (
+                        block_ids[1],
+                        1,
+                        "0x3108322284d0a89a7accb288d1a94384d499504fe7e04441b0706c7628dee7b7",
+                    ),
+                    (
+                        block_ids[1],
+                        2,
+                        "0x50449de1973d86f21bfafa7c72011854a7e33a226709dc3e2e4edcca34188388",
+                    ),
+                ],
+            )
+            .await;
+            // tx0 is referenced via account.creation_tx, tx1 via contract_code.modify_tx;
+            // tx2 and tx3 are orphans.
+            let account_id = db_fixtures::insert_account(
+                &mut conn,
+                "6B175474E89094C44Da98b954EedeAC495271d0F",
+                "cleanup_test_account",
+                chain_id,
+                Some(tx_ids[0]),
+            )
+            .await;
+            db_fixtures::insert_contract_code(
+                &mut conn,
+                account_id,
+                tx_ids[1],
+                Bytes::from_str("C0C0").unwrap(),
+            )
+            .await;
+
+            // The procedure commits internally, so it must run as a single autocommit
+            // statement rather than inside a transaction. p_min_age is zeroed because the
+            // fixtures were inserted just now, far inside the production horizon.
+            conn.batch_execute(
+                "CALL cleanup_orphaned_transactions(
+                    p_batch_size => 1000,
+                    p_time_budget => interval '1 minute',
+                    p_min_age => interval '0 seconds'
+                );",
+            )
+            .await
+            .expect("cleanup procedure should run");
+
+            let mut remaining: Vec<i64> = schema::transaction::table
+                .select(schema::transaction::id)
+                .load(&mut conn)
+                .await
+                .expect("querying remaining transactions failed");
+            remaining.sort();
+            let mut expected = vec![tx_ids[0], tx_ids[1]];
+            expected.sort();
+            assert_eq!(
+                remaining, expected,
+                "referenced transactions must survive, orphans must be deleted"
+            );
+        })
+        .await;
     }
 }

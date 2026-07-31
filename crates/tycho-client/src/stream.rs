@@ -8,17 +8,22 @@ use std::{
 use thiserror::Error;
 use tokio::{sync::mpsc::Receiver, task::JoinHandle};
 use tracing::{info, warn};
-use tycho_common::dto::{
-    Chain, ExtractorIdentity, PaginationLimits, PaginationParams, ProtocolSystemsRequestBody,
+use tycho_common::{
+    dto::{PaginationLimits, ProtocolSystemsRequestBody},
+    models::{
+        chain_config::{init_chain_registry, ChainConfigRegistry},
+        Chain, ExtractorIdentity,
+    },
 };
 
 use crate::{
+    client_metadata::serialize_client_metadata,
     deltas::DeltasClient,
     feed::{
         component_tracker::ComponentFilter, synchronizer::ProtocolStateSynchronizer, BlockHeader,
         BlockSynchronizer, BlockSynchronizerError, FeedMessage,
     },
-    rpc::{HttpRPCClientOptions, RPCClient},
+    rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     HttpRPCClient, WsDeltasClient,
 };
 
@@ -52,6 +57,19 @@ pub struct ConstantRetryConfiguration {
     cooldown: Duration,
 }
 
+/// Loads and validates the custom-chain config once, before the stream starts. A missing or
+/// malformed `TYCHO_CHAINS_CONFIG` fails here with an actionable error, rather than degrading to
+/// an empty registry and resurfacing later as a confusing unknown-chain error mid-stream. An unset
+/// env var yields an empty registry (Ok), so built-in-only consumers are unaffected. The validated
+/// registry is best-effort installed as the process-wide one; a prior lazy access may already have
+/// initialised it, in which case the install is a no-op.
+fn validate_chain_config() -> Result<(), StreamError> {
+    let registry = ChainConfigRegistry::load_default()
+        .map_err(|e| StreamError::SetUpError(format!("failed to load custom chain config: {e}")))?;
+    let _ = init_chain_registry(registry);
+    Ok(())
+}
+
 pub struct TychoStreamBuilder {
     tycho_url: String,
     chain: Chain,
@@ -70,6 +88,7 @@ pub struct TychoStreamBuilder {
     compression: bool,
     partial_blocks: bool,
     max_messages: Option<usize>,
+    client_metadata: HashMap<String, String>,
 }
 
 impl TychoStreamBuilder {
@@ -101,6 +120,7 @@ impl TychoStreamBuilder {
             compression: true,
             partial_blocks: false,
             max_messages: None,
+            client_metadata: HashMap::new(),
         }
     }
 
@@ -116,6 +136,11 @@ impl TychoStreamBuilder {
             Chain::Bsc => (1, 12, 50),
             Chain::Unichain => (1, 10, 100),
             Chain::Polygon => (2, 12, 50), // ~2s block time
+            Chain::Plasma => (1, 10, 100), // ~1s block time
+            _ => {
+                let block_time = chain.block_time_secs();
+                (block_time, block_time * 3, 50)
+            }
         }
     }
 
@@ -188,6 +213,29 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Adds client-metadata entries sent to the server in the `X-Tycho-Client-Metadata` header.
+    ///
+    /// The metadata is opaque to tycho-client; consumers supply their own keys. Accepts any
+    /// iterator of key/value pairs and inserts each entry, keeping previously set metadata. An
+    /// empty map sends no header. Invalid keys/values and oversized metadata are dropped with a
+    /// warning at `build()` time, sending no header.
+    ///
+    /// Values are self-reported and may surface in the server's metrics and logs. Do not include
+    /// secrets or personally identifiable information.
+    pub fn add_client_metadata<I, K, V>(mut self, metadata: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.client_metadata.extend(
+            metadata
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into())),
+        );
+        self
+    }
+
     /// Disables TLS/SSL for the connection, using `http` and `ws` protocols.
     pub fn no_tls(mut self, no_tls: bool) -> Self {
         self.no_tls = no_tls;
@@ -255,6 +303,17 @@ impl TychoStreamBuilder {
             ));
         }
 
+        // Serialize client metadata once, before any network I/O. Metadata is best-effort
+        // telemetry, so invalid input is dropped with a warning rather than failing the stream.
+        let metadata_header =
+            serialize_client_metadata(&self.client_metadata).unwrap_or_else(|e| {
+                warn!("Ignoring invalid client metadata: {e}");
+                None
+            });
+
+        // Fail fast on a broken custom-chain config, before any network I/O.
+        validate_chain_config()?;
+
         // Attempt to read the authentication key from the environment variable if not provided
         let auth_key = self
             .auth_key
@@ -285,12 +344,14 @@ impl TychoStreamBuilder {
                 config.cooldown,
             ),
         }
-        .map_err(|e| StreamError::SetUpError(e.to_string()))?;
+        .map_err(|e| StreamError::SetUpError(e.to_string()))?
+        .with_client_metadata_header(metadata_header.clone());
         let rpc_client = HttpRPCClient::new(
             &tycho_rpc_url,
             HttpRPCClientOptions::new()
                 .with_auth_key(auth_key)
-                .with_compression(self.compression),
+                .with_compression(self.compression)
+                .with_client_metadata_header(metadata_header),
         )
         .map_err(|e| StreamError::SetUpError(e.to_string()))?;
         let ws_jh = ws_client
@@ -391,11 +452,9 @@ impl ProtocolSystemsInfo {
     ) -> Self {
         let page_size =
             ProtocolSystemsRequestBody::effective_max_page_size(rpc_client.compression());
+        let params = ProtocolSystemsParams::new(chain).with_pagination(0, page_size);
         let response = rpc_client
-            .get_protocol_systems(&ProtocolSystemsRequestBody {
-                chain,
-                pagination: PaginationParams { page: 0, page_size },
-            })
+            .get_protocol_systems(params)
             .await
             .map_err(|e| {
                 warn!(
@@ -409,26 +468,30 @@ impl ProtocolSystemsInfo {
             return Self { dci_protocols: HashSet::new(), other_available: HashSet::new() };
         };
 
-        if response.pagination.total > page_size {
+        if response.total() > page_size {
             warn!(
                 "Server has {} protocol systems but only {} were fetched (page_size={page_size}). \
                  Availability info may be incomplete.",
-                response.pagination.total,
-                response.protocol_systems.len(),
+                response.total(),
+                response.data().protocol_systems().len(),
             );
         }
 
         let available: HashSet<_> = response
-            .protocol_systems
-            .into_iter()
+            .data()
+            .protocol_systems()
+            .iter()
+            .cloned()
             .collect();
         let other_available = available
             .difference(requested_exchanges)
             .cloned()
             .collect();
         let mut dci_protocols: HashSet<String> = response
-            .dci_protocols
-            .into_iter()
+            .data()
+            .dci_protocols()
+            .iter()
+            .cloned()
             .collect();
 
         // TODO(ENG-5302): Remove this fallback once all environments serve
@@ -470,6 +533,31 @@ impl ProtocolSystemsInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_chain_config_errors_on_broken_file() {
+        // Relies on nextest process isolation: this mutates the process-global env var.
+        std::env::set_var("TYCHO_CHAINS_CONFIG", "/nonexistent/does-not-exist.yaml");
+        let result = validate_chain_config();
+        std::env::remove_var("TYCHO_CHAINS_CONFIG");
+
+        let err = result.expect_err("a missing config file must fail validation");
+        assert!(matches!(err, StreamError::SetUpError(_)));
+        assert!(
+            err.to_string()
+                .contains("custom chain config"),
+            "error should name the custom chain config: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_chain_config_ok_when_env_unset() {
+        std::env::remove_var("TYCHO_CHAINS_CONFIG");
+        assert!(
+            validate_chain_config().is_ok(),
+            "an unset env var means no custom chains, which is valid"
+        );
+    }
 
     #[test]
     fn test_retry_configuration_constant() {
@@ -517,6 +605,27 @@ mod tests {
             .build()
             .await;
         assert!(receiver.is_err(), "Client should fail to build when no exchanges are registered.");
+    }
+
+    #[test]
+    fn test_add_client_metadata_accumulates() {
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum)
+            .add_client_metadata([("fynd_version", "0.57.0")])
+            .add_client_metadata([("preset", "best")]);
+        assert_eq!(
+            builder
+                .client_metadata
+                .get("fynd_version")
+                .map(String::as_str),
+            Some("0.57.0")
+        );
+        assert_eq!(
+            builder
+                .client_metadata
+                .get("preset")
+                .map(String::as_str),
+            Some("best")
+        );
     }
 
     #[ignore = "require tycho gateway"]

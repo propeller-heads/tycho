@@ -289,7 +289,14 @@ impl ExecutionSimulator {
 
                         let gas_used = trace_value
                             .get("gasUsed")
-                            .and_then(|g| g.as_u64())
+                            .and_then(|g| {
+                                g.as_u64().or_else(|| {
+                                    g.as_str().and_then(|s| {
+                                        u64::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16)
+                                            .ok()
+                                    })
+                                })
+                            })
                             .unwrap_or(0);
 
                         results.insert(
@@ -299,11 +306,15 @@ impl ExecutionSimulator {
                     }
                 }
                 Err(err) => {
+                    let reason = format!("Transaction failed: {}", err);
+                    if crate::is_block_not_found(&reason) {
+                        // All calls share the same block_id in a single batch request to one node,
+                        // so if one fails with block-not-found the rest will too. Early-return so
+                        // the caller can retry the whole batch.
+                        return Err(reason.into());
+                    }
                     error!("Error tracing transaction {}: {:?}", simulation_id, err);
-                    results.insert(
-                        simulation_id.clone(),
-                        SimulationResult::Revert { reason: format!("Transaction failed: {}", err) },
-                    );
+                    results.insert(simulation_id.clone(), SimulationResult::Revert { reason });
                 }
             }
         }

@@ -16,14 +16,14 @@ pub enum Address {
     #[serde(rename = "sender-controlled")]
     SenderControlled,
     /// We choose WETH as the only value holding ERC20
-    /// as its value directly matches the value of [Address::Zero],
-    /// which represents the native token.
+    /// as its value directly matches the value of [Address::NativeETH].
     /// this makes it much easier to determine whether a user
     /// managed to steal value in scenarios that involve both
     /// ERC20 and the native token
     WETH,
+    /// The canonical ETH marker address used by the TychoRouter.
     /// <https://etherscan.io/address/0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE>
-    CurveNative,
+    NativeETH,
     /// Address chosen by sender to receive client fee.
     ClientFeeReceiver,
     /// Address chosen by tycho to receive router fee.
@@ -35,12 +35,13 @@ pub enum Address {
 
 impl Address {
     pub const VARIANTS: [Address; 6] = [
-        Address::Zero,
+        Address::Zero, /* No longer represents NativeETH, but we should still ensure this
+                        * doesn't cause issues */
         Address::Router,
         Address::Sender,
         Address::SenderControlled,
         Address::WETH,
-        Address::CurveNative,
+        Address::NativeETH,
     ];
 
     pub const VARIANTS_EXCEPT_ZERO: [Address; 5] = [
@@ -48,30 +49,18 @@ impl Address {
         Address::Sender,
         Address::SenderControlled,
         Address::WETH,
-        Address::CurveNative,
+        Address::NativeETH,
     ];
 
-    /// Addresses which do or could implement ERC20
-    /// as well as the zero address, because the zero
-    /// address represents the native currency.
+    /// Addresses which do or could implement ERC20,
+    /// plus [Address::NativeETH] for the native currency.
     /// Using this instead of [Address::VARIANTS]
     /// might miss edge case vulnerabilities
     /// but will reduce the parameter space,
     /// reduce the potential number of reverts due to the address not implementing ERC20,
     /// and speed up the simulation.
-    pub const POSSIBLY_ERC20_AND_ZERO: [Address; 4] =
-        [Address::Sender, Address::SenderControlled, Address::WETH, Address::Zero];
-
-    /// [Address::POSSIBLY_ERC20_AND_ZERO] + [Address::CurveNative].
-    /// Use this when generating tokens used by Curve because
-    /// Curve gives special meaning to [Address::CurveNative].
-    pub const CURVE_TOKENS: [Address; 5] = [
-        Address::Sender,
-        Address::SenderControlled,
-        Address::WETH,
-        Address::Zero,
-        Address::CurveNative,
-    ];
+    pub const POSSIBLY_ERC20_AND_NATIVE: [Address; 4] =
+        [Address::Sender, Address::SenderControlled, Address::WETH, Address::NativeETH];
 
     pub const SENDER_CONTROLLED: [Address; 2] = [Address::Sender, Address::SenderControlled];
 
@@ -87,6 +76,6 @@ impl Address {
 
     /// ERC20 operations should revert for addresses that never implement ERC20
     pub fn is_never_erc20(&self) -> bool {
-        self == &Address::Zero || self == &Address::Router || self == &Address::CurveNative
+        self == &Address::Zero || self == &Address::Router || self == &Address::NativeETH
     }
 }

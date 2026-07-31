@@ -7,6 +7,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::{
         constants::NON_PLE_ENCODED_PROTOCOLS,
+        gas_estimator::estimate_gas_usage,
         group_swaps::group_swaps,
         strategy_encoder::strategy_validators::{
             SequentialSwapValidator, SplitSwapValidator, SwapValidator,
@@ -14,7 +15,7 @@ use crate::encoding::{
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{get_token_position, percentage_to_uint24, ple_encode},
     },
-    models::{EncodedSolution, EncodingContext, Solution, UserTransferType},
+    models::{EncodedSolution, EncodingContext, Solution, Strategy, UserTransferType},
     strategy_encoder::StrategyEncoder,
     swap_encoder::SwapEncoder,
 };
@@ -61,7 +62,7 @@ impl StrategyEncoder for SingleSwapStrategyEncoder {
         if number_of_groups != 1 {
             return Err(EncodingError::InvalidInput(format!(
                 "Single strategy only supports exactly one swap for non-groupable protocols. Found {number_of_groups}",
-            )))
+            )));
         }
 
         let grouped_swap = grouped_swaps
@@ -71,7 +72,7 @@ impl StrategyEncoder for SingleSwapStrategyEncoder {
         if grouped_swap.split != 0f64 {
             return Err(EncodingError::InvalidInput(
                 "Splits not supported for single swaps.".to_string(),
-            ))
+            ));
         }
 
         let protocol = &grouped_swap.protocol_system;
@@ -93,7 +94,7 @@ impl StrategyEncoder for SingleSwapStrategyEncoder {
         let mut initial_protocol_data: Vec<u8> = vec![];
         for swap in grouped_swap.swaps.iter() {
             let protocol_data = swap_encoder.encode_swap(swap, &encoding_context)?;
-            if encoding_context.group_token_in == *swap.token_in() {
+            if encoding_context.group_token_in == *swap.token_in().address {
                 initial_protocol_data = protocol_data;
             } else {
                 grouped_protocol_data.push(protocol_data);
@@ -112,7 +113,14 @@ impl StrategyEncoder for SingleSwapStrategyEncoder {
 
         let swap_data =
             self.encode_swap_header(swap_encoder.executor_address().clone(), initial_protocol_data);
-        Ok(EncodedSolution::new(swap_data, self.router_address.clone(), function_signature, 0))
+        let gas_usage = estimate_gas_usage(solution, Strategy::Single);
+        Ok(EncodedSolution::new(
+            swap_data,
+            self.router_address.clone(),
+            function_signature,
+            0,
+            gas_usage,
+        ))
     }
 
     fn get_swap_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
@@ -193,7 +201,7 @@ impl StrategyEncoder for SequentialSwapStrategyEncoder {
             let mut initial_protocol_data: Vec<u8> = vec![];
             for swap in grouped_swap.swaps.iter() {
                 let protocol_data = swap_encoder.encode_swap(swap, &encoding_context)?;
-                if encoding_context.group_token_in == *swap.token_in() {
+                if encoding_context.group_token_in == *swap.token_in().address {
                     initial_protocol_data = protocol_data;
                 } else {
                     grouped_protocol_data.push(protocol_data);
@@ -216,7 +224,14 @@ impl StrategyEncoder for SequentialSwapStrategyEncoder {
         }
 
         let encoded_swaps = ple_encode(swaps);
-        Ok(EncodedSolution::new(encoded_swaps, self.router_address.clone(), function_signature, 0))
+        let gas_usage = estimate_gas_usage(solution, Strategy::Sequential);
+        Ok(EncodedSolution::new(
+            encoded_swaps,
+            self.router_address.clone(),
+            function_signature,
+            0,
+            gas_usage,
+        ))
     }
 
     fn get_swap_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
@@ -331,7 +346,7 @@ impl StrategyEncoder for SplitSwapStrategyEncoder {
             let mut initial_protocol_data: Vec<u8> = vec![];
             for swap in grouped_swap.swaps.iter() {
                 let protocol_data = swap_encoder.encode_swap(swap, &encoding_context)?;
-                if encoding_context.group_token_in == *swap.token_in() {
+                if encoding_context.group_token_in == *swap.token_in().address {
                     initial_protocol_data = protocol_data;
                 } else {
                     grouped_protocol_data.push(protocol_data);
@@ -364,11 +379,13 @@ impl StrategyEncoder for SplitSwapStrategyEncoder {
         } else {
             tokens.len()
         };
+        let gas_usage = estimate_gas_usage(solution, Strategy::Split);
         Ok(EncodedSolution::new(
             encoded_swaps,
             self.router_address.clone(),
             function_signature,
             tokens_len,
+            gas_usage,
         ))
     }
 
@@ -415,7 +432,7 @@ mod tests {
 
     mod single {
         use super::*;
-        use crate::encoding::models::Swap;
+        use crate::encoding::models::{default_token, Swap};
         #[test]
         fn test_single_swap_strategy_encoder() {
             // Performs a single swap from WETH to DAI on a USV2 pool, with no grouping
@@ -430,8 +447,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                weth.clone(),
-                dai.clone(),
+                default_token(weth.clone()),
+                default_token(dai.clone()),
+                BigUint::ZERO,
             );
             let swap_encoder_registry = get_swap_encoder_registry();
             let encoder =
@@ -468,7 +486,7 @@ mod tests {
 
     mod sequential {
         use super::*;
-        use crate::encoding::models::Swap;
+        use crate::encoding::models::{default_token, Swap};
 
         #[test]
         fn test_sequential_swap_strategy_encoder_no_permit2() {
@@ -486,8 +504,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                weth.clone(),
-                wbtc.clone(),
+                default_token(weth.clone()),
+                default_token(wbtc.clone()),
+                BigUint::ZERO,
             );
             let swap_wbtc_usdc = Swap::new(
                 ProtocolComponent {
@@ -495,8 +514,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                wbtc.clone(),
-                usdc.clone(),
+                default_token(wbtc.clone()),
+                default_token(usdc.clone()),
+                BigUint::ZERO,
             );
             let swap_encoder_registry = get_swap_encoder_registry();
             let encoder =
@@ -544,7 +564,7 @@ mod tests {
 
     mod split {
         use super::*;
-        use crate::encoding::models::Swap;
+        use crate::encoding::models::{default_token, Swap};
 
         #[test]
         fn test_split_input_cyclic_swap() {
@@ -575,8 +595,9 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                usdc.clone(),
-                weth.clone(),
+                default_token(usdc.clone()),
+                default_token(weth.clone()),
+                BigUint::ZERO,
             )
             .with_split(0.6f64);
 
@@ -596,8 +617,9 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                usdc.clone(),
-                weth.clone(),
+                default_token(usdc.clone()),
+                default_token(weth.clone()),
+                BigUint::ZERO,
             );
 
             // WETH -> USDC (Pool 2)
@@ -616,8 +638,9 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                weth.clone(),
-                usdc.clone(),
+                default_token(weth.clone()),
+                default_token(usdc.clone()),
+                BigUint::ZERO,
             );
             let swap_encoder_registry = get_swap_encoder_registry();
             let encoder = SplitSwapStrategyEncoder::new(
@@ -709,8 +732,9 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                usdc.clone(),
-                weth.clone(),
+                default_token(usdc.clone()),
+                default_token(weth.clone()),
+                BigUint::ZERO,
             );
 
             let swap_weth_usdc_v3_pool1 = Swap::new(
@@ -728,8 +752,9 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                weth.clone(),
-                usdc.clone(),
+                default_token(weth.clone()),
+                default_token(usdc.clone()),
+                BigUint::ZERO,
             )
             .with_split(0.6f64);
 
@@ -748,8 +773,9 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                weth.clone(),
-                usdc.clone(),
+                default_token(weth.clone()),
+                default_token(usdc.clone()),
+                BigUint::ZERO,
             );
 
             let swap_encoder_registry = get_swap_encoder_registry();

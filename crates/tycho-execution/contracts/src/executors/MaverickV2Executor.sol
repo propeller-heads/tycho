@@ -63,7 +63,7 @@ contract MaverickV2Executor is IExecutor {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        pure
         returns (
             TransferManager.TransferType transferType,
             address receiver,

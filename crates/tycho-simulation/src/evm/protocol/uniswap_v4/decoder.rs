@@ -206,7 +206,10 @@ mod tests {
 
     use chrono::DateTime;
     use rstest::rstest;
-    use tycho_common::dto::{Chain, ChangeType, ProtocolComponent, ResponseProtocolState};
+    use tycho_common::models::{
+        protocol::{ProtocolComponent, ProtocolComponentState},
+        Chain, ChangeType,
+    };
 
     use super::*;
     use crate::evm::protocol::test_utils::try_decode_snapshot_with_defaults;
@@ -227,7 +230,7 @@ mod tests {
             protocol_type_name: "typename1".to_string(),
             chain: Chain::Ethereum,
             tokens: Vec::new(),
-            contract_ids: Vec::new(),
+            contract_addresses: Vec::new(),
             static_attributes,
             change: ChangeType::Creation,
             creation_tx: Bytes::from_str("0x0000").unwrap(),
@@ -256,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn test_usv4_try_from() {
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes: usv4_attributes(),
                 balances: HashMap::new(),
@@ -313,7 +316,7 @@ mod tests {
         }
 
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes,
                 balances: HashMap::new(),

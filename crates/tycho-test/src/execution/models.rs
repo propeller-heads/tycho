@@ -20,6 +20,7 @@ pub struct TychoExecutionInput {
     pub component_id: String,
     pub token_in: String,
     pub token_out: String,
+    pub estimated_gas: BigUint,
 }
 
 /// Result of executing a Tycho transaction simulation.
@@ -88,12 +89,14 @@ pub struct Transaction {
     value: BigUint,
     /// ABI-encoded calldata.
     data: Vec<u8>,
+    /// Estimated gas usage for this transaction
+    estimated_gas: BigUint,
 }
 
 impl Transaction {
     /// Creates a new transaction.
-    pub fn new(to: Bytes, value: BigUint, data: Vec<u8>) -> Self {
-        Self { to, value, data }
+    pub fn new(to: Bytes, value: BigUint, data: Vec<u8>, estimated_gas: BigUint) -> Self {
+        Self { to, value, data, estimated_gas }
     }
 
     /// Returns the contract address to call.
@@ -109,5 +112,10 @@ impl Transaction {
     /// Returns the ABI-encoded calldata.
     pub fn data(&self) -> &Vec<u8> {
         &self.data
+    }
+
+    /// Returns the estimated gas usage
+    pub fn estimated_gas(&self) -> &BigUint {
+        &self.estimated_gas
     }
 }

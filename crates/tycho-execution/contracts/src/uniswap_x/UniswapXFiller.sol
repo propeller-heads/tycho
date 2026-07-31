@@ -10,6 +10,7 @@ import {
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import {TychoRouter} from "../TychoRouter.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 error UniswapXFiller__AddressZero();
 error UniswapXFiller__BatchExecutionNotSupported();
@@ -153,7 +154,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
 
         uint256 amount = address(this).balance;
         if (amount > 0) {
-            emit Withdrawal(address(0), amount, receiver);
+            emit Withdrawal(ETH_ADDRESS, amount, receiver);
             Address.sendValue(payable(receiver), amount);
         }
     }

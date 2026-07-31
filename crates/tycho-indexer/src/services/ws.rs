@@ -10,20 +10,20 @@ use actix::{
 };
 use actix_web::{web, Error, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
-use metrics::{counter, gauge};
+use metrics::{counter, gauge, Label};
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
-    dto::{BlockChanges, Command, Response, WebSocketMessage},
+    dto::{BlockAggregatedChanges, Command, Response, WebSocketMessage},
     models::{error::WebsocketError, ExtractorIdentity},
 };
 use uuid::Uuid;
 
-use crate::extractor::runner::MessageSender;
+use crate::{extractor::runner::MessageSender, services::client_metadata};
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// How long before lack of client response causes a timeout
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub type MessageSenderMap = HashMap<ExtractorIdentity, Arc<dyn MessageSender + Send + Sync>>;
 
@@ -63,6 +63,10 @@ pub struct WsActor {
     compression_enabled: HashMap<Uuid, bool>,
     user_identity: Option<String>,
     client_version: String,
+    /// Client plan from the X-User-Plan header, projected onto connection metrics.
+    user_plan: String,
+    /// Allowlisted client metadata projected onto connection metrics.
+    client_metadata: HashMap<String, String>,
 }
 
 impl WsActor {
@@ -70,6 +74,8 @@ impl WsActor {
         app_state: web::Data<WsData>,
         user_identity: Option<String>,
         client_version: String,
+        user_plan: String,
+        client_metadata: HashMap<String, String>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -79,7 +85,27 @@ impl WsActor {
             compression_enabled: HashMap::new(),
             user_identity,
             client_version,
+            user_plan,
+            client_metadata,
         }
+    }
+
+    /// Labels for the `websocket_connections_active` gauge: the existing identity/version labels
+    /// plus the allowlisted client metadata.
+    fn connection_labels(&self) -> Vec<Label> {
+        let mut labels = vec![
+            Label::new(
+                "user_identity",
+                self.user_identity
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            ),
+            Label::new("client_version", self.client_version.clone()),
+            Label::new("user_plan", self.user_plan.clone()),
+        ];
+        labels.extend(client_metadata::metric_labels(&self.client_metadata));
+        labels
     }
 
     /// Entry point for the WS connection
@@ -105,7 +131,22 @@ impl WsActor {
             .unwrap_or("unknown")
             .to_string();
 
-        let ws_actor = WsActor::new(data, user_identity, client_version);
+        let user_plan = req
+            .headers()
+            .get("x-user-plan")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("none")
+            .to_string();
+
+        let client_metadata = client_metadata::parse_client_metadata(
+            req.headers()
+                .get(client_metadata::CLIENT_METADATA_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or(""),
+        );
+
+        let ws_actor =
+            WsActor::new(data, user_identity, client_version, user_plan, client_metadata);
 
         ws::start(ws_actor, &req, stream)
     }
@@ -376,12 +417,7 @@ impl Actor for WsActor {
     fn started(&mut self, ctx: &mut Self::Context) {
         info!("Websocket connection established");
 
-        gauge!(
-            "websocket_connections_active",
-            "user_identity" => self.user_identity.as_deref().unwrap_or("unknown").to_owned(),
-            "client_version" => self.client_version.clone(),
-        )
-        .increment(1);
+        gauge!("websocket_connections_active", self.connection_labels()).increment(1);
 
         // Start the heartbeat
         self.heartbeat(ctx);
@@ -391,12 +427,7 @@ impl Actor for WsActor {
     fn stopped(&mut self, ctx: &mut Self::Context) {
         info!("Websocket connection closed");
 
-        gauge!(
-            "websocket_connections_active",
-            "user_identity" => self.user_identity.as_deref().unwrap_or("unknown").to_owned(),
-            "client_version" => self.client_version.clone(),
-        )
-        .decrement(1);
+        gauge!("websocket_connections_active", self.connection_labels()).decrement(1);
 
         // Close all remaining subscriptions
         let user_identity = self
@@ -419,18 +450,18 @@ impl Actor for WsActor {
 }
 
 /// Handle incoming messages from the extractor and forward them to the WS connection
-impl StreamHandler<Result<(Uuid, BlockChanges), ws::ProtocolError>> for WsActor {
+impl StreamHandler<Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>> for WsActor {
     #[instrument(skip_all, fields(WsActor.id = %self.id))]
     fn handle(
         &mut self,
-        msg: Result<(Uuid, BlockChanges), ws::ProtocolError>,
+        msg: Result<(Uuid, BlockAggregatedChanges), ws::ProtocolError>,
         ctx: &mut Self::Context,
     ) {
         trace!("Message received from extractor");
         match msg {
             Ok((subscription_id, deltas)) => {
                 trace!("Forwarding message to client");
-                let msg = WebSocketMessage::BlockChanges { deltas, subscription_id };
+                let msg = WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id };
                 let json_str = serde_json::to_string(&msg).unwrap();
 
                 // Check if compression is enabled for this subscription
@@ -580,7 +611,7 @@ mod tests {
     };
     use tracing::{debug, info_span, Instrument};
     use tycho_common::{
-        dto::{BlockChanges, Response},
+        dto::{self, Response},
         models::{
             blockchain::{Block, BlockAggregatedChanges},
             Chain,
@@ -742,7 +773,7 @@ mod tests {
     struct DummyDelta {
         #[allow(dead_code)]
         subscription_id: Uuid,
-        deltas: BlockChanges,
+        deltas: dto::BlockAggregatedChanges,
     }
 
     async fn wait_for_dummy_message(

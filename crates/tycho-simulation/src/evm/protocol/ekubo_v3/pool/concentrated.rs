@@ -33,7 +33,13 @@ use crate::{
 // Factor to account for computation inaccuracies due to not using tick bitmaps
 const WEI_UNDERESTIMATION_FACTOR: i128 = 2;
 
-const BASE_GAS_COST: u64 = 19_665;
+// The names of the constants reflect the exact method from the tenderly log.
+const TRANSFER_FROM_USER_GAS_COST: u64 = 40_000;
+const START_PAYMENT_GAS_COST: u64 = 6_000;
+const BASE_SWAP_GAS_COST: u64 = 19_665;
+const WITHDRAW_GAS_COST: u64 = 37_500;
+const COMPLETE_PAYMENT_GAS_COST: u64 = 2_000;
+
 const GAS_COST_OF_ONE_INITIALIZED_TICK_CROSSED: u64 = 14_259;
 const GAS_COST_OF_ONE_EXTRA_TICK_BITMAP_SLOAD: u64 = 2_000;
 const GAS_COST_OF_ONE_EXTRA_MATH_ROUND: u64 = 4_076;
@@ -173,7 +179,11 @@ pub(super) fn gas_costs(
     let (extra_distinct_bitmap_lookups, initialized_ticks_crossed) =
         (u64::from(extra_distinct_bitmap_lookups), u64::from(initialized_ticks_crossed));
 
-    BASE_GAS_COST +
+    START_PAYMENT_GAS_COST +
+        BASE_SWAP_GAS_COST +
+        WITHDRAW_GAS_COST +
+        COMPLETE_PAYMENT_GAS_COST +
+        TRANSFER_FROM_USER_GAS_COST +
         extra_distinct_bitmap_lookups * GAS_COST_OF_ONE_EXTRA_TICK_BITMAP_SLOAD +
         initialized_ticks_crossed * GAS_COST_OF_ONE_INITIALIZED_TICK_CROSSED +
         (initialized_ticks_crossed + extra_distinct_bitmap_lookups) *

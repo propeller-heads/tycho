@@ -386,7 +386,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
 
         bytes memory curveStEthData = abi.encodePacked(
-            ETH_ADDR_FOR_CURVE,
+            ETH_ADDR,
             STETH_ADDR,
             STETH_POOL,
             uint8(1), // poolType = stable
@@ -405,7 +405,7 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         uint256 amountOut = tychoRouter.sequentialSwap{value: amountIn}(
             amountIn,
-            address(0), // tokenIn = native ETH
+            ETH_ADDR, // tokenIn = native ETH
             WETH_ADDR,
             1, // min amount out
             ALICE,

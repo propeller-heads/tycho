@@ -26,6 +26,15 @@ const DEPOSIT_FEE_BASE: u128 = 1_000_000_000_000_000_000; // 1e18
 /// 32 ETH — the hardcoded amount every megapool queue entry requests.
 const FULL_DEPOSIT_VALUE: u128 = 32_000_000_000_000_000_000u128;
 
+// The names of the constants reflect the exact method from the tenderly log.
+const BASE_DEPOSIT_GAS: u64 = 209_000;
+const RETH_MINT_GAS: u64 = 50_000;
+const VAULT_DEPOSIT_OR_EXCESS_GAS: u64 = 20_000;
+const ASSIGN_DEPOSITS_BASE_GAS: u64 = 20_000;
+// peekItem + withdrawEther + assignFunds + dequeueItem
+const GAS_PER_MEGAPOOL_ASSIGNMENT: u64 = 120_000;
+const BASE_WITHDRAWAL_GAS: u64 = 134_000;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RocketpoolState {
     pub reth_supply: U256,
@@ -179,12 +188,12 @@ impl RocketpoolState {
     ///
     /// The minimum of these three gives the number of entries assigned.
     /// Total ETH assigned = entries × 32 ETH.
-    fn calculate_assign_deposits(&self, deposit_amount: U256) -> U256 {
+    fn calculate_assign_deposits(&self, deposit_amount: U256) -> (U256, u64) {
         if !self.deposit_assigning_enabled ||
             self.megapool_queue_requested_total
                 .is_zero()
         {
-            return U256::ZERO;
+            return (U256::ZERO, 0);
         }
 
         let full_deposit_value = U256::from(FULL_DEPOSIT_VALUE);
@@ -205,7 +214,7 @@ impl RocketpoolState {
             .min(vault_cap)
             .min(queue_entries);
 
-        entries * full_deposit_value
+        (entries * full_deposit_value, entries.try_into().unwrap_or(u64::MAX))
     }
 }
 
@@ -287,18 +296,35 @@ impl ProtocolSim for RocketpoolState {
         };
 
         let mut new_state = self.clone();
+        let mut gas_used = 0;
+
         // Note: total_eth and reth_supply are not updated as they are managed by an oracle.
         if is_depositing_eth {
+            gas_used += BASE_DEPOSIT_GAS;
+
             // route ETH between rETH collateral buffer and vault.
             let (to_reth, to_vault) = new_state.compute_deposit_routing(amount_in)?;
             new_state.reth_contract_liquidity =
                 safe_add_u256(new_state.reth_contract_liquidity, to_reth)?;
             new_state.deposit_contract_balance =
                 safe_add_u256(new_state.deposit_contract_balance, to_vault)?;
+            if to_reth > U256::ZERO {
+                gas_used += RETH_MINT_GAS;
+            }
+
+            if to_vault > U256::ZERO {
+                gas_used += VAULT_DEPOSIT_OR_EXCESS_GAS;
+            }
 
             // Assign deposits: dequeue megapool entries and send ETH from vault to validators.
             // Both the vault balance and the queue requested are reduced by the same amount.
-            let eth_assigned = new_state.calculate_assign_deposits(amount_in);
+            let (eth_assigned, entries) = new_state.calculate_assign_deposits(amount_in);
+
+            if entries > 0 {
+                gas_used += ASSIGN_DEPOSITS_BASE_GAS;
+                gas_used += entries * GAS_PER_MEGAPOOL_ASSIGNMENT;
+            }
+
             if eth_assigned > U256::ZERO {
                 new_state.deposit_contract_balance =
                     safe_sub_u256(new_state.deposit_contract_balance, eth_assigned)?;
@@ -306,6 +332,7 @@ impl ProtocolSim for RocketpoolState {
                     safe_sub_u256(new_state.megapool_queue_requested_total, eth_assigned)?;
             }
         } else {
+            gas_used = BASE_WITHDRAWAL_GAS;
             // Withdraw from rETH contract first, spill remainder into deposit pool.
             let needed_from_deposit_pool =
                 amount_out.saturating_sub(new_state.reth_contract_liquidity);
@@ -319,7 +346,6 @@ impl ProtocolSim for RocketpoolState {
         // The ETH withdrawal gas estimation assumes a best case scenario when there is sufficient
         // liquidity in the rETH contract. Note that there has never been a situation during a
         // withdrawal when this was not the case, hence the simplified gas estimation.
-        let gas_used = if is_depositing_eth { 209_000u32 } else { 134_000u32 };
 
         Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
@@ -1166,7 +1192,7 @@ mod tests {
             U256::from(max),
             U256::from(socialised),
         );
-        let assigned = state.calculate_assign_deposits(U256::from(deposit));
+        let (assigned, _gas_used) = state.calculate_assign_deposits(U256::from(deposit));
         assert_eq!(assigned, U256::from(expected_assigned));
     }
 

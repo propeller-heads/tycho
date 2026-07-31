@@ -40,7 +40,7 @@ interface IExecutor {
      */
     function getTransferData(bytes calldata data)
         external
-        payable
+        view
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -60,7 +60,7 @@ interface IExecutor {
      * @return receiver Address where to send the funds to. Returns msg.sender if funds should stay in router,
      * or the target address (e.g., pool) if direct transfer is supported.
      */
-    function fundsExpectedAddress(bytes calldata data) external returns (address receiver);
+    function fundsExpectedAddress(bytes calldata data) external view returns (address receiver);
 }
 
 interface IExecutorErrors {

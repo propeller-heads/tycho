@@ -18,7 +18,18 @@ use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
 use tycho_common::Bytes;
 
-use crate::encoding::{errors::EncodingError, models::Swap};
+use crate::encoding::{errors::EncodingError, evm::constants::ROUTER_ETH_ADDRESS, models::Swap};
+
+/// Converts `Address::ZERO` (protocol-native ETH marker) to the
+/// `ETH_ADDRESS` marker (0xEeee…) used by the TychoRouter. Non-zero
+/// addresses pass through unchanged.
+pub fn convert_to_router_token(addr: Address) -> Address {
+    if addr == Address::ZERO {
+        Address::from_slice(&ROUTER_ETH_ADDRESS)
+    } else {
+        addr
+    }
+}
 
 /// Safely converts a `Bytes` object to an `Address` object.
 ///

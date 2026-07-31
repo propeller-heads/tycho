@@ -4,6 +4,10 @@ use tycho_common::keccak256;
 pub mod account_storage;
 pub mod decoder;
 pub mod engine_db;
+/// Live per-block VM state-override streaming: generic core, default registry, and concrete
+/// providers (e.g. the Titan pAMM stream).
+pub mod override_stream;
+pub mod pending;
 pub mod protocol;
 pub mod query_pool_swap;
 pub mod simulation;

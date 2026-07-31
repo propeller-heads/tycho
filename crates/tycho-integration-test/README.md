@@ -52,6 +52,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 # Set required environment variables
 export RUST_LOG=tycho_integration_test=info,tycho_test=debug,error
 export TYCHO_URL=tycho-dev.propellerheads.xyz
+export TYCHO_API_KEY=<your-tycho-key>
 export RPC_URL=https://your-rpc-endpoint
 
 # Run with default settings

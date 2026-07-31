@@ -118,6 +118,13 @@ impl<E: std::borrow::Borrow<RawValue>> RetryableError for RpcError<TransportErro
                     return resp.error.is_retry_err() || has_custom_retry_code(&resp.error);
                 }
 
+                // Some nodes return `{"result": null}` under load (e.g. rate limiting)
+                // instead of a proper error response. Alloy treats this as a success
+                // with a null result, which fails deserialization. Retry like NullResp.
+                if text.trim() == "null" {
+                    return true;
+                }
+
                 false
             }
             Self::ErrorResp(err) => err.is_retry_err() || has_custom_retry_code(err),
@@ -206,7 +213,7 @@ impl RetryPolicy {
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
-        E: RetryableError,
+        E: RetryableError + std::fmt::Debug,
     {
         // Currently we clone the policy for each retry_request call to avoid state sharing issues.
         // TODO: consider if we should share state for concurrent retries from multiple tasks
@@ -214,7 +221,16 @@ impl RetryPolicy {
 
         backoff::future::retry(policy, || {
             let fut = operation();
-            async move { fut.await.map_err(E::to_backoff) }
+            async move {
+                fut.await.map_err(|e| {
+                    if e.is_retryable() {
+                        debug!(error = ?e, "RPC request failed, will retry");
+                    } else {
+                        warn!(error = ?e, "RPC request failed, non-retryable");
+                    }
+                    e.to_backoff()
+                })
+            }
         })
         .await
     }
@@ -372,6 +388,20 @@ pub(crate) mod tests {
             "DeserError with code {} should be {}retryable",
             error_code,
             if expected_retryable { "" } else { "non-" }
+        );
+    }
+
+    #[test]
+    fn test_deser_error_null_result_is_retryable() {
+        let deser_err = RpcError::<TransportErrorKind>::DeserError {
+            err: serde_json::Error::custom(
+                "invalid type: null, expected struct StorageRangeResultWrapper",
+            ),
+            text: "null".to_string(),
+        };
+        assert!(
+            deser_err.is_retryable(),
+            "DeserError with null text should be retryable (node returned result: null)"
         );
     }
 

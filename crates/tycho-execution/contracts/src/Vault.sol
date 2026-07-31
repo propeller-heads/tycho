@@ -11,11 +11,13 @@ import {
 } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC6909} from "@openzeppelin/contracts/token/ERC6909/ERC6909.sol";
+import {ETH_ADDRESS} from "../lib/NativeETH.sol";
 
 error Vault__InsufficientBalance(
     address user, address token, uint256 requested, uint256 available
 );
 error Vault__AmountZero();
+error Vault__AddressZero();
 error Vault__UnexpectedNonZeroCount(uint256 nonZeroCount);
 error Vault__InvalidInputDelta(address token, int256 expected, int256 actual);
 error Vault__UnexpectedInputDelta(int256 inputDelta);
@@ -112,7 +114,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
 
     /**
      * @notice Deposit tokens into the vault for the caller
-     * @param token The token address to deposit (use address(0) for native ETH)
+     * @param token The token address to deposit (use ETH_ADDRESS for native ETH)
      * @param amount The amount to deposit
      */
     function deposit(address token, uint256 amount)
@@ -121,20 +123,28 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         whenNotPaused
         nonReentrant
     {
+        if (token == address(0)) {
+            revert Vault__AddressZero();
+        }
         if (amount == 0) {
             revert Vault__AmountZero();
         }
 
         uint256 id = _toId(token);
 
-        if (token == address(0)) {
+        if (token == ETH_ADDRESS) {
             // Native ETH deposit
             require(msg.value == amount, "Value mismatch");
             _mint(msg.sender, id, amount);
         } else {
-            // ERC20 deposit - transfer to this contract (router)
-            _mint(msg.sender, id, amount);
+            require(msg.value == 0, "ETH not accepted for ERC20 deposit");
+            // ERC20 deposit - transfer to this contract and measure actual received
+            // amount to handle  fee-on-transfer and rebasing tokens
+            uint256 balanceBefore = IERC20(token).balanceOf(address(this));
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+            uint256 received =
+                IERC20(token).balanceOf(address(this)) - balanceBefore;
+            _mint(msg.sender, id, received);
         }
     }
 
@@ -144,6 +154,9 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
      * @param amount The amount to withdraw
      */
     function withdraw(address token, uint256 amount) external nonReentrant {
+        if (token == address(0)) {
+            revert Vault__AddressZero();
+        }
         if (amount == 0) {
             revert Vault__AmountZero();
         }
@@ -159,7 +172,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         _burn(msg.sender, id, amount);
 
         // Transfer tokens from contract to user
-        if (token == address(0)) {
+        if (token == ETH_ADDRESS) {
             Address.sendValue(payable(msg.sender), amount);
         } else {
             IERC20(token).safeTransfer(msg.sender, amount);
@@ -349,6 +362,8 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 }
                 uint256 id = _toId(inputToken);
                 _burn(user, id, inputAmount);
+                _setDelta(inputToken, 0);
+                _setNonZeroDeltaCount(0);
             }
         } else {
             // When vault usage is NOT allowed, all deltas must be zero

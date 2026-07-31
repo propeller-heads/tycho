@@ -17,4 +17,10 @@ cargo run -- full  --package "ethereum-balancer-v2"          # creation block to
 cargo run -- range --package "base-aerodrome-slipstreams" --chain base
 ```
 
+WARNING: each run drops and recreates the database named in `DATABASE_URL`. The spawned
+tycho-indexer listens on `TYCHO_SERVER_PORT` / `--tycho-server-port` (default 4242). To run
+alongside another Tycho stack, isolate both the database and the port — see `README.md`
+("Running alongside another Tycho stack"). The compose db host port is `DB_HOST_PORT`
+(default 5431).
+
 Docker Compose is available for isolated runs — see `README.md`.

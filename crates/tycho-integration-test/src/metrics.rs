@@ -50,7 +50,12 @@ pub fn initialize_metrics() {
     );
     describe_gauge!(
         "tycho_integration_protocol_sync_state",
-        "Current synchronization state per protocol (1=Started, 2=Ready, 3=Delayed, 4=Stale, 5=Advanced, 6=Ended)"
+        "Current synchronization state per protocol (1=Started, 2=Ready, 3=Delayed, 4=Stale, \
+         5=Advanced, 6=Ended, 7=Skipped — Tycho reported Ready but RPC block was ahead)"
+    );
+    describe_gauge!(
+        "tycho_integration_protocol_pool_count",
+        "Current number of pools (components) being streamed per protocol"
     );
     describe_counter!(
         "tycho_integration_protocol_updates_skipped_total",
@@ -63,6 +68,16 @@ pub fn initialize_metrics() {
     describe_counter!(
         "tycho_integration_validation_failures_total",
         "Total number of failed state validations"
+    );
+    describe_histogram!(
+        "tycho_integration_simulation_gas_signed_error_ratio",
+        "Signed gas estimation error as a fraction of actual gas: (estimated - actual) / actual. \
+         Positive = overestimate, negative = underestimate"
+    );
+    describe_histogram!(
+        "tycho_integration_simulation_gas_signed_error_absolute",
+        "Signed gas estimation error in absolute gas units: estimated - actual. \
+         Positive = overestimate, negative = underestimate"
     );
 }
 
@@ -176,6 +191,39 @@ pub fn record_protocol_sync_state(protocol: &str, sync_state: &SynchronizerState
     .set(state_value);
 }
 
+/// Record the current number of pools (components) being streamed for a protocol.
+pub fn record_protocol_pool_count(protocol: &str, count: usize) {
+    gauge!(
+        "tycho_integration_protocol_pool_count",
+        "protocol" => protocol.to_string()
+    )
+    .set(count as f64);
+}
+
+/// Record that an update was skipped because the RPC block was ahead of the update block.
+///
+/// The protocol's `SynchronizerState` may report Ready in this case — the lag is only
+/// observable by comparing the update block against the RPC's latest block.
+pub fn record_protocol_sync_state_skipped(protocol: &str) {
+    gauge!(
+        "tycho_integration_protocol_sync_state",
+        "protocol" => protocol.to_string()
+    )
+    .set(7.0);
+}
+
+/// Explicitly mark a protocol as stale when no update has been received within the expected window.
+///
+/// Unlike `record_protocol_sync_state`, this is called by the staleness watchdog when the stream
+/// has gone silent — the SynchronizerState itself cannot be queried in that case.
+pub fn mark_protocol_stale(protocol: &str) {
+    gauge!(
+        "tycho_integration_protocol_sync_state",
+        "protocol" => protocol.to_string()
+    )
+    .set(4.0); // 4 = Stale
+}
+
 /// Record when a protocol update is skipped because it's behind the current block
 pub fn record_protocol_update_skipped() {
     counter!("tycho_integration_protocol_updates_skipped_total").increment(1);
@@ -184,6 +232,30 @@ pub fn record_protocol_update_skipped() {
 /// Record the block delay of protocol updates
 pub fn record_protocol_update_block_delay(block_delay: u64) {
     histogram!("tycho_integration_protocol_update_block_delay_blocks").record(block_delay as f64);
+}
+
+/// Record signed gas estimation deviation as (estimated - actual) / actual
+pub fn record_gas_signed_error_ratio(protocol: &str, estimated_gas: f64, actual_gas: f64) {
+    if actual_gas > 0.0 {
+        let deviation = (estimated_gas - actual_gas) / actual_gas;
+        histogram!(
+            "tycho_integration_simulation_gas_signed_error_ratio",
+            "protocol" => protocol.to_string(),
+        )
+        .record(deviation);
+    }
+}
+
+/// Record signed gas estimation deviation in absolute gas units: estimated - actual
+pub fn record_gas_signed_error_absolute(protocol: &str, estimated_gas: f64, actual_gas: f64) {
+    if actual_gas > 0.0 {
+        let diff = estimated_gas - actual_gas;
+        histogram!(
+            "tycho_integration_simulation_gas_signed_error_absolute",
+            "protocol" => protocol.to_string(),
+        )
+        .record(diff);
+    }
 }
 
 /// Record a failed validation
@@ -226,7 +298,16 @@ pub async fn create_metrics_exporter(port: u16) -> Result<tokio::task::JoinHandl
             Matcher::Full("tycho_integration_protocol_update_block_delay_blocks".to_string()),
             &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0, 25.0],
         )
+        .map_err(|e| miette::miette!("Failed to set buckets: {}", e))?
+        .set_buckets_for_metric(
+            Matcher::Full("tycho_integration_simulation_gas_signed_error_ratio".to_string()),
+            &[
+                -1.0, -0.75, -0.5, -0.25, -0.1, -0.08, -0.06, -0.04, -0.02, 0.0, 0.02, 0.04, 0.06,
+                0.08, 0.1, 0.25, 0.5, 0.75, 1.0,
+            ],
+        )
         .map_err(|e| miette::miette!("Failed to set buckets: {}", e))?;
+
     let handle = exporter_builder
         .install_recorder()
         .into_diagnostic()

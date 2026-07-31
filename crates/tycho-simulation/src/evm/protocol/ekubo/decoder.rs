@@ -194,7 +194,7 @@ fn attribute<'a>(
 mod tests {
     use rstest::*;
     use rstest_reuse::apply;
-    use tycho_common::dto::ResponseProtocolState;
+    use tycho_common::models::protocol::ProtocolComponentState;
 
     use super::*;
     use crate::evm::protocol::{
@@ -205,9 +205,10 @@ mod tests {
     #[tokio::test]
     async fn test_try_from_with_header(case: TestCase) {
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
+                component_id: String::new(),
                 attributes: case.state_attributes,
-                ..Default::default()
+                balances: HashMap::new(),
             },
             component: case.component,
             component_tvl: None,
@@ -234,10 +235,10 @@ mod tests {
             attributes.remove(&missing_attribute);
 
             let snapshot = ComponentWithState {
-                state: ResponseProtocolState {
+                state: ProtocolComponentState {
                     attributes,
-                    component_id: Default::default(),
-                    balances: Default::default(),
+                    component_id: String::new(),
+                    balances: HashMap::new(),
                 },
                 component,
                 component_tvl: None,

@@ -179,22 +179,15 @@ where
             debug!("Will retry {:?} parameters", params_to_retry.len());
         }
 
-        // Combine new params from block and retry params into a single map for processing
-        let mut all_entrypoint_params = new_entrypoint_params;
-        for (ep_id, retry_params) in params_to_retry {
-            all_entrypoint_params
-                .entry(ep_id)
-                .or_default()
-                .extend(retry_params);
-        }
-
         // Select for analysis the newly detected EntryPointsWithData that haven't been analyzed
         // yet. This filter prevents us from re-analyzing entrypoints that have already been
         // analyzed, which can be a case if all the components have the same entrypoint. This is
         // for performance reasons, we don't want to re-analyze the same entrypoint many times.
         let mut entrypoints_to_analyze: HashMap<EntryPointWithTracingParams, &Transaction> =
             HashMap::new();
-        for (entrypoint_id, tracing_params) in all_entrypoint_params.iter() {
+
+        // Process new params: update component_id_to_entrypoint_params cache + build trace list
+        for (entrypoint_id, tracing_params) in new_entrypoint_params.iter() {
             for (tx, param) in tracing_params.iter() {
                 let entrypoint = new_entrypoints
                     .get(entrypoint_id)
@@ -214,7 +207,6 @@ where
                     EntryPointWithTracingParams::new(entrypoint.clone(), param.clone());
 
                 // Skip if we already have a successful trace for this entrypoint + params pair.
-                // Only skip if we have Some(result), not if we have None (failed trace).
                 if let Some(Some(_)) = self
                     .cache
                     .entrypoint_results
@@ -223,7 +215,7 @@ where
                     continue;
                 }
 
-                // Update the component_id_to_entrypoint_params cache
+                // Update the component_id_to_entrypoint_params cache (new params only)
                 if let Some(component_ids) = self
                     .cache
                     .ep_id_to_component_id
@@ -238,8 +230,45 @@ where
                     }
                 }
 
-                // If the same params appear twice in the block, we link them to the first
-                // transaction.
+                entrypoints_to_analyze
+                    .entry(entrypoint_with_params)
+                    .and_modify(|entry_tx| {
+                        if entry_tx.index > tx.index {
+                            *entry_tx = tx;
+                        }
+                    })
+                    .or_insert(tx);
+            }
+        }
+
+        // Process retry params: build trace list only (no cache write — they're already cached)
+        for (entrypoint_id, tracing_params) in params_to_retry.iter() {
+            for (tx, param) in tracing_params.iter() {
+                let entrypoint = new_entrypoints
+                    .get(entrypoint_id)
+                    .or_else(|| {
+                        self.cache
+                            .ep_id_to_entrypoint
+                            .get(entrypoint_id)
+                    })
+                    .ok_or_else(|| {
+                        ExtractionError::Storage(StorageError::NotFound(
+                            "Entrypoint".to_string(),
+                            entrypoint_id.to_string(),
+                        ))
+                    })?;
+
+                let entrypoint_with_params =
+                    EntryPointWithTracingParams::new(entrypoint.clone(), param.clone());
+
+                if let Some(Some(_)) = self
+                    .cache
+                    .entrypoint_results
+                    .get(&(entrypoint_id.clone(), param.clone()))
+                {
+                    continue;
+                }
+
                 entrypoints_to_analyze
                     .entry(entrypoint_with_params)
                     .and_modify(|entry_tx| {
@@ -759,7 +788,7 @@ where
             );
 
         // First, populate all TracingParams with None
-        for (_entrypoint_id, params_set) in entrypoints_with_params.iter() {
+        for params_set in entrypoints_with_params.values() {
             for entrypoint_with_params in params_set.iter() {
                 self.cache
                     .entrypoint_results
@@ -1110,12 +1139,16 @@ where
                 .entrypoint_results
                 .insert_pending(block.clone(), key.clone(), None)?;
 
-            // Increment retry counter (starting from 0 on first failure)
+            // Increment retry counter: read across all layers, then write to current layer
+            let current_count = self
+                .cache
+                .tracing_retry_counts
+                .get(&key)
+                .cloned()
+                .unwrap_or(0);
             self.cache
                 .tracing_retry_counts
-                .pending_entry(block, &key)?
-                .and_modify(|count| *count += 1)
-                .or_insert(0);
+                .insert_pending(block.clone(), key, current_count + 1)?;
         }
 
         Ok(())
@@ -3549,6 +3582,7 @@ mod tests {
                         Bytes::from(1u64).lpad(32, 0),
                     )]),
                     deleted_attributes: HashSet::new(),
+                    ..Default::default()
                 },
             )]),
             ..Default::default()
@@ -3698,6 +3732,7 @@ mod tests {
                         Bytes::from(1u64).lpad(32, 0),
                     )]),
                     deleted_attributes: HashSet::new(),
+                    ..Default::default()
                 },
             )]),
             ..Default::default()
@@ -3715,6 +3750,136 @@ mod tests {
                 .get(&(entrypoint.external_id, tracing_params)),
             Some(Some(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_retry_counter_increments_across_blocks() {
+        // Verifies that the retry counter persists across blocks so that retries
+        // stop after max_retry_count failures.
+        let gateway = get_mock_gateway();
+        let account_extractor = MockAccountExtractor::new();
+        let mut entrypoint_tracer = MockEntryPointTracer::new();
+
+        let component_id = "component_1".to_string();
+        let entrypoint_id = "entrypoint_1".to_string();
+        let entrypoint = EntryPoint::new(
+            entrypoint_id.clone(),
+            Bytes::from(1_u8),
+            "test_entrypoint".to_string(),
+        );
+        let tracing_params = get_tracing_params(1);
+        let max_retries: u32 = 2;
+
+        // Block 1: initial trace fails
+        entrypoint_tracer
+            .expect_trace()
+            .times(1)
+            .with(
+                eq(Bytes::from(1_u8).lpad(32, 0)),
+                eq(vec![EntryPointWithTracingParams::new(
+                    entrypoint.clone(),
+                    tracing_params.clone(),
+                )]),
+            )
+            .return_once(|_, _| vec![Err("fail".to_string())]);
+
+        // Block 2: retry_count=1 < 2, retry → fails → retry_count becomes 2
+        entrypoint_tracer
+            .expect_trace()
+            .times(1)
+            .with(
+                eq(Bytes::from(2_u8).lpad(32, 0)),
+                eq(vec![EntryPointWithTracingParams::new(
+                    entrypoint.clone(),
+                    tracing_params.clone(),
+                )]),
+            )
+            .return_once(|_, _| vec![Err("fail".to_string())]);
+
+        // Block 3+: retry_count=2 >= max_retries=2 → NO trace expected
+
+        let mut dci = DynamicContractIndexer::new(
+            Chain::Ethereum,
+            "test".to_string(),
+            gateway,
+            account_extractor,
+            entrypoint_tracer,
+        );
+        dci.with_max_retry_count(max_retries);
+
+        // Initialize cache
+        dci.cache
+            .ep_id_to_component_id
+            .insert_permanent(entrypoint_id.clone(), HashSet::from([component_id.clone()]));
+        dci.cache
+            .component_id_to_entrypoint_params
+            .insert_permanent(
+                component_id.clone(),
+                HashSet::from([EntryPointWithTracingParams::new(
+                    entrypoint.clone(),
+                    tracing_params.clone(),
+                )]),
+            );
+        dci.cache
+            .ep_id_to_entrypoint
+            .insert_permanent(entrypoint_id.clone(), entrypoint.clone());
+
+        // Block 1: initial params arrive, trace fails
+        let mut bc1 = get_block_changes(1);
+        bc1.txs_with_update = vec![TxWithChanges {
+            tx: get_transaction(1),
+            entrypoint_params: HashMap::from([(
+                entrypoint_id.clone(),
+                HashSet::from([(tracing_params.clone(), component_id.clone())]),
+            )]),
+            ..Default::default()
+        }];
+        dci.process_block_update(&mut bc1)
+            .await
+            .unwrap();
+
+        let key = (entrypoint.external_id.clone(), tracing_params.clone());
+        assert_eq!(dci.cache.entrypoint_results.get(&key), Some(&None));
+        assert_eq!(dci.cache.tracing_retry_counts.get(&key), Some(&1));
+
+        // Helper closure: build a block with only a state update for the component
+        let make_state_update_block = |version: u8| {
+            let mut bc = get_block_changes(version);
+            bc.txs_with_update = vec![TxWithChanges {
+                tx: get_transaction(version),
+                state_updates: HashMap::from([(
+                    component_id.clone(),
+                    ProtocolComponentStateDelta {
+                        component_id: component_id.clone(),
+                        updated_attributes: HashMap::from([(
+                            "key".to_string(),
+                            Bytes::from(version as u64).lpad(32, 0),
+                        )]),
+                        deleted_attributes: HashSet::new(),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }];
+            bc
+        };
+
+        // Block 2: state update triggers retry, trace fails again
+        let mut bc2 = make_state_update_block(2);
+        dci.process_block_update(&mut bc2)
+            .await
+            .unwrap();
+        assert_eq!(dci.cache.tracing_retry_counts.get(&key), Some(&2));
+
+        // Block 3: state update, but retry_count=2 >= max_retries=2 → no trace call
+        // If the tracer were called, the mock would panic (no expectation set)
+        let mut bc3 = make_state_update_block(3);
+        dci.process_block_update(&mut bc3)
+            .await
+            .unwrap();
+
+        // Counter unchanged — no retry was attempted
+        assert_eq!(dci.cache.tracing_retry_counts.get(&key), Some(&2));
     }
 
     #[tokio::test]

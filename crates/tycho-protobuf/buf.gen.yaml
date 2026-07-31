@@ -1,0 +1,18 @@
+version: v2
+inputs:
+  - directory: ../../proto
+    paths:
+      - tycho/evm/v1/common.proto
+plugins:
+  - remote: buf.build/community/neoeinstein-prost:v0.2.2
+    out: src/pb
+    opt:
+      - file_descriptor_set=false
+      - type_attribute=.tycho.evm.v1.Transaction=#[derive(Eq\, Hash)]
+      - type_attribute=.tycho.evm.v1.TraceData=#[derive(Eq\, Hash)]
+      - type_attribute=.tycho.evm.v1.EntryPoint=#[derive(Eq\, Hash)]
+      - type_attribute=.tycho.evm.v1.EntryPointParams=#[derive(Eq\, Hash)]
+      - type_attribute=.tycho.evm.v1.RPCTraceData=#[derive(Eq\, Hash)]
+  - remote: buf.build/community/neoeinstein-prost-crate:v0.3.1
+    out: src/pb
+    opt: no_features

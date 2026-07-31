@@ -16,7 +16,6 @@ interface ICallback {
         bytes calldata data
     ) external returns (bytes memory result);
 
-
     /**
      * @notice Gets transfer data for callback-based token transfers.
      * @dev Used by the Dispatcher during protocol callbacks to determine
@@ -29,14 +28,20 @@ interface ICallback {
      *
      * @param data The encoded callback data.
      * @param tokenIn The address of the input token to transfer.
-     * @return transferType The transfer type for this executor (None, ProtocolWillDebit, or Transfer).
-     * @return receiver The address that should receive the pre swap tokens (usually a pool or the TychoRouter - depending on the protocol)
+     * @param caller The address that triggered the callback (msg.sender
+     *     in the fallback).
+     * @return transferType The transfer type for this executor (None,
+     *     ProtocolWillDebit, or Transfer).
+     * @return receiver The address that should receive the pre swap
+     *     tokens (usually a pool or the TychoRouter - depending on the
+     *     protocol)
      */
-    function getCallbackTransferData(bytes calldata data, address tokenIn)
+    function getCallbackTransferData(
+        bytes calldata data,
+        address tokenIn,
+        address caller
+    )
         external
-        payable
-        returns (
-            TransferManager.TransferType transferType,
-            address receiver
-        );
+        view
+        returns (TransferManager.TransferType transferType, address receiver);
 }

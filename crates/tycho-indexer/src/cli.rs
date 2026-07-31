@@ -163,6 +163,10 @@ pub struct IndexArgs {
     #[clap(long, env, default_value = "./extractors.yaml")]
     pub extractors_config: String,
 
+    /// Custom chains configuration file
+    #[clap(long, env = "TYCHO_CHAINS_CONFIG", default_value = "./chains.yaml")]
+    pub chain_config: String,
+
     /// A comma separated list of blockchains to index on
     #[clap(long, default_value = "ethereum", value_delimiter = ',')]
     pub chains: Vec<String>,
@@ -184,6 +188,10 @@ pub struct RunSpkgArgs {
     /// The blockchain to index on
     #[clap(long, default_value = "ethereum")]
     pub chain: String,
+
+    /// Custom chains configuration file
+    #[clap(long, env = "TYCHO_CHAINS_CONFIG", default_value = "./chains.yaml")]
+    pub chain_config: String,
 
     #[clap(flatten)]
     pub substreams_args: SubstreamsArgs,
@@ -329,6 +337,7 @@ mod cli_tests {
             },
             command: Command::Run(RunSpkgArgs {
                 chain: "ethereum".to_string(),
+                chain_config: "./chains.yaml".to_string(),
                 spkg: "package.spkg".to_string(),
                 module: "module_name".to_string(),
                 protocol_type_names: vec!["pt1".to_string(), "pt2".to_string()],
@@ -401,6 +410,7 @@ mod cli_tests {
                 },
                 chains: vec!["ethereum".to_string()],
                 extractors_config: "/opt/extractors.yaml".to_string(),
+                chain_config: "./chains.yaml".to_string(),
                 retention_horizon: "2024-01-01T00:00:00".to_string(),
                 settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
                     .parse()

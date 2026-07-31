@@ -1,2 +1,10 @@
+# Foundry
 out/
 cache/
+
+# Hardhat
+artifacts/
+cache_hardhat/
+
+# Dependencies
+node_modules/

@@ -5,7 +5,10 @@ use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::bytes_to_address,
+    evm::{
+        constants::ROUTER_ETH_ADDRESS,
+        utils::{bytes_to_address, convert_to_router_token},
+    },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -13,7 +16,6 @@ use crate::encoding::{
 #[derive(Clone)]
 pub struct FluidV1SwapEncoder {
     executor_address: Bytes,
-    native_address: Bytes,
     chain: Chain,
 }
 
@@ -23,11 +25,7 @@ impl SwapEncoder for FluidV1SwapEncoder {
         chain: Chain,
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
-        Ok(Self {
-            executor_address,
-            native_address: Bytes::from("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"),
-            chain,
-        })
+        Ok(Self { executor_address, chain })
     }
 
     fn encode_swap(
@@ -38,17 +36,17 @@ impl SwapEncoder for FluidV1SwapEncoder {
         let dex_address = Address::from_str(&swap.component().id).map_err(|_| {
             EncodingError::FatalError(format!(
                 "Failed parsing FluidV1 component id as ethereum address: {}",
-                &swap.component().id
+                swap.component().id
             ))
         })?;
 
         let args = (
             dex_address,
-            self.coerce_native_address(swap.token_in()) <
-                self.coerce_native_address(swap.token_out()),
-            bytes_to_address(swap.token_in())?,
-            bytes_to_address(swap.token_out())?,
-            *swap.token_in() == self.chain.native_token().address,
+            self.coerce_native_address(&swap.token_in().address) <
+                self.coerce_native_address(&swap.token_out().address),
+            convert_to_router_token(bytes_to_address(&swap.token_in().address)?),
+            convert_to_router_token(bytes_to_address(&swap.token_out().address)?),
+            swap.token_in().address == self.chain.native_token().address,
         );
         Ok(args.abi_encode_packed())
     }
@@ -65,7 +63,7 @@ impl SwapEncoder for FluidV1SwapEncoder {
 impl FluidV1SwapEncoder {
     fn coerce_native_address<'a>(&'a self, address: &'a Bytes) -> &'a Bytes {
         if address == &self.chain.native_token().address {
-            &self.native_address
+            &ROUTER_ETH_ADDRESS
         } else {
             address
         }
@@ -75,10 +73,11 @@ impl FluidV1SwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::evm::swap_encoder::fluid_v1::FluidV1SwapEncoder;
+    use crate::encoding::{evm::swap_encoder::fluid_v1::FluidV1SwapEncoder, models::default_token};
 
     #[test]
     fn test_encode_fluid_v1() {
@@ -90,7 +89,12 @@ mod tests {
         };
         let token_in = Bytes::from("0x9d39a5de30e57443bff2a8307a4256c8797a3497");
         let token_out = Bytes::from("0xdac17f958d2ee523a2206206994597c13d831ec7");
-        let swap = Swap::new(fluid_dex, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            fluid_dex,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),

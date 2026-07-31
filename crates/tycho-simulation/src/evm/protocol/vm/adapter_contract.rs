@@ -17,6 +17,7 @@ use crate::evm::{
     account_storage::StateUpdate,
     engine_db::engine_db_interface::EngineDatabaseInterface,
     protocol::{u256_num::u256_to_f64, vm::utils::string_to_bytes32},
+    simulation::BlockEnvOverrides,
 };
 
 #[derive(Debug)]
@@ -54,6 +55,9 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    /// `caller` sets the simulation's `tx.origin`/`msg.sender`; `None` defaults to
+    /// `EXTERNAL_ACCOUNT`.
+    #[allow(clippy::too_many_arguments)]
     pub fn price(
         &self,
         pair_id: &str,
@@ -61,12 +65,14 @@ where
         buy_token: Address,
         amounts: Vec<U256>,
         overwrites: Option<HashMap<Address, Overwrites>>,
+        caller: Option<Address>,
+        block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<Vec<f64>, SimulationError> {
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token, amounts);
         let selector = "price(bytes32,address,address,uint256[])";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None)?
+            .call(selector, args, overwrites, caller, U256::from(0u64), None, block_overrides)?
             .return_value;
 
         let decoded: PriceReturn = PriceReturn::abi_decode(&res).map_err(|e| {
@@ -86,11 +92,13 @@ where
         is_buy: bool,
         amount: U256,
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
+        block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<(Trade, HashMap<Address, StateUpdate>), SimulationError> {
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token, is_buy, amount);
         let selector = "swap(bytes32,address,address,uint8,uint256)";
 
-        let res = self.call(selector, args, overwrites, None, U256::from(0u64), None)?;
+        let res =
+            self.call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?;
 
         let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|_| {
             SimulationError::FatalError(format!(
@@ -120,12 +128,13 @@ where
         sell_token: Address,
         buy_token: Address,
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
+        block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<(U256, U256), SimulationError> {
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token);
         let selector = "getLimits(bytes32,address,address)";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None)?
+            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?
             .return_value;
 
         let decoded: LimitsReturn = LimitsReturn::abi_decode(&res).map_err(|e| {
@@ -147,7 +156,7 @@ where
         let selector = "getCapabilities(bytes32,address,address)";
 
         let res = self
-            .call(selector, args, None, None, U256::from(0u64), None)?
+            .call(selector, args, None, None, U256::from(0u64), None, None)?
             .return_value;
         let decoded: CapabilitiesReturn = CapabilitiesReturn::abi_decode(&res).map_err(|e| {
             SimulationError::FatalError(format!(
@@ -169,7 +178,7 @@ where
         let selector = "minGasUsage()";
 
         let res = self
-            .call(selector, args, None, None, U256::from(0u64), None)?
+            .call(selector, args, None, None, U256::from(0u64), None, None)?
             .return_value;
 
         let decoded: MinGasUsageReturn = MinGasUsageReturn::abi_decode(&res).map_err(|e| {

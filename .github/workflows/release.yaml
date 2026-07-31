@@ -4,9 +4,9 @@ name: Release
 # Also supports manual runs.
 on:
   release:
-    types: [published, prereleased]
+    types: [ published, prereleased ]
   workflow_dispatch:
-    inputs: {}
+    inputs: { }
 
 permissions:
   contents: write
@@ -72,7 +72,6 @@ jobs:
 
   # ── Crate publishing (all workspace crates in dependency order) ───────────────
   # Merged from tycho-indexer, tycho-simulation, and tycho-execution release.yamls.
-  # NOTE: --dry-run is set for the test migration. Remove it at real cutover.
   publish:
     name: Publish crates to crates.io
     runs-on: ubuntu-latest
@@ -93,7 +92,7 @@ jobs:
       # Wave 1: foundation crate
       - name: Publish tycho-common
         run: >
-          cargo publish -p tycho-common --locked --dry-run
+          cargo publish -p tycho-common --locked
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index wave 1
@@ -102,12 +101,12 @@ jobs:
       # Wave 2: crates that depend only on tycho-common
       - name: Publish tycho-ethereum
         run: >
-          cargo publish -p tycho-ethereum --locked --dry-run
+          cargo publish -p tycho-ethereum --locked
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
       - name: Publish tycho-client
         run: >
-          cargo publish -p tycho-client --locked --dry-run
+          cargo publish -p tycho-client --locked
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index wave 2
@@ -119,30 +118,31 @@ jobs:
           cargo publish -p tycho-storage --locked --dry-run
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
-      - name: Publish tycho-simulation
-        run: >
-          cargo publish -p tycho-simulation --locked --dry-run
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
       - name: Publish tycho-execution
         run: >
-          cargo publish -p tycho-execution --locked --dry-run
+          cargo publish -p tycho-execution --locked
+          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+
+      - name: Publish tycho-simulation
+        run: >
+          cargo publish -p tycho-simulation --locked
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index wave 3
         run: sleep 30
 
       # Wave 4: indexer (depends on storage, common, client, ethereum)
-      - name: Publish tycho-indexer
-        run: >
-          cargo publish -p tycho-indexer --locked --dry-run
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+      # TODO: Re-enable this when we can release tycho-storage to crates.io
+      # - name: Publish tycho-indexer
+      #   run: >
+      #     cargo publish -p tycho-indexer --locked
+      #     --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
-      - name: Wait for crates.io to index wave 4
-        run: sleep 30
+      # - name: Wait for crates.io to index wave 4
+      #   run: sleep 30
 
-      # Wave 5: metacrate
-      - name: Publish tycho (metacrate)
-        run: >
-          cargo publish -p tycho --locked --dry-run
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+      # # Wave 5: metacrate
+      # - name: Publish tycho (metacrate)
+      #   run: >
+      #     cargo publish -p tycho --locked
+      #     --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}

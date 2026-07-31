@@ -1,6 +1,9 @@
 pragma solidity ^0.8.26;
 
-import {TychoRouter} from "@src/TychoRouter.sol";
+import {
+    TychoRouter,
+    TychoRouter__NoPendingFeeCalculator
+} from "@src/TychoRouter.sol";
 import {FeeCalculator} from "@src/FeeCalculator.sol";
 import {
     IAccessControl
@@ -94,10 +97,51 @@ contract TychoRouterTest is TychoRouterTestSetup {
     }
 
     // FEE CALCULATOR TESTS
-    function testSetFeeCalculator() public {
+    function testSetFeeCalculatorQueuesPending() public {
+        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER);
         vm.prank(FEE_SETTER);
-        tychoRouter.setFeeCalculator(address(feeCalculator));
+        tychoRouter.setFeeCalculator(address(newCalc));
+
+        (address pending, uint256 activationTs) =
+            tychoRouter.getPendingFeeCalculator();
+        assertEq(pending, address(newCalc));
+        assertEq(
+            activationTs,
+            block.timestamp + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION()
+        );
+        // Active calculator unchanged
         assertEq(tychoRouter.getFeeCalculator(), address(feeCalculator));
+    }
+
+    function testActivationAfterTimelock() public {
+        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER);
+        vm.prank(FEE_SETTER);
+        tychoRouter.setFeeCalculator(address(newCalc));
+
+        vm.warp(block.timestamp + tychoRouter.DELAY_FEE_CALCULATOR_ACTIVATION());
+        vm.prank(FEE_SETTER);
+        tychoRouter.activateFeeCalculator();
+
+        assertEq(tychoRouter.getFeeCalculator(), address(newCalc));
+        (address pending,) = tychoRouter.getPendingFeeCalculator();
+        assertEq(pending, address(0));
+    }
+
+    function testActivationRevertsWhenTimelocked() public {
+        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER);
+        vm.prank(FEE_SETTER);
+        tychoRouter.setFeeCalculator(address(newCalc));
+
+        vm.prank(FEE_SETTER);
+        vm.expectRevert();
+        tychoRouter.activateFeeCalculator();
+        assertEq(tychoRouter.getFeeCalculator(), address(feeCalculator));
+    }
+
+    function testActivationRevertsWhenNoPending() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(TychoRouter__NoPendingFeeCalculator.selector);
+        tychoRouter.activateFeeCalculator();
     }
 
     function testSetFeeCalculatorNonContract() public {
@@ -116,18 +160,17 @@ contract TychoRouterTest is TychoRouterTestSetup {
         tychoRouter.setFeeCalculator(address(feeCalculator));
     }
 
-    function testSetFeeCalculatorUpdatesCorrectly() public {
-        // Deploy a new FeeCalculator contract
-        FeeCalculator newFeeCalculator = new FeeCalculator(FEE_SETTER);
+    function testSetFeeCalculatorOverwritesPending() public {
+        FeeCalculator calc1 = new FeeCalculator(FEE_SETTER);
+        FeeCalculator calc2 = new FeeCalculator(FEE_SETTER);
 
         vm.startPrank(FEE_SETTER);
-        tychoRouter.setFeeCalculator(address(feeCalculator));
-        assertEq(tychoRouter.getFeeCalculator(), address(feeCalculator));
-
-        tychoRouter.setFeeCalculator(address(newFeeCalculator));
+        tychoRouter.setFeeCalculator(address(calc1));
+        tychoRouter.setFeeCalculator(address(calc2));
         vm.stopPrank();
 
-        assertEq(tychoRouter.getFeeCalculator(), address(newFeeCalculator));
+        (address pending,) = tychoRouter.getPendingFeeCalculator();
+        assertEq(pending, address(calc2));
     }
 
     function testConstructorNonContractFeeCalculator() public {

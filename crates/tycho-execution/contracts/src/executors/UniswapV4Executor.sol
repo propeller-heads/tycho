@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 import {
     IERC20,
     SafeERC20
@@ -78,13 +79,15 @@ contract UniswapV4Executor is IExecutor, ICallback {
         _swapExactInputSingleSelector = this.swapExactInputSingle.selector;
     }
 
-    function fundsExpectedAddress(
-        bytes calldata /* data */
-    )
+    function fundsExpectedAddress(bytes calldata data)
         external
         view
         returns (address receiver)
     {
+        bool skipUnlock = data[41] != 0;
+        if (skipUnlock) {
+            return address(poolManager);
+        }
         return msg.sender;
     }
 
@@ -105,9 +108,15 @@ contract UniswapV4Executor is IExecutor, ICallback {
         address tokenIn;
         address tokenOut;
         bool zeroForOne;
+        bool skipUnlock;
         UniswapV4Executor.UniswapV4Pool[] memory pools;
-        (tokenIn, tokenOut, zeroForOne, pools) = _decodeData(data);
+        (tokenIn, tokenOut, zeroForOne, skipUnlock, pools) = _decodeData(data);
+        // When skipUnlock=true, output must land at the router so the
+        // Dispatcher can measure the balance diff and forward via
+        // _transferOut (outputToRouter=true in getTransferData).
+        address swapReceiver = skipUnlock ? address(this) : receiver;
         bytes memory swapData;
+        bytes4 selector;
         if (pools.length == 1) {
             PoolKey memory key = PoolKey({
                 currency0: Currency.wrap(zeroForOne ? tokenIn : tokenOut),
@@ -116,12 +125,13 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 tickSpacing: pools[0].tickSpacing,
                 hooks: IHooks(pools[0].hook)
             });
+            selector = _swapExactInputSingleSelector;
             swapData = abi.encodeWithSelector(
-                this.swapExactInputSingle.selector,
+                selector,
                 key,
                 zeroForOne,
                 amountIn,
-                receiver,
+                swapReceiver,
                 pools[0].hookData
             );
         } else {
@@ -143,13 +153,43 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 this.swapExactInput.selector,
                 currencyIn,
                 amountIn,
-                receiver,
+                swapReceiver,
                 path
             );
         }
-        poolManager.sync(Currency.wrap(tokenIn));
-        // slither-disable-next-line unused-return
-        poolManager.unlock(swapData);
+        if (skipUnlock) {
+            // Caller must have called poolManager.sync(tokenIn)
+            // and the Dispatcher transferred tokens to PM already.
+            // This delegatecall is safe because the swapData signature is constructed
+            // in this method.
+            // slither-disable-next-line low-level-calls
+            (bool success, bytes memory returnData) =
+                _self.delegatecall(swapData);
+            if (!success) {
+                revert(
+                    string(
+                        returnData.length > 0
+                            ? returnData
+                            : abi.encodePacked(
+                                "Uniswap v4 swap without unlock failed"
+                            )
+                    )
+                );
+            }
+            // Snapshot PM's tokenOut balance so the Dispatcher's _transferOut (which
+            // forwards output to PM for the next sequential hop) is detected by the
+            // next settle(). This is safe to do even if there is no next hop.
+            poolManager.sync(Currency.wrap(tokenOut));
+        } else {
+            poolManager.sync(Currency.wrap(tokenIn));
+            // slither-disable-next-line unused-return
+            poolManager.unlock(swapData);
+        }
+    }
+
+    /// @dev Swap data uses ETH_ADDRESS for native ETH; translate to address(0) for V4 protocol interaction.
+    function _toV4Token(address token) internal pure returns (address) {
+        return token == ETH_ADDRESS ? address(0) : token;
     }
 
     // slither-disable-next-line dead-code
@@ -161,18 +201,20 @@ contract UniswapV4Executor is IExecutor, ICallback {
             address tokenIn,
             address tokenOut,
             bool zeroForOne,
+            bool skipUnlock,
             UniswapV4Pool[] memory pools
         )
     {
-        if (data.length < 89) {
+        if (data.length < 90) {
             revert UniswapV4Executor__InvalidDataLength();
         }
 
-        tokenIn = address(bytes20(data[0:20]));
-        tokenOut = address(bytes20(data[20:40]));
+        tokenIn = _toV4Token(address(bytes20(data[0:20])));
+        tokenOut = _toV4Token(address(bytes20(data[20:40])));
         zeroForOne = data[40] != 0;
+        skipUnlock = data[41] != 0;
 
-        bytes calldata remaining = data[41:];
+        bytes calldata remaining = data[42:];
 
         // Decode first pool with hook data
         if (remaining.length < 48) {
@@ -180,7 +222,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
             revert UniswapV4Executor__InvalidDataLength();
         }
 
-        address firstToken = address(bytes20(remaining[0:20]));
+        address firstToken = _toV4Token(address(bytes20(remaining[0:20])));
         uint24 firstFee = uint24(bytes3(remaining[20:23]));
         int24 firstTickSpacing = int24(uint24(bytes3(remaining[23:26])));
         address firstHook = address(bytes20(remaining[26:46]));
@@ -231,6 +273,8 @@ contract UniswapV4Executor is IExecutor, ICallback {
                 hook := shr(96, mload(add(dataPtr, 26)))
                 hookDataLength := and(shr(240, mload(add(dataPtr, 46))), 0xffff)
             }
+
+            intermediaryToken = _toV4Token(intermediaryToken);
 
             if (poolData.length < 48 + hookDataLength) {
                 revert UniswapV4Executor__InvalidDataLength();
@@ -520,7 +564,7 @@ contract UniswapV4Executor is IExecutor, ICallback {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        view
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -531,25 +575,49 @@ contract UniswapV4Executor is IExecutor, ICallback {
     {
         tokenIn = address(bytes20(data[0:20]));
         tokenOut = address(bytes20(data[20:40]));
-        return (
-            TransferManager.TransferType.None,
-            address(0),
-            tokenIn,
-            tokenOut,
-            false
-        );
+        bool skipUnlock = data[41] != 0;
+
+        // In the case where the unlock is skipped - the callback is not performed.
+        if (skipUnlock) {
+            if (tokenIn == ETH_ADDRESS) {
+                return (
+                    TransferManager.TransferType.TransferNativeInExecutor,
+                    address(0),
+                    tokenIn,
+                    tokenOut,
+                    true
+                );
+            } else {
+                return (
+                    TransferManager.TransferType.Transfer,
+                    address(poolManager),
+                    tokenIn,
+                    tokenOut,
+                    true
+                );
+            }
+        } else {
+            return (
+                TransferManager.TransferType.None,
+                address(0),
+                tokenIn,
+                tokenOut,
+                false
+            );
+        }
     }
 
     function getCallbackTransferData(
         bytes calldata, /* data */
-        address tokenIn
+        address tokenIn,
+        address /* caller */
     )
         external
-        payable
+        view
         returns (TransferManager.TransferType transferType, address receiver)
     {
         receiver = address(poolManager);
-        if (tokenIn == address(0)) {
+        if (tokenIn == ETH_ADDRESS) {
             transferType = TransferManager.TransferType.TransferNativeInExecutor;
         } else {
             transferType = TransferManager.TransferType.Transfer;

@@ -74,11 +74,11 @@ contract VaultTest is Constants, TestUtils {
         deal(ALICE, amount);
         uint256 balanceBefore = address(vault).balance;
         vm.startPrank(ALICE);
-        vault.deposit{value: amount}(address(0), amount);
+        vault.deposit{value: amount}(ETH_ADDR, amount);
 
         assertEq(ALICE.balance, 0);
         assertEq(address(vault).balance - balanceBefore, amount);
-        assertEq(vault.balanceOf(ALICE, uint256(uint160(address(0)))), amount);
+        assertEq(vault.balanceOf(ALICE, uint256(uint160(ETH_ADDR))), amount);
     }
 
     function testWithdrawERC20() public {
@@ -104,16 +104,15 @@ contract VaultTest is Constants, TestUtils {
         deal(user, amount);
         uint256 balanceBefore = address(vault).balance;
         vm.startPrank(user);
-        vault.deposit{value: amount}(address(0), amount);
+        vault.deposit{value: amount}(ETH_ADDR, amount);
 
         uint256 amountToWithdraw = amount / 2;
-        vault.withdraw(address(0), amountToWithdraw);
+        vault.withdraw(ETH_ADDR, amountToWithdraw);
 
         assertEq(user.balance, amountToWithdraw);
         assertEq(address(vault).balance - balanceBefore, amountToWithdraw);
         assertEq(
-            vault.balanceOf(user, uint256(uint160(address(0)))),
-            amountToWithdraw
+            vault.balanceOf(user, uint256(uint160(ETH_ADDR))), amountToWithdraw
         );
     }
 
@@ -394,5 +393,26 @@ contract VaultTest is Constants, TestUtils {
 
         assertEq(balanceStart - balanceEnd, inputAmount);
         assertEq(balanceEnd, 1_000_000);
+    }
+
+    function testDepositFeeOnTransferToken() public {
+        // TWIF charges 6% on every transfer
+        address TWIF = 0x2Dd636C514Bb4705c756D161585Ff9ec665f18A2;
+
+        uint256 amount = 1_000_000;
+        uint256 expectedReceived = amount - (amount * 6) / 100;
+
+        deal(TWIF, ALICE, amount);
+        vm.startPrank(ALICE);
+        IERC20(TWIF).approve(address(vault), amount);
+        vault.deposit(TWIF, amount);
+        vm.stopPrank();
+
+        // Vault credits only the actual received amount
+        assertEq(
+            vault.balanceOf(ALICE, uint256(uint160(TWIF))), expectedReceived
+        );
+        // Router holds exactly the credited amount
+        assertEq(IERC20(TWIF).balanceOf(address(vault)), expectedReceived);
     }
 }

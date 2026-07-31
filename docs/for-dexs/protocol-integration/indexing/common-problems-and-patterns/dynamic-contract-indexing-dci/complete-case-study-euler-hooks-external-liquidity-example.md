@@ -12,7 +12,7 @@ This section provides a comprehensive walkthrough of the Euler hook integration 
 
 Euler is a standalone protocol, that designed an interface to be Hook-compliant, allowing it to be accessible by UniswapV4 Pools. This is a common pattern with current hooks, and are considered by Tycho Hooks with External Liquidity.
 
-You can learn more about the protocol [here](https://docs.euler.finance/)
+You can learn more about the protocol <a href="https://docs.euler.finance/" target="_blank" rel="noopener noreferrer">here</a>
 
 **Euler Hook Pattern (External Liquidity)**:
 

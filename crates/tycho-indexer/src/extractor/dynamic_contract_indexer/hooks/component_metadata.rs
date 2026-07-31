@@ -840,7 +840,8 @@ impl RpcTransport {
         // separation between RPC requests and providers, we will use a default routing key.
         let routing_key = "rpc_default".to_string();
 
-        Self { endpoint, method, params, id: rand::random::<u64>() % 10000, routing_key } //TODO: use a better id that ensure no collisions at all
+        Self { endpoint, method, params, id: rand::random::<u64>() % 10000, routing_key }
+        //TODO: use a better id that ensure no collisions at all
     }
 
     pub(super) fn eth_call(

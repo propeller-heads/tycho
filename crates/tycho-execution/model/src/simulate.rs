@@ -30,8 +30,12 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     // assumption: all swap methods revert if `amount_in = 0`.
     // no need to simulate it.
     let amount_in = params.request("amount_in", vec![1, 10000])?;
-    let token_in = params.request("token_in", Address::VARIANTS)?;
-    let token_out = params.request("token_out", Address::VARIANTS)?;
+
+    // assumption: all swap methods revert if `token_in = 0` or `token_out = 0`.
+    // no need to simulate it.
+    let token_in = params.request("token_in", Address::VARIANTS_EXCEPT_ZERO)?;
+    let token_out = params.request("token_out", Address::VARIANTS_EXCEPT_ZERO)?;
+
     // assumption: all swap methods revert if `min_amount_out = 0`.
     // no need to simulate it.
     let min_amount_out = params.request("min_amount_out", [1, 10000])?;

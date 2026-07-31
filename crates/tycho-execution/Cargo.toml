@@ -36,9 +36,10 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
 tokio      = { workspace = true }
+tracing    = { workspace = true }
 tycho-common = { workspace = true }
 typetag    = { workspace = true, optional = true }
-alloy      = { workspace = true, features = ["providers", "rpc-types-eth", "eip712", "signer-local", "node-bindings", "sol-types"], optional = true }
+alloy      = { workspace = true, features = ["providers", "rpc-types-eth", "eip712", "signer-local", "node-bindings", "sol-types", "transport-http", "reqwest-rustls-tls"], optional = true }
 async-trait = { workspace = true, optional = true }
 
 [dev-dependencies]

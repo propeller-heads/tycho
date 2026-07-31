@@ -8,12 +8,12 @@ How to swap on-chain with Tycho. This quickstart will help you:
 * Simulate or execute the best trade using Tycho Execution.
 
 {% hint style="success" %}
-Want to chat with our docs? Download an LLM-friendly [text file of the full Tycho docs](https://docs.propellerheads.xyz/tycho/llms-full.txt).
+Want to chat with our docs? Download an LLM-friendly <a href="https://docs.propellerheads.xyz/tycho/llms-full.txt" target="_blank" rel="noopener noreferrer">text file of the full Tycho docs</a>.
 {% endhint %}
 
 ## Run the Quickstart
 
-Clone the [Tycho repository](https://github.com/propeller-heads/tycho-indexer); here's [the quickstart](https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/examples/quickstart/main.rs) code.
+Clone the <a href="https://github.com/propeller-heads/tycho-indexer" target="_blank" rel="noopener noreferrer">Tycho repository</a>; here's <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/examples/quickstart/main.rs" target="_blank" rel="noopener noreferrer">the quickstart</a> code.
 
 Run the quickstart with execution using the following commands:
 
@@ -46,7 +46,7 @@ cargo run --release --example quickstart -- --chain unichain
 {% endtab %}
 {% endtabs %}
 
-If you don't have an RPC URL, here are some public ones for [Ethereum Mainnet](https://ethereumnodes.com/), [Unichain](https://chainlist.org/chain/130), and [Base](https://chainlist.org/chain/8453).
+If you don't have an RPC URL, here are some public ones for <a href="https://ethereumnodes.com/" target="_blank" rel="noopener noreferrer">Ethereum Mainnet</a>, <a href="https://chainlist.org/chain/130" target="_blank" rel="noopener noreferrer">Unichain</a>, and <a href="https://chainlist.org/chain/8453" target="_blank" rel="noopener noreferrer">Base</a>.
 
 The `PRIVATE_KEY` environment variable is unnecessary if you want to run the quickstart without simulation or execution.
 
@@ -82,7 +82,7 @@ cargo run --release --example quickstart -- --sell-token "0x833589fCD6eDb6E08f4c
 
 This example would seek the best swap for 10 USDC -> WETH on Base.
 
-The TVL filter means we will only look for snapshot data for pools with TVL greater than the specified threshold (in ETH). Its default is **1000 ETH** to limit the data you pull.
+The TVL filter means we will only look for snapshot data for pools with TVL greater than the specified threshold, denominated in the chain's native token. See [TVL Filtering](for-solvers/indexer/tycho-client/README.md#tvl-filtering) for default values per chain.
 
 #### Logs
 
@@ -107,7 +107,7 @@ The quickstart shows you how to:
 Run Tycho Indexer by setting up the following environment variables:
 
 * TYCHO\_URL (by default `"tycho-beta.propellerheads.xyz"`)
-* TYCHO\_API\_KEY key
+* TYCHO\_API\_KEY key ([get one from @fynd\_portal\_bot](https://t.me/fynd_portal_bot))
 * PRIVATE\_KEY if you wish to execute the swap against the Tycho Router
 
 The Indexer stream or the Simulation does not manage tokens; you manage them yourself.
@@ -206,8 +206,7 @@ let solution = Solution::new(
 #### b. Encode solution
 
 ```rust
-let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
-    .add_default_encoders(None)
+let swap_encoder_registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum)
     .expect("Failed to get default SwapEncoderRegistry");
     
 let encoder = TychoRouterEncoderBuilder::new()
@@ -239,10 +238,10 @@ let tx = encode_tycho_router_call(
 ```
 
 {% hint style="danger" %}
-:warning: These functions are only examples intended for use within the quickstart.\
+These functions are only examples intended for use within the quickstart.\
 **Do not use them in production.** You must write your own logic to:
 
-* Control parameters like `minAmountOut` and `receiver` .
+* Control parameters like `minAmountOut` and `receiver`.
 * Sign the permit2 object safely and correctly.
 
 This gives you full control over execution. And it protects you from MEV and slippage risks.

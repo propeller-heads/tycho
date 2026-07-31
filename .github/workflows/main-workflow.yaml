@@ -49,6 +49,8 @@ jobs:
       image_tag: ${{ needs.release.outputs.next_release_version }}
       image_name: tycho-indexer
       dockerfile: docker/tycho-indexer.Dockerfile
+      build_args: CARGO_PROFILE=profiling # Use profiling profile for heap profiling with jeprof/pprof. The cost is a bigger binary, no performance penalty.
+      # kaniko_verbosity: debug
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}

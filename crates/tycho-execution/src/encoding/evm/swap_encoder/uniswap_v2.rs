@@ -35,8 +35,8 @@ impl SwapEncoder for UniswapV2SwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let token_in_address = bytes_to_address(swap.token_in())?;
-        let token_out_address = bytes_to_address(swap.token_out())?;
+        let token_in_address = bytes_to_address(&swap.token_in().address)?;
+        let token_out_address = bytes_to_address(&swap.token_out().address)?;
         let component_id = Address::from_str(&swap.component().id)
             .map_err(|_| EncodingError::FatalError("Invalid USV2 component id".to_string()))?;
 
@@ -55,12 +55,13 @@ impl SwapEncoder for UniswapV2SwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
     use crate::encoding::{
         evm::{swap_encoder::uniswap_v2::UniswapV2SwapEncoder, utils::write_calldata_to_file},
-        models::Swap,
+        models::{default_token, Swap},
     };
     #[test]
     fn test_encode_uniswap_v2() {
@@ -71,7 +72,12 @@ mod tests {
 
         let token_in = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
         let token_out = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
-        let swap = Swap::new(usv2_pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            usv2_pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),

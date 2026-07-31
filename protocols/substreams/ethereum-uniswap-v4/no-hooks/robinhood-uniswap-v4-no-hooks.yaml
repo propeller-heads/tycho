@@ -1,0 +1,139 @@
+specVersion: v0.1.0
+package:
+  name: "robinhood_uniswap_v4_no_hooks"
+  version: v0.4.2
+  url: "https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/ethereum-uniswap-v4/no-hooks"
+
+protobuf:
+  files:
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - uniswap.proto
+  importPaths:
+    - ../../../../proto
+    - ../shared/proto
+  excludePaths:
+    - sf/substreams
+    - google
+    - tycho
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v4_no_hooks.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 9070
+    updatePolicy: set_if_not_exists
+    valueType: proto:uniswap.v4.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_events
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:uniswap.v4.Events
+
+  - name: store_pool_current_tick
+    kind: store
+    initialBlock: 9070
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_events
+
+  - name: store_pool_current_sqrt_price
+    kind: store
+    initialBlock: 9070
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - map: map_events
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - map: map_events
+      - store: store_pool_current_sqrt_price
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    initialBlock: 9070
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_ticks_changes
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - map: map_events
+    output:
+      type: proto:uniswap.v4.TickDeltas
+
+  - name: store_ticks_liquidity
+    kind: store
+    initialBlock: 9070
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_ticks_changes
+
+  - name: map_liquidity_changes
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - map: map_events
+      - store: store_pool_current_tick
+    output:
+      type: proto:uniswap.v4.LiquidityChanges
+
+  - name: store_liquidity
+    kind: store
+    initialBlock: 9070
+    updatePolicy: set_sum
+    valueType: bigint
+    inputs:
+      - map: map_liquidity_changes
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - map: map_events
+      - map: map_balance_changes
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_ticks_changes
+      - store: store_ticks_liquidity
+        mode: deltas
+      - map: map_liquidity_changes
+      - store: store_liquidity
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: "8366a39CC670B4001A1121B8F6A443A643e40951"

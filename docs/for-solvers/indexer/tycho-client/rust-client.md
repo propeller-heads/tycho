@@ -11,12 +11,14 @@ Tycho offers another packaged called Tycho Simulation, which uses Tycho Client t
 To use Tycho Client in Rust, add the following crates to your `Cargo.toml`:
 
 ```toml
-// Cargo.toml
-
 [dependencies]
-tycho-client = "0.66.2"
-tycho-common = "0.66.2"
+tycho-client = "x.y.z"
+tycho-common = "x.y.z"
 ```
+
+{% hint style="info" %}
+**Note:** Replace `x.y.z` with the latest version from <a href="https://crates.io/crates/tycho-client" target="_blank" rel="noopener noreferrer">crates.io</a>.
+{% endhint %}
 
 **Step 2: Use Tycho-client**
 

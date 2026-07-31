@@ -28,7 +28,7 @@ contract FluidV1ExecutorExposed is FluidV1Executor {
     // The first argument is the token that must be transferred to liquidity.
     function dexCallback(address tokenIn, uint256) public {
         (TransferManager.TransferType transferType, address receiver) =
-            this.getCallbackTransferData(msg.data, tokenIn);
+            this.getCallbackTransferData(msg.data, tokenIn, msg.sender);
         if (transferType == TransferManager.TransferType.Transfer) {
             uint256 amount = abi.decode(msg.data[36:68], (uint256));
             IERC20(tokenIn).transfer(receiver, amount);
@@ -94,7 +94,7 @@ contract FluidV1ExecutorTest is Test, Constants {
         executor.setCurrentDex(IFluidV1Dex(dexAddress));
 
         (TransferManager.TransferType transferType, address receiver) =
-            executor.getCallbackTransferData(data, DAI_ADDR);
+            executor.getCallbackTransferData(data, DAI_ADDR, address(this));
 
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
@@ -105,12 +105,12 @@ contract FluidV1ExecutorTest is Test, Constants {
     function testGetCallbackTransferDataETH() public {
         uint256 amountOwed = 1000000000000000000;
         bytes memory data =
-            abi.encodeWithSelector(hex"12345678", address(0), amountOwed);
+            abi.encodeWithSelector(hex"12345678", ETH_ADDR, amountOwed);
         address dexAddress = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
         executor.setCurrentDex(IFluidV1Dex(dexAddress));
 
         (TransferManager.TransferType transferType, address receiver) =
-            executor.getCallbackTransferData(data, address(0));
+            executor.getCallbackTransferData(data, ETH_ADDR, address(this));
 
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
@@ -177,7 +177,7 @@ contract FluidV1ExecutorTest is Test, Constants {
         IERC20 ezETH = IERC20(0xbf5495Efe5DB9ce00f80364C8B423567e58d2110);
         uint256 amountIn = 10e18;
         bytes memory params =
-            abi.encodePacked(dex, false, address(0), address(ezETH), true);
+            abi.encodePacked(dex, false, ETH_ADDR, address(ezETH), true);
         deal(address(executor), amountIn);
         uint256 balanceBefore = ezETH.balanceOf(BOB);
 
@@ -192,7 +192,7 @@ contract FluidV1ExecutorTest is Test, Constants {
         IERC20 ezETH = IERC20(0xbf5495Efe5DB9ce00f80364C8B423567e58d2110);
         uint256 amountIn = 10e18;
         bytes memory params =
-            abi.encodePacked(dex, true, address(ezETH), address(0), false);
+            abi.encodePacked(dex, true, address(ezETH), ETH_ADDR, false);
         deal(address(ezETH), address(executor), amountIn);
         uint256 balanceBefore = BOB.balance;
 
@@ -259,7 +259,7 @@ contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
         bytes memory protocolData = abi.encodePacked(
             fluidDex,
             false, // zero2one
-            address(0), // tokenIn = native ETH
+            ETH_ADDR, // tokenIn = native ETH
             address(ezETH), // tokenOut
             true // isNativeSell
         );
@@ -268,7 +268,7 @@ contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
 
         vm.prank(ALICE);
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
-            amountIn, address(0), address(ezETH), 1, ALICE, noClientFee(), swap
+            amountIn, ETH_ADDR, address(ezETH), 1, ALICE, noClientFee(), swap
         );
 
         assertGt(amountOut, 0);

@@ -32,8 +32,8 @@ impl SwapEncoder for AerodromeV1SwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let token_in_address = bytes_to_address(swap.token_in())?;
-        let token_out_address = bytes_to_address(swap.token_out())?;
+        let token_in_address = bytes_to_address(&swap.token_in().address)?;
+        let token_out_address = bytes_to_address(&swap.token_out().address)?;
         let zero_for_one = token_in_address < token_out_address;
         let component_id = Address::from_str(&swap.component().id).map_err(|_| {
             EncodingError::FatalError("Invalid aerodrome_v1 component id".to_string())
@@ -54,12 +54,13 @@ impl SwapEncoder for AerodromeV1SwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
     use crate::encoding::{
         evm::{swap_encoder::aerodrome_v1::AerodromeV1SwapEncoder, utils::write_calldata_to_file},
-        models::Swap,
+        models::{default_token, Swap},
     };
 
     #[test]
@@ -71,7 +72,12 @@ mod tests {
 
         let token_in = Bytes::from("0x236aa50979d5f3de3bd1eeb40e81137f22ab794b");
         let token_out = Bytes::from("0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca");
-        let swap = Swap::new(pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),

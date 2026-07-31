@@ -33,25 +33,54 @@ impl<T: Log> Outcome<T> {
         Self { params, state, vault, log }
     }
 
-    /// Right now the [Outcome] is considered suspicious if the
-    /// caller ends up with more ETH or WETH on the addresses they
-    /// control ([Address::is_sender_controlled]) than they had before
-    /// the transaction.
-    ///
-    /// TODO should be extended to detect more suspicious scenarios.
-    /// only looks at situations where the user can steal assets.
-    /// TODO also detect situations where the user can waste assets.
+    /// The [Outcome] is considered suspicious if:
+    /// 1. The caller ends up with more ETH or WETH on the addresses they control
+    ///    ([Address::is_sender_controlled]) than they had before the transaction (stealing assets).
+    /// 2. The router's on-chain ETH/WETH loss exceeds the reduction in vault balances. A client
+    ///    contribution that debits a vault balance to cover the router's outflow is not suspicious
+    ///    — the client paid for it.
     pub fn is_suspicious(&self) -> bool {
         let msg_value: i64 = self
             .params
             .get("msg_value")
             .unwrap_or(0);
-        self.final_caller_eth_balance() > msg_value
+        self.final_caller_eth_balance() > msg_value ||
+            self.final_router_eth_balance() < self.sender_vault_eth_change()
+    }
+
+    /// ETH/WETH vault balance change for sender-controlled addresses.
+    /// These parties consented: msg.sender by calling the function,
+    /// ClientFeeReceiver by signing the client fee params.
+    fn sender_vault_eth_change(&self) -> i64 {
+        let mut total = 0;
+        for ((owner, token), balance) in &self.vault.owner_and_token_to_balance {
+            if owner.is_sender_controlled() &&
+                (*token == Address::NativeETH || *token == Address::WETH)
+            {
+                total += balance;
+            }
+        }
+        total
+    }
+
+    /// On-chain ETH and WETH balance delta of [Address::Router].
+    /// A negative value means the router lost tokens.
+    pub fn final_router_eth_balance(&self) -> i64 {
+        self.state
+            .owner_to_eth_balance
+            .get(&Address::Router)
+            .copied()
+            .unwrap_or(0) +
+            self.state
+                .owner_and_token_to_balance
+                .get(&(Address::Router, Address::WETH))
+                .copied()
+                .unwrap_or(0)
     }
 
     /// Return the positive or negative ETH and WETH balance the caller
     /// has at the end of the simulated transaction
-    /// accross all addresses they control ([Address::is_sender_controlled]).
+    /// across all addresses they control ([Address::is_sender_controlled]).
     pub fn final_caller_eth_balance(&self) -> i64 {
         let mut total_eth = 0;
         for (owner, balance) in &self.state.owner_to_eth_balance {
@@ -87,7 +116,7 @@ impl<T: Log> Outcome<T> {
                 // TODO if you introduce other value holding erc20 tokens,
                 // make sure to add code for them here and introduce
                 // some fixed conversion rate to eth
-                if *token == Address::Zero || *token == Address::WETH {
+                if *token == Address::NativeETH || *token == Address::WETH {
                     total_eth += balance;
                 }
             }
@@ -106,6 +135,10 @@ impl<T: Log + Serialize> Serialize for Outcome<T> {
         let final_caller_eth_balance = self.final_caller_eth_balance();
         if final_caller_eth_balance > 0 {
             s.serialize_entry("final_caller_eth_balance", &final_caller_eth_balance)?;
+        }
+        let final_router_eth_balance = self.final_router_eth_balance();
+        if final_router_eth_balance < 0 {
+            s.serialize_entry("final_router_eth_balance", &final_router_eth_balance)?;
         }
 
         if !self

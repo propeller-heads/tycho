@@ -26,7 +26,9 @@ contract BalancerV3ExecutorExposed is BalancerV3Executor {
         // tokenIn is at bytes [32:52] in the Balancer V3 callback data:
         // amountGiven(32) | tokenIn(20) | tokenOut(20) | poolId(20) | receiver(20)
         address tokenIn = address(bytes20(data[32:52]));
-        (, address receiver) = this.getCallbackTransferData(data, tokenIn);
+        (TransferManager.TransferType transferType, address receiver) =
+            this.getCallbackTransferData(data, tokenIn, msg.sender);
+        assert(transferType == TransferManager.TransferType.Transfer);
         uint256 amount = uint256(bytes32(data[0:32]));
         IERC20(tokenIn).transfer(receiver, amount);
         return abi.encode(_swapCallback(data));
@@ -91,8 +93,9 @@ contract BalancerV3ExecutorTest is Constants, TestUtils {
         uint256 amountOwed = 1 ether;
         bytes memory params =
             abi.encodePacked(amountOwed, WBTC_ADDR, address(0), address(0));
-        (TransferManager.TransferType transferType, address receiver) =
-            balancerV3Exposed.getCallbackTransferData(params, WBTC_ADDR);
+        (TransferManager.TransferType transferType, address receiver) = balancerV3Exposed.getCallbackTransferData(
+            params, WBTC_ADDR, address(this)
+        );
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
         );

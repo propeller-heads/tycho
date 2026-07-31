@@ -31,10 +31,12 @@ TychoStreamBuilder (stream.rs)
 ## Sync Lifecycle
 
 1. `WsDeltasClient` subscribes; first message determines snapshot block
-2. `HttpRPCClient` fetches snapshot at that block; deltas buffer until it arrives.
-   When `partial_blocks` is enabled, components created on a partial block cannot be snapshotted
-   immediately — their snapshots are deferred (`deferred_snapshot_components`) until the first
-   message of the next block arrives, then fetched at the previous block's height.
+2. `HttpRPCClient` fetches initial snapshot at that block synchronously; all subsequent new
+   components are fetched via background tasks (`spawn_snapshot_task`) so the delta loop never
+   blocks on RPC. Each component moves through `SnapshotStatus` (`Deferred` → `InFlight`
+   → removed on success, or `RetryNext` / `Blacklisted` on failure). When `partial_blocks` is
+   enabled, brand-new components are held in `Deferred` state until the first message of the next
+   block, then promoted to `InFlight`.
 3. `BlockSynchronizer` waits for all synchronizers, then emits a `FeedMessage` per block
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are kept but skipped
 

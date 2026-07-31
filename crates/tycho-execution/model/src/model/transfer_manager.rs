@@ -171,7 +171,7 @@ fn _transfer_from_user(
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TransferManager.sol#L291>
 pub fn _balance_of(state: &mut State, token: Address, owner: Address) -> Result<i64, Error> {
-    if token == Address::Zero {
+    if token == Address::NativeETH {
         Ok(state.eth_balance(owner))
     } else {
         state.erc20_balance_of(token, owner)
@@ -185,7 +185,7 @@ pub fn _transfer_out(
     to: Address,
     amount: i64,
 ) -> Result<i64, Error> {
-    if token == Address::Zero {
+    if token == Address::NativeETH {
         state.eth_send_value(Address::Router, to, amount)?;
     } else {
         state.erc20_safe_transfer(token, Address::Router, to, amount)?;

@@ -36,8 +36,11 @@ impl SwapEncoder for MaverickV2SwapEncoder {
         let component_id = AlloyBytes::from_str(&swap.component().id)
             .map_err(|_| EncodingError::FatalError("Invalid component ID".to_string()))?;
 
-        let args =
-            (component_id, bytes_to_address(swap.token_in())?, bytes_to_address(swap.token_out())?);
+        let args = (
+            component_id,
+            bytes_to_address(&swap.token_in().address)?,
+            bytes_to_address(&swap.token_out().address)?,
+        );
         Ok(args.abi_encode_packed())
     }
 
@@ -52,11 +55,13 @@ impl SwapEncoder for MaverickV2SwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::evm::{
-        swap_encoder::maverick_v2::MaverickV2SwapEncoder, utils::write_calldata_to_file,
+    use crate::encoding::{
+        evm::{swap_encoder::maverick_v2::MaverickV2SwapEncoder, utils::write_calldata_to_file},
+        models::default_token,
     };
     #[test]
     fn test_encode_maverick_v2() {
@@ -68,7 +73,12 @@ mod tests {
         };
         let token_in = Bytes::from("0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f");
         let token_out = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
-        let swap = Swap::new(maverick_pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            maverick_pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),

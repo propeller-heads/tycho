@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use num_bigint::BigUint;
 use tycho_common::{
     models::{protocol::ProtocolComponent, Chain},
     Bytes,
@@ -61,7 +62,7 @@ impl TychoRouterEncoder {
 
     fn encode_solution(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         self.validate_solution(solution)?;
-        let solution = self.add_weth_swaps(solution, &self.chain);
+        let solution = self.add_native_wrap_swaps(solution, &self.chain);
 
         let groups = group_swaps(solution.swaps());
 
@@ -83,15 +84,18 @@ impl TychoRouterEncoder {
         Ok(encoded_solution)
     }
 
-    /// Returns a new solution with added wrapping/unwrapping swaps if the original solution
-    /// contains a swap that goes from ETH to WETH or vice versa but doesn't include the
-    /// corresponding wrapping or unwrapping swap.
-    fn add_weth_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
+    /// Returns a new solution with added wrapping/unwrapping swaps if the
+    /// original solution contains a swap between a chain's native token and
+    /// its wrapped counterpart but doesn't include the corresponding
+    /// wrapping or unwrapping swap.
+    fn add_native_wrap_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
         let swaps = solution.swaps();
         let mut new_swaps: Vec<Swap> = Vec::with_capacity(swaps.len());
 
         // Check if we need to add a wrapping swap at the beginning of the solution
-        if let Some(s) = self._wrapping_bridge(solution.token_in(), swaps[0].token_in(), chain) {
+        if let Some(s) =
+            self._wrapping_bridge(solution.token_in(), &swaps[0].token_in().address, chain)
+        {
             new_swaps.push(s);
         }
 
@@ -100,8 +104,8 @@ impl TychoRouterEncoder {
         for i in 0..swaps.len() {
             new_swaps.push(swaps[i].clone());
             if i + 1 < swaps.len() {
-                let token_out = swaps[i].token_out();
-                let token_in = swaps[i + 1].token_in();
+                let token_out = &swaps[i].token_out().address;
+                let token_in = &swaps[i + 1].token_in().address;
                 if let Some(s) = self._wrapping_bridge(token_out, token_in, chain) {
                     new_swaps.push(s);
                 }
@@ -111,7 +115,7 @@ impl TychoRouterEncoder {
         // Check if we need to add an unwrapping swap at the end of the solution
         if let Some(last_swap) = swaps.last() {
             if let Some(s) =
-                self._wrapping_bridge(last_swap.token_out(), solution.token_out(), chain)
+                self._wrapping_bridge(&last_swap.token_out().address, solution.token_out(), chain)
             {
                 new_swaps.push(s);
             }
@@ -120,24 +124,18 @@ impl TychoRouterEncoder {
         solution.clone().with_swaps(new_swaps)
     }
 
-    // This method checks if an ETH <-> WETH swap is needed between two tokens and
-    // returns the corresponding swap if needed
     fn _wrapping_bridge(&self, token_a: &Bytes, token_b: &Bytes, chain: &Chain) -> Option<Swap> {
-        let eth = chain.native_token();
-        let weth = chain.wrapped_native_token();
+        let native = chain.native_token();
+        let wrapped_native = chain.wrapped_native_token();
+        let wrap_component = ProtocolComponent {
+            protocol_system: "native_wrapper".to_string(),
+            ..Default::default()
+        };
 
-        if token_a == &weth.address && token_b == &eth.address {
-            Some(Swap::new(
-                ProtocolComponent { protocol_system: "weth".to_string(), ..Default::default() },
-                weth.address.clone(),
-                eth.address.clone(),
-            ))
-        } else if token_a == &eth.address && token_b == &weth.address {
-            Some(Swap::new(
-                ProtocolComponent { protocol_system: "weth".to_string(), ..Default::default() },
-                eth.address.clone(),
-                weth.address.clone(),
-            ))
+        if token_a == &wrapped_native.address && token_b == &native.address {
+            Some(Swap::new(wrap_component, wrapped_native, native, BigUint::from(14_000u64)))
+        } else if token_a == &native.address && token_b == &wrapped_native.address {
+            Some(Swap::new(wrap_component, native, wrapped_native, BigUint::from(7_000u64)))
         } else {
             None
         }
@@ -174,18 +172,18 @@ impl TychoEncoder for TychoRouterEncoder {
         for (i, swap) in swaps.iter().enumerate() {
             // so we don't count the split tokens more than once
             if swap.split() != 0.0 {
-                if !split_tokens_already_considered.contains(swap.token_in()) {
-                    solution_tokens.push(swap.token_in());
-                    split_tokens_already_considered.insert(swap.token_in());
+                if !split_tokens_already_considered.contains(&swap.token_in().address) {
+                    solution_tokens.push(&swap.token_in().address);
+                    split_tokens_already_considered.insert(&swap.token_in().address);
                 }
             } else {
                 // it might be the last swap of the split or a regular swap
-                if !split_tokens_already_considered.contains(swap.token_in()) {
-                    solution_tokens.push(swap.token_in());
+                if !split_tokens_already_considered.contains(&swap.token_in().address) {
+                    solution_tokens.push(&swap.token_in().address);
                 }
             }
             if i == swaps.len() - 1 {
-                solution_tokens.push(swap.token_out());
+                solution_tokens.push(&swap.token_out().address);
             }
         }
 
@@ -197,7 +195,7 @@ impl TychoEncoder for TychoRouterEncoder {
                 .len()
         {
             if let Some(last_swap) = swaps.last() {
-                if *swaps[0].token_in() != *last_swap.token_out() {
+                if *swaps[0].token_in().address != *last_swap.token_out().address {
                     return Err(EncodingError::FatalError(
                         "Cyclical swaps are only allowed if they are the first and last token of a solution".to_string(),
                     ));
@@ -234,7 +232,7 @@ impl TychoExecutorEncoder {
         if number_of_groups > 1 {
             return Err(EncodingError::InvalidInput(format!(
                 "Tycho executor encoder only supports one swap. Found {number_of_groups}"
-            )))
+            )));
         }
 
         let grouped_swap = grouped_swaps
@@ -260,7 +258,7 @@ impl TychoExecutorEncoder {
         let mut initial_protocol_data: Vec<u8> = vec![];
         for swap in grouped_swap.swaps.iter() {
             let protocol_data = swap_encoder.encode_swap(swap, &encoding_context)?;
-            if encoding_context.group_token_in == *swap.token_in() {
+            if encoding_context.group_token_in == *swap.token_in().address {
                 initial_protocol_data = protocol_data;
             } else {
                 grouped_protocol_data.push(protocol_data);
@@ -276,6 +274,7 @@ impl TychoExecutorEncoder {
             swap_encoder.executor_address().clone(),
             "".to_string(),
             0,
+            grouped_swap.estimated_gas.clone(),
         ))
     }
 }
@@ -309,7 +308,7 @@ mod tests {
     use tycho_common::models::{protocol::ProtocolComponent, Chain};
 
     use super::*;
-    use crate::encoding::models::Swap;
+    use crate::encoding::models::{default_token, Swap};
 
     fn dai() -> Bytes {
         Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap()
@@ -352,8 +351,9 @@ mod tests {
                 static_attributes: static_attributes_usdc_eth,
                 ..Default::default()
             },
-            usdc().clone(),
-            eth().clone(),
+            default_token(usdc().clone()),
+            default_token(eth().clone()),
+            BigUint::ZERO,
         )
     }
 
@@ -371,8 +371,9 @@ mod tests {
                 static_attributes: static_attributes_eth_pepe,
                 ..Default::default()
             },
-            eth().clone(),
-            pepe().clone(),
+            default_token(eth().clone()),
+            default_token(pepe().clone()),
+            BigUint::ZERO,
         )
     }
 
@@ -434,8 +435,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                dai().clone(),
-                usdc().clone(),
+                default_token(dai().clone()),
+                default_token(usdc().clone()),
+                BigUint::ZERO,
             );
 
             let swap_weth_dai = Swap::new(
@@ -444,8 +446,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                weth().clone(),
-                dai().clone(),
+                default_token(weth().clone()),
+                default_token(dai().clone()),
+                BigUint::ZERO,
             );
 
             let solution = Solution::new(
@@ -458,15 +461,15 @@ mod tests {
                 vec![swap_dai_usdc, swap_usdc_eth_univ4(), swap_weth_dai],
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps().len(), 4);
-            assert_eq!(solution.swaps()[2].token_in(), &eth());
-            assert_eq!(solution.swaps()[2].token_out(), &weth());
+            assert_eq!(solution.swaps()[2].token_in().address, eth());
+            assert_eq!(solution.swaps()[2].token_out().address, weth());
             assert_eq!(
                 solution.swaps()[2]
                     .component()
                     .protocol_system,
-                "weth"
+                "native_wrapper"
             );
         }
 
@@ -483,8 +486,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                weth().clone(),
-                dai().clone(),
+                default_token(weth().clone()),
+                default_token(dai().clone()),
+                BigUint::ZERO,
             );
 
             let solution = Solution::new(
@@ -497,15 +501,15 @@ mod tests {
                 vec![swap_weth_dai],
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps().len(), 2);
-            assert_eq!(solution.swaps()[0].token_in(), &eth());
-            assert_eq!(solution.swaps()[0].token_out(), &weth());
+            assert_eq!(solution.swaps()[0].token_in().address, eth());
+            assert_eq!(solution.swaps()[0].token_out().address, weth());
             assert_eq!(
                 solution.swaps()[0]
                     .component()
                     .protocol_system,
-                "weth"
+                "native_wrapper"
             );
         }
 
@@ -525,21 +529,25 @@ mod tests {
                 vec![swap_usdc_eth_univ4()],
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             let last_swap = solution.swaps().last().unwrap();
             assert_eq!(solution.swaps().len(), 2);
-            assert_eq!(last_swap.token_in(), &eth());
-            assert_eq!(last_swap.token_out(), &weth());
-            assert_eq!(last_swap.component().protocol_system, "weth");
+            assert_eq!(last_swap.token_in().address, eth());
+            assert_eq!(last_swap.token_out().address, weth());
+            assert_eq!(last_swap.component().protocol_system, "native_wrapper");
         }
 
         #[test]
         fn test_sanity_check_no_missing_wrapped_eth_swap() {
             // USDC -> ETH -> WETH (no swap needed to be added)
             let eth_weth_swap = Swap::new(
-                ProtocolComponent { protocol_system: "weth".to_string(), ..Default::default() },
-                eth(),
-                weth(),
+                ProtocolComponent {
+                    protocol_system: "native_wrapper".to_string(),
+                    ..Default::default()
+                },
+                default_token(eth()),
+                default_token(weth()),
+                BigUint::ZERO,
             );
 
             let input_swaps = vec![swap_usdc_eth_univ4(), eth_weth_swap];
@@ -555,7 +563,7 @@ mod tests {
                 input_swaps.clone(),
             );
 
-            let solution = encoder.add_weth_swaps(&solution, &encoder.chain);
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps().len(), 2);
             assert_eq!(solution.swaps(), input_swaps.as_slice());
         }
@@ -597,8 +605,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    dai().clone(),
-                    weth().clone(),
+                    default_token(dai().clone()),
+                    default_token(weth().clone()),
+                    BigUint::ZERO,
                 ),
                 Swap::new(
                     ProtocolComponent {
@@ -606,8 +615,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    dai().clone(),
-                    weth().clone(),
+                    default_token(dai().clone()),
+                    default_token(weth().clone()),
+                    BigUint::ZERO,
                 ),
                 Swap::new(
                     ProtocolComponent {
@@ -615,8 +625,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    weth().clone(),
-                    dai().clone(),
+                    default_token(weth().clone()),
+                    default_token(dai().clone()),
+                    BigUint::ZERO,
                 ),
             ];
 
@@ -648,8 +659,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    dai().clone(),
-                    weth().clone(),
+                    default_token(dai().clone()),
+                    default_token(weth().clone()),
+                    BigUint::ZERO,
                 ),
                 Swap::new(
                     ProtocolComponent {
@@ -657,8 +669,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    weth().clone(),
-                    usdc().clone(),
+                    default_token(weth().clone()),
+                    default_token(usdc().clone()),
+                    BigUint::ZERO,
                 ),
                 Swap::new(
                     ProtocolComponent {
@@ -666,8 +679,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    usdc().clone(),
-                    dai().clone(),
+                    default_token(usdc().clone()),
+                    default_token(dai().clone()),
+                    BigUint::ZERO,
                 ),
                 Swap::new(
                     ProtocolComponent {
@@ -675,8 +689,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    dai().clone(),
-                    wbtc().clone(),
+                    default_token(dai().clone()),
+                    default_token(wbtc().clone()),
+                    BigUint::ZERO,
                 ),
             ];
 
@@ -715,8 +730,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    weth(),
-                    dai(),
+                    default_token(weth()),
+                    default_token(dai()),
+                    BigUint::ZERO,
                 ),
                 Swap::new(
                     ProtocolComponent {
@@ -724,8 +740,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    dai(),
-                    weth(),
+                    default_token(dai()),
+                    default_token(weth()),
+                    BigUint::ZERO,
                 )
                 .with_split(0.5),
                 Swap::new(
@@ -734,8 +751,9 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    dai(),
-                    weth(),
+                    default_token(dai()),
+                    default_token(weth()),
+                    BigUint::ZERO,
                 ),
             ];
 
@@ -779,8 +797,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                token_in.clone(),
-                token_out.clone(),
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
             );
 
             let solution = Solution::new(
@@ -831,8 +850,9 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                token_in.clone(),
-                token_out.clone(),
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
             );
 
             let solution = Solution::new(
@@ -887,8 +907,10 @@ mod tests {
                     "6982508145454ce325ddbe47a25d4ec3d2311933",
                     // zero for one
                     "00",
+                    // skip unlock
+                    "00",
                     // first pool intermediary token (ETH)
-                    "0000000000000000000000000000000000000000",
+                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                     // fee
                     "000bb8",
                     // tick spacing

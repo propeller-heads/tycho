@@ -7,6 +7,7 @@ library UniswapV4Utils {
         address tokenIn,
         address tokenOut,
         bool zeroForOne,
+        bool skipUnlock,
         UniswapV4Executor.UniswapV4Pool[] memory pools
     ) public pure returns (bytes memory) {
         require(pools.length > 0, "Must have at least one pool");
@@ -36,6 +37,7 @@ library UniswapV4Utils {
             tokenIn,
             tokenOut,
             zeroForOne,
+            skipUnlock,
             firstPool,
             pleEncode(encodedExtraPools)
         );

@@ -13,6 +13,7 @@ use crate::{
     evm::{
         engine_db::{tycho_db::PreCachedDB, SHARED_TYCHO_DB},
         protocol::vm::{constants::get_adapter_file, utils::json_deserialize_address_list},
+        simulation::BlockEnvOverrides,
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -78,7 +79,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
         }
         let involved_contracts = snapshot
             .component
-            .contract_ids
+            .contract_addresses
             .iter()
             .map(|bytes: &Bytes| Address::from_slice(bytes.as_ref()))
             .collect::<HashSet<Address>>();
@@ -87,6 +88,26 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .component
             .static_attributes
             .get("rebase_tokens")
+        {
+            if let Ok(vecs) = json_deserialize_address_list(bytes) {
+                vecs.into_iter()
+                    .map(|addr| Address::from_slice(&addr))
+                    .collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
+        // Tokens whose protocol does not emit token contract storage. Simulation handles their
+        // transfers entirely in the proxy's local bookkeeping (custom approval + recipient balance)
+        // so they never delegate to an implementation another protocol may have left in the shared
+        // DB.
+        let self_contained_tokens: HashSet<Address> = if let Some(bytes) = snapshot
+            .component
+            .static_attributes
+            .get("self_contained_tokens")
         {
             if let Ok(vecs) = json_deserialize_address_list(bytes) {
                 vecs.into_iter()
@@ -163,16 +184,57 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
         if let Some(trace) = &decoder_context.vm_traces {
             vm_traces = *trace;
         }
+        // A protocol may override only one block env field. In that case the VM call will use the
+        // overridden field together with the current block's other field, so block.number and
+        // block.timestamp may not correspond to the same real chain block.
+        let block_number = snapshot
+            .state
+            .attributes
+            .get("override_block_number")
+            .map(|block_number| {
+                <[u8; 8]>::try_from(block_number.as_ref())
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| {
+                        InvalidSnapshotError::ValueError(
+                            "override_block_number attribute must be an 8-byte big-endian u64"
+                                .to_string(),
+                        )
+                    })
+            })
+            .transpose()?;
+        let block_timestamp = snapshot
+            .state
+            .attributes
+            .get("override_block_timestamp")
+            .map(|block_timestamp| {
+                <[u8; 8]>::try_from(block_timestamp.as_ref())
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| {
+                        InvalidSnapshotError::ValueError(
+                            "override_block_timestamp attribute must be an 8-byte big-endian u64"
+                                .to_string(),
+                        )
+                    })
+            })
+            .transpose()?;
+        let block_overrides = if block_number.is_some() || block_timestamp.is_some() {
+            Some(BlockEnvOverrides { number: block_number, timestamp: block_timestamp })
+        } else {
+            None
+        };
         let mut pool_state_builder =
             EVMPoolStateBuilder::new(id.clone(), tokens.clone(), adapter_contract_address)
                 .balances(component_balances)
                 .disable_overwrite_tokens(potential_rebase_tokens)
+                .self_contained_tokens(self_contained_tokens)
                 .account_balances(account_balances)
                 .adapter_contract_bytecode(adapter_bytecode)
                 .involved_contracts(involved_contracts)
                 .stateless_contracts(stateless_contracts)
                 .manual_updates(manual_updates)
-                .trace(vm_traces);
+                .trace(vm_traces)
+                .block_overrides(block_overrides)
+                .spot_price_caller(spot_price_caller(protocol_name));
 
         if let Some(balance_owner) = balance_owner {
             pool_state_builder = pool_state_builder.balance_owner(balance_owner)
@@ -183,10 +245,23 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
             .await
             .map_err(InvalidSnapshotError::VMError)?;
 
+        if let Some(receiver) = decoder_context.live_override.clone() {
+            pool_state.set_live_overrides(receiver);
+        }
+
         pool_state.set_spot_prices(all_tokens)?;
 
         Ok(pool_state)
     }
+}
+
+/// The caller (`tx.origin`) for a protocol's adapter `price()` query.
+///
+/// Balancer V3's price path calls `querySwapExactIn`, which reverts with `NotStaticCall()` unless
+/// `tx.origin == address(0)` (its off-chain query-mode check). Every other adapter uses the
+/// default `EXTERNAL_ACCOUNT` caller (`None`).
+fn spot_price_caller(protocol_name: &str) -> Option<Address> {
+    (protocol_name == "balancer_v3").then_some(Address::ZERO)
 }
 
 #[cfg(test)]
@@ -196,7 +271,10 @@ mod tests {
     use chrono::DateTime;
     use revm::{primitives::KECCAK_EMPTY, state::AccountInfo};
     use serde_json::Value;
-    use tycho_common::dto::{Chain, ChangeType, ProtocolComponent, ResponseProtocolState};
+    use tycho_common::models::{
+        protocol::{ProtocolComponent, ProtocolComponentState},
+        Chain, ChangeType,
+    };
 
     use super::*;
     use crate::evm::{
@@ -229,7 +307,7 @@ mod tests {
             protocol_type_name: "balancer_v2_pool".to_string(),
             chain: Chain::Ethereum,
             tokens,
-            contract_ids: vec![
+            contract_addresses: vec![
                 Bytes::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap()
             ],
             static_attributes,
@@ -251,7 +329,6 @@ mod tests {
         accounts
     }
 
-    #[allow(deprecated)]
     #[tokio::test]
     async fn test_try_from_with_header() {
         let attributes: HashMap<String, Bytes> = vec![
@@ -259,6 +336,8 @@ mod tests {
                 "balance_owner".to_string(),
                 Bytes::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap(),
             ),
+            ("override_block_number".to_string(), Bytes::from(123_u64.to_be_bytes().to_vec())),
+            ("override_block_timestamp".to_string(), Bytes::from(456_u64.to_be_bytes().to_vec())),
             ("reserve1".to_string(), Bytes::from(200_u64.to_le_bytes().to_vec())),
         ]
         .into_iter()
@@ -287,7 +366,7 @@ mod tests {
         .map(|t| (t.address.clone(), t))
         .collect::<HashMap<_, _>>();
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "0x4626d81b3a1711beb79f4cecff2413886d461677000200000000000000000011"
                     .to_owned(),
                 attributes,
@@ -359,5 +438,19 @@ mod tests {
             .insert(Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap());
         assert_eq!(res_pool.get_involved_contracts(), exp_involved_contracts);
         assert!(res_pool.get_manual_updates());
+        // vm_component() is vm:balancer_v2, so the price query uses the default caller.
+        assert_eq!(res_pool.get_spot_price_caller(), None);
+        assert_eq!(
+            res_pool.get_block_overrides(),
+            Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) })
+        );
+    }
+
+    #[test]
+    fn test_spot_price_caller() {
+        // Balancer V3 must query with tx.origin == address(0); everything else uses the default.
+        assert_eq!(spot_price_caller("balancer_v3"), Some(Address::ZERO));
+        assert_eq!(spot_price_caller("balancer_v2"), None);
+        assert_eq!(spot_price_caller("curve"), None);
     }
 }

@@ -28,12 +28,15 @@ use std::{collections::HashMap, default::Default, future::Future};
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tycho_client::feed::{HeaderLike, SynchronizerState};
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
     Bytes,
 };
+
+use crate::evm::override_stream::OverrideSnapshot;
 
 /// Context struct containing attributes for decoders
 ///
@@ -42,11 +45,16 @@ use tycho_common::{
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
+    /// Live per-block VM state override channel, wired into the pool at construction time.
+    ///
+    /// Set internally by the decoder from its registered override providers; not part of the
+    /// public API. External consumers never set this — overrides are fully handled by the library.
+    pub(crate) live_override: Option<watch::Receiver<OverrideSnapshot>>,
 }
 
 impl DecoderContext {
     pub fn new() -> Self {
-        Self { adapter_path: None, vm_traces: None }
+        Self { adapter_path: None, vm_traces: None, live_override: None }
     }
 
     pub fn vm_adapter_path<S: Into<String>>(mut self, path: S) -> Self {
@@ -116,7 +124,7 @@ impl ProtocolComponent {
     }
 
     pub fn from_with_tokens(
-        core_model: tycho_common::dto::ProtocolComponent,
+        core_model: tycho_common::models::protocol::ProtocolComponent,
         tokens: Vec<Token>,
     ) -> Self {
         let id = Bytes::from(core_model.id.as_str());
@@ -124,9 +132,9 @@ impl ProtocolComponent {
             id.clone(),
             core_model.protocol_system,
             core_model.protocol_type_name,
-            core_model.chain.into(),
+            core_model.chain,
             tokens,
-            core_model.contract_ids,
+            core_model.contract_addresses,
             core_model.static_attributes,
             core_model.creation_tx,
             core_model.created_at,
@@ -175,6 +183,9 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
     pub block_number_or_timestamp: u64,
+    /// True when this update is for a partial (pre-confirmation) block, false for full blocks.
+    #[serde(default)]
+    pub is_partial: bool,
     /// Synchronization state per protocol
     pub sync_states: HashMap<String, SynchronizerState>,
     /// The new and updated states of this block.
@@ -196,11 +207,17 @@ impl Update {
     ) -> Self {
         Update {
             block_number_or_timestamp: block_number,
+            is_partial: false,
             sync_states: HashMap::new(),
             states,
             new_pairs,
             removed_pairs: HashMap::new(),
         }
+    }
+
+    pub fn set_is_partial(mut self, is_partial: bool) -> Self {
+        self.is_partial = is_partial;
+        self
     }
 
     pub fn set_removed_pairs(mut self, pairs: HashMap<String, ProtocolComponent>) -> Self {

@@ -57,7 +57,7 @@ impl ProtocolApprovalsManager {
                 })?;
 
                 if allowance < U256::MAX / U256::from(2) {
-                    return Ok(true)
+                    return Ok(true);
                 }
 
                 Ok(false)

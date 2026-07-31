@@ -1,11 +1,14 @@
 use std::{path::Path, str::FromStr};
 
 use clap::Parser;
-use tracing::{error, info};
+use tracing::info;
 use tracing_appender::rolling;
-use tycho_common::dto::Chain;
+use tycho_common::{dto::TvlThresholdTier, models::Chain};
 
-use crate::{feed::component_tracker::ComponentFilter, stream::TychoStreamBuilder};
+use crate::{
+    feed::{component_tracker::ComponentFilter, dto::FeedMessage as FeedMessageDto},
+    stream::TychoStreamBuilder,
+};
 
 /// Tycho Client CLI - A tool for indexing and tracking blockchain protocol data
 ///
@@ -36,10 +39,11 @@ struct CliArgs {
     #[clap(short = 'e', long, number_of_values = 1)]
     exchange: Vec<String>,
 
-    /// Specifies the minimum TVL to filter the components. Denoted in the native token (e.g.
-    /// Mainnet -> ETH). Ignored if addresses or range tvl values are provided.
-    #[clap(long, default_value = "10")]
-    min_tvl: f64,
+    /// Specifies the minimum TVL to filter the components. Denoted in the native token.
+    /// Defaults to a chain-appropriate value targeting ~$20K USD equivalent.
+    /// Ignored if addresses or range tvl values are provided.
+    #[clap(long)]
+    min_tvl: Option<f64>,
 
     /// Specifies the lower bound of the TVL threshold range. Denoted in the native token (e.g.
     /// Mainnet -> ETH). Components below this TVL will be removed from tracking.
@@ -225,7 +229,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
     };
 
     let chain = Chain::from_str(&args.chain)
-        .map_err(|_| format!("Unknown chain: {chain}", chain = &args.chain))?;
+        .map_err(|_| format!("Unknown chain: {chain}", chain = args.chain))?;
 
     let mut builder = TychoStreamBuilder::new(&args.tycho_url, chain)
         .auth_key(args.auth_key)
@@ -253,7 +257,6 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
     if let Some(n) = args.max_messages {
         builder = builder.max_messages(n);
     }
-
     // Register exchanges
     let builder = exchanges
         .into_iter()
@@ -265,7 +268,9 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
             {
                 ComponentFilter::with_tvl_range(remove_tvl, add_tvl)
             } else {
-                ComponentFilter::with_tvl_range(args.min_tvl, args.min_tvl)
+                let default_min_tvl = chain.default_tvl_threshold(TvlThresholdTier::Low);
+                let min_tvl = args.min_tvl.unwrap_or(default_min_tvl);
+                ComponentFilter::with_tvl_range(min_tvl, min_tvl)
             };
             b.exchange(&name, filter)
         });
@@ -280,12 +285,9 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
             let msg =
                 result.map_err(|e| format!("Message printer received synchronizer error: {e}"))?;
 
-            if let Ok(msg_json) = serde_json::to_string(&msg) {
-                println!("{msg_json}");
-            } else {
-                // Log the error but continue processing further messages.
-                error!("Failed to serialize FeedMessage");
-            };
+            let json = serde_json::to_string(&FeedMessageDto::from(msg))
+                .map_err(|e| format!("Message printer failed to serialize message: {e}"))?;
+            println!("{json}");
         }
 
         Ok::<(), String>(())
@@ -349,7 +351,7 @@ mod cli_tests {
         let exchanges: Vec<String> = vec!["uniswap_v2".to_string()];
         assert_eq!(args.tycho_url, "localhost:5000");
         assert_eq!(args.exchange, exchanges);
-        assert_eq!(args.min_tvl, 3000.0);
+        assert_eq!(args.min_tvl, Some(3000.0));
         assert_eq!(args.block_time, Some(50));
         assert_eq!(args.timeout, Some(5));
         assert_eq!(args.log_folder, "test_logs");

@@ -51,8 +51,7 @@ contract CurveExecutorTest is Test, TestUtils, Constants {
     function setUp() public {
         uint256 forkBlock = 22031795;
         vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
-        curveExecutorExposed =
-            new CurveExecutorExposed(ETH_ADDR_FOR_CURVE, STETH_ADDR);
+        curveExecutorExposed = new CurveExecutorExposed(ETH_ADDR, STETH_ADDR);
         metaRegistry = MetaRegistry(CURVE_META_REGISTRY);
     }
 
@@ -140,8 +139,7 @@ contract CurveExecutorTest is Test, TestUtils, Constants {
         uint256 amountIn = 1 ether;
         deal(address(curveExecutorExposed), amountIn);
 
-        bytes memory data =
-            _getData(ETH_ADDR_FOR_CURVE, STETH_ADDR, STETH_POOL, 1);
+        bytes memory data = _getData(ETH_ADDR, STETH_ADDR, STETH_POOL, 1);
 
         curveExecutorExposed.swap(amountIn, data, ALICE);
 
@@ -240,8 +238,7 @@ contract CurveExecutorTest is Test, TestUtils, Constants {
         uint256 amountIn = 1 ether;
         deal(XYO_ADDR, address(curveExecutorExposed), amountIn);
 
-        bytes memory data =
-            _getData(XYO_ADDR, ETH_ADDR_FOR_CURVE, ETH_XYO_POOL, 2);
+        bytes memory data = _getData(XYO_ADDR, ETH_ADDR, ETH_XYO_POOL, 2);
 
         vm.prank(address(curveExecutorExposed));
         IERC20(XYO_ADDR).approve(ETH_XYO_POOL, amountIn);
@@ -392,7 +389,7 @@ contract TychoRouterForCurveTest is TychoRouterTestSetup {
         vm.startPrank(ALICE);
 
         bytes memory curveStEthData = abi.encodePacked(
-            ETH_ADDR_FOR_CURVE,
+            ETH_ADDR,
             STETH_ADDR,
             STETH_POOL,
             uint8(1), // poolType = stable
@@ -405,7 +402,7 @@ contract TychoRouterForCurveTest is TychoRouterTestSetup {
 
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
             amountIn,
-            address(0), // tokenIn = native ETH
+            ETH_ADDR, // tokenIn = native ETH
             STETH_ADDR,
             1, // min amount out
             ALICE,

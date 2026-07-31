@@ -86,7 +86,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
             InvalidSnapshotError::ValueError(format!("Failed to get Bebop authentication: {e}"))
         })?;
 
-        let client = BebopClientBuilder::new(snapshot.component.chain.into(), auth.user, auth.key)
+        let client = BebopClientBuilder::new(snapshot.component.chain, auth.key)
             .build()
             .map_err(|e| {
                 InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
@@ -100,9 +100,9 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
 mod tests {
     use std::env;
 
-    use tycho_common::{
-        dto::{Chain, ChangeType, ProtocolComponent, ResponseProtocolState},
-        models::Chain as ModelChain,
+    use tycho_common::models::{
+        protocol::{ProtocolComponent, ProtocolComponentState},
+        Chain, ChangeType,
     };
 
     use super::*;
@@ -116,7 +116,7 @@ mod tests {
             8,
             0,
             &[Some(10_000)],
-            ModelChain::Ethereum,
+            Chain::Ethereum,
             100,
         )
     }
@@ -130,7 +130,7 @@ mod tests {
             6,
             0,
             &[Some(10_000)],
-            ModelChain::Ethereum,
+            Chain::Ethereum,
             100,
         )
     }
@@ -160,7 +160,7 @@ mod tests {
         );
 
         let snapshot = ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 attributes: state_attributes,
                 component_id: "bebop_wbtc_usdc".to_string(),
                 balances: HashMap::new(),
@@ -171,7 +171,7 @@ mod tests {
                 protocol_type_name: "bebop".to_string(),
                 chain: Chain::Ethereum,
                 tokens: vec![wbtc_token.address.clone(), usdc_token.address.clone()],
-                contract_ids: Vec::new(),
+                contract_addresses: Vec::new(),
                 static_attributes: HashMap::new(),
                 change: ChangeType::Creation,
                 creation_tx: Bytes::default(),
@@ -186,7 +186,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_with_header() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         let (snapshot, tokens) = create_test_snapshot();
@@ -212,7 +211,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_missing_token() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         // Test missing second token (only one token in array)
@@ -231,7 +229,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_missing_bids() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         // Should decode an empty array of bids
@@ -251,7 +248,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_invalid_json() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         let (mut snapshot, tokens) = create_test_snapshot();

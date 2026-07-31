@@ -65,18 +65,24 @@ impl SwapEncoder for EtherfiSwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let direction = if *swap.token_in() == self.eeth_address &&
-            *swap.token_out() == self.eth_address
+        let direction = if *swap.token_in().address == self.eeth_address &&
+            *swap.token_out().address == self.eth_address
         {
             EtherfiDirection::EethToEth
-        } else if *swap.token_in() == self.eth_address && *swap.token_out() == self.eeth_address {
+        } else if *swap.token_in().address == self.eth_address &&
+            *swap.token_out().address == self.eeth_address
+        {
             EtherfiDirection::EthToEeth
-        } else if *swap.token_in() == self.eeth_address && *swap.token_out() == self.weeth_address {
+        } else if *swap.token_in().address == self.eeth_address &&
+            *swap.token_out().address == self.weeth_address
+        {
             EtherfiDirection::EethToWeeth
-        } else if *swap.token_in() == self.weeth_address && *swap.token_out() == self.eeth_address {
+        } else if *swap.token_in().address == self.weeth_address &&
+            *swap.token_out().address == self.eeth_address
+        {
             EtherfiDirection::WeethToEeth
         } else {
-            return Err(EncodingError::InvalidInput("Combination not allowed".to_owned()))
+            return Err(EncodingError::InvalidInput("Combination not allowed".to_owned()));
         };
 
         let args = (direction as u8).to_be_bytes();
@@ -96,9 +102,11 @@ impl SwapEncoder for EtherfiSwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
+    use crate::encoding::models::default_token;
 
     const EETH_ADDRESS: &str = "0x35fA164735182de50811E8e2E824cFb9B6118ac2";
     const WEETH_ADDRESS: &str = "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee";
@@ -137,7 +145,12 @@ mod tests {
         };
         let token_in = Bytes::from(EETH_ADDRESS);
         let token_out = Bytes::from("0x0000000000000000000000000000000000000000");
-        let swap = Swap::new(component, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoded_swap = encoder()
             .encode_swap(&swap, &encoding_context(&token_in, &token_out))
             .unwrap();
@@ -154,7 +167,12 @@ mod tests {
         };
         let token_in = Bytes::from("0x0000000000000000000000000000000000000000");
         let token_out = Bytes::from(EETH_ADDRESS);
-        let swap = Swap::new(component, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoded_swap = encoder()
             .encode_swap(&swap, &encoding_context(&token_in, &token_out))
             .unwrap();
@@ -171,7 +189,12 @@ mod tests {
         };
         let token_in = Bytes::from(EETH_ADDRESS);
         let token_out = Bytes::from(WEETH_ADDRESS);
-        let swap = Swap::new(component, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoded_swap = encoder()
             .encode_swap(&swap, &encoding_context(&token_in, &token_out))
             .unwrap();
@@ -188,7 +211,12 @@ mod tests {
         };
         let token_in = Bytes::from(WEETH_ADDRESS);
         let token_out = Bytes::from(EETH_ADDRESS);
-        let swap = Swap::new(component, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoded_swap = encoder()
             .encode_swap(&swap, &encoding_context(&token_in, &token_out))
             .unwrap();
@@ -205,7 +233,12 @@ mod tests {
         };
         let token_in = Bytes::from(WEETH_ADDRESS);
         let token_out = Bytes::from("0x0000000000000000000000000000000000000000");
-        let swap = Swap::new(component, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoded_swap = encoder().encode_swap(&swap, &encoding_context(&token_in, &token_out));
 
         assert!(encoded_swap.is_err());

@@ -2,35 +2,58 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 
+contract PolygonConstants {
+    address constant POLYGON_WETH = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619;
+    address constant POLYGON_USDC = 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359;
+}
+
+contract ArbitrumConstants {
+    address constant ARBITRUM_WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+    address constant ARBITRUM_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
+}
+
+contract BscConstants {
+    address constant BSC_WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address constant BSC_WETH = 0x2170Ed0880ac9A755fd29B2688956BD959F933F8;
+}
+
 contract BaseConstants {
-    address BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address BASE_MAG7 = 0x9E6A46f294bB67c20F1D1E7AfB0bBEf614403B55;
-    address BASE_WETH = 0x4200000000000000000000000000000000000006;
-    address BASE_cbBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    address BASE_BMI = 0x2F16386bB37709016023232523FF6d9DAF444BE3;
+    address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant BASE_MAG7 = 0x9E6A46f294bB67c20F1D1E7AfB0bBEf614403B55;
+    address constant BASE_WETH = 0x4200000000000000000000000000000000000006;
+    address constant BASE_cbBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address constant BASE_BMI = 0x2F16386bB37709016023232523FF6d9DAF444BE3;
     // Uniswap v2
-    address USDC_MAG7_POOL = 0x739c2431670A12E2cF8e11E3603eB96e6728a789;
+    address constant USDC_MAG7_POOL =
+        0x739c2431670A12E2cF8e11E3603eB96e6728a789;
 
     //Pancakeswap v3
-    address PANCAKESWAPV3_cbBTC_USDC_POOL =
+    address constant PANCAKESWAPV3_cbBTC_USDC_POOL =
         0xb94b22332ABf5f89877A14Cc88f2aBC48c34B3Df;
 
-    address PANCAKESWAPV3_DEPLOYER = 0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9;
+    address constant PANCAKESWAPV3_DEPLOYER =
+        0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9;
 
     // Aerodrome Slipstreams Factory
-    address SLIPSTREAMS_FACTORY_BASE =
+    address constant SLIPSTREAMS_FACTORY_BASE =
         0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
-    address SLIPSTREAMS_NEW_FACTORY_BASE =
+    address constant SLIPSTREAMS_NEW_FACTORY_BASE =
         0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a;
     // Aerodrome Slipstreams
-    address SLIPSTREAMS_WETH_USDC_POOL =
+    address constant SLIPSTREAMS_WETH_USDC_POOL =
         0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59;
     // Pool that uses the new factory
-    address SLIPSTREAMS_WETH_BMI_POOL =
+    address constant SLIPSTREAMS_WETH_BMI_POOL =
         0x1b7088833548A8C4Ab12a900a2f4bdFA49221081;
 }
 
-contract Constants is Test, BaseConstants {
+contract Constants is
+    Test,
+    PolygonConstants,
+    ArbitrumConstants,
+    BaseConstants,
+    BscConstants
+{
     address ADMIN = makeAddr("unique-admin"); //admin=us
     // Changed this since someone deployed a drainer contract to makeAddr("bob")
     address BOB = makeAddr("bob*"); //bob=someone!=us
@@ -55,8 +78,7 @@ contract Constants is Test, BaseConstants {
     address UNPAUSER = makeAddr("unpauser");
 
     // Assets
-    address ETH_ADDR_FOR_CURVE =
-        address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
+    address ETH_ADDR = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     address WETH_ADDR = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
     address DAI_ADDR = address(0x6B175474E89094C44Da98b954EedeAC495271d0F);
     address BAL_ADDR = address(0xba100000625a3754423978a60c9317c58a424e3D);
@@ -159,6 +181,9 @@ contract Constants is Test, BaseConstants {
     // Bebop Settlement
     address BEBOP_SETTLEMENT = 0xbbbbbBB520d69a9775E85b458C58c648259FAD5F;
 
+    // Bebop Router
+    address BEBOP_ROUTER = 0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A;
+
     // Hashflow Router
     address HASHFLOW_ROUTER = 0x55084eE0fEf03f14a305cd24286359A35D735151;
 
@@ -182,6 +207,22 @@ contract Constants is Test, BaseConstants {
 
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
+
+    // FermiSwap
+    address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
+
+    // Metric oracle (Base)
+    address METRIC_ORACLE = 0x681E908B8ab57c49C74D770F369754CCC3E1ae09;
+
+    // BopAMM (Bebop on-chain PMM)
+    address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;
+    address BOPAMM_MODULE = 0xBC60639345dFa607d73b74e88C2d54D8B8AD7Cc3;
+    address BOPAMM_REGISTRY = 0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F;
+    address BOPAMM_MAKER = 0x6F7a3714D7FC266e3E84067AC31E7b1a3bE18060;
+
+    // Ring Swap V2
+    address RING_FEW_FACTORY = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
+    address RING_SWAP_FACTORY = 0xeb2A625B704d73e82946D8d026E1F588Eed06416;
 
     // Angstrom hook address
     address ANGSTROM_HOOK = 0x0000000aa232009084Bd71A5797d089AA4Edfad4;

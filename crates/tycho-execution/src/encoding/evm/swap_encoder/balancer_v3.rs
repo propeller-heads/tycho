@@ -37,7 +37,11 @@ impl SwapEncoder for BalancerV3SwapEncoder {
             EncodingError::FatalError("Invalid pool address for Balancer v3".to_string())
         })?;
 
-        let args = (bytes_to_address(swap.token_in())?, bytes_to_address(swap.token_out())?, pool);
+        let args = (
+            bytes_to_address(&swap.token_in().address)?,
+            bytes_to_address(&swap.token_out().address)?,
+            pool,
+        );
         Ok(args.abi_encode_packed())
     }
 
@@ -53,12 +57,13 @@ impl SwapEncoder for BalancerV3SwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
     use crate::encoding::{
         evm::{swap_encoder::balancer_v3::BalancerV3SwapEncoder, utils::write_calldata_to_file},
-        models::Swap,
+        models::default_token,
     };
 
     #[test]
@@ -70,7 +75,12 @@ mod tests {
         };
         let token_in = Bytes::from("0x7bc3485026ac48b6cf9baf0a377477fff5703af8");
         let token_out = Bytes::from("0xc71ea051a5f82c67adcf634c36ffe6334793d24c");
-        let swap = Swap::new(balancer_pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            balancer_pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),

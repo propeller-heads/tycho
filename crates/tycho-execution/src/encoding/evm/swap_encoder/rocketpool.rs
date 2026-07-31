@@ -41,7 +41,7 @@ impl SwapEncoder for RocketpoolSwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let is_deposit = *swap.token_in() == self.native_token_address;
+        let is_deposit = *swap.token_in().address == self.native_token_address;
 
         let args = is_deposit;
 
@@ -60,11 +60,13 @@ impl SwapEncoder for RocketpoolSwapEncoder {
 #[cfg(test)]
 mod tests {
     use alloy::hex::encode;
+    use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::evm::{
-        swap_encoder::rocketpool::RocketpoolSwapEncoder, utils::write_calldata_to_file,
+    use crate::encoding::{
+        evm::{swap_encoder::rocketpool::RocketpoolSwapEncoder, utils::write_calldata_to_file},
+        models::default_token,
     };
     #[test]
     fn test_encode_rocketpool_deposit() {
@@ -76,7 +78,12 @@ mod tests {
         };
         let token_in = Bytes::from("0x0000000000000000000000000000000000000000");
         let token_out = Bytes::from("0xae78736Cd615f374D3085123A210448E74Fc6393");
-        let swap = Swap::new(rocketpool_pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            rocketpool_pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),
@@ -109,7 +116,12 @@ mod tests {
         };
         let token_in = Bytes::from("0xae78736Cd615f374D3085123A210448E74Fc6393");
         let token_out = Bytes::from("0x0000000000000000000000000000000000000000");
-        let swap = Swap::new(rocketpool_pool, token_in.clone(), token_out.clone());
+        let swap = Swap::new(
+            rocketpool_pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),

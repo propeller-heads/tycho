@@ -5,13 +5,74 @@ use async_trait::async_trait;
 
 use crate::{
     models::{
-        blockchain::{Block, BlockTag, EntryPointWithTracingParams, TracedEntryPoint},
+        blockchain::{
+            Block, BlockAggregatedChanges, BlockTag, EntryPointWithTracingParams, TracedEntryPoint,
+            TxInput,
+        },
         contract::AccountDelta,
         token::{Token, TokenQuality, TransferCost, TransferTax},
         Address, Balance, BlockHash, StoreKey,
     },
     Bytes,
 };
+
+/// Indexes protocol state deltas from raw EVM transactions.
+///
+/// A `TxDeltaIndexer` is a native-code substitute for a Substreams package.
+/// It consumes a stream of finalised [`BlockAggregatedChanges`] to keep its internal
+/// protocol state current, then — on demand — applies a batch of in-flight
+/// [`TxInput`]s and returns the resulting [`BlockAggregatedChanges`]. The primary
+/// consumer is an Ethereum block builder that needs to know how a candidate
+/// transaction bundle alters DEX state before deciding whether to include it.
+///
+/// # Lifecycle
+///
+/// 1. **Hydrate** — call [`apply_block`][TxDeltaIndexer::apply_block] for each finalised block
+///    received from the Tycho client. The first call serves as initialisation: `state_deltas` and
+///    `component_balances` will contain the full snapshot at that height rather than a sparse
+///    delta. Subsequent calls apply incremental deltas.
+///
+/// 2. **Query** — call [`generate_deltas`][TxDeltaIndexer::generate_deltas] with a batch of
+///    in-flight transactions at any point. The indexer applies them against its current internal
+///    state and returns a [`BlockAggregatedChanges`] describing what would change. Internal state
+///    is **not** mutated by this call; it always operates on the state left by the most recent
+///    `apply_block`.
+pub trait TxDeltaIndexer: Send {
+    /// Advances internal protocol state by applying a finalised block.
+    ///
+    /// Must be called in block-height order. The first call initialises the
+    /// indexer from a full snapshot; subsequent calls apply incremental state
+    /// deltas. After this call returns, [`generate_deltas`][TxDeltaIndexer::generate_deltas]
+    /// will produce deltas relative to the new state.
+    ///
+    /// # Parameters
+    ///
+    /// * `block` — a finalised [`BlockAggregatedChanges`] as received from the Tycho client. On the
+    ///   first call this carries the full component and state snapshot; on later calls it carries
+    ///   only the changed attributes and balances.
+    fn apply_block(&mut self, block: &BlockAggregatedChanges) -> anyhow::Result<()>;
+
+    /// Applies a batch of in-flight transactions against the current state and
+    /// returns the protocol state deltas they would produce.
+    ///
+    /// The returned [`BlockAggregatedChanges`] contains the aggregated deltas across
+    /// all transactions in the batch: `state_deltas`, `component_balances`,
+    /// `new_protocol_components`, and `deleted_protocol_components`. Block
+    /// metadata (`block`, `chain`, `extractor`, `finalized_block_height`) is
+    /// populated from the state stored by the most recent
+    /// [`apply_block`][TxDeltaIndexer::apply_block] call.
+    ///
+    /// Internal state is **not** modified. Calling `generate_deltas` twice with
+    /// the same transactions returns identical results.
+    ///
+    /// Transactions where `succeeded == false` are silently skipped.
+    ///
+    /// # Parameters
+    ///
+    /// * `txs` — ordered slice of in-flight transactions, typically a builder's candidate bundle or
+    ///   the full mempool selection for one block.
+    fn generate_deltas(&mut self, txs: &[TxInput]) -> BlockAggregatedChanges;
+}
 
 /// A struct representing a request to get an account state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

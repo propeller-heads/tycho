@@ -34,7 +34,7 @@ jobs:
             dir=$(dirname "$lock")
             mkdir -p "/tmp/old-locks/$dir"
             cp "$lock" "/tmp/old-locks/$lock"
-          done < <(find . -name Cargo.lock -not -path '*/target/*' -print0)
+          done < <(find . -name Cargo.lock -not -path '*/target/*' -print0 | .github/scripts/filter-skipped-workspaces.sh)
 
       - name: Run cargo update in every workspace with a Cargo.lock
         run: |
@@ -45,7 +45,7 @@ jobs:
               echo "::warning::cargo update failed in $ws, skipping"
             fi
             echo "::endgroup::"
-          done < <(find . -name Cargo.lock -not -path '*/target/*' -print0)
+          done < <(find . -name Cargo.lock -not -path '*/target/*' -print0 | .github/scripts/filter-skipped-workspaces.sh)
 
       - name: Check for changes
         id: changes
@@ -71,7 +71,7 @@ jobs:
               .github/scripts/check-crate-ages.sh "$old" "$lock" "$outfile" "$MIN_CRATE_AGE_DAYS" || true
               echo "::endgroup::"
             fi
-          done < <(find . -name Cargo.lock -not -path '*/target/*' -print0)
+          done < <(find . -name Cargo.lock -not -path '*/target/*' -print0 | .github/scripts/filter-skipped-workspaces.sh)
 
       - name: Pin back too-recent crates
         if: steps.changes.outputs.changed == 'true'
@@ -90,7 +90,7 @@ jobs:
               echo "::group::Pin ${crate}@${old_version} in $ws"
               (cd "$ws" && cargo update -p "$crate" --precise "$old_version") || true
               echo "::endgroup::"
-            done < <(find . -name Cargo.lock -not -path '*/target/*' -print0)
+            done < <(find . -name Cargo.lock -not -path '*/target/*' -print0 | .github/scripts/filter-skipped-workspaces.sh)
           done <<< "$pinlist"
 
       - name: Re-check for changes after pinning

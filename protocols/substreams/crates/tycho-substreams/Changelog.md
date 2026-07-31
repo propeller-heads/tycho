@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+### Fixed
+
+- `ContractChange::is_empty` now accounts for `token_balances`, so contract changes carrying only token balance updates are no longer dropped by `TransactionChangesBuilder` (#1056).
+
 ## 0.2.0
 
 ### Updated

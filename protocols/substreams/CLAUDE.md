@@ -11,6 +11,8 @@ One directory per protocol: `{chain}-{protocol}` (e.g. `ethereum-uniswap-v2`). E
 - `{name}.yaml` — manifest: package metadata, protobuf imports, module graph, initial block
 - `src/` — Rust map/store modules emitting `BlockChanges` / `EntityChanges` protobufs
 - `integration_test.tycho.yaml` — block range + assertions for `protocols/testing`
+- `rust-toolchain.toml` — exact toolchain pin (never `stable`); release builds use it for
+  reproducible wasm output
 
 ## Adding a new protocol
 

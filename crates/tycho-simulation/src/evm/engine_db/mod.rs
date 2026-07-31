@@ -72,12 +72,12 @@ pub fn update_engine(
     if let Some(block) = block {
         let mut vm_updates: Vec<AccountUpdate> = Vec::new();
 
-        for (_address, account_update) in account_updates.iter() {
+        for account_update in account_updates.values() {
             vm_updates.push(account_update.clone());
         }
 
         if let Some(vm_storage_values) = vm_storage {
-            for (_address, vm_storage_values) in vm_storage_values.iter() {
+            for vm_storage_values in vm_storage_values.values() {
                 // ResponseAccount objects to AccountUpdate objects as required by the update method
                 vm_updates.push(AccountUpdate {
                     address: vm_storage_values.address,

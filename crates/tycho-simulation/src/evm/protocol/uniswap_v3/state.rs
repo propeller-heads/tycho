@@ -39,14 +39,21 @@ use crate::evm::protocol::{
     },
 };
 
-// Gas limit constants for capping get_limits calculations
-// These prevent simulations from exceeding Ethereum's block gas limit
-const SWAP_BASE_GAS: u64 = 130_000;
-// This gas is estimated from UniswapV3Pool cross() calls on Tenderly
-const GAS_PER_TICK: u64 = 17_540;
+// Pre/post loop overhead: cold SLOADs (slot0, liquidity, feeGrowthGlobal) +
+// cold SSTOREs (slot0 write, liquidity write) at end of swap.
+const SWAP_BASE_GAS: u64 = 70_000;
+// Bitmap word scan (cold SLOAD of tickBitmap word)
+const GAS_PER_BITMAP_WORD: u64 = 2_100;
+// swap math step: getSqrtRatioAtTick + computeSwapStep + amount accounting + getTickAtSqrtRatio
+const GAS_PER_SWAP_MATH_STEP: u64 = 5_400;
+// Initialized tick crossing: cross() updates feeGrowthOutside0/1 (2 SSTOREs).
+// Warm ≈ 10-17k, cold ≈ 40-52k. 24k biases toward cold for overestimation.
+const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 24_000;
+// Output transfer + balanceBefore + callback + balanceAfter.
+const V3_CALLBACK_SETTLEMENT_GAS: u64 = 70_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
-const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_TICK;
+const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_INITIALIZED_TICK_CROSS;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapV3State {
@@ -127,7 +134,7 @@ impl UniswapV3State {
             tick: self.tick,
             liquidity: self.liquidity,
         };
-        let mut gas_used = U256::from(130_000);
+        let mut gas_used = U256::from(SWAP_BASE_GAS);
 
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
@@ -136,7 +143,10 @@ impl UniswapV3State {
                 .ticks
                 .next_initialized_tick_within_one_word(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => (tick, init),
+                Ok((tick, init)) => {
+                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
+                    (tick, init)
+                }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
@@ -158,6 +168,7 @@ impl UniswapV3State {
 
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
 
+            let sqrt_price_start = state.sqrt_price;
             let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
@@ -169,7 +180,7 @@ impl UniswapV3State {
             state.sqrt_price = sqrt_price;
 
             let step = StepComputation {
-                sqrt_price_start: state.sqrt_price,
+                sqrt_price_start,
                 tick_next: next_tick,
                 initialized,
                 sqrt_price_next,
@@ -177,6 +188,9 @@ impl UniswapV3State {
                 amount_out,
                 fee_amount,
             };
+
+            gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_SWAP_MATH_STEP))?;
+
             if exact_input {
                 state.amount_remaining -= I256::checked_from_sign_and_abs(
                     Sign::Positive,
@@ -204,12 +218,12 @@ impl UniswapV3State {
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
+                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_INITIALIZED_TICK_CROSS))?;
                 }
                 state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
             } else if state.sqrt_price != step.sqrt_price_start {
                 state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
             }
-            gas_used = safe_add_u256(gas_used, U256::from(2000))?;
         }
         Ok(SwapResults {
             amount_calculated: state.amount_calculated,
@@ -218,7 +232,7 @@ impl UniswapV3State {
             sqrt_price: state.sqrt_price,
             liquidity: state.liquidity,
             tick: state.tick,
-            gas_used,
+            gas_used: safe_add_u256(gas_used, U256::from(V3_CALLBACK_SETTLEMENT_GAS))?,
         })
     }
 
@@ -855,14 +869,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_limits() {
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
         let asset_path =
             Path::new(project_root).join("tests/assets/decoder/uniswap_v3_snapshot.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let usv3_state = UniswapV3State::try_from_with_header(
             state,
@@ -897,13 +912,20 @@ mod tests {
             .get_limits(t0.address.clone(), t1.address.clone())
             .unwrap();
 
-        assert_eq!(&res.0, &BigUint::from_u128(155144999154).unwrap()); // Crazy amount because of this tick: "ticks/-887272/net-liquidity": "0x10d73d"
+        assert_eq!(&res.0, &BigUint::from_u128(29160572556).unwrap());
 
         let out = usv3_state
             .get_amount_out(res.0, &t0, &t1)
             .expect("swap for limit in didn't work");
 
-        assert_eq!(&res.1, &out.amount);
+        // Allow 1-unit rounding difference: get_limits uses ceiling/floor delta math
+        // while get_amount_out uses the full swap path.
+        let diff = if res.1 > out.amount {
+            res.1.clone() - out.amount.clone()
+        } else {
+            out.amount.clone() - res.1.clone()
+        };
+        assert!(diff <= BigUint::from(1u64), "limit_out and amount_out differ by {diff}");
     }
 
     // Helper to create a basic test pool
@@ -917,6 +939,48 @@ mod tests {
 
         UniswapV3State::new(liquidity, sqrt_price, FeeAmount::Low, tick, ticks)
             .expect("Failed to create pool")
+    }
+
+    fn create_tick_boundary_test_pool() -> UniswapV3State {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let ticks = vec![TickInfo::new(-120, 0).unwrap(), TickInfo::new(120, 0).unwrap()];
+
+        UniswapV3State::new(100_000_000_000_000_000_000u128, sqrt_price, FeeAmount::Low, 0, ticks)
+            .expect("Failed to create pool")
+    }
+
+    #[test]
+    fn test_partial_step_updates_tick_when_price_moves_without_crossing_initialized_tick() {
+        let pool = create_tick_boundary_test_pool();
+        let amount =
+            I256::checked_from_sign_and_abs(Sign::Positive, U256::from(100_000_000_000_000_000u64))
+                .unwrap();
+
+        let result = pool
+            .swap(true, amount, None)
+            .expect("swap should stay within the current liquidity range");
+        let expected_tick =
+            get_tick_at_sqrt_ratio(result.sqrt_price).expect("new sqrt price should map to a tick");
+
+        assert_ne!(result.sqrt_price, pool.sqrt_price);
+        assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
+        assert_ne!(expected_tick, pool.tick);
+        assert_eq!(result.tick, expected_tick);
+    }
+
+    #[test]
+    fn test_swap_keeps_boundary_tick_when_price_does_not_move() {
+        let mut pool = create_tick_boundary_test_pool();
+        pool.tick = -1;
+        let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1u64)).unwrap();
+
+        let result = pool
+            .swap(true, amount, None)
+            .expect("swap should consume the input as fee without moving price");
+
+        assert_eq!(result.sqrt_price, pool.sqrt_price);
+        assert_eq!(get_tick_at_sqrt_ratio(result.sqrt_price).unwrap(), 0);
+        assert_eq!(result.tick, pool.tick);
     }
 
     #[test]
@@ -1374,25 +1438,28 @@ mod tests {
 
 #[cfg(test)]
 mod tests_forks {
-    use std::{fs, path::Path, str::FromStr};
+    use std::str::FromStr;
 
-    use serde_json::Value;
     use tycho_client::feed::synchronizer::ComponentWithState;
-    use tycho_common::models::Chain;
+    use tycho_common::{hex_bytes::Bytes, models::Chain};
 
     use super::*;
     use crate::protocol::models::{DecoderContext, TryFromWithBlock};
 
     #[tokio::test]
     async fn test_pancakeswap_get_amount_out() {
+        use std::{fs, path::Path};
+
+        use serde_json::Value;
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
         let asset_path =
             Path::new(project_root).join("tests/assets/decoder/pancakeswap_v3_snapshot.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let pool_state = UniswapV3State::try_from_with_header(
             state,
@@ -1423,7 +1490,6 @@ mod tests_forks {
             100,
         );
 
-        // Swap from https://etherscan.io/tx/0x641b1e98990ae49fd00157a29e1530ff6403706b2864aa52b1c30849ce020b2c#eventlog
         let res = pool_state
             .get_amount_out(BigUint::from_str("5976361609").unwrap(), &usdt, &usdc)
             .unwrap();

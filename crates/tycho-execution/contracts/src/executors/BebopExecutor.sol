@@ -12,7 +12,8 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 /// @title BebopExecutor
 /// @notice Executor for Bebop PMM RFQ (Request for Quote) swaps
-/// @dev Handles Single and Aggregate RFQ swaps through Bebop settlement contract
+/// @dev Handles Single and Aggregate RFQ swaps through either the Bebop
+///      settlement contract or the Bebop router contract, selected per-quote
 /// @dev Only supports single token in to single token out swaps
 contract BebopExecutor is IExecutor {
     using Math for uint256;
@@ -22,15 +23,28 @@ contract BebopExecutor is IExecutor {
     /// @notice Bebop-specific errors
     error BebopExecutor__InvalidDataLength();
     error BebopExecutor__ZeroAddress();
+    error BebopExecutor__InvalidTarget();
+    error BebopExecutor__InvalidSelector();
+
+    /// @notice BebopSettlement.swapSingle
+    bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
+    /// @notice BebopSettlement.swapAggregate
+    bytes4 private constant _SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
+    /// @notice BebopRouter.swap
+    bytes4 private constant _ROUTER_SWAP_SELECTOR = 0x9586d0e8;
 
     /// @notice The Bebop settlement contract address
     address public immutable bebopSettlement;
 
-    constructor(address bebopSettlement_) {
-        if (bebopSettlement_ == address(0)) {
+    /// @notice The Bebop router contract address
+    address public immutable bebopRouter;
+
+    constructor(address bebopSettlement_, address bebopRouter_) {
+        if (bebopSettlement_ == address(0) || bebopRouter_ == address(0)) {
             revert BebopExecutor__ZeroAddress();
         }
         bebopSettlement = bebopSettlement_;
+        bebopRouter = bebopRouter_;
     }
 
     function fundsExpectedAddress(
@@ -51,11 +65,16 @@ contract BebopExecutor is IExecutor {
         external
         payable
     {
+        address target;
         uint8 partialFillOffset;
         uint256 originalFilledTakerAmount;
         bytes memory bebopCalldata;
-        (partialFillOffset, originalFilledTakerAmount, bebopCalldata) =
+        (target, partialFillOffset, originalFilledTakerAmount, bebopCalldata) =
             _decodeData(data);
+
+        // Only allow calling the settlement or router contract, and only with
+        // the swap selectors each one exposes.
+        _validateCall(target, bytes4(bebopCalldata));
 
         // Modify the filledTakerAmount in the calldata
         // If the filledTakerAmount is the same as the original, the original calldata is returned
@@ -69,7 +88,26 @@ contract BebopExecutor is IExecutor {
         // Use OpenZeppelin's Address library for safe call
         // This will revert if the call fails
         // slither-disable-next-line unused-return
-        bebopSettlement.functionCall(finalCalldata);
+        target.functionCall(finalCalldata);
+    }
+
+    /// @dev Reverts unless target is an allowed contract and the selector is
+    ///      one that target exposes for swaps.
+    function _validateCall(address target, bytes4 selector) internal view {
+        if (target == bebopSettlement) {
+            if (
+                selector != _SWAP_SINGLE_SELECTOR
+                    && selector != _SWAP_AGGREGATE_SELECTOR
+            ) {
+                revert BebopExecutor__InvalidSelector();
+            }
+        } else if (target == bebopRouter) {
+            if (selector != _ROUTER_SWAP_SELECTOR) {
+                revert BebopExecutor__InvalidSelector();
+            }
+        } else {
+            revert BebopExecutor__InvalidTarget();
+        }
     }
 
     /// @dev Decodes the packed calldata
@@ -77,18 +115,21 @@ contract BebopExecutor is IExecutor {
         internal
         pure
         returns (
+            address target,
             uint8 partialFillOffset,
             uint256 originalFilledTakerAmount,
             bytes memory bebopCalldata
         )
     {
-        // Need at least 73 bytes for the minimum fixed fields
-        // 20 (tokenIn) + 20 (tokenOut) + 1 (offset) + 32 (amount) = 73
-        if (data.length < 73) revert BebopExecutor__InvalidDataLength();
+        // Need at least 93 bytes for the minimum fixed fields
+        // 20 (tokenIn) + 20 (tokenOut) + 20 (target) + 1 (offset) +
+        // 32 (amount) = 93
+        if (data.length < 93) revert BebopExecutor__InvalidDataLength();
 
-        partialFillOffset = uint8(data[40]);
-        originalFilledTakerAmount = uint256(bytes32(data[41:73]));
-        bebopCalldata = data[73:];
+        target = address(bytes20(data[40:60]));
+        partialFillOffset = uint8(data[60]);
+        originalFilledTakerAmount = uint256(bytes32(data[61:93]));
+        bebopCalldata = data[93:];
     }
 
     /// @dev Modifies the filledTakerAmount in the bebop calldata to handle slippage
@@ -143,7 +184,7 @@ contract BebopExecutor is IExecutor {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        view
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -152,14 +193,20 @@ contract BebopExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length < 73) {
+        if (data.length < 93) {
             revert BebopExecutor__InvalidDataLength();
         }
 
         tokenIn = address(bytes20(data[0:20]));
         tokenOut = address(bytes20(data[20:40]));
+        address target = address(bytes20(data[40:60]));
+        if (target != bebopSettlement && target != bebopRouter) {
+            revert BebopExecutor__InvalidTarget();
+        }
         transferType = TransferManager.TransferType.ProtocolWillDebit;
-        receiver = bebopSettlement;
+        // Both the settlement and the router pull tokenIn from the caller via
+        // transferFrom, so the approval must go to whichever one we call.
+        receiver = target;
         outputToRouter = true;
     }
 }

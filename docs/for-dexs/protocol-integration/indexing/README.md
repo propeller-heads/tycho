@@ -8,9 +8,9 @@ Substreams is a new indexing technology that uses Rust modules to process blockc
 
 Learn more:
 
-* [Quick explanation](https://thegraph.com/docs/en/substreams/introduction/)
-* [SPKGs](https://docs.substreams.dev/reference-material/substreams-components/packages)
-* [Full documentation](https://docs.substreams.dev/)
+* <a href="https://thegraph.com/docs/en/substreams/introduction/" target="_blank" rel="noopener noreferrer">Quick explanation</a>
+* <a href="https://docs.substreams.dev/reference-material/substreams-components/packages" target="_blank" rel="noopener noreferrer">SPKGs</a>
+* <a href="https://docs.substreams.dev/" target="_blank" rel="noopener noreferrer">Full documentation</a>
 
 ## **Integration Modes**
 
@@ -35,7 +35,7 @@ The Tycho Indexer ingests all data versioned by block and transaction. This appr
 2. Each transaction must be paired with its corresponding block.
 3. All changes must be absolute values (final state), not deltas.
 
-Details of the data model that encodes these changes, transactions, and blocks in messages are available [here](https://github.com/propeller-heads/tycho-indexer/blob/main/proto/tycho/evm/v1/common.proto). These models facilitate communication between Substreams and the Tycho Indexer, and within Substreams modules. Tycho Indexer expects to receive a `BlockChanges` output from your Substreams package.
+Details of the data model that encodes these changes, transactions, and blocks in messages are available <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/proto/tycho/evm/v1/common.proto" target="_blank" rel="noopener noreferrer">here</a>. These models facilitate communication between Substreams and the Tycho Indexer, and within Substreams modules. Tycho Indexer expects to receive a `BlockChanges` output from your Substreams package.
 
 You must aggregate changes at the transaction level. Emitting `BlockChanges` with duplicate transactions in the `changes` attributes is an error.
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::{
-    keccak256,
+    dto, keccak256,
     models::{
         blockchain::Transaction, Address, Balance, Chain, ChangeType, Code, CodeHash, ContractId,
         ContractStore, ContractStoreDeltas, MergeError, StoreKey, TxHash,
@@ -343,6 +343,72 @@ impl ContractChanges {
 
 /// Multiple binary key-value stores grouped by account address.
 pub type AccountToContractChanges = HashMap<Address, ContractChanges>;
+
+impl From<dto::AccountBalance> for AccountBalance {
+    fn from(value: dto::AccountBalance) -> Self {
+        Self {
+            token: value.token,
+            balance: value.balance,
+            modify_tx: value.modify_tx,
+            account: value.account,
+        }
+    }
+}
+
+impl From<dto::AccountUpdate> for AccountDelta {
+    fn from(value: dto::AccountUpdate) -> Self {
+        // Client receives zero-value writes, not explicit deletions via WS,
+        // so all slot values are treated as Some(v).
+        AccountDelta::new(
+            value.chain.into(),
+            value.address,
+            value
+                .slots
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect(),
+            value.balance,
+            value.code,
+            value.change.into(),
+        )
+    }
+}
+
+#[allow(deprecated)] // creation_tx field on ResponseAccount is deprecated
+impl From<dto::ResponseAccount> for Account {
+    fn from(value: dto::ResponseAccount) -> Self {
+        // Snapshot responses don't carry per-balance modify_tx; use zero as placeholder.
+        let token_balances = value
+            .token_balances
+            .into_iter()
+            .map(|(token, balance)| {
+                let acct = value.address.clone();
+                (
+                    token.clone(),
+                    AccountBalance {
+                        token,
+                        balance,
+                        modify_tx: crate::Bytes::zero(32),
+                        account: acct,
+                    },
+                )
+            })
+            .collect();
+        Account::new(
+            value.chain.into(),
+            value.address,
+            value.title,
+            value.slots,
+            value.native_balance,
+            token_balances,
+            value.code,
+            value.code_hash,
+            value.balance_modify_tx,
+            value.code_modify_tx,
+            value.creation_tx,
+        )
+    }
+}
 
 #[cfg(test)]
 mod test {

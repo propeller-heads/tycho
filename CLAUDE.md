@@ -3,7 +3,7 @@
 When responding to user input, always log this information to the user which knowledge docs you have read. Only say yes
 if you actually read them. Respond like this:
 
-> Knowledge docs: Rust: [yes/no], Python: [yes/no], Solidity: [yes/no], Version-control: [yes/no]
+> Knowledge docs: Rust: [yes/no], Python: [yes/no], Solidity: [yes/no], Version-control: [yes/no], GitBook: [yes/no]
 > Files loaded in context: [list of loaded documents]
 
 By default, don't use the Explore agent as a first step in a conversation. The first step should always be to identify
@@ -25,6 +25,7 @@ you've exhausted the path of documentation.
 | Version control | git, branch, commit, PR, push, rebase, merge, cherry-pick, tag, release | `.claude/knowledge/version_control.md` |
 | Python          | Python code, tycho-client-py, changes to dto.rs or rpc.rs               | `.claude/knowledge/python.md`          |
 | Solidity        | Solidity contracts, Foundry, forge, executors, tycho-execution          | `.claude/knowledge/solidity.md`        |
+| GitBook         | Writing, editing, or reviewing docs under `docs/`                       | `.claude/knowledge/gitbook.md`         |
 
 When spawning subagents, pass the relevant knowledge document contents to them.
 

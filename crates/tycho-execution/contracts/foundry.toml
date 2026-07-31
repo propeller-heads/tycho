@@ -2,17 +2,21 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
-evm_version = 'cancun'
+evm_version = 'osaka'
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# Pin solc and drop the metadata hash so the runtime bytecode fixtures
+# (protocols/testing/fixtures) are reproducible across Foundry versions.
+solc = '0.8.33'
+bytecode_hash = 'none'
 fs_permissions = [{ access = "read", path = "./test/assets" }, { access = "write", path = "./test" }]
 
 [profile.production]
 src = 'src'
 out = 'out'
 libs = ['lib']
-evm_version = 'cancun'
+evm_version = 'osaka'
 optimizer = true
 optimizer_runs = 1000
 via_ir = true
@@ -20,7 +24,9 @@ via_ir = true
 [rpc_endpoints]
 mainnet = "${RPC_URL}"
 base = "${BASE_RPC_URL}"
+arbitrum = "${ARBITRUM_RPC_URL}"
 polygon = "${POLYGON_RPC_URL}"
+bsc = "${BSC_RPC_URL}"
 
 [fmt]
 line_length = 80

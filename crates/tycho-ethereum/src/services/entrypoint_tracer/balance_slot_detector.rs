@@ -89,7 +89,8 @@ mod tests {
 
     use super::{BalanceStrategy, SlotDetectionStrategy, *};
     use crate::test_fixtures::{
-        TestFixture, STETH_STR, USDC_HOLDER_ADDR, USDC_STR, USDT_STR, WETH_STR,
+        TestFixture, ARB_USDC_HOLDER_ADDR, ARB_USDC_STR, ARB_WETH_STR, STETH_STR, USDC_HOLDER_ADDR,
+        USDC_STR, USDT_STR, WETH_STR,
     };
 
     const BLOCK_HASH: &str = "0x658814e4cb074359f10dd71237cc57b1ae6791fc9de59fde570e724bd884cbb0";
@@ -97,6 +98,14 @@ mod tests {
     impl TestFixture {
         fn create_balance_detector() -> EVMBalanceSlotDetector {
             let fixture = TestFixture::new();
+
+            let rpc = fixture.create_rpc_client(true);
+
+            EVMBalanceSlotDetector::new(&rpc).with_max_token_batch_size(5)
+        }
+
+        fn create_arb_balance_detector() -> EVMBalanceSlotDetector {
+            let fixture = TestFixture::new_arbitrum();
 
             let rpc = fixture.create_rpc_client(true);
 
@@ -286,6 +295,101 @@ mod tests {
             }
         } else {
             panic!("No result for stETH token");
+        }
+    }
+
+    /// Tests balance slot detection for Arbitrum USDC (FiatToken proxy) with a zero-balance
+    /// user address. This reproduces the production failure where Arbitrum precompile storage
+    /// slots appear in the trace and cause detection to fail.
+    ///
+    /// The prestateTracer returns slots from Arbitrum precompile addresses (0xa4b05fff...)
+    /// alongside the actual USDC contract slots. When the user has zero balance, both the
+    /// precompile zero-value slot and the actual balance slot have value 0. If the precompile
+    /// slot is tested first, the eth_call override fails with "overriding address ... not
+    /// allowed", and the current code treats this as a terminal error instead of trying the
+    /// next candidate.
+    #[rstest]
+    #[case("0xf847a638E44186F3287ee9F8cAF73FF4d4B80784", "ZeroBalanceUser")]
+    #[case(ARB_USDC_HOLDER_ADDR, "NonZeroBalanceUser")]
+    #[tokio::test]
+    #[ignore = "require ARB_RPC_URL"]
+    async fn test_detect_arb_usdc_balance_slots(
+        #[case] holder_address_hex: &str,
+        #[case] holder_name: &str,
+    ) {
+        let arb_usdc = Address::from_str(ARB_USDC_STR).expect("Invalid ARB USDC address");
+        let arb_weth = Address::from_str(ARB_WETH_STR).expect("Invalid ARB WETH address");
+
+        let holder_address = Address::from_str(holder_address_hex).expect("Invalid holder address");
+
+        let tokens = vec![arb_usdc.clone(), arb_weth.clone()];
+
+        // Use latest block — Arbitrum fixture uses block 0 / default hash
+        let rpc_url = std::env::var("ARB_RPC_URL").expect("ARB_RPC_URL must be set");
+        let client = reqwest::Client::new();
+        let response: serde_json::Value = client
+            .post(&rpc_url)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": ["latest", false],
+                "id": 1
+            }))
+            .send()
+            .await
+            .expect("Failed to fetch block")
+            .json()
+            .await
+            .expect("Failed to parse response");
+
+        let block_hash_str = response["result"]["hash"]
+            .as_str()
+            .expect("Missing block hash");
+        let block_hash = BlockHash::from_str(block_hash_str).expect("Invalid block hash");
+        println!("Arbitrum block hash: {block_hash}");
+
+        let detector = TestFixture::create_arb_balance_detector();
+        let results = detector
+            .detect_balance_slots(&tokens, holder_address, block_hash)
+            .await;
+
+        assert!(!results.is_empty(), "Expected results for at least one token, but got none");
+
+        // Check USDC result
+        if let Some(usdc_result) = results.get(&arb_usdc) {
+            match usdc_result {
+                Ok((storage_addr, slot)) => {
+                    println!(
+                        "ARB USDC slot detected for {holder_name} - Storage: {storage_addr}, Slot: {slot}"
+                    );
+                    assert_eq!(
+                        storage_addr, &arb_usdc,
+                        "Storage address should be the USDC proxy, not an Arbitrum precompile"
+                    );
+                }
+                Err(e) => panic!(
+                    "Failed to detect ARB USDC balance slot for {holder_name}: {e}. \
+                     This is the production bug: slot detection fails for USDC on Arbitrum \
+                     because Arbitrum precompile slots interfere with candidate selection."
+                ),
+            }
+        } else {
+            panic!("No result for ARB USDC token for {holder_name}");
+        }
+
+        // Check WETH result (should always work as it's not a proxy)
+        if let Some(weth_result) = results.get(&arb_weth) {
+            match weth_result {
+                Ok((storage_addr, slot)) => {
+                    println!(
+                        "ARB WETH slot detected for {holder_name} - Storage: {storage_addr}, Slot: {slot}"
+                    );
+                }
+                Err(e) => panic!("Failed to detect ARB WETH balance slot for {holder_name}: {e}"),
+            }
+        } else {
+            panic!("No result for ARB WETH token for {holder_name}");
         }
     }
 

@@ -196,7 +196,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
         assertEq(ADMIN.balance, 0);
         vm.deal(fillerAddr, 100 ether);
         vm.expectEmit();
-        emit Withdrawal(address(0), 100 ether, ADMIN);
+        emit Withdrawal(ETH_ADDR, 100 ether, ADMIN);
         filler.withdrawNative(ADMIN);
         assertEq(fillerAddr.balance, 0);
         assertEq(ADMIN.balance, 100 ether);

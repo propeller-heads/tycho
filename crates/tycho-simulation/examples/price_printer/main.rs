@@ -9,15 +9,18 @@ use clap::Parser;
 use futures::{future::select_all, StreamExt};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tycho_client::feed::component_tracker::ComponentFilter;
-use tycho_common::models::Chain;
+use tycho_common::{dto::TvlThresholdTier, models::Chain};
 use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            curve::CurveState,
             ekubo::state::EkuboState,
-            ekubo_v3::{self, state::EkuboV3State},
-            filters::{balancer_v2_pool_filter, curve_pool_filter},
+            ekubo_v3::state::EkuboV3State,
+            filters::{balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter},
             pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -31,12 +34,17 @@ use tycho_simulation::{
 
 #[derive(Parser)]
 struct Cli {
-    /// The tvl threshold to filter the graph by
-    #[arg(long, default_value_t = 1000.0)]
-    tvl_threshold: f64,
+    /// The tvl threshold to filter the graph by. Defaults to a chain-appropriate
+    /// value targeting ~$200K USD equivalent.
+    #[arg(long)]
+    tvl_threshold: Option<f64>,
     /// The target blockchain
     #[clap(long, default_value = "ethereum")]
     pub chain: String,
+    /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
+    /// dev instance (e.g. http://127.0.0.1:4242).
+    #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
+    no_tls: bool,
 }
 
 fn register_exchanges(
@@ -57,28 +65,44 @@ fn register_exchanges(
                     tvl_filter.clone(),
                     Some(balancer_v2_pool_filter),
                 )
-                .exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    Some(curve_pool_filter),
-                )
+                .exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
                 .exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None)
-                .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3::filter_fn))
+                .exchange::<EkuboV3State>(
+                    "ekubo_v3",
+                    tvl_filter.clone(),
+                    Some(ekubo_v3_extension_filter),
+                )
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
-                .exchange::<UniswapV4State>("uniswap_v4_hooks", tvl_filter.clone(), None);
-            // COMING SOON!
-            // .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None);
         }
         Chain::Base => {
             builder = builder
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>(
+                    "aerodrome_slipstreams",
+                    tvl_filter.clone(),
+                    None,
+                )
+        }
+        Chain::Bsc => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             builder = builder
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Polygon => {
+            builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
         }
         _ => {}
     }
@@ -113,7 +137,7 @@ async fn main() {
     let tycho_message_processor: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         let all_tokens = load_all_tokens(
             tycho_url.as_str(),
-            false,
+            cli.no_tls,
             Some(tycho_api_key.as_str()),
             true,
             chain,
@@ -122,16 +146,21 @@ async fn main() {
         )
         .await
         .expect("Failed loading tokens");
-        let tvl_filter = ComponentFilter::with_tvl_range(cli.tvl_threshold, cli.tvl_threshold);
-        let mut protocol_stream =
+        let tvl_threshold = cli
+            .tvl_threshold
+            .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
+        let tvl_filter = ComponentFilter::with_tvl_range(tvl_threshold, tvl_threshold);
+        let protocol_stream =
             register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter)
                 .auth_key(Some(tycho_api_key.clone()))
+                .no_tls(cli.no_tls)
                 .skip_state_decode_failures(true)
                 .set_tokens(all_tokens)
                 .await
                 .build()
                 .await
                 .expect("Failed building protocol stream");
+        tokio::pin!(protocol_stream);
 
         // Loop through block updates
         while let Some(msg) = protocol_stream.next().await {

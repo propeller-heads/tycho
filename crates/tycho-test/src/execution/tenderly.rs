@@ -230,6 +230,7 @@ pub fn get_overwrites_string(
 #[cfg(test)]
 mod tests {
     use alloy::primitives::address;
+    use num_bigint::BigUint;
 
     use super::*;
 
@@ -237,8 +238,9 @@ mod tests {
     fn test_build_url_with_transaction() {
         let tx = Transaction::new(
             vec![0xde, 0xad, 0xbe, 0xef].into(),
-            num_bigint::BigUint::from(1000u32),
+            BigUint::from(1000u32),
             vec![0x12, 0x34, 0x56, 0x78],
+            BigUint::ZERO,
         );
 
         let caller = address!("f847a638E44186F3287ee9F8cAF73FF4d4B80784");

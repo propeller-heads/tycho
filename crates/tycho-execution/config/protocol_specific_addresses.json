@@ -1,8 +1,5 @@
 {
   "ethereum": {
-    "vm:curve": {
-      "native_token_address": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-    },
     "uniswap_v4": {
       "angstrom_hook_address": "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
     },
@@ -15,10 +12,9 @@
     }
   },
   "base": {},
+  "arbitrum": {},
   "polygon": {},
-  "unichain": {
-    "vm:curve": {
-      "native_token_address": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-    }
-  }
+  "unichain": {},
+  "bsc": {},
+  "plasma": {}
 }

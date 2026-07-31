@@ -66,7 +66,7 @@ mod tests {
     use alloy::primitives::U256;
     use rstest::rstest;
     use tycho_client::feed::synchronizer::ComponentWithState;
-    use tycho_common::{dto::ResponseProtocolState, Bytes};
+    use tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::super::state::RocketpoolState;
     use crate::{
@@ -76,7 +76,7 @@ mod tests {
 
     fn create_test_snapshot() -> ComponentWithState {
         ComponentWithState {
-            state: ResponseProtocolState {
+            state: ProtocolComponentState {
                 component_id: "Rocketpool".to_owned(),
                 attributes: HashMap::from([
                     (

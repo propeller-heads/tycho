@@ -208,9 +208,9 @@ impl std::fmt::Display for Telemetry {
         writeln!(f, "## Param Key Value combinations for which all simulations reverted")?;
         writeln!(f)?;
 
-        for (key_value, _) in self
+        for key_value in self
             .key_and_value_to_count_simulated
-            .iter()
+            .keys()
         {
             if !self
                 .key_and_value_to_count_success

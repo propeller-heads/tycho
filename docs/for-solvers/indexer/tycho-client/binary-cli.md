@@ -33,7 +33,7 @@ cargo install tycho-client
 
 **Step 1: Download the pre-built binary**
 
-For a simple, setup-free start, download the latest `tycho-client` binary release that matches your OS/architecture on [GitHub](https://github.com/propeller-heads/tycho-indexer/releases).
+For a simple, setup-free start, download the latest `tycho-client` binary release that matches your OS/architecture on <a href="https://github.com/propeller-heads/tycho-indexer/releases" target="_blank" rel="noopener noreferrer">GitHub</a>.
 
 {% hint style="info" %}
 > 💡 **Tip**: Choose the latest release unless you need a specific version.
@@ -90,7 +90,7 @@ tycho-client --version
 tycho-client 0.54.0 # should match the latest version published on GitHub
 ```
 
-You should see the Tycho Client version displayed. If you need more guidance, contact us via [Telegram](https://t.me/c/2288091950/1)
+You should see the Tycho Client version displayed. If you need more guidance, contact us via <a href="https://t.me/c/2288091950/1" target="_blank" rel="noopener noreferrer">Telegram</a>
 
 ***
 

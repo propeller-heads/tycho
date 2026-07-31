@@ -40,8 +40,11 @@ use tycho_simulation::{
         BlockHeader, FeedMessage,
     },
     tycho_common::{
-        dto::{Chain, ProtocolComponent, ResponseProtocolState},
-        models::{token::Token, Chain as ChainModel},
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            token::Token,
+            Chain,
+        },
         Bytes,
     },
 };
@@ -69,6 +72,9 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
     HashMap::from([
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
+        ("base-balancer-v3", "ethereum-balancer-v3"),
+        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
+        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("unichain-curve", "ethereum-curve"),
     ])
@@ -91,6 +97,7 @@ pub struct TestRunner {
     test_type: TestType,
     chain: Chain,
     db_url: String,
+    tycho_server_port: u16,
     substreams_path: PathBuf,
     config_file_path: PathBuf,
     vm_simulation_traces: bool,
@@ -110,6 +117,7 @@ impl TestRunner {
         protocol: String,
         db_url: String,
         rpc_url: String,
+        tycho_server_port: u16,
         vm_simulation_traces: bool,
         reuse_last_sync: bool,
     ) -> miette::Result<Self> {
@@ -140,6 +148,7 @@ impl TestRunner {
             test_type,
             chain,
             db_url,
+            tycho_server_port,
             substreams_path,
             config_file_path,
             vm_simulation_traces,
@@ -254,7 +263,7 @@ impl TestRunner {
         });
 
         // Wait for protocol to be synced before starting live testing
-        let tycho_client = TychoClient::new("http://localhost:4242", Some("dummy".to_string()))
+        let tycho_client = TychoClient::new(&self.tycho_http_url(), Some("dummy".to_string()))
             .into_diagnostic()
             .wrap_err("Failed to create Tycho client for sync check")?;
 
@@ -275,10 +284,10 @@ impl TestRunner {
     async fn run_live_testing(&self, config: &IntegrationTestsConfig) -> miette::Result<()> {
         info!("Starting live testing for protocol {}", &config.protocol_system);
 
-        let chain = ChainModel::from(self.chain);
+        let chain = self.chain;
         // Load tokens for the stream
         let all_tokens = tycho_simulation::utils::load_all_tokens(
-            "localhost:4242",
+            &self.tycho_host(),
             true,
             Some("dummy"),
             true,
@@ -293,7 +302,8 @@ impl TestRunner {
         let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
 
         let protocol_stream_builder =
-            ProtocolStreamBuilder::new("localhost:4242/", chain).skip_state_decode_failures(true);
+            ProtocolStreamBuilder::new(&format!("{}/", self.tycho_host()), chain)
+                .skip_state_decode_failures(true);
 
         let adapter_contract_path = self.get_adapter_contract_path(
             &config.adapter_contract,
@@ -308,19 +318,24 @@ impl TestRunner {
         if let Some(vm_adapter_path) = adapter_contract_path_str {
             decoder_context = decoder_context.vm_adapter_path(vm_adapter_path);
         }
-        let protocol_stream_builder =
-            register_protocol(protocol_stream_builder, &config.protocol_system, decoder_context)?;
+        let protocol_stream_builder = register_protocol(
+            protocol_stream_builder,
+            &config.protocol_system,
+            chain,
+            decoder_context,
+        )?;
 
         let stream_builder = protocol_stream_builder
             .skip_state_decode_failures(true)
             .set_tokens(all_tokens)
             .await;
 
-        let mut stream = stream_builder
+        let stream = stream_builder
             .build()
             .await
             .into_diagnostic()
             .wrap_err("Failed to build protocol stream")?;
+        tokio::pin!(stream);
 
         info!("Live testing started. Processing stream updates...");
 
@@ -555,7 +570,7 @@ impl TestRunner {
         let (protocol_components, snapshot, all_tokens) =
             self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, stop_block)?;
 
-        let response_protocol_states_by_id: HashMap<String, ResponseProtocolState> = snapshot
+        let response_protocol_states_by_id: HashMap<String, ProtocolComponentState> = snapshot
             .states
             .clone()
             .into_iter()
@@ -575,7 +590,9 @@ impl TestRunner {
             .collect();
 
         // Step 1: Validate that all expected components are present on Tycho after indexing
-        self.validate_state(&test.expected_components, protocol_components)?;
+        self.validate_state(&test.expected_components, protocol_components.clone())?;
+
+        self.validate_excluded_components(&test.excluded_components, &protocol_components)?;
 
         // Step 2: Validate Token Balances
         match config.skip_balance_check {
@@ -629,14 +646,33 @@ impl TestRunner {
         Ok(())
     }
 
-    async fn empty_database(&self) -> Result<(), tokio_postgres::Error> {
-        // Remove db name from URL. This is required because we cannot drop a database that we are
-        // currently connected to.
-        let base_url = match self.db_url.rfind('/') {
-            Some(pos) => &self.db_url[..pos],
-            None => self.db_url.as_str(),
+    /// Host and port of the spawned tycho-indexer server, e.g. `localhost:4242`.
+    fn tycho_host(&self) -> String {
+        format!("localhost:{}", self.tycho_server_port)
+    }
+
+    /// HTTP URL of the spawned tycho-indexer server, e.g. `http://localhost:4242`.
+    fn tycho_http_url(&self) -> String {
+        format!("http://{}", self.tycho_host())
+    }
+
+    async fn empty_database(&self) -> miette::Result<()> {
+        // Split the URL into the server part and the database name. We must connect without the
+        // database name because we cannot drop a database that we are currently connected to.
+        let (base_url, db_name) = match self.db_url.rfind('/') {
+            Some(pos) => (&self.db_url[..pos], &self.db_url[pos + 1..]),
+            None => (self.db_url.as_str(), ""),
         };
-        let (client, connection) = tokio_postgres::connect(base_url, NoTls).await?;
+        if db_name.is_empty() {
+            return Err(miette!(
+                "Database URL '{}' has no database name; expected e.g. \
+                 postgres://user:password@host:port/db_name",
+                self.db_url
+            ));
+        }
+        let (client, connection) = tokio_postgres::connect(base_url, NoTls)
+            .await
+            .into_diagnostic()?;
 
         // Spawn the connection handler
         tokio::spawn(async move {
@@ -645,12 +681,16 @@ impl TestRunner {
             }
         });
 
+        // Identifiers cannot be bound as query parameters; quote them, escaping embedded quotes.
+        let quoted_name = format!("\"{}\"", db_name.replace('"', "\"\""));
         client
-            .execute("DROP DATABASE IF EXISTS \"tycho_indexer_0\" WITH (FORCE)", &[])
-            .await?;
+            .execute(&format!("DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"), &[])
+            .await
+            .into_diagnostic()?;
         client
-            .execute("CREATE DATABASE \"tycho_indexer_0\"", &[])
-            .await?;
+            .execute(&format!("CREATE DATABASE {quoted_name}"), &[])
+            .await
+            .into_diagnostic()?;
 
         Ok(())
     }
@@ -659,10 +699,14 @@ impl TestRunner {
         if !self.reuse_last_sync {
             self.empty_database()
                 .await
-                .into_diagnostic()
                 .wrap_err("Failed to empty the database")?;
         }
-        Ok(TychoRunner::new(self.chain, self.db_url.to_string(), initialized_accounts))
+        Ok(TychoRunner::new(
+            self.chain,
+            self.db_url.to_string(),
+            self.tycho_server_port,
+            initialized_accounts,
+        ))
     }
 
     fn run_tvl_import(&self) -> miette::Result<()> {
@@ -748,7 +792,7 @@ impl TestRunner {
     /// # Returns
     /// A tuple containing:
     /// - `Update` - Decoded protocol state update for simulation
-    /// - `HashMap<String, ResponseProtocolState>` - Protocol states by component ID
+    /// - `HashMap<String, ProtocolComponentState>` - Protocol states by component ID
     /// - `Block` - The block header for the specified block
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn fetch_from_tycho_rpc(
@@ -760,7 +804,7 @@ impl TestRunner {
         info!("Fetching protocol data from Tycho with stop block {}...", stop_block);
 
         // Create Tycho client for the RPC server
-        let tycho_client = TychoClient::new("http://localhost:4242", None)
+        let tycho_client = TychoClient::new(&self.tycho_http_url(), None)
             .into_diagnostic()
             .wrap_err("Failed to create Tycho client")?;
 
@@ -807,7 +851,7 @@ impl TestRunner {
         let contract_ids: Vec<Bytes> = protocol_components
             .clone()
             .into_iter()
-            .flat_map(|component| component.contract_ids)
+            .flat_map(|component| component.contract_addresses)
             .chain(
                 traced_entry_points
                     .values()
@@ -857,7 +901,7 @@ impl TestRunner {
         let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
 
         let protocol_stream_builder =
-            ProtocolStreamBuilder::new("", self.chain.into()).skip_state_decode_failures(true);
+            ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
 
         let mut decoder_context = DecoderContext::new().vm_traces(vm_simulation_traces);
         if let Some(vm_adapter_path) = adapter_contract_path.as_ref() {
@@ -865,8 +909,12 @@ impl TestRunner {
                 decoder_context = decoder_context.vm_adapter_path(path_str);
             }
         }
-        let protocol_stream_builder =
-            register_protocol(protocol_stream_builder, protocol_system, decoder_context)?;
+        let protocol_stream_builder = register_protocol(
+            protocol_stream_builder,
+            protocol_system,
+            self.chain,
+            decoder_context,
+        )?;
 
         let decoder = protocol_stream_builder.get_decoder();
         initialize_hook_handlers().into_diagnostic()?;
@@ -972,6 +1020,33 @@ impl TestRunner {
         Ok(())
     }
 
+    fn validate_excluded_components(
+        &self,
+        excluded_components: &[String],
+        protocol_components: &[ProtocolComponent],
+    ) -> miette::Result<()> {
+        if excluded_components.is_empty() {
+            return Ok(());
+        }
+
+        let indexed_ids: HashSet<String> = protocol_components
+            .iter()
+            .map(|c| c.id.to_lowercase())
+            .collect();
+
+        for excluded_id in excluded_components {
+            let excluded = excluded_id.to_lowercase();
+            if indexed_ids.contains(&excluded) {
+                return Err(miette!(
+                    "Component {excluded_id} was indexed but is listed in excluded_components"
+                ));
+            }
+            info!("Component {excluded_id} correctly absent from Tycho output");
+        }
+
+        Ok(())
+    }
+
     /// Runs simulations for all protocol components and swap directions.
     ///
     /// This method performs comprehensive simulation testing on protocol components by:
@@ -1030,7 +1105,7 @@ impl TestRunner {
                 .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
 
             let tokens = component.tokens.clone();
-            let formatted_token_str = format!("{:}/{:}", &tokens[0].symbol, &tokens[1].symbol);
+            let formatted_token_str = format!("{:}/{:}", tokens[0].symbol, tokens[1].symbol);
             state
                 .spot_price(&tokens[0], &tokens[1])
                 .map(|price| info!("[{}] Spot price {:?}: {:?}", id, formatted_token_str, price))
@@ -1105,11 +1180,11 @@ impl TestRunner {
                     }
 
                     let executors_json = json!({
-                        "ethereum": {
+                        (self.chain.to_string()): {
                             (protocol_system): EXECUTOR_ADDRESS
                         }
                     });
-                    let chain_model = ChainModel::from(self.chain);
+                    let chain_model = self.chain;
                     let (solution, calldata) = encode_swap(
                         component,
                         None,
@@ -1118,6 +1193,7 @@ impl TestRunner {
                         amount_in.clone(),
                         chain_model,
                         Some(executors_json.to_string()),
+                        amount_out_result.gas.clone(),
                     )?;
 
                     // Create unique simulation ID
@@ -1136,6 +1212,7 @@ impl TestRunner {
                             component_id: component.id.to_string(),
                             token_in: token_in.symbol.clone(),
                             token_out: token_out.symbol.clone(),
+                            estimated_gas: amount_out_result.gas.clone(),
                         },
                     );
                 }
@@ -1197,7 +1274,7 @@ impl TestRunner {
             return Ok(());
         }
 
-        let chain_model = ChainModel::from(self.chain);
+        let chain_model = self.chain;
         let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &chain_model).await?;
 
         // Prepare router overwrites data
@@ -1317,7 +1394,7 @@ impl TestRunner {
     fn validate_token_balances(
         &self,
         component_tokens: &HashMap<String, Vec<Token>>,
-        protocol_states_by_id: &HashMap<String, ResponseProtocolState>,
+        protocol_states_by_id: &HashMap<String, ProtocolComponentState>,
         stop_block: u64,
     ) -> miette::Result<()> {
         for (id, component) in protocol_states_by_id.iter() {
@@ -1403,7 +1480,7 @@ mod tests {
 
     use dotenv::dotenv;
     use glob::glob;
-    use tycho_simulation::tycho_common::{dto::ResponseProtocolState, Bytes};
+    use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::*;
 
@@ -1464,6 +1541,7 @@ mod tests {
             "test-protocol".to_string(),
             "".to_string(),
             rpc_url,
+            4242,
             false,
             false,
         )
@@ -1476,7 +1554,7 @@ mod tests {
         let block_number = 21998530;
         let token_bytes = Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap();
         let component_id = "0x787B8840100d9BaAdD7463f4a73b5BA73B00C6cA".to_string();
-        let token = Token::new(&token_bytes, "FAKE", 18, 0, &[], Chain::Ethereum.into(), 100);
+        let token = Token::new(&token_bytes, "FAKE", 18, 0, &[], Chain::Ethereum, 100);
 
         let mut balances = HashMap::new();
         let balance_bytes = Bytes::from(
@@ -1485,16 +1563,12 @@ mod tests {
                 .to_be_bytes::<32>(),
         );
         balances.insert(token_bytes.clone(), balance_bytes.clone());
-        let protocol_state = ResponseProtocolState {
-            component_id: component_id.clone(),
-            balances,
-            ..Default::default()
-        };
+        let protocol_state = ProtocolComponentState::new(&component_id, HashMap::new(), balances);
 
         let mut component_tokens = HashMap::new();
         component_tokens.insert(component_id.clone(), vec![token]);
         let mut protocol_states_by_id = HashMap::new();
-        protocol_states_by_id.insert(component_id.clone(), protocol_state.clone());
+        protocol_states_by_id.insert(component_id.clone(), protocol_state);
 
         let result =
             runner.validate_token_balances(&component_tokens, &protocol_states_by_id, block_number);
@@ -1509,22 +1583,18 @@ mod tests {
         let block_number = 21998530;
         let token_bytes = Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap();
         let component_id = "0x787B8840100d9BaAdD7463f4a73b5BA73B00C6cA".to_string();
-        let token = Token::new(&token_bytes, "FAKE", 18, 0, &[], Chain::Ethereum.into(), 100);
+        let token = Token::new(&token_bytes, "FAKE", 18, 0, &[], Chain::Ethereum, 100);
 
         // Set expected balance to zero
         let mut balances = HashMap::new();
         let balance_bytes = Bytes::from(U256::from(0).to_be_bytes::<32>());
         balances.insert(token_bytes.clone(), balance_bytes.clone());
-        let protocol_state = ResponseProtocolState {
-            component_id: component_id.clone(),
-            balances,
-            ..Default::default()
-        };
+        let protocol_state = ProtocolComponentState::new(&component_id, HashMap::new(), balances);
 
         let mut component_tokens = HashMap::new();
         component_tokens.insert(component_id.clone(), vec![token]);
         let mut protocol_states_by_id = HashMap::new();
-        protocol_states_by_id.insert(component_id.clone(), protocol_state.clone());
+        protocol_states_by_id.insert(component_id.clone(), protocol_state);
 
         dotenv().ok();
         let result =

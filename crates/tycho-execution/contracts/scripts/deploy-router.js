@@ -1,34 +1,13 @@
 require('dotenv').config();
-const { ethers } = require("hardhat");
+const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const roles = require("./roles.json");
-
-function resolveRolesNetwork(network) {
-    // Strip tenderly_ prefix to match roles.json keys
-    const base = network.replace(/^tenderly_/, "");
-    if (!roles[base]) {
-        throw new Error(
-            `No roles defined for network "${base}" in roles.json`
-        );
-    }
-    return roles[base];
-}
+const {resolveRolesNetwork} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
-    let permit2;
+    // Permit2 is deployed at the same address on all EVM chains
+    const permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
     let feeCalculator = process.env.FEE_CALCULATOR;
-    if (network === "ethereum" || network === "tenderly_ethereum") {
-        permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
-    } else if (network === "base" || network === "tenderly_base") {
-        // permit2 address is the same as on ethereum
-        permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
-    } else if (network === "unichain") {
-        // permit2 address is the same as on ethereum
-        permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
-    } else {
-        throw new Error(`Unsupported network: ${network}`);
-    }
 
     const networkRoles = resolveRolesNetwork(network);
     const unpauser = networkRoles.UNPAUSER_ROLE[0];

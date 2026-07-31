@@ -1,0 +1,84 @@
+{
+  "state_msgs": {
+    "uniswap_v2": {
+      "header": {
+        "hash": "0x2186b54aff9eed0f2dd8eb48c36cfe1f67a1c0e6eeac721826b4c13d9ee8506d",
+        "number": 21284148,
+        "parent_hash": "0x590bd97e6ab91cf527020174c8bcda9d9d182f45c49cbeb13f43da4309eafa00",
+        "revert": false,
+        "timestamp": 1732771835
+      },
+      "snapshots": {
+        "states": {},
+        "vm_storage": {}
+      },
+      "deltas": {
+        "extractor": "uniswap_v2",
+        "chain": "ethereum",
+        "block": {
+          "number": 21284148,
+          "hash": "0x2186b54aff9eed0f2dd8eb48c36cfe1f67a1c0e6eeac721826b4c13d9ee8506d",
+          "parent_hash": "0x590bd97e6ab91cf527020174c8bcda9d9d182f45c49cbeb13f43da4309eafa00",
+          "chain": "ethereum",
+          "ts": "2024-11-28T05:30:35"
+        },
+        "finalized_block_height": 21284089,
+        "revert": false,
+        "new_tokens": {},
+        "account_updates": {
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "slots": {
+              "0x01": "0x0a"
+            },
+            "balance": "0x00",
+            "code": "0xdeadbeaf",
+            "change": "Creation"
+          }
+        },
+        "state_updates": {},
+        "new_protocol_components": {},
+        "deleted_protocol_components": {},
+        "component_balances": {
+          "0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852": {
+            "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+              "token": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+              "balance": "0x288c879fc6e0",
+              "balance_float": 44584035927776.0,
+              "modify_tx": "0xd43047ed0d2077ae189b5c7cda52dd729fd6954031611d119458e6ef697ebc22",
+              "component_id": "0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852"
+            },
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+              "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "balance": "0x02a17f13e7674e01a281",
+              "balance_float": 1.242381567850478e+22,
+              "modify_tx": "0xd43047ed0d2077ae189b5c7cda52dd729fd6954031611d119458e6ef697ebc22",
+              "component_id": "0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852"
+            }
+          }
+        },
+        "account_balances": {},
+        "component_tvl": {
+          "0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852": 24795.15956433103
+        },
+        "dci_update": {
+          "new_entrypoints": {},
+          "new_entrypoint_params": {},
+          "trace_results": {}
+        }
+      },
+      "removed_components": {}
+    }
+  },
+  "sync_states": {
+    "uniswap_v2": {
+      "status": "ready",
+      "hash": "0x2186b54aff9eed0f2dd8eb48c36cfe1f67a1c0e6eeac721826b4c13d9ee8506d",
+      "number": 21284148,
+      "parent_hash": "0x590bd97e6ab91cf527020174c8bcda9d9d182f45c49cbeb13f43da4309eafa00",
+      "revert": false,
+      "timestamp": 1732771835
+    }
+  }
+}

@@ -7,7 +7,6 @@ import {TransferManager} from "@src/TransferManager.sol";
 import {Constants} from "../Constants.sol";
 import {ICore} from "@ekubo/interfaces/ICore.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {NATIVE_TOKEN_ADDRESS} from "@ekubo/math/constants.sol";
 import {console} from "forge-std/Test.sol";
 
 contract EkuboExecutorTest is Constants, TestUtils {
@@ -58,7 +57,7 @@ contract EkuboExecutorTest is Constants, TestUtils {
         uint256 usdcBalanceBeforeExecutor = USDC.balanceOf(address(executor));
 
         bytes memory data = abi.encodePacked(
-            NATIVE_TOKEN_ADDRESS, // tokenIn
+            ETH_ADDRESS, // tokenIn
             USDC_ADDR, // tokenOut
             ORACLE_CONFIG // poolConfig
         );
@@ -105,7 +104,7 @@ contract EkuboExecutorTest is Constants, TestUtils {
         bytes memory data = abi.encodePacked(PAY_CALLBACK_SELECTOR);
 
         (TransferManager.TransferType transferType, address receiver) =
-            executor.getCallbackTransferData(data, USDC_ADDR);
+            executor.getCallbackTransferData(data, USDC_ADDR, address(this));
 
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
@@ -117,7 +116,7 @@ contract EkuboExecutorTest is Constants, TestUtils {
         bytes memory data = abi.encodePacked(LOCKED_SELECTOR);
 
         (TransferManager.TransferType transferType, address receiver) =
-            executor.getCallbackTransferData(data, USDC_ADDR);
+            executor.getCallbackTransferData(data, USDC_ADDR, address(this));
 
         assertEq(uint8(transferType), uint8(TransferManager.TransferType.None));
         assertEq(receiver, address(0));
@@ -127,7 +126,7 @@ contract EkuboExecutorTest is Constants, TestUtils {
         bytes memory data = abi.encodePacked(LOCKED_SELECTOR);
 
         (TransferManager.TransferType transferType, address receiver) =
-            executor.getCallbackTransferData(data, address(0));
+            executor.getCallbackTransferData(data, ETH_ADDRESS, address(this));
 
         assertEq(
             uint8(transferType),
@@ -139,7 +138,7 @@ contract EkuboExecutorTest is Constants, TestUtils {
     // Same test case as in swap_encoder::tests::ekubo::test_encode_swap_multi
     function testMultiHopSwap() public setUpFork(22082754) {
         bytes memory data = abi.encodePacked(
-            NATIVE_TOKEN_ADDRESS, // tokenIn
+            ETH_ADDRESS, // tokenIn
             USDC_ADDR, // tokenOut of 1st swap
             ORACLE_CONFIG, // config of 1st swap
             USDT_ADDR, // tokenOut of 2nd swap

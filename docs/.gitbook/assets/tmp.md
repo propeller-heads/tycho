@@ -21,7 +21,7 @@ Keeping both enabled (the default) is recommended for production use.
 
 #### Partial Blocks
 
-Some chains, such as [Base](https://docs.base.org/building-with-base/differences/flashblocks), support _flash blocks_ —
+Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ —
 pre-confirmation updates that contain parts of a future block before it is finalized. When `--partial-blocks` is
 enabled, Tycho streams these incremental updates as they arrive, giving you sub-block latency. On chains without flash block
 support, enabling this flag has no effect — full blocks are delivered as usual.
@@ -29,7 +29,7 @@ support, enabling this flag has no effect — full blocks are delivered as usual
 {% hint style="warning" %}
 Block hashes in partial block messages are **unstable** — they change between partial updates and will differ from the
 final block hash. Do not use them as persistent identifiers or cache keys. See
-the [Substreams documentation](https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks)
+the <a href="https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks" target="_blank" rel="noopener noreferrer">Substreams documentation</a>
 for details.
 {% endhint %}
 

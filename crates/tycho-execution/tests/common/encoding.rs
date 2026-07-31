@@ -12,6 +12,7 @@ use tycho_execution::encoding::{
     evm::{
         approvals::permit2::{Permit2, PermitSingle},
         utils::{biguint_to_u256, bytes_to_address},
+        ROUTER_ETH_ADDRESS,
     },
     models,
     models::{EncodedSolution, Solution, UserTransferType},
@@ -107,8 +108,12 @@ pub fn encode_tycho_router_call(
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let native_addr = bytes_to_address(native_address)?;
+    let router_eth = bytes_to_address(&ROUTER_ETH_ADDRESS)?;
     let given_token = bytes_to_address(solution.token_in())?;
+    let given_token = if given_token == native_addr { router_eth } else { given_token };
     let checked_token = bytes_to_address(solution.token_out())?;
+    let checked_token = if checked_token == native_addr { router_eth } else { checked_token };
     let receiver = bytes_to_address(solution.receiver())?;
     let n_tokens = U256::from(encoded_solution.n_tokens());
     let max_client_contribution = biguint_to_u256(&max_client_contribution);

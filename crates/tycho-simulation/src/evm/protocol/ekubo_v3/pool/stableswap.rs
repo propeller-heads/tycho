@@ -17,8 +17,12 @@ use tycho_common::{
 use super::{EkuboPool, EkuboPoolQuote};
 use crate::protocol::errors::InvalidSnapshotError;
 
-const BASE_GAS_COST: u64 = 17_400;
-
+// The names of the constants reflect the exact method from the tenderly log.
+const START_PAYMENT_GAS_COST: u64 = 6_000;
+const BASE_SWAP_GAS_COST: u64 = 17_400;
+const WITHDRAW_GAS_COST: u64 = 16_500;
+const COMPLETE_PAYMENT_GAS_COST: u64 = 2_000;
+const TRANSFER_FROM_USER_GAS_COST: u64 = 20_000;
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct StableswapPool {
     imp: EvmStableswapPool,
@@ -43,7 +47,11 @@ impl StableswapPool {
     }
 
     pub(super) fn gas_costs() -> u64 {
-        BASE_GAS_COST
+        START_PAYMENT_GAS_COST +
+            BASE_SWAP_GAS_COST +
+            WITHDRAW_GAS_COST +
+            COMPLETE_PAYMENT_GAS_COST +
+            TRANSFER_FROM_USER_GAS_COST
     }
 }
 

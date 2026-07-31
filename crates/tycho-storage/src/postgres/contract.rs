@@ -10,7 +10,7 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
-use tracing::{debug, debug_span, error, instrument, Instrument, Level};
+use tracing::{debug, debug_span, error, instrument, warn, Instrument, Level};
 use tycho_common::{
     keccak256,
     models::{
@@ -897,21 +897,25 @@ impl PostgresGateway {
             .map(|code| (code.entity.account_id, code))
             .collect();
 
-        // Since we already filtered accounts to only include those with code in the initial query,
-        // we can use accounts directly. For specific IDs, we still need to verify all accounts have
-        // code.
-        let filtered_accounts = if ids.is_some() {
-            // If specific IDs were requested, all accounts must have code
-            if accounts.len() != code_map.len() {
-                return Err(StorageError::Unexpected(format!(
-                    "Some accounts were missing code. Got {} accounts and {} code entries.",
-                    accounts.len(),
-                    code_map.len(),
-                )));
-            }
+        // Accounts are pre-filtered to have code in the all-IDs path. For the specific-IDs
+        // path we filter here and warn about any gaps, which indicate a DB inconsistency
+        // (e.g. an account inserted via the token path that never received a contract_code row).
+        let filtered_accounts = if ids.is_some() && accounts.len() != code_map.len() {
+            let missing: Vec<String> = accounts
+                .iter()
+                .filter(|a| !code_map.contains_key(&a.id))
+                .map(|a| hex::encode(&a.address))
+                .collect();
+            warn!(
+                missing_count = accounts.len() - code_map.len(),
+                ?missing,
+                "Accounts missing contract_code at this version; skipping them"
+            );
             accounts
+                .into_iter()
+                .filter(|a| code_map.contains_key(&a.id))
+                .collect()
         } else {
-            // If no specific IDs were requested, accounts are already filtered to have code
             accounts
         };
 

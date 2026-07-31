@@ -51,7 +51,7 @@ impl PostgresGateway {
                         storage_error_from_diesel(
                             err,
                             "Block",
-                            &format!("Batch: {} and {} more", &chunk[0].hash, chunk.len() - 1),
+                            &format!("Batch: {} and {} more", chunk[0].hash, chunk.len() - 1),
                             None,
                         )
                     })?;

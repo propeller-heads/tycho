@@ -66,7 +66,6 @@
 //! use futures::StreamExt;
 //! use tycho_client::feed::component_tracker::ComponentFilter;
 //! use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
-//! use std::collections::HashSet;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -82,19 +81,19 @@
 //!     .await
 //!     .expect("Failed loading tokens");
 //!
-//!     let mut protocol_stream =
+//!     let protocol_stream =
 //!         ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum)
 //!             .auth_key(Some("sampletoken".to_string()))
 //!             .skip_state_decode_failures(true)
 //!             .exchange::<UniswapV2State>(
 //!                 "uniswap_v2", ComponentFilter::with_tvl_range(5.0, 10.0), None
 //!             )
-//!             .blocklist_components(HashSet::new())
 //!             .set_tokens(all_tokens)
 //!             .await
 //!             .build()
 //!             .await
 //!             .expect("Failed building protocol stream");
+//!     tokio::pin!(protocol_stream);
 //!
 //!     // Loop through block updates
 //!     while let Some(msg) = protocol_stream.next().await {
@@ -108,34 +107,58 @@ use std::{
     time,
 };
 
-use futures::{Stream, StreamExt};
+use futures::{future::Either, stream, Stream, StreamExt};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, warn};
 use tycho_client::{
     feed::{
         component_tracker::ComponentFilter, synchronizer::ComponentWithState, BlockHeader,
-        SynchronizerState,
+        BlockSynchronizerError, FeedMessage, SynchronizerState,
     },
     stream::{RetryConfiguration, StreamError, TychoStreamBuilder},
 };
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
+    traits::TxDeltaIndexer,
     Bytes,
 };
 
 use crate::{
     evm::{
         decoder::{StreamDecodeError, TychoStreamDecoder},
-        protocol::uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
+        override_stream::{self, StateOverrideProvider},
+        pending::PendingBlockProcessor,
+        protocol::{
+            filters::uniswap_v4_non_angstrom_hook_pool_filter,
+            native_wrapper::state::NativeWrapperState,
+            uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
+        },
     },
     protocol::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock, Update},
     },
+    utils::default_blocklist,
 };
 
-const EXCHANGES_REQUIRING_FILTER: [&str; 2] = ["vm:balancer_v2", "vm:curve"];
+const EXCHANGES_REQUIRING_FILTER: [&str; 4] = ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3"];
+
+/// The client-side filter applied to exchange `name` when the caller provides none.
+///
+/// `uniswap_v4_hooks`: without `ANGSTROM_API_KEY`, Angstrom swaps cannot be encoded (they carry
+/// per-block attestations from the Angstrom API), so Angstrom pools are excluded up front rather
+/// than failing every route that selects them at encoding time.
+fn default_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
+    if name == "uniswap_v4_hooks" && std::env::var("ANGSTROM_API_KEY").is_err() {
+        warn!(
+            "ANGSTROM_API_KEY is not set: excluding Angstrom pools from '{name}'. \
+             Set the key to include them."
+        );
+        return Some(uniswap_v4_non_angstrom_hook_pool_filter);
+    }
+    None
+}
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum StreamEndPolicy {
@@ -164,6 +187,55 @@ impl StreamEndPolicy {
     }
 }
 
+/// Handle returned by [`ProtocolStreamBuilder::with_step_controller`] that gives external
+/// control over when each buffered block is released for decoding.
+///
+/// Intended for complex test scenarios where the caller needs to observe what the next
+/// block contains before allowing the decoder pipeline to process it.
+///
+/// ## Drop behaviour
+///
+/// Dropping this controller ungates the stream: the gating task detects the closed trigger
+/// channel, forwards the currently-buffered block (if any), then continues passing subsequent
+/// blocks through without waiting for triggers — exactly as if step-control had never been
+/// enabled. The stream runs to its natural end.
+pub struct BlockStepController {
+    /// Sends a trigger signal to release the next buffered block.
+    trigger_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Watch channel containing the next buffered raw message, or `None` if no block is pending.
+    peek_rx: tokio::sync::watch::Receiver<Option<FeedMessage<BlockHeader>>>,
+}
+
+impl BlockStepController {
+    /// Releases the next buffered block for decoding and emission.
+    ///
+    /// Returns an error if the stream has already ended and the sender is disconnected.
+    pub fn trigger_next_block(&self) -> Result<(), tokio::sync::mpsc::error::SendError<()>> {
+        // Send a unit value on the trigger channel to unblock the gating task.
+        self.trigger_tx.send(())
+    }
+
+    /// Returns the currently buffered block immediately, or `None` if no block is buffered yet.
+    pub fn try_peek_next_block(&self) -> Option<FeedMessage<BlockHeader>> {
+        self.peek_rx.borrow().clone()
+    }
+
+    /// Waits until a block is buffered and returns it without consuming it.
+    ///
+    /// Returns `None` only if the stream has ended and no further blocks will arrive.
+    /// If a block is already buffered when this is called, it returns immediately.
+    pub async fn peek_next_block(&self) -> Option<FeedMessage<BlockHeader>> {
+        // Clone so we don't hold a mutable borrow on self; wait_for checks the current
+        // value first, so this returns immediately if a block is already present.
+        let mut rx = self.peek_rx.clone();
+        let guard = rx
+            .wait_for(|v| v.is_some())
+            .await
+            .ok()?;
+        guard.clone()
+    }
+}
+
 /// Builds and configures the multi protocol stream described in the [module-level docs](self).
 ///
 /// See the module documentation for details on protocols, configuration options, and
@@ -172,17 +244,43 @@ pub struct ProtocolStreamBuilder {
     decoder: TychoStreamDecoder<BlockHeader>,
     stream_builder: TychoStreamBuilder,
     stream_end_policy: StreamEndPolicy,
+    chain: Chain,
+    pending_indexers: HashMap<String, Box<dyn TxDeltaIndexer>>,
+    /// Watch sender used to publish the currently-buffered raw block so the controller can peek
+    /// at it before triggering. `Some` iff step-control mode is active.
+    step_peek_tx: Option<tokio::sync::watch::Sender<Option<FeedMessage<BlockHeader>>>>,
+    /// Receiver half of the trigger channel. Held here until `build()` / `build_with_pending()`
+    /// transfers ownership to the gating task. `Some` iff step-control mode is active.
+    step_trigger_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    /// State-override providers explicitly registered by the consumer, keyed by `protocol_system`.
+    /// These take precedence over the built-in default registry and are installed onto the decoder
+    /// at build time.
+    override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
+    /// Names of all exchanges registered on the builder, used to decide which built-in override
+    /// providers to auto-register at build time.
+    registered_exchanges: HashSet<String>,
 }
 
 impl ProtocolStreamBuilder {
     /// Creates a new builder for a multi-protocol stream.
     ///
+    /// The shipped pool blocklist is applied by default, excluding components known to break
+    /// simulation. Use [`blocklist_components`](Self::blocklist_components) to exclude additional
+    /// components.
+    ///
     /// See the [module-level docs](self) for full details on stream behavior and configuration.
     pub fn new(tycho_url: &str, chain: Chain) -> Self {
         Self {
             decoder: TychoStreamDecoder::new(),
-            stream_builder: TychoStreamBuilder::new(tycho_url, chain.into()),
+            stream_builder: TychoStreamBuilder::new(tycho_url, chain)
+                .blocklisted_ids(default_blocklist()),
             stream_end_policy: StreamEndPolicy::default(),
+            chain,
+            pending_indexers: HashMap::new(),
+            step_peek_tx: None,
+            step_trigger_rx: None,
+            override_providers: HashMap::new(),
+            registered_exchanges: HashSet::new(),
         }
     }
 
@@ -221,14 +319,22 @@ impl ProtocolStreamBuilder {
         self.stream_builder = self
             .stream_builder
             .exchange(name, filter);
+        self.registered_exchanges
+            .insert(name.to_string());
         self.decoder.register_decoder::<T>(name);
         if let Some(predicate) = filter_fn {
+            self.decoder
+                .register_filter(name, predicate);
+        } else if let Some(predicate) = default_filter_fn(name) {
             self.decoder
                 .register_filter(name, predicate);
         }
 
         if EXCHANGES_REQUIRING_FILTER.contains(&name) && filter_fn.is_none() {
-            warn!("Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs", name);
+            warn!(
+                "Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs",
+                name
+            );
         }
 
         self
@@ -272,15 +378,23 @@ impl ProtocolStreamBuilder {
         self.stream_builder = self
             .stream_builder
             .exchange(name, filter);
+        self.registered_exchanges
+            .insert(name.to_string());
         self.decoder
             .register_decoder_with_context::<T>(name, decoder_context);
         if let Some(predicate) = filter_fn {
             self.decoder
                 .register_filter(name, predicate);
+        } else if let Some(predicate) = default_filter_fn(name) {
+            self.decoder
+                .register_filter(name, predicate);
         }
 
         if EXCHANGES_REQUIRING_FILTER.contains(&name) && filter_fn.is_none() {
-            warn!("Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs", name);
+            warn!(
+                "Warning: For exchange type '{}', it is necessary to set a filter function because not all pools are supported. See all filters at src/evm/protocol/filters.rs",
+                name
+            );
         }
 
         self
@@ -346,6 +460,24 @@ impl ProtocolStreamBuilder {
         self
     }
 
+    /// Adds client-metadata entries forwarded to the server in the `X-Tycho-Client-Metadata`
+    /// header.
+    ///
+    /// See [`TychoStreamBuilder::add_client_metadata`]. Values are self-reported and may surface in
+    /// the server's metrics and logs — do not include secrets or personally identifiable
+    /// information.
+    pub fn add_client_metadata<I, K, V>(mut self, metadata: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.stream_builder = self
+            .stream_builder
+            .add_client_metadata(metadata);
+        self
+    }
+
     /// Disables TLS/ SSL for the connection, using http and ws protocols.
     ///
     /// This is not recommended for production use.
@@ -370,7 +502,10 @@ impl ProtocolStreamBuilder {
         self
     }
 
-    /// Exclude specific component IDs from all registered exchanges.
+    /// Exclude additional component IDs from all registered exchanges.
+    ///
+    /// These IDs are added to the shipped blocklist that is already applied by default (see
+    /// [`new`](Self::new)).
     pub fn blocklist_components(mut self, ids: HashSet<String>) -> Self {
         if !ids.is_empty() {
             tracing::info!("Blocklisting {} components", ids.len());
@@ -443,56 +578,465 @@ impl ProtocolStreamBuilder {
         &self.decoder
     }
 
+    /// Registers a [`TxDeltaIndexer`] for ephemeral pending-block simulation.
+    ///
+    /// The indexer is associated with `extractor` (the protocol synchronizer name, e.g.
+    /// `"uniswap_v3"`). Use [`build_with_pending`](Self::build_with_pending) to obtain both
+    /// the confirmed stream and the pending processor.
+    ///
+    /// Returns an error if `extractor` names a VM protocol (prefix `"vm:"`), which requires
+    /// `update_engine()` and cannot be simulated natively.
+    pub fn with_pending_indexer(
+        mut self,
+        extractor: &str,
+        indexer: Box<dyn TxDeltaIndexer>,
+    ) -> Result<Self, StreamError> {
+        if extractor.starts_with("vm:") {
+            return Err(StreamError::SetUpError(format!(
+                "extractor '{extractor}' is a VM protocol; TxDeltaIndexer only supports native protocols"
+            )));
+        }
+        self.pending_indexers
+            .insert(extractor.to_string(), indexer);
+        Ok(self)
+    }
+
+    /// Enables controlled-step mode for testing.
+    ///
+    /// Returns a [`BlockStepController`] that lets the caller decide when each buffered block
+    /// is released for decoding. Call this before [`build`](Self::build) or
+    /// [`build_with_pending`](Self::build_with_pending) — both detect and wire up the gating
+    /// automatically.
+    ///
+    /// In production code, do not call this method; the stream runs at full speed.
+    pub fn with_step_controller(mut self) -> (Self, BlockStepController) {
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (peek_tx, peek_rx) =
+            tokio::sync::watch::channel::<Option<FeedMessage<BlockHeader>>>(None);
+
+        self.step_peek_tx = Some(peek_tx);
+        self.step_trigger_rx = Some(trigger_rx);
+
+        let controller = BlockStepController { trigger_tx, peek_rx };
+        (self, controller)
+    }
+
+    /// Spawns a background task that gates `FeedMessage` delivery.
+    ///
+    /// The task buffers each incoming message, publishes it to `peek_tx` so the
+    /// [`BlockStepController`] can inspect it, waits for a trigger, then forwards the message to
+    /// `output_tx` for the decode pipeline. If `advance_tx` is `Some`, a clone of the message is
+    /// also forwarded there (used by the pending-processor path) before the decode step.
+    /// When the input channel closes or a terminal error is received according to
+    /// `stream_end_policy`, the task exits and all output channels are dropped.
+    fn run_gating_task(
+        raw_rx: tokio::sync::mpsc::Receiver<
+            Result<FeedMessage<BlockHeader>, BlockSynchronizerError>,
+        >,
+        mut trigger_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+        peek_tx: tokio::sync::watch::Sender<Option<FeedMessage<BlockHeader>>>,
+        output_tx: tokio::sync::mpsc::Sender<FeedMessage<BlockHeader>>,
+        stream_end_policy: StreamEndPolicy,
+    ) {
+        tokio::spawn(async move {
+            let mut raw_stream = ReceiverStream::new(raw_rx);
+            loop {
+                let msg = match raw_stream.next().await {
+                    Some(Ok(msg)) => msg,
+                    Some(Err(e)) => {
+                        error!("Block stream ended with terminal error: {e}");
+                        break;
+                    }
+                    None => break,
+                };
+
+                if stream_end_policy.should_end(msg.sync_states.values()) {
+                    error!(
+                        "Block stream ended due to {:?}: {:?}",
+                        stream_end_policy, msg.sync_states
+                    );
+                    break;
+                }
+
+                // Publish the buffered message so the caller can peek before triggering.
+                let _ = peek_tx.send(Some(msg.clone()));
+
+                // Block until the controller fires trigger_next_block(), or until it is dropped.
+                if trigger_rx.recv().await.is_none() {
+                    // Controller dropped — forward the buffered message and drain the rest
+                    // without gating, so the stream continues to its natural end.
+                    let _ = peek_tx.send(None);
+                    if output_tx.send(msg).await.is_err() {
+                        break;
+                    }
+                    while let Some(item) = raw_stream.next().await {
+                        let Ok(msg) = item else { break };
+                        if stream_end_policy.should_end(msg.sync_states.values()) {
+                            break;
+                        }
+                        if output_tx.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+                // Clear the peek slot before decoding so callers see None between blocks.
+                let _ = peek_tx.send(None);
+
+                if output_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Registers `provider` as the live override source for `protocol_system`.
+    ///
+    /// Explicit registrations take precedence over the built-in default registry, so this is how
+    /// you swap a venue (e.g. `vm:bopamm`) onto a different provider. Registering the same provider
+    /// for several protocols is cheap — it is shared via `Arc`, not duplicated.
+    pub fn with_override_provider(
+        mut self,
+        protocol_system: impl Into<String>,
+        provider: Arc<dyn StateOverrideProvider>,
+    ) -> Self {
+        self.override_providers
+            .insert(protocol_system.into(), provider);
+        self
+    }
+
+    /// Installs override providers onto the decoder before the stream is built.
+    ///
+    /// Explicit consumer registrations win; the built-in default registry (see
+    /// [`default_override_providers`](crate::evm::override_stream::default_override_providers))
+    /// then fills every remaining protocol it can serve.
+    fn install_override_providers(&mut self) {
+        let explicit = std::mem::take(&mut self.override_providers);
+        // Protocols eligible for a built-in default provider: registered exchanges not explicitly
+        // overridden by the consumer.
+        let uncovered = self
+            .registered_exchanges
+            .clone()
+            .into_iter()
+            .filter(|exchange| !explicit.contains_key(exchange));
+        let defaults = override_stream::default_override_providers(uncovered);
+        for (protocol_system, provider) in defaults.into_iter().chain(explicit) {
+            self.decoder
+                .set_override_provider(protocol_system, provider);
+        }
+    }
+
+    /// Builds the confirmed protocol stream and a [`PendingBlockProcessor`] that stays
+    /// in sync with it automatically.
+    ///
+    /// The stream pipeline forwards every confirmed [`FeedMessage`] to the processor via an
+    /// internal unbounded channel — it never blocks waiting for the consumer. The consumer
+    /// owns the returned `PendingBlockProcessor` exclusively and may wrap it in whatever
+    /// synchronisation primitive suits their use case (e.g. `Mutex` for shared access,
+    /// nothing for single-threaded use).
+    ///
+    /// Call [`generate_pending_update`](PendingBlockProcessor::generate_pending_update) to
+    /// simulate a candidate bundle; it drains the channel automatically before computing.
+    pub async fn build_with_pending(
+        mut self,
+    ) -> Result<
+        (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
+        StreamError,
+    > {
+        initialize_hook_handlers().map_err(|e| {
+            StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
+        })?;
+        self.install_override_providers();
+        let (_, rx) = self.stream_builder.build().await?;
+        let decoder = Arc::new(self.decoder);
+
+        let (advance_tx, advance_rx) =
+            tokio::sync::mpsc::unbounded_channel::<FeedMessage<BlockHeader>>();
+        let pending = PendingBlockProcessor::new(
+            self.pending_indexers,
+            decoder.clone(),
+            self.chain,
+            advance_rx,
+        );
+
+        let chain = self.chain;
+        let stream_end_policy = self.stream_end_policy;
+
+        let decode_stream: Box<dyn Stream<Item = FeedMessage<BlockHeader>> + Send + Unpin> =
+            if let (Some(peek_tx), Some(trigger_rx)) = (self.step_peek_tx, self.step_trigger_rx) {
+                let (gated_tx, gated_rx) =
+                    tokio::sync::mpsc::channel::<FeedMessage<BlockHeader>>(1);
+                Self::run_gating_task(rx, trigger_rx, peek_tx, gated_tx, stream_end_policy);
+                Box::new(ReceiverStream::new(gated_rx))
+            } else {
+                let normal = ReceiverStream::new(rx)
+                    .take_while(move |msg| match msg {
+                        Ok(msg) => {
+                            let states = msg.sync_states.values();
+                            if stream_end_policy.should_end(states) {
+                                error!(
+                                    "Block stream ended due to {:?}: {:?}",
+                                    stream_end_policy, msg.sync_states
+                                );
+                                futures::future::ready(false)
+                            } else {
+                                futures::future::ready(true)
+                            }
+                        }
+                        Err(e) => {
+                            error!("Block stream ended with terminal error: {e}");
+                            futures::future::ready(false)
+                        }
+                    })
+                    .map(|msg| msg.expect("Safe since stream ends if we receive an error"));
+                Box::new(Box::pin(normal))
+            };
+
+        let stream = Box::pin(decode_stream.then({
+            let decoder = decoder.clone();
+            move |msg| {
+                let decoder = decoder.clone();
+                let advance_tx = advance_tx.clone();
+                async move {
+                    let _ = advance_tx.send(msg.clone());
+                    decoder.decode(&msg).await.map_err(|e| {
+                        debug!(msg=?msg, "Decode error: {}", e);
+                        e
+                    })
+                }
+            }
+        }));
+        let stream = inject_native_wrapper(stream, chain);
+        Ok((stream, pending))
+    }
+
     /// Builds and returns the configured protocol stream.
     ///
     /// See the module-level docs for details on stream behavior and emitted messages.
     /// This method applies all builder settings and starts the stream.
     pub async fn build(
-        self,
+        mut self,
     ) -> Result<impl Stream<Item = Result<Update, StreamDecodeError>>, StreamError> {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
+        let chain = self.chain;
+        let stream_end_policy = self.stream_end_policy;
 
-        let stream = Box::pin(
-            ReceiverStream::new(rx)
-                .take_while(move |msg| match msg {
-                    Ok(msg) => {
-                        let states = msg.sync_states.values();
-                        if self
-                            .stream_end_policy
-                            .should_end(states)
-                        {
-                            error!(
-                                "Block stream ended due to {:?}: {:?}",
-                                self.stream_end_policy, msg.sync_states
-                            );
+        let decode_stream: Box<dyn Stream<Item = FeedMessage<BlockHeader>> + Send + Unpin> =
+            if let (Some(peek_tx), Some(trigger_rx)) = (self.step_peek_tx, self.step_trigger_rx) {
+                let (gated_tx, gated_rx) =
+                    tokio::sync::mpsc::channel::<FeedMessage<BlockHeader>>(1);
+                Self::run_gating_task(rx, trigger_rx, peek_tx, gated_tx, stream_end_policy);
+                Box::new(ReceiverStream::new(gated_rx))
+            } else {
+                let normal = ReceiverStream::new(rx)
+                    .take_while(move |msg| match msg {
+                        Ok(msg) => {
+                            let states = msg.sync_states.values();
+                            if stream_end_policy.should_end(states) {
+                                error!(
+                                    "Block stream ended due to {:?}: {:?}",
+                                    stream_end_policy, msg.sync_states
+                                );
+                                futures::future::ready(false)
+                            } else {
+                                futures::future::ready(true)
+                            }
+                        }
+                        Err(e) => {
+                            error!("Block stream ended with terminal error: {e}");
                             futures::future::ready(false)
-                        } else {
-                            futures::future::ready(true)
                         }
-                    }
-                    Err(e) => {
-                        error!("Block stream ended with terminal error: {e}");
-                        futures::future::ready(false)
-                    }
-                })
-                .then({
-                    let decoder = decoder.clone(); // Clone the decoder for the closure
-                    move |msg| {
-                        let decoder = decoder.clone(); // Clone again for the async block
-                        async move {
-                            let msg = msg.expect("Save since stream ends if we receive an error");
-                            decoder.decode(&msg).await.map_err(|e| {
-                                debug!(msg=?msg, "Decode error: {}", e);
-                                e
-                            })
-                        }
-                    }
-                }),
-        );
+                    })
+                    .map(|msg| msg.expect("Safe since stream ends if we receive an error"));
+                Box::new(Box::pin(normal))
+            };
+
+        let stream = Box::pin(decode_stream.then({
+            let decoder = decoder.clone();
+            move |msg| {
+                let decoder = decoder.clone();
+                async move {
+                    decoder.decode(&msg).await.map_err(|e| {
+                        debug!(msg=?msg, "Decode error: {}", e);
+                        e
+                    })
+                }
+            }
+        }));
+        let stream = inject_native_wrapper(stream, chain);
         Ok(stream)
+    }
+}
+
+/// Wraps a decoded protocol stream to inject a `NativeWrapperState` component
+/// on the first successful update.
+///
+/// Skips injection for chains where the native and wrapped-native tokens share
+/// the same address (e.g. Starknet).
+fn inject_native_wrapper(
+    inner: impl Stream<Item = Result<Update, StreamDecodeError>> + Unpin + Send + 'static,
+    chain: Chain,
+) -> impl Stream<Item = Result<Update, StreamDecodeError>> + Send {
+    let has_distinct_wrapper = chain.native_token().address != chain.wrapped_native_token().address;
+    if !has_distinct_wrapper {
+        return Either::Left(inner);
+    }
+
+    Either::Right(
+        stream::once(async move {
+            let mut inner = inner;
+            let first = inner.next().await;
+            let modified = first.into_iter().map(move |result| {
+                result.map(|mut update| {
+                    let component = NativeWrapperState::component(chain);
+                    let id = component.id.to_string();
+                    update
+                        .new_pairs
+                        .insert(id.clone(), component);
+                    update
+                        .states
+                        .insert(id, Box::new(NativeWrapperState::new(chain)));
+                    debug!("Injected native_wrapper component for {chain}");
+                    update
+                })
+            });
+            stream::iter(modified).chain(inner)
+        })
+        .flatten(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use futures::{stream, StreamExt};
+    use tycho_common::models::Chain;
+
+    use super::*;
+    use crate::protocol::models::Update;
+
+    fn empty_update(block: u64) -> Update {
+        Update::new(block, HashMap::new(), HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_inject_native_wrapper_first_message_only() {
+        let updates = vec![Ok(empty_update(1)), Ok(empty_update(2)), Ok(empty_update(3))];
+        let input = stream::iter(updates);
+
+        let results: Vec<_> = inject_native_wrapper(input, Chain::Ethereum)
+            .collect()
+            .await;
+
+        assert_eq!(results.len(), 3);
+
+        let expected_id = NativeWrapperState::component(Chain::Ethereum)
+            .id
+            .to_string();
+
+        let first = results[0]
+            .as_ref()
+            .expect("first update ok");
+        assert!(
+            first
+                .new_pairs
+                .contains_key(&expected_id),
+            "first message should have native_wrapper component"
+        );
+        assert!(
+            first.states.contains_key(&expected_id),
+            "first message should have native_wrapper state"
+        );
+
+        let second = results[1]
+            .as_ref()
+            .expect("second update ok");
+        assert!(
+            !second
+                .new_pairs
+                .contains_key(&expected_id),
+            "second message should NOT have native_wrapper component"
+        );
+        assert!(
+            !second.states.contains_key(&expected_id),
+            "second message should NOT have native_wrapper state"
+        );
+    }
+
+    /// Verifies that `with_step_controller` returns both a modified builder and a controller.
+    ///
+    /// This test only checks that the builder method is callable and that the returned controller
+    /// compiles — it does not start any network connection.
+    #[tokio::test]
+    async fn test_with_step_controller_returns_controller() {
+        let builder = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum);
+        let (_builder, controller) = builder.with_step_controller();
+        // The controller was successfully returned — verifying the public API is callable.
+        drop(controller);
+    }
+
+    /// Connects to a live Tycho instance, verifies that the stream blocks until
+    /// `trigger_next_block` is called, and that `peek_next_block` exposes the buffered message.
+    #[ignore = "requires live Tycho connection (TYCHO_AUTH_TOKEN env var)"]
+    #[tokio::test]
+    async fn test_step_controller_trigger_releases_block() {
+        use std::{env, time::Duration};
+
+        use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        let auth = env::var("TYCHO_AUTH_TOKEN").expect("TYCHO_AUTH_TOKEN must be set");
+
+        // Track a single well-known pool to minimise startup latency.
+        let usdc_weth_v2 = "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc".to_string();
+        let (builder, controller) =
+            ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum)
+                .auth_key(Some(auth))
+                .exchange::<UniswapV2State>(
+                    "uniswap_v2",
+                    ComponentFilter::Ids(vec![usdc_weth_v2]),
+                    None,
+                )
+                .with_step_controller();
+
+        let (stream, _pending) = builder
+            .build_with_pending()
+            .await
+            .expect("build_with_pending failed");
+        tokio::pin!(stream);
+
+        // Wait up to 60 s for the first block to arrive in the gating buffer.
+        let peeked = tokio::time::timeout(Duration::from_secs(60), controller.peek_next_block())
+            .await
+            .expect("timed out waiting for first block to buffer")
+            .expect("stream ended before a block arrived");
+
+        assert!(!peeked.sync_states.is_empty(), "peeked block should carry sync states");
+
+        // Stream must be empty before we trigger — the gating task should be holding the block.
+        let pre_trigger = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
+        assert!(
+            pre_trigger.is_err(),
+            "stream should be blocked before trigger_next_block, got an item"
+        );
+
+        // Release the block.
+        controller
+            .trigger_next_block()
+            .expect("trigger_next_block failed");
+
+        // Stream should now yield the decoded update within one block time.
+        let update = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for update after trigger")
+            .expect("stream ended unexpectedly");
+
+        assert!(update.is_ok(), "decoded update should be Ok, got: {:?}", update);
     }
 }

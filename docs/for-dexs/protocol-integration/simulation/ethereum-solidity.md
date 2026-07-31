@@ -6,7 +6,7 @@
 
 To integrate an EVM exchange protocol:
 
-1. Implement the [`ISwapAdapter.sol`](https://github.com/propeller-heads/tycho-indexer/blob/main/protocols/adapter-integration/evm/interfaces/ISwapAdapter.sol) interface.
+1. Implement the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/protocols/adapter-integration/evm/interfaces/ISwapAdapter.sol" target="_blank" rel="noopener noreferrer">`ISwapAdapter.sol`</a> interface.
 2. Create a manifest file summarizing the protocol's metadata.
 
 ### The Manifest File

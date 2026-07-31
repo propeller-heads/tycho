@@ -34,7 +34,7 @@ use crate::{
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::dto::{ProtocolComponent, ResponseProtocolState},
+    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
 fn bytes_to_address(address: &Bytes) -> Result<Address, RFQError> {
@@ -65,9 +65,6 @@ pub struct BebopClient {
     tokens: HashSet<Bytes>,
     // Min tvl value in the quote token.
     tvl: f64,
-    // name header for authentication
-    #[serde(skip_serializing, default)]
-    ws_user: String,
     // key header for authentication
     #[serde(skip_serializing, default)]
     ws_key: String,
@@ -83,7 +80,6 @@ impl BebopClient {
         chain: Chain,
         tokens: HashSet<Bytes>,
         tvl: f64,
-        ws_user: String,
         ws_key: String,
         quote_tokens: HashSet<Bytes>,
         quote_timeout: Duration,
@@ -95,7 +91,6 @@ impl BebopClient {
             tokens,
             chain,
             tvl,
-            ws_user,
             ws_key,
             quote_tokens,
             quote_timeout,
@@ -113,9 +108,9 @@ impl BebopClient {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "bebop_pool".to_string(),
-            chain: self.chain.into(),
+            chain: self.chain,
             tokens,
-            contract_ids: vec![], // empty for RFQ
+            contract_addresses: vec![], // empty for RFQ
             static_attributes: Default::default(),
             change: Default::default(),
             creation_tx: Default::default(),
@@ -130,7 +125,9 @@ impl BebopClient {
         if !price_data.bids.is_empty() {
             let bids_pairs: Vec<(f32, f32)> = price_data
                 .bids
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| (chunk[0], chunk[1]))
                 .collect();
             let bids_json = serde_json::to_string(&bids_pairs).unwrap_or_default();
@@ -139,7 +136,9 @@ impl BebopClient {
         if !price_data.asks.is_empty() {
             let asks_pairs: Vec<(f32, f32)> = price_data
                 .asks
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| (chunk[0], chunk[1]))
                 .collect();
             let asks_json = serde_json::to_string(&asks_pairs).unwrap_or_default();
@@ -147,11 +146,7 @@ impl BebopClient {
         }
 
         ComponentWithState {
-            state: ResponseProtocolState {
-                component_id: component_id.clone(),
-                attributes,
-                balances: HashMap::new(),
-            },
+            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],
@@ -167,6 +162,9 @@ impl BebopClient {
                 quote.validate(params)?;
 
                 let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
+                // The contract the calldata targets: either the Bebop settlement
+                // or the Bebop router.
+                quote_attributes.insert("tx_to".into(), quote.tx.to);
                 quote_attributes.insert("calldata".into(), quote.tx.data);
                 quote_attributes.insert(
                     "partial_fill_offset".into(),
@@ -262,8 +260,7 @@ impl RFQClient for BebopClient {
         let tokens = self.tokens.clone();
         let url = self.price_ws.clone();
         let tvl_threshold = self.tvl;
-        let name = self.ws_user.clone();
-        let authorization = self.ws_key.clone();
+        let authorization = format!("Bearer {}", self.ws_key);
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
@@ -280,7 +277,6 @@ impl RFQClient for BebopClient {
                     .header("Connection", "Upgrade")
                     .header("Sec-WebSocket-Key", generate_key())
                     .header("Sec-WebSocket-Version", "13")
-                    .header("name", &name)
                     .header("Authorization", &authorization)
                     .body(())
                     .map_err(|_| RFQError::FatalError("Failed to build request".into()))?;
@@ -481,12 +477,9 @@ impl RFQClient for BebopClient {
                     ("expiry_type", "standard".into()),
                     ("fee", "0".into()),
                     ("is_ui", "false".into()),
-                    ("source", self.ws_user.clone()),
                 ])
                 .header("accept", "application/json")
-                .header("name", &self.ws_user)
-                .header("source-auth", &self.ws_key)
-                .header("Authorization", &self.ws_key);
+                .bearer_auth(&self.ws_key);
 
             let response = match timeout(remaining_time, request.send()).await {
                 Ok(Ok(resp)) => resp,
@@ -583,7 +576,6 @@ mod tests {
             Chain::Ethereum,
             HashSet::from_iter(vec![weth.clone(), wbtc.clone()]),
             10.0, // $10 minimum TVL
-            auth.user,
             auth.key,
             quote_tokens,
             Duration::from_secs(30),
@@ -593,9 +585,12 @@ mod tests {
         let mut stream = client.stream();
 
         // Test connection and message reception with timeout
+        // Receiving a single decodable pricing message is enough to prove the authenticated
+        // handshake and protobuf decoding work. Bebop only pushes on price changes, so
+        // requiring more messages makes the test flaky against market cadence.
         let result = timeout(Duration::from_secs(10), async {
             let mut message_count = 0;
-            let max_messages = 5;
+            let max_messages = 1;
 
             while let Some(result) = stream.next().await {
                 match result {
@@ -626,10 +621,7 @@ mod tests {
                                     .protocol_type_name,
                                 "bebop_pool"
                             );
-                            assert_eq!(
-                                component_with_state.component.chain,
-                                Chain::Ethereum.into()
-                            );
+                            assert_eq!(component_with_state.component.chain, Chain::Ethereum);
 
                             let attributes = &component_with_state.state.attributes;
 
@@ -750,7 +742,6 @@ mod tests {
             price_ws: format!("ws://127.0.0.1:{}", addr.port()),
             tokens: tokens_formatted.into_iter().collect(),
             tvl: 1000.0,
-            ws_user: "test_user".to_string(),
             ws_key: "test_key".to_string(),
             quote_tokens: test_quote_tokens,
             quote_endpoint: "".to_string(),
@@ -823,7 +814,6 @@ mod tests {
             Chain::Ethereum,
             HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
             10.0, // $10 minimum TVL
-            auth.user,
             auth.key,
             HashSet::new(),
             Duration::from_secs(30),
@@ -848,8 +838,9 @@ mod tests {
         assert_eq!(quote.quote_token, token_out);
         assert_eq!(quote.amount_in, BigUint::from(1_000000000000000000u64));
 
-        // Assuming the BTC - WETH price doesn't change too much at the time of running this
-        assert!(quote.amount_out > BigUint::from(3000000u64));
+        // Conservative sanity bound (0.01 WBTC for 1 WETH) — proves a real, non-dust quote came
+        // back without depending closely on the live WETH/WBTC price.
+        assert!(quote.amount_out > BigUint::from(1_000_000u64));
 
         // SWAP_SINGLE_SELECTOR = 0x4dcebcba;
         assert_eq!(
@@ -886,7 +877,6 @@ mod tests {
             Chain::Ethereum,
             HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
             10.0, // $10 minimum TVL
-            auth.user,
             auth.key,
             HashSet::new(),
             Duration::from_secs(30),
@@ -1025,7 +1015,6 @@ mod tests {
             quote_endpoint,
             tokens: HashSet::from([token_in, token_out]),
             tvl: 10.0,
-            ws_user: "test_user".to_string(),
             ws_key: "test_key".to_string(),
             quote_tokens: HashSet::new(),
             quote_timeout,
@@ -1187,7 +1176,6 @@ mod tests {
             quote_endpoint: "https://api.bebop.xyz/quote".to_string(),
             tokens: HashSet::from([token_in.clone(), token_out.clone()]),
             tvl: 50.5,
-            ws_user: "secret_user".to_string(),
             ws_key: "secret_key".to_string(),
             quote_tokens: HashSet::from([quote_token.clone()]),
             quote_timeout: Duration::from_millis(5500),
@@ -1205,16 +1193,14 @@ mod tests {
         assert_eq!(deserialized.quote_tokens, original.quote_tokens);
         assert_eq!(deserialized.quote_timeout, original.quote_timeout);
 
-        // ws_user and ws_key should NOT round-trip (skip_serializing + default)
-        assert_eq!(deserialized.ws_user, "");
+        // ws_key should NOT round-trip (skip_serializing + default)
         assert_eq!(deserialized.ws_key, "");
-        assert_ne!(deserialized.ws_user, original.ws_user);
         assert_ne!(deserialized.ws_key, original.ws_key);
     }
 
     #[test]
     fn test_bebop_client_deserialize_with_credentials() {
-        // When ws_user and ws_key are provided in JSON, they should be deserialized
+        // When ws_key is provided in JSON, it should be deserialized
         // (skip_serializing only affects serialization, not deserialization)
         let json = r#"{
             "chain": "ethereum",
@@ -1222,7 +1208,6 @@ mod tests {
             "quote_endpoint": "https://api.bebop.xyz/quote",
             "tokens": [],
             "tvl": 10.0,
-            "ws_user": "provided_user",
             "ws_key": "provided_key",
             "quote_tokens": [],
             "quote_timeout": {"secs": 30, "nanos": 0}
@@ -1231,7 +1216,6 @@ mod tests {
         let client: BebopClient = serde_json::from_str(json).unwrap();
 
         // Credentials should be deserialized from JSON
-        assert_eq!(client.ws_user, "provided_user");
         assert_eq!(client.ws_key, "provided_key");
     }
 }

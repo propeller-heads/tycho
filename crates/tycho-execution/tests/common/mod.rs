@@ -82,26 +82,13 @@ pub fn get_signer() -> PrivateKeySigner {
     PrivateKeySigner::from_bytes(&pk).unwrap()
 }
 
-pub fn get_tycho_router_encoder() -> Box<dyn TychoEncoder> {
+pub fn get_tycho_router_encoder(chain: Chain) -> Box<dyn TychoEncoder> {
     let executors_addresses = fs::read_to_string("config/test_executor_addresses.json").unwrap();
-    let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Ethereum)
+    let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(Some(executors_addresses))
         .unwrap();
     TychoRouterEncoderBuilder::new()
-        .chain(Chain::Ethereum)
-        .swap_encoder_registry(swap_encoder_registry)
-        .router_address(router_address())
-        .build()
-        .expect("Failed to build encoder")
-}
-
-pub fn get_base_tycho_router_encoder() -> Box<dyn TychoEncoder> {
-    let executors_addresses = fs::read_to_string("config/test_executor_addresses.json").unwrap();
-    let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Base)
-        .add_default_encoders(Some(executors_addresses))
-        .unwrap();
-    TychoRouterEncoderBuilder::new()
-        .chain(Chain::Base)
+        .chain(chain)
         .swap_encoder_registry(swap_encoder_registry)
         .router_address(router_address())
         .build()

@@ -46,8 +46,8 @@ impl SwapEncoder for BebopSwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let token_in = bytes_to_address(swap.token_in())?;
-        let token_out = bytes_to_address(swap.token_out())?;
+        let token_in = bytes_to_address(&swap.token_in().address)?;
+        let token_out = bytes_to_address(&swap.token_out().address)?;
 
         let protocol_state = swap
             .protocol_state()
@@ -55,7 +55,7 @@ impl SwapEncoder for BebopSwapEncoder {
             .ok_or_else(|| {
                 EncodingError::FatalError("protocol_state is required for Bebop".to_string())
             })?;
-        let (partial_fill_offset, original_filled_taker_amount, bebop_calldata) = {
+        let (target, partial_fill_offset, original_filled_taker_amount, bebop_calldata) = {
             let indicatively_priced_state = protocol_state
                 .as_indicatively_priced()
                 .map_err(|e| {
@@ -67,8 +67,8 @@ impl SwapEncoder for BebopSwapEncoder {
                 .ok_or(EncodingError::FatalError(
                     "Estimated amount in is mandatory for a Bebop swap".to_string(),
                 ))?;
-            let token_in = swap.token_in().clone();
-            let token_out = swap.token_out().clone();
+            let token_in = swap.token_in().address.clone();
+            let token_out = swap.token_out().address.clone();
             let router_address = encoding_context
                 .router_address
                 .clone()
@@ -102,8 +102,15 @@ impl SwapEncoder for BebopSwapEncoder {
                 .ok_or(EncodingError::FatalError(
                     "Bebop quote must have a partial_fill_offset attribute".to_string(),
                 ))?;
+            let target = signed_quote
+                .quote_attributes
+                .get("tx_to")
+                .ok_or(EncodingError::FatalError(
+                    "Bebop quote must have a tx_to attribute".to_string(),
+                ))?;
             let original_filled_taker_amount = biguint_to_u256(&signed_quote.amount_out);
             (
+                bytes_to_address(target)?,
                 // we are only interested in the last byte to get a u8
                 partial_fill_offset[partial_fill_offset.len() - 1],
                 original_filled_taker_amount,
@@ -112,11 +119,12 @@ impl SwapEncoder for BebopSwapEncoder {
         };
 
         // Encode packed data for the executor
-        // Format: token_in | token_out | partial_fill_offset |
-        //         original_filled_taker_amount | approval_needed | bebop_calldata
+        // Format: token_in | token_out | target | partial_fill_offset |
+        //         original_filled_taker_amount | bebop_calldata
         let args = (
             token_in,
             token_out,
+            target,
             partial_fill_offset.to_be_bytes(),
             original_filled_taker_amount.to_be_bytes::<32>(),
             &bebop_calldata[..],
@@ -143,8 +151,9 @@ mod tests {
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::evm::{
-        swap_encoder::bebop::BebopSwapEncoder, testing_utils::MockRFQState,
+    use crate::encoding::{
+        evm::{swap_encoder::bebop::BebopSwapEncoder, testing_utils::MockRFQState},
+        models::default_token,
     };
 
     #[test]
@@ -152,6 +161,7 @@ mod tests {
         // 3000 USDC -> 1 WETH using a mocked RFQ state to get a quote
         let bebop_calldata = Bytes::from_str("0x123456").unwrap();
         let partial_fill_offset = 12u64;
+        let target = Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap();
         let quote_amount_out = BigUint::from_str("1000000000000000000").unwrap();
 
         let bebop_component = ProtocolComponent {
@@ -171,15 +181,21 @@ mod tests {
                             .to_vec(),
                     ),
                 ),
+                ("tx_to".to_string(), target.clone()),
             ]),
         };
 
         let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
         let token_out = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"); // WETH
 
-        let swap = Swap::new(bebop_component, token_in.clone(), token_out.clone())
-            .with_estimated_amount_in(BigUint::from_str("3000000000").unwrap())
-            .with_protocol_state(Arc::new(bebop_state));
+        let swap = Swap::new(
+            bebop_component,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(BigUint::from_str("3000000000").unwrap())
+        .with_protocol_state(Arc::new(bebop_state));
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
@@ -204,6 +220,8 @@ mod tests {
             "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
             // token out
             "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            // target (settlement or router)
+            "bbbbbbb520d69a9775e85b458c58c648259fad5f",
             // partiall filled offset
             "0c",
             //  original taker amount

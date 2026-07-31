@@ -51,11 +51,22 @@ use crate::{
     impl_non_serializable_protocol,
 };
 
-// Gas limit constants for capping get_limits calculations
-// These prevent simulations from exceeding Ethereum's block gas limit
-const SWAP_BASE_GAS: u64 = 130_000;
-// This gas is estimated from UniswapV3Pool cross() calls on Tenderly
-const GAS_PER_TICK: u64 = 17_540;
+// Fixed overhead per swap: covers router overhead, executor preamble (decode, sync,
+// unlock/callback pattern), and token transfer-in.
+const SWAP_BASE_GAS: u64 = 185_000;
+// Per loop: PoolManager.swap bitmap lookup + sqrt math + computeSwapStep.
+// V4's singleton PoolManager hits warmer storage than V3 standalone pools: ~3,500/loop.
+const GAS_PER_BITMAP_LOOKUP: u64 = 3_500;
+// Initialized tick crossing: _updateTick() updates feeGrowthOutside0/1 (2 SSTOREs).
+// Warm ≈ 10–17k, cold ≈ 40–52k. We use a blended estimate that
+// weights toward cold costs.
+const GAS_PER_TICK: u64 = 29_000;
+// Settlement overhead within swapExactInputSingle: _settle() + _getFullCredit() + misc.
+const V4_CALLBACK_SETTLEMENT_GAS: u64 = 30_000;
+// PoolManager Hooks.sol wrapper overhead per hook call: ABI encode params,
+// external CALL dispatch, decode return, validate selector, and process
+// the returned BeforeSwapDelta / AfterSwapDelta.
+const PM_PER_HOOK_CALL_OVERHEAD: u64 = 25_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
 const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_TICK;
@@ -209,14 +220,17 @@ impl UniswapV4State {
             tick: self.tick,
             liquidity: self.liquidity,
         };
-        let mut gas_used = U256::from(130_000);
+        let mut gas_used = U256::from(SWAP_BASE_GAS);
 
         while state.amount_remaining != I256::ZERO && state.sqrt_price != price_limit {
             let (mut next_tick, initialized) = match self
                 .ticks
                 .next_initialized_tick_within_one_word(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => (tick, init),
+                Ok((tick, init)) => {
+                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_LOOKUP))?;
+                    (tick, init)
+                }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
@@ -243,6 +257,7 @@ impl UniswapV4State {
                 .fees
                 .calculate_swap_fees_pips(zero_for_one, lp_fee_override);
 
+            let sqrt_price_start = state.sqrt_price;
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 UniswapV4State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
@@ -256,7 +271,7 @@ impl UniswapV4State {
             state.sqrt_price = sqrt_price;
 
             let step = StepComputation {
-                sqrt_price_start: state.sqrt_price,
+                sqrt_price_start,
                 tick_next: next_tick,
                 initialized,
                 sqrt_price_next,
@@ -291,13 +306,14 @@ impl UniswapV4State {
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
+                    gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_TICK))?;
                 }
                 state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
             } else if state.sqrt_price != step.sqrt_price_start {
                 state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
             }
-            gas_used = safe_add_u256(gas_used, U256::from(2000))?;
         }
+
         Ok(SwapResults {
             amount_calculated: state.amount_calculated,
             amount_specified,
@@ -305,7 +321,7 @@ impl UniswapV4State {
             sqrt_price: state.sqrt_price,
             liquidity: state.liquidity,
             tick: state.tick,
-            gas_used,
+            gas_used: safe_add_u256(gas_used, U256::from(V4_CALLBACK_SETTLEMENT_GAS))?,
         })
     }
 
@@ -648,8 +664,19 @@ impl ProtocolSim for UniswapV4State {
         new_state.tick = result.tick;
         new_state.sqrt_price = result.sqrt_price;
 
-        // Add hook gas costs to baseline swap cost
-        let total_gas_used = result.gas_used + U256::from(before_swap_gas + after_swap_gas);
+        // Add hook gas costs to baseline swap cost.
+        // before_swap_gas / after_swap_gas capture the hook contract's internal
+        // logic (from VM simulation). PM_PER_HOOK_CALL_OVERHEAD accounts for the
+        // PoolManager's Hooks.sol dispatch wrapper that is not captured by either
+        // the native swap constants or the VM simulation.
+        let mut hook_overhead = before_swap_gas + after_swap_gas;
+        if before_swap_gas > 0 {
+            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
+        }
+        if after_swap_gas > 0 {
+            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
+        }
+        let total_gas_used = result.gas_used + U256::from(hook_overhead);
         Ok(GetAmountOutResult::new(
             u256_to_biguint(U256::from(amount_out.abs())),
             u256_to_biguint(total_gas_used),
@@ -1113,18 +1140,17 @@ mod tests {
     }
 
     #[tokio::test]
-    /// Compares a quote that we got from the UniswapV4 Quoter contract on Sepolia with a simulation
-    /// using Tycho-simulation and a state extracted with Tycho-indexer
+    /// Compares a quote from the UniswapV4 Quoter contract on Sepolia with a simulation.
     async fn test_swap_sim() {
+        use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
-
         let asset_path = Path::new(project_root)
             .join("tests/assets/decoder/uniswap_v4_snapshot_sepolia_block_7239119.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let block = BlockHeader {
             number: 7239119,
@@ -1147,7 +1173,7 @@ mod tests {
         );
         let t1 = Token::new(
             &Bytes::from_str("0xe390a1c311b26f14ed0d55d3b0261c2320d15ca5").unwrap(),
-            "T0",
+            "T1",
             18,
             0,
             &[Some(10_000)],
@@ -1174,35 +1200,13 @@ mod tests {
             .get_amount_out(BigUint::from_u64(1000000000000000000).unwrap(), &t0, &t1)
             .unwrap();
 
-        // This amount comes from a call to the `quoteExactInputSingle` on the quoter contract on a
-        // sepolia node with these arguments
-        // ```
-        // {"poolKey":{"currency0":"0x647e32181a64f4ffd4f0b0b4b052ec05b277729c","currency1":"0xe390a1c311b26f14ed0d55d3b0261c2320d15ca5","fee":"3000","tickSpacing":"60","hooks":"0x0000000000000000000000000000000000000000"},"zeroForOne":true,"exactAmount":"1000000000000000000","hookData":"0x"}
-        // ```
-        // Here is the curl for it:
-        //
-        // ```
-        // curl -X POST https://eth-sepolia.api.onfinality.io/public \
-        // -H "Content-Type: application/json" \
-        // -d '{
-        //   "jsonrpc": "2.0",
-        //   "method": "eth_call",
-        //   "params": [
-        //     {
-        //       "to": "0xCd8716395D55aD17496448a4b2C42557001e9743",
-        //       "data": "0xaa9d21cb0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000647e32181a64f4ffd4f0b0b4b052ec05b277729c000000000000000000000000e390a1c311b26f14ed0d55d3b0261c2320d15ca50000000000000000000000000000000000000000000000000000000000000bb8000000000000000000000000000000000000000000000000000000000000003c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000"
-        //     },
-        //     "0x6e75cf"
-        //   ],
-        //   "id": 1
-        //   }'
-        // ```
         let expected_amount = BigUint::from(9999909699895_u64);
         assert_eq!(res.amount, expected_amount);
     }
 
     #[tokio::test]
     async fn test_get_limits() {
+        use tycho_client::feed::dto;
         let block = BlockHeader {
             number: 22689129,
             hash: Bytes::from_str(
@@ -1218,9 +1222,9 @@ mod tests {
             Path::new(project_root).join("tests/assets/decoder/uniswap_v4_snapshot.json");
         let json_data = fs::read_to_string(asset_path).expect("Failed to read test asset");
         let data: Value = serde_json::from_str(&json_data).expect("Failed to parse JSON");
-
-        let state: ComponentWithState = serde_json::from_value(data)
-            .expect("Expected json to match ComponentWithState structure");
+        let state: ComponentWithState = serde_json::from_value::<dto::ComponentWithState>(data)
+            .expect("Expected json to match ComponentWithState structure")
+            .into();
 
         let t0 = Token::new(
             &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
@@ -1260,7 +1264,7 @@ mod tests {
             .get_limits(t0.address.clone(), t1.address.clone())
             .unwrap();
 
-        assert_eq!(&res.0, &BigUint::from_u128(71698353688830259750744466706).unwrap()); // Crazy amount because of this tick: "ticks/-887220/net-liquidity": "0x00e8481d98"
+        assert_eq!(&res.0, &BigUint::from_u128(71698353688830259750744466706).unwrap());
 
         let out = usv4_state
             .get_amount_out(res.0, &t0, &t1)
@@ -1985,6 +1989,53 @@ mod tests {
             ticks,
         )
         .expect("Failed to create pool")
+    }
+
+    fn create_tick_boundary_v4_test_pool() -> UniswapV4State {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let ticks = vec![TickInfo::new(-120, 0).unwrap(), TickInfo::new(120, 0).unwrap()];
+
+        UniswapV4State::new(
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
+            0,
+            60,
+            ticks,
+        )
+        .expect("Failed to create pool")
+    }
+
+    #[test]
+    fn test_partial_step_updates_tick_when_price_moves_without_crossing_initialized_tick() {
+        let pool = create_tick_boundary_v4_test_pool();
+        let amount = -I256::from_raw(U256::from(100_000_000_000_000_000u64));
+
+        let result = pool
+            .swap(true, amount, None, None)
+            .expect("swap should stay within the current liquidity range");
+        let expected_tick =
+            get_tick_at_sqrt_ratio(result.sqrt_price).expect("new sqrt price should map to a tick");
+
+        assert_ne!(result.sqrt_price, pool.sqrt_price);
+        assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
+        assert_ne!(expected_tick, pool.tick);
+        assert_eq!(result.tick, expected_tick);
+    }
+
+    #[test]
+    fn test_swap_keeps_boundary_tick_when_price_does_not_move() {
+        let mut pool = create_tick_boundary_v4_test_pool();
+        pool.tick = -1;
+        let amount = -I256::from_raw(U256::from(1u64));
+
+        let result = pool
+            .swap(true, amount, None, None)
+            .expect("swap should consume the input as fee without moving price");
+
+        assert_eq!(result.sqrt_price, pool.sqrt_price);
+        assert_eq!(get_tick_at_sqrt_ratio(result.sqrt_price).unwrap(), 0);
+        assert_eq!(result.tick, pool.tick);
     }
 
     #[test]

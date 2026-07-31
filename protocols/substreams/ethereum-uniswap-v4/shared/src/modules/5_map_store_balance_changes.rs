@@ -28,7 +28,7 @@ pub fn map_balance_changes(
         .map(|e| {
             (
                 pools_current_sqrt_price_store
-                    .get_at(e.log_ordinal, format!("pool:{0}", &e.pool_id))
+                    .get_at(e.log_ordinal, format!("pool:{0}", e.pool_id))
                     .unwrap_or(BigInt::zero()),
                 e,
             )

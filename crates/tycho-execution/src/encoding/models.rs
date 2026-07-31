@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
+#[cfg(feature = "evm")]
+use alloy::primitives::{Address, U256};
 use clap::ValueEnum;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
-    models::protocol::ProtocolComponent, simulation::protocol_sim::ProtocolSim, Bytes,
+    models::{protocol::ProtocolComponent, token::Token},
+    simulation::protocol_sim::ProtocolSim,
+    Bytes,
 };
 
 use crate::encoding::serde_primitives::biguint_string;
@@ -30,6 +34,88 @@ pub enum UserTransferType {
     #[default]
     TransferFrom,
     UseVaultsFunds,
+}
+
+/// Client fee parameters passed to the router, matching the Solidity `ClientFeeParams` struct.
+///
+/// The default value (all zeros) represents no fee. Clients are responsible for constructing
+/// and signing this struct; `tycho-execution` does not use it internally.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ClientFeeParams {
+    /// Fee in basis points charged by the client (0–10000).
+    client_fee_bps: u16,
+    /// Address that identifies the client and receives any client fee.
+    client_fee_receiver: Bytes,
+    /// Maximum amount the client will contribute from their vault if slippage reduces the output
+    /// below `min_amount_out`.
+    #[serde(with = "biguint_string")]
+    max_client_contribution: BigUint,
+    /// Deadline for the fee signature as a unix timestamp.
+    #[serde(with = "biguint_string")]
+    deadline: BigUint,
+    /// EIP-712 signature over the fee parameters and swap intent.
+    client_signature: Bytes,
+}
+
+impl ClientFeeParams {
+    /// Creates params that identify the client and charge a fee in basis points.
+    pub fn new(
+        client_fee_receiver: Bytes,
+        client_signature: Bytes,
+        deadline: BigUint,
+        client_fee_bps: u16,
+    ) -> Self {
+        Self {
+            client_fee_bps,
+            client_fee_receiver,
+            max_client_contribution: BigUint::ZERO,
+            deadline,
+            client_signature,
+        }
+    }
+
+    /// Creates params that identify the client for router fee discounts without charging a fee.
+    pub fn new_without_fee(
+        client_fee_receiver: Bytes,
+        client_signature: Bytes,
+        deadline: BigUint,
+    ) -> Self {
+        Self {
+            client_fee_bps: 0,
+            client_fee_receiver,
+            max_client_contribution: BigUint::ZERO,
+            deadline,
+            client_signature,
+        }
+    }
+
+    pub fn with_max_client_contribution(mut self, max_client_contribution: BigUint) -> Self {
+        self.max_client_contribution = max_client_contribution;
+        self
+    }
+}
+
+#[cfg(feature = "evm")]
+impl ClientFeeParams {
+    /// Converts into the ABI-encodable tuple matching the Solidity `ClientFeeParams` struct.
+    pub fn into_abi_params(self) -> (u16, Address, U256, U256, Vec<u8>) {
+        let receiver = if self.client_fee_receiver.is_empty() {
+            Address::ZERO
+        } else {
+            Address::from_slice(&self.client_fee_receiver)
+        };
+        (
+            self.client_fee_bps,
+            receiver,
+            U256::from_be_slice(
+                &self
+                    .max_client_contribution
+                    .to_bytes_be(),
+            ),
+            U256::from_be_slice(&self.deadline.to_bytes_be()),
+            self.client_signature.to_vec(),
+        )
+    }
 }
 
 /// Represents a solution containing details describing an order, and instructions for filling
@@ -155,9 +241,9 @@ pub struct Swap {
     /// Protocol component from tycho indexer
     component: ProtocolComponent,
     /// Token being input into the pool.
-    token_in: Bytes,
+    token_in: Token,
     /// Token being output from the pool.
-    token_out: Bytes,
+    token_out: Token,
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde(default)]
     split: f64,
@@ -169,13 +255,16 @@ pub struct Swap {
     /// Optional estimated amount in for this Swap. This is necessary for RFQ protocols. This value
     /// is used to request the quote
     estimated_amount_in: Option<BigUint>,
+    /// Estimated gas usage for this swap by simulation
+    estimated_gas: BigUint,
 }
 
 impl Swap {
     pub fn new<T: Into<ProtocolComponent>>(
         component: T,
-        token_in: Bytes,
-        token_out: Bytes,
+        token_in: Token,
+        token_out: Token,
+        estimated_gas: BigUint,
     ) -> Self {
         Self {
             component: component.into(),
@@ -185,6 +274,7 @@ impl Swap {
             user_data: None,
             protocol_state: None,
             estimated_amount_in: None,
+            estimated_gas,
         }
     }
 
@@ -216,11 +306,11 @@ impl Swap {
         &self.component
     }
 
-    pub fn token_in(&self) -> &Bytes {
+    pub fn token_in(&self) -> &Token {
         &self.token_in
     }
 
-    pub fn token_out(&self) -> &Bytes {
+    pub fn token_out(&self) -> &Token {
         &self.token_out
     }
 
@@ -239,16 +329,21 @@ impl Swap {
     pub fn estimated_amount_in(&self) -> &Option<BigUint> {
         &self.estimated_amount_in
     }
+
+    pub fn estimated_gas(&self) -> &BigUint {
+        &self.estimated_gas
+    }
 }
 
 impl PartialEq for Swap {
     fn eq(&self, other: &Self) -> bool {
         self.component() == other.component() &&
-            self.token_in() == other.token_in() &&
-            self.token_out() == other.token_out() &&
+            self.token_in().address == other.token_in().address &&
+            self.token_out().address == other.token_out().address &&
             self.split() == other.split() &&
             self.user_data() == other.user_data() &&
-            self.estimated_amount_in() == other.estimated_amount_in()
+            self.estimated_amount_in() == other.estimated_amount_in() &&
+            self.estimated_gas() == other.estimated_gas()
     }
 }
 
@@ -259,6 +354,7 @@ impl PartialEq for Swap {
 /// * `interacting_with`: Address of the contract to be called.
 /// * `function_signature`: The signature of the function to be called.
 /// * `n_tokens`: Number of tokens in the swap.
+/// * `estimated_gas`: Estimated gas usage for the encoded solution
 #[derive(Clone, Debug)]
 pub struct EncodedSolution {
     /// Encoded swaps to be executed.
@@ -269,6 +365,8 @@ pub struct EncodedSolution {
     function_signature: String,
     /// Number of tokens in the swap.
     n_tokens: usize,
+    /// Estimated gas usage for this solution
+    estimated_gas: BigUint,
 }
 
 impl EncodedSolution {
@@ -277,8 +375,9 @@ impl EncodedSolution {
         interacting_with: Bytes,
         function_signature: String,
         n_tokens: usize,
+        estimated_gas: BigUint,
     ) -> Self {
-        Self { swaps, interacting_with, function_signature, n_tokens }
+        Self { swaps, interacting_with, function_signature, n_tokens, estimated_gas }
     }
 
     pub fn swaps(&self) -> &[u8] {
@@ -295,6 +394,31 @@ impl EncodedSolution {
 
     pub fn n_tokens(&self) -> usize {
         self.n_tokens
+    }
+
+    pub fn estimated_gas(&self) -> &BigUint {
+        &self.estimated_gas
+    }
+
+    /// Byte offset within TychoRouter calldata where the client fee signature starts.
+    pub fn client_fee_signature_offset(&self) -> usize {
+        let name = self
+            .function_signature
+            .split('(')
+            .next()
+            .unwrap_or("");
+        let head_params = match name {
+            "singleSwap" |
+            "singleSwapUsingVault" |
+            "sequentialSwap" |
+            "sequentialSwapUsingVault" => 7,
+            "splitSwap" | "splitSwapUsingVault" => 8,
+            "singleSwapPermit2" | "sequentialSwapPermit2" => 14,
+            "splitSwapPermit2" => 15,
+            _ => 0,
+        };
+        // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple
+        4 + head_params * 32 + 192
     }
 }
 
@@ -395,6 +519,20 @@ pub struct EncodingContext {
     pub group_token_out: Bytes,
 }
 
+#[derive(PartialEq)]
+pub enum Strategy {
+    Single,
+    Sequential,
+    Split,
+}
+
+/// Creates a minimal `Token` from just an address, with zero-value defaults for other fields.
+/// Only available in tests and when the `test-utils` feature is enabled.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn default_token(address: Bytes) -> Token {
+    Token::new(&address, "", 0, 0, &[Some(60_000u64)], Default::default(), 100)
+}
+
 mod tests {
     use super::*;
 
@@ -427,12 +565,17 @@ mod tests {
             protocol_system: "uniswap_v2".to_string(),
         };
         let user_data = Bytes::from("0x1234");
-        let swap = Swap::new(component, Bytes::from("0x12"), Bytes::from("0x34"))
-            .with_split(0.5)
-            .with_user_data(user_data.clone());
+        let swap = Swap::new(
+            component,
+            default_token(Bytes::from("0x12")),
+            default_token(Bytes::from("0x34")),
+            BigUint::ZERO,
+        )
+        .with_split(0.5)
+        .with_user_data(user_data.clone());
 
-        assert_eq!(*swap.token_in(), Bytes::from("0x12"));
-        assert_eq!(*swap.token_out(), Bytes::from("0x34"));
+        assert_eq!(swap.token_in().address, Bytes::from("0x12"));
+        assert_eq!(swap.token_out().address, Bytes::from("0x34"));
         assert_eq!(swap.component().protocol_system, "uniswap_v2");
         assert_eq!(swap.component().id, "i-am-an-id");
         assert_eq!(swap.split(), 0.5);

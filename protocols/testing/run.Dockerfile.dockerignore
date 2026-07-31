@@ -9,6 +9,11 @@ target/
 # Git history (not needed — forge deps are installed in-Dockerfile)
 .git/
 
+# Foundry submodule deps — installed in-Dockerfile via `forge install`. If the host has
+# initialized these submodules, copying them in makes that `forge install` fail
+# ("destination path already exists and is not an empty directory").
+protocols/adapter-integration/evm/lib/
+
 # IDE and local dev files
 .claude/
 .idea/

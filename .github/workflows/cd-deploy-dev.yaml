@@ -7,7 +7,7 @@ name: Dev; Build and deploy
 # Choosing "tycho-indexer" deploys to all indexer services; picking a specific
 # name (e.g. "base-tycho-indexer") targets only that one.
 #
-# For tycho-integration-test the app_name input is ignored.
+# For tycho-integration-test the app_name, cargo_profile, and extra_cargo_flags inputs are ignored.
 on:
   workflow_dispatch:
     inputs:
@@ -31,7 +31,26 @@ on:
           - ethereum-tycho-indexer
           - ethereum-tycho-indexer-new-protocol
           - base-tycho-indexer
+          - bsc-tycho-indexer
           - unichain-tycho-indexer
+          - polygon-tycho-indexer
+      cargo_profile:
+        description: >
+          Cargo build profile. "profiling" includes debug symbols for
+          heap profiling with jeprof/pprof and doesn't affect performance.
+        required: false
+        type: choice
+        default: profiling
+        options:
+          - profiling
+          - release
+      extra_cargo_flags:
+        description: >
+          Extra flags passed to cargo build (e.g. --no-default-features
+          to disable jemalloc).
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -49,6 +68,9 @@ jobs:
       image_tag: ${{ github.sha }}
       image_name: tycho-indexer
       dockerfile: docker/tycho-indexer.Dockerfile
+      build_args: |
+        CARGO_PROFILE=${{ inputs.cargo_profile }}
+        EXTRA_CARGO_FLAGS=${{ inputs.extra_cargo_flags }}
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}

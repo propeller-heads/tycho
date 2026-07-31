@@ -2824,6 +2824,7 @@ mod test {
             deleted_attributes: vec!["deleted2".to_owned()]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
         let expected = vec![state_delta, other_state_delta];
 
@@ -2928,6 +2929,7 @@ mod test {
             deleted_attributes: vec!["to_delete".to_owned()]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
         let expected = vec![state_delta];
 
@@ -4150,5 +4152,45 @@ mod test {
         assert_eq!(tvls.total.unwrap(), 2);
         assert_eq!(tvls.entity.get("state1"), Some(&2.0));
         assert!(!tvls.entity.contains_key("state3"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_token_with_price() {
+        let mut conn = setup_db().await;
+        let chain_id = db_fixtures::insert_chain(&mut conn, "ethereum").await;
+
+        let native = Chain::Ethereum.native_token();
+        let wrapped = Chain::Ethereum.wrapped_native_token();
+        crate::postgres::ensure_token_with_price(chain_id, &native, &mut conn).await;
+        crate::postgres::ensure_token_with_price(chain_id, &wrapped, &mut conn).await;
+
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let prices = gw
+            .get_token_prices(&Chain::Ethereum, &mut conn)
+            .await
+            .expect("get prices failed");
+
+        let expected_price = 10.0_f64.powi(18);
+        assert_eq!(prices.get(&native.address).copied(), Some(expected_price));
+        assert_eq!(prices.get(&wrapped.address).copied(), Some(expected_price));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_token_with_price_idempotent() {
+        let mut conn = setup_db().await;
+        let chain_id = db_fixtures::insert_chain(&mut conn, "ethereum").await;
+
+        let native = Chain::Ethereum.native_token();
+        crate::postgres::ensure_token_with_price(chain_id, &native, &mut conn).await;
+        crate::postgres::ensure_token_with_price(chain_id, &native, &mut conn).await;
+
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let prices = gw
+            .get_token_prices(&Chain::Ethereum, &mut conn)
+            .await
+            .expect("get prices failed");
+
+        let expected_price = 10.0_f64.powi(18);
+        assert_eq!(prices.get(&native.address).copied(), Some(expected_price));
     }
 }

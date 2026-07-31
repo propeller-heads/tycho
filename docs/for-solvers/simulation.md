@@ -8,7 +8,7 @@ description: Simulate interactions with any protocol.
 
 Tycho Simulation is a Rust crate that provides powerful tools for **interacting with protocol states**, **calculating spot prices**, and **simulating token swaps**.
 
-The crate lives at [`crates/tycho-simulation`](https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation) inside the [Tycho monorepo](https://github.com/propeller-heads/tycho-indexer).
+The crate lives at <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">`crates/tycho-simulation`</a> inside the <a href="https://github.com/propeller-heads/tycho-indexer" target="_blank" rel="noopener noreferrer">Tycho monorepo</a>.
 
 {% hint style="info" %}
 **✨ New: Sub-Second Latency with Partial Blocks**
@@ -18,29 +18,21 @@ Tycho now provides early support for partial blocks on Base, enabling sub-second
 
 ## Installation
 
-The `tycho-simulation` package is available on [Github](https://github.com/propeller-heads/tycho-indexer).
+The `tycho-simulation` package is available on <a href="https://crates.io/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">crates.io</a>.
 
-To use the simulation tools with Ethereum Virtual Machine (EVM) chains, add the optional `evm` feature flag to your dependency configuration:
+Add it to your project's `Cargo.toml`:
 
 ```toml
-tycho-simulation = { 
-     git = "https://github.com/propeller-heads/tycho-indexer.git",
-     package = "tycho-simulation",
-     tag = "x.y.z", # Replace with latest version
-     features = ["evm"]
-}
-
+tycho-simulation = "x.y.z"
 ```
 
-Add this to your project's `Cargo.toml` file.
-
 {% hint style="info" %}
-**Note:** Replace `x.y.z` with the latest version number from our [GitHub Releases page](https://github.com/propeller-heads/tycho-indexer/releases). Using the latest release ensures you have the most up-to-date features and bug fixes.
+**Note:** Replace `x.y.z` with the latest version number from <a href="https://crates.io/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">crates.io</a>. Using the latest release ensures you have the most up-to-date features and bug fixes.
 {% endhint %}
 
 ## Main Interface
 
-All protocols implement the `ProtocolSim` trait (see definition [here](https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/protocol/state.rs)). It has the main methods:
+All protocols implement the `ProtocolSim` trait (see definition <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/protocol/state.rs" target="_blank" rel="noopener noreferrer">here</a>). It has the main methods:
 
 #### Spot price
 
@@ -75,7 +67,7 @@ pub struct GetAmountOutResult {
 
 `new state` allows you to, for example, simulate consecutive swaps in the same protocol.
 
-Please refer to the [in-code documentation](https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-common/src/simulation/protocol_sim.rs) of the `ProtocolSim` trait and its methods for more in-depth information.
+Please refer to the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-common/src/simulation/protocol_sim.rs" target="_blank" rel="noopener noreferrer">in-code documentation</a> of the `ProtocolSim` trait and its methods for more in-depth information.
 
 #### Fee
 
@@ -177,7 +169,7 @@ let all_tokens = load_all_tokens(
 
 #### Step 2: Create a stream
 
-You can use the [ProtocolStreamBuilder](https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/evm/stream.rs) to easily set up and manage multiple protocols within one stream. An example of creating such a stream with Uniswap V2 and Balancer V2 protocols is as follows:
+You can use the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/evm/stream.rs" target="_blank" rel="noopener noreferrer">ProtocolStreamBuilder</a> to easily set up and manage multiple protocols within one stream. An example of creating such a stream with Uniswap V2 and Balancer V2 protocols is as follows:
 
 ```rust
 use tycho_simulation::evm::{
@@ -205,6 +197,8 @@ let mut protocol_stream = ProtocolStreamBuilder::new("tycho-beta.propellerheads.
 
 Some protocols, such as Balancer V2 and Curve, require a pool filter to be defined to filter out unsupported pools. If a protocol needs a pool filter and the user does not provide one, a warning will be raised during the stream setup process.
 
+`ProtocolStreamBuilder` applies a curated blocklist of pools that are known to break simulation (for example, rebasing-token and insolvent pools) by default, so the stream excludes them automatically. To exclude additional components, pass their IDs to `blocklist_components(...)`.
+
 The stream created emits `Update` messages which consist of:
 
 * `block number_or_timestamp`- the block this update message refers to
@@ -221,7 +215,25 @@ If you want to restrict processing to specific tokens (for example USDC/WETH onl
 For a full list of supported protocols and the simulation state implementations they use, see [Supported Protocols](supported-protocols.md).
 
 {% hint style="info" %}
-`ProtocolStreamBuilder` supports the same [streaming options](https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-client#streaming-options) as the Tycho Client, with one difference: TVL estimates are **always included** in the simulation package and cannot be disabled.
+`ProtocolStreamBuilder` supports the same <a href="https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-client#streaming-options" target="_blank" rel="noopener noreferrer">streaming options</a> as the Tycho Client, with one difference: TVL estimates are **always included** in the simulation package and cannot be disabled.
+{% endhint %}
+
+### Partial Blocks (Flashblocks)
+
+Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ — pre-confirmation updates that contain parts of a future block before its construction is finished. Enable this on your stream to receive sub-block latency updates as they arrive. On chains without flash block support, enabling this flag is unsupported.
+
+```rust
+let mut protocol_stream = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Base)
+    // ... other builder options ...
+    .enable_partial_blocks()
+    .await
+    .build()
+    .await
+    .expect("Failed building protocol stream");
+```
+
+{% hint style="warning" %}
+Block hashes in partial block messages are **unstable** — they change between partial updates and will differ from the final block hash. Do not use them as persistent identifiers or cache keys. See the <a href="https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks" target="_blank" rel="noopener noreferrer">Substreams documentation</a> for details.
 {% endhint %}
 
 <details>
@@ -288,7 +300,7 @@ let mut amount_out = HashMap::new()
 
 ## Example Use Case: Token Price Printer
 
-You can find an example of a **price printer** [here](https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples).
+You can find an example of a **price printer** <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples" target="_blank" rel="noopener noreferrer">here</a>.
 
 Clone the repo, then run:
 
@@ -298,7 +310,7 @@ cargo run --release --example price_printer -- --tvl-threshold 1000
 ```
 
 {% hint style="info" %}
-You'll need an RPC to fetch some static protocol info. You can use any RPC provider – e.g. set one up with [Infura](https://www.infura.io/).
+You'll need an RPC to fetch some static protocol info. You can use any RPC provider – e.g. set one up with <a href="https://www.infura.io/" target="_blank" rel="noopener noreferrer">Infura</a>.
 {% endhint %}
 
 You will see a UI where you can select any pool, press enter, and simulate different trade amounts on the pool.

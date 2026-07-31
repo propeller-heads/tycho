@@ -2,13 +2,16 @@ use std::{collections::HashMap, str::FromStr};
 
 use alloy::{hex::encode, primitives::Address, sol_types::SolValue};
 use num_bigint::{BigInt, BigUint};
-use tycho_common::{models::protocol::ProtocolComponent, Bytes};
+use tycho_common::{
+    models::{protocol::ProtocolComponent, Chain},
+    Bytes,
+};
 use tycho_execution::encoding::{
     evm::{
         approvals::protocol_approvals_manager::ProtocolApprovalsManager,
         utils::{bytes_to_address, write_calldata_to_file},
     },
-    models::{Solution, Swap},
+    models::{default_token, Solution, Swap},
 };
 
 use crate::common::{
@@ -47,8 +50,9 @@ fn test_evm_sequential_swap_usx() {
             },
             ..Default::default()
         },
-        dai.clone(),
-        usdc.clone(),
+        default_token(dai.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
     );
     let swap_usdc_usdt = Swap::new(
         ProtocolComponent {
@@ -62,10 +66,11 @@ fn test_evm_sequential_swap_usx() {
             },
             ..Default::default()
         },
-        usdc.clone(),
-        usdt.clone(),
+        default_token(usdc.clone()),
+        default_token(usdt.clone()),
+        BigUint::ZERO,
     );
-    let encoder = get_tycho_router_encoder();
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
 
     let solution = Solution::new(
         filler.clone(),

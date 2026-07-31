@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "base_aerodrome_slipstreams"
-  version: v0.1.0
+  version: v0.1.3
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/base-aerodrome-slipstreams"
 
 protobuf:
@@ -22,7 +22,7 @@ binaries:
 modules:
   - name: map_tick_spacing_fee
     kind: map
-    initialBlock: 13843704
+    initialBlock: &initial_block 13843704
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -31,7 +31,6 @@ modules:
 
   - name: store_tick_spacing_fee
     kind: store
-    initialBlock: 13843704
     updatePolicy: set
     valueType: proto:slipstreams.TickSpacingFees
     inputs:
@@ -39,7 +38,7 @@ modules:
 
   - name: map_pools_created
     kind: map
-    initialBlock: 13843704
+    initialBlock: *initial_block
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -49,15 +48,23 @@ modules:
 
   - name: store_pools
     kind: store
-    initialBlock: 13843704
     updatePolicy: set_if_not_exists
     valueType: proto:slipstreams.Pool
     inputs:
       - map: map_pools_created
 
+  - name: store_dynamic_fee_config
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
   - name: map_balance_changes
     kind: map
-    initialBlock: 13843704
+    initialBlock: *initial_block
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_pools
@@ -66,7 +73,6 @@ modules:
 
   - name: store_pools_balances
     kind: store
-    initialBlock: 13843704
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -74,12 +80,15 @@ modules:
 
   - name: map_protocol_changes
     kind: map
-    initialBlock: 13843704
+    initialBlock: *initial_block
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created
       - store: store_pools
+      - store: store_dynamic_fee_config
+        mode: deltas
+      - store: store_dynamic_fee_config
       - store: store_pools_balances
         mode: deltas
       - map: map_balance_changes
@@ -87,6 +96,7 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_tick_spacing_fee: "factories[]=5e7BB104d84c7CB9B682AaC2F3d509f5F406809A&factories[]=aDe65c38CD4849aDBA595a4323a8C7DdfE89716a&dynamic_fee_modules[]=DB45818A6db280ecfeB33cbeBd445423d0216b5D&dynamic_fee_modules[]=00cB12a1c84dfC1b9c70734C0385E769Bc86e9Ef"
-  map_pools_created: "factories[]=5e7BB104d84c7CB9B682AaC2F3d509f5F406809A&factories[]=aDe65c38CD4849aDBA595a4323a8C7DdfE89716a&dynamic_fee_modules[]=DB45818A6db280ecfeB33cbeBd445423d0216b5D&dynamic_fee_modules[]=00cB12a1c84dfC1b9c70734C0385E769Bc86e9Ef"
-  map_protocol_changes: "factories[]=5e7BB104d84c7CB9B682AaC2F3d509f5F406809A&factories[]=aDe65c38CD4849aDBA595a4323a8C7DdfE89716a&dynamic_fee_modules[]=DB45818A6db280ecfeB33cbeBd445423d0216b5D&dynamic_fee_modules[]=00cB12a1c84dfC1b9c70734C0385E769Bc86e9Ef"
+  map_tick_spacing_fee: &slipstreams_params "factories[]=5e7BB104d84c7CB9B682AaC2F3d509f5F406809A&factories[]=aDe65c38CD4849aDBA595a4323a8C7DdfE89716a&dynamic_fee_modules[]=090b2A6bb475c00e2256e2095A60887cD710803b&dynamic_fee_modules[]=F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"
+  map_pools_created: *slipstreams_params
+  store_dynamic_fee_config: *slipstreams_params
+  map_protocol_changes: *slipstreams_params

@@ -10,7 +10,7 @@ use tycho_execution::encoding::{
         encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
-    models::{Solution, Swap},
+    models::{default_token, Solution, Swap},
 };
 
 fn main() {
@@ -42,8 +42,9 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        weth.clone(),
-        usdc.clone(),
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
     );
     // Split defines the fraction of the amount to be swapped. A value of 0 indicates 100% of
     // the amount or the total remaining balance. (0 is default, so no need to set it)
@@ -93,8 +94,9 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        weth.clone(),
-        dai.clone(),
+        default_token(weth.clone()),
+        default_token(dai.clone()),
+        BigUint::ZERO,
     )
     .with_split(0.5);
 
@@ -106,8 +108,9 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        weth.clone(),
-        wbtc.clone(),
+        default_token(weth.clone()),
+        default_token(wbtc.clone()),
+        BigUint::ZERO,
     );
 
     let swap_dai_usdc = Swap::new(
@@ -116,8 +119,9 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        dai.clone(),
-        usdc.clone(),
+        default_token(dai.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
     );
     let swap_wbtc_usdc = Swap::new(
         ProtocolComponent {
@@ -125,8 +129,9 @@ fn main() {
             protocol_system: "uniswap_v2".to_string(),
             ..Default::default()
         },
-        wbtc.clone(),
-        usdc.clone(),
+        default_token(wbtc.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
     );
     let complex_solution = solution.clone().with_swaps(vec![
         swap_weth_dai,

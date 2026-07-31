@@ -1,0 +1,2 @@
+# This marker file tells the cargo-update CI workflow to skip this workspace.
+# See .github/workflows/cargo-update.yaml

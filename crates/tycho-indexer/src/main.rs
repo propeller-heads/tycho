@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // TODO: We need to use `use pretty_assertions::{assert_eq, assert_ne}` per test module.
 #[cfg(test)]
 #[macro_use]
@@ -33,6 +37,7 @@ use tracing_subscriber::EnvFilter;
 use tycho_common::{
     models::{
         blockchain::{Block, Transaction},
+        chain_config::{init_chain_registry, ChainConfigRegistry},
         contract::AccountDelta,
         Address, Chain, ExtractionState, ImplementationType,
     },
@@ -81,6 +86,20 @@ impl ExtractorConfigs {
         let config: ExtractorConfigs = serde_yaml::from_str(&contents)?;
         Ok(config)
     }
+}
+
+/// Loads custom chains from `path` (empty registry if the file is absent) and installs it as the
+/// process-wide registry, so `Chain::from_str` can resolve custom chains by name.
+fn init_chains(path: &str) -> Result<(), ExtractionError> {
+    let registry = if std::path::Path::new(path).exists() {
+        ChainConfigRegistry::from_yaml_file(path)
+            .map_err(|e| ExtractionError::Setup(e.to_string()))?
+    } else {
+        ChainConfigRegistry::empty()
+    };
+    init_chain_registry(registry).map_err(|_| {
+        ExtractionError::Setup("chain config registry already initialised".to_string())
+    })
 }
 
 type ExtractionTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
@@ -165,6 +184,33 @@ async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
         .body(metrics)
 }
 
+/// Spawns a background task that emits jemalloc allocator stats as Prometheus gauges every 60s.
+///
+/// Emits `jemalloc_allocated_bytes` (live allocations) and `jemalloc_resident_bytes` (RSS as seen
+/// by jemalloc).
+#[cfg(feature = "jemalloc")]
+fn spawn_jemalloc_stats_reporter() {
+    use metrics::gauge;
+    use tikv_jemalloc_ctl::{epoch, stats};
+
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            // Advance the epoch to refresh stats.
+            if epoch::advance().is_err() {
+                continue;
+            }
+            if let Ok(allocated) = stats::allocated::read() {
+                gauge!("jemalloc_allocated_bytes").set(allocated as f64);
+            }
+            if let Ok(resident) = stats::resident::read() {
+                gauge!("jemalloc_resident_bytes").set(resident as f64);
+            }
+        }
+    });
+}
+
 /// Executes all extractors configured in the extractor configuration file and starts the server.
 ///
 /// Note: This function utilizes two distinct runtimes: one for extraction tasks and another
@@ -201,9 +247,15 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
         .block_on(async {
             create_tracing_subscriber();
             let _metrics_task = create_metrics_exporter();
+            #[cfg(feature = "jemalloc")]
+            spawn_jemalloc_stats_reporter();
 
             info!("Starting Tycho");
             debug!("{} CPUs detected", num_cpus::get());
+            // Install the custom-chain registry before parsing extractors, so an extractor's
+            // `chain` field resolves against it at parse time.
+            init_chains(&index_args.chain_config)?;
+
             let extractors_config = ExtractorConfigs::from_yaml(&index_args.extractors_config)
                 .map_err(|e| {
                     ExtractionError::Setup(format!("Failed to load extractors.yaml. {e}"))
@@ -214,17 +266,23 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 .parse()
                 .expect("Failed to parse retention horizon");
 
+            let chains = index_args
+                .chains
+                .iter()
+                .map(|name| {
+                    Chain::from_str(name).map_err(|e| {
+                        ExtractionError::Setup(format!(
+                            "Unknown chain '{name}': {e}; add it to {}",
+                            index_args.chain_config
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let (extraction_tasks, other_tasks) = create_indexing_tasks(
                 &global_args,
                 &index_args.substreams_args,
-                &index_args
-                    .chains
-                    .iter()
-                    .map(|chain_str| {
-                        Chain::from_str(chain_str)
-                            .unwrap_or_else(|_| panic!("Unknown chain {chain_str}"))
-                    })
-                    .collect::<Vec<_>>(),
+                &chains,
                 retention_horizon,
                 extractors_config,
                 Some(extraction_runtime.handle()),
@@ -278,14 +336,19 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             _ => Err(ExtractionError::Setup(format!("Unknown DCI plugin: {s}"))),
         })?;
 
+    init_chains(&run_args.chain_config)?;
+
+    let chain = Chain::from_str(&run_args.chain)
+        .map_err(|e| ExtractionError::Setup(format!("Invalid chain '{}': {e}", run_args.chain)))?;
+
     let config = ExtractorConfigs::new(HashMap::from([(
         run_args.protocol_system.clone(),
         ExtractorConfig::new(
             run_args.protocol_system.clone(),
-            Chain::from_str(&run_args.chain).unwrap(),
+            chain,
             ImplementationType::Vm,
-            1, /* TODO: if we want to increase this, we need to commit the cache when we reached
-                * `end_block` */
+            1, /* TODO: if we want to increase this, we need to commit the cache when we
+                * reached `end_block` */
             run_args.start_block,
             run_args.stop_block(),
             run_args
@@ -307,7 +370,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,
         &run_args.substreams_args,
-        &[Chain::from_str(&run_args.chain).unwrap()],
+        &[chain],
         Utc::now().naive_utc(),
         config,
         None,
@@ -454,11 +517,13 @@ async fn build_all_extractors(
 ) -> Result<Vec<(ExtractorRunner, ExtractorHandle)>, ExtractionError> {
     let mut extractor_handles = Vec::new();
 
+    let chain = *chains
+        .first()
+        .expect("No chain provided");
+
     info!("Building protocol cache");
     let protocol_cache = ProtocolMemoryCache::new(
-        *chains
-            .first()
-            .expect("No chain provided"), //TODO: handle multichain?
+        chain,
         chrono::Duration::seconds(900),
         Arc::new(cached_gw.clone()),
     );
@@ -471,7 +536,7 @@ async fn build_all_extractors(
                 .clone(),
             extractor_config.initialized_accounts_block,
             rpc_client,
-            *chains.first().unwrap(),
+            chain,
             cached_gw,
         )
         .await;
@@ -659,6 +724,26 @@ async fn run_analyze_tokens(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_common::models::chain_config::ChainTokenConfig;
+
+    #[test]
+    fn test_chain_token_invalid_hex() {
+        assert!(ChainTokenConfig::try_new("0xGGGGGGGG", "ETH", 18).is_err());
+    }
+
+    #[test]
+    fn test_chain_token_symbol_too_long() {
+        assert!(ChainTokenConfig::try_new(
+            "0x0000000000000000000000000000000000000000",
+            "TOOLONGSYM",
+            18
+        )
+        .is_err());
+    }
 }
 
 #[cfg(test)]

@@ -142,7 +142,7 @@ contract CurveExecutor is IExecutor {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        view
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -157,18 +157,9 @@ contract CurveExecutor is IExecutor {
             revert CurveExecutor__TokenAddressZero();
         }
         if (tokenIn == nativeToken) {
-            // ETH transfers are handled in the Executor, so we need to set the transferType to TransferNativeInExecutor
-            // to update the delta accounting accordingly.
-            tokenIn = address(0);
             transferType = TransferManager.TransferType.TransferNativeInExecutor;
         } else {
             transferType = TransferManager.TransferType.ProtocolWillDebit;
-        }
-        // This is necessary because Curve's native token is 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE and TychoRouter
-        // uses the address(0) instead. The tokenOut is then later used on some internal accounting across the entire
-        // swap by the TychoRouter, so it is relevant that we are consistent.
-        if (tokenOut == nativeToken) {
-            tokenOut = address(0);
         }
         // The receiver of the funds will be the pool contract. This is only relevant
         // for performing an approval in the case of ProtocolWillDebit.

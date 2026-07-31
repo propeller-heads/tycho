@@ -29,15 +29,9 @@ contract UniswapV3ExecutorExposed is UniswapV3Executor {
             ? IUniswapV3Pool(msg.sender).token0()
             : IUniswapV3Pool(msg.sender).token1();
 
-        // Use delegatecall to preserve msg.sender
-        bytes memory callData = abi.encodeWithSignature(
-            "getCallbackTransferData(bytes,address)", msg.data, tokenIn
-        );
-        (bool success, bytes memory result) =
-            address(this).delegatecall(callData);
-        require(success, "Delegatecall failed");
-
-        (, address receiver) = abi.decode(result, (uint8, address));
+        (TransferManager.TransferType transferType, address receiver) =
+            this.getCallbackTransferData(msg.data, tokenIn, msg.sender);
+        assert(transferType == TransferManager.TransferType.Transfer);
 
         uint256 amount =
             amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
@@ -108,8 +102,9 @@ contract UniswapV3ExecutorTest is Test, TestUtils, Constants {
             dataLength,
             protocolData
         );
-        (TransferManager.TransferType transferType, address receiver) =
-            uniswapV3Exposed.getCallbackTransferData(callbackData, WETH_ADDR);
+        (TransferManager.TransferType transferType, address receiver) = uniswapV3Exposed.getCallbackTransferData(
+            callbackData, WETH_ADDR, address(this)
+        );
 
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
@@ -254,5 +249,92 @@ contract TychoRouterForUniswapV3Test is TychoRouterTestSetup {
 
         // 1000 USDC ~= 0.0095 BTC -> 1 BTC ~= 105k USDC ✅
         assertEq(IERC20(BASE_cbBTC).balanceOf(BOB), 950567);
+    }
+}
+
+contract TychoRouterForUniswapV3PolygonTest is TychoRouterTestSetup {
+    function getChain() public pure override returns (string memory) {
+        return "polygon";
+    }
+
+    function getForkBlock() public pure override returns (uint256) {
+        return 68000000;
+    }
+
+    function testSingleUniswapV3PolygonIntegration() public {
+        deal(POLYGON_WETH, ALICE, 1 ether);
+        uint256 balanceBefore = IERC20(POLYGON_USDC).balanceOf(ALICE);
+
+        vm.startPrank(ALICE);
+        IERC20(POLYGON_WETH).approve(tychoRouterAddr, type(uint256).max);
+
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_uniswap_v3_polygon"
+        );
+        (bool success,) = tychoRouterAddr.call(callData);
+
+        uint256 balanceAfter = IERC20(POLYGON_USDC).balanceOf(ALICE);
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(POLYGON_WETH).balanceOf(tychoRouterAddr), 0);
+        assertEq(balanceAfter, 2694197373);
+    }
+}
+
+contract TychoRouterForUniswapV3BscTest is TychoRouterTestSetup {
+    function getChain() public pure override returns (string memory) {
+        return "bsc";
+    }
+
+    function getForkBlock() public pure override returns (uint256) {
+        return 40000000;
+    }
+
+    function testSingleUniswapV3BscIntegration() public {
+        deal(BSC_WBNB, ALICE, 1 ether);
+        uint256 balanceBefore = IERC20(BSC_WETH).balanceOf(ALICE);
+
+        vm.startPrank(ALICE);
+        IERC20(BSC_WBNB).approve(tychoRouterAddr, type(uint256).max);
+
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_uniswap_v3_bsc"
+        );
+        (bool success,) = tychoRouterAddr.call(callData);
+
+        uint256 balanceAfter = IERC20(BSC_WETH).balanceOf(ALICE);
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(BSC_WBNB).balanceOf(tychoRouterAddr), 0);
+        assertEq(balanceAfter - balanceBefore, 167585949393846682);
+    }
+}
+
+contract TychoRouterForUniswapV3ArbitrumTest is TychoRouterTestSetup {
+    function getChain() public pure override returns (string memory) {
+        return "arbitrum";
+    }
+
+    function getForkBlock() public pure override returns (uint256) {
+        return 280000000;
+    }
+
+    function testSingleUniswapV3ArbitrumIntegration() public {
+        deal(ARBITRUM_WETH, ALICE, 1 ether);
+        uint256 balanceBefore = IERC20(ARBITRUM_USDC).balanceOf(ALICE);
+
+        vm.startPrank(ALICE);
+        IERC20(ARBITRUM_WETH).approve(tychoRouterAddr, type(uint256).max);
+
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_uniswap_v3_arbitrum"
+        );
+        (bool success,) = tychoRouterAddr.call(callData);
+
+        uint256 balanceAfter = IERC20(ARBITRUM_USDC).balanceOf(ALICE);
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(ARBITRUM_WETH).balanceOf(tychoRouterAddr), 0);
+        assertEq(balanceAfter, 3707959149);
     }
 }

@@ -8,6 +8,7 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {TransferManager} from "../TransferManager.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 error RocketpoolExecutor__InvalidDataLength();
 
@@ -66,7 +67,7 @@ contract RocketpoolExecutor is IExecutor {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        view
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -81,12 +82,12 @@ contract RocketpoolExecutor is IExecutor {
 
         bool isDeposit = uint8(data[0]) == 1;
         if (isDeposit) {
-            tokenIn = address(0);
+            tokenIn = ETH_ADDRESS;
             tokenOut = address(RETH);
             transferType = TransferManager.TransferType.TransferNativeInExecutor;
         } else {
             tokenIn = address(RETH);
-            tokenOut = address(0);
+            tokenOut = ETH_ADDRESS;
             transferType = TransferManager.TransferType.ProtocolWillDebit;
         }
         outputToRouter = true;

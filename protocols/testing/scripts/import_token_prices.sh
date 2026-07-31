@@ -54,7 +54,7 @@ CSV_URL="${S3_URL}/token-prices/${CHAIN}/latest/token-prices.csv"
 echo "Downloading latest token prices for $CHAIN..."
 echo "From: $CSV_URL"
 
-if ! curl -sf "$CSV_URL" -o "$CSV_FILE"; then
+if ! curl -sf --retry 5 --retry-delay 2 --retry-all-errors "$CSV_URL" -o "$CSV_FILE"; then
     echo "Error: Failed to download CSV from $CSV_URL"
     exit 1
 fi

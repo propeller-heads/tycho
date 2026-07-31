@@ -15,7 +15,7 @@ cargo +nightly clippy --workspace --all-features --all-targets -- -D warnings
 
 We are using the stable toolchain for building and testing, but the nightly toolchain for formatting and linting, as it allows us to use the latest features of `rustfmt` and `clippy`.
 
-If you are working in VSCode, we recommend you install the [rust-analyzer](https://rust-analyzer.github.io/) extension, and use the following VSCode user settings:
+If you are working in VSCode, we recommend you install the <a href="https://rust-analyzer.github.io/" target="_blank" rel="noopener noreferrer">rust-analyzer</a> extension, and use the following VSCode user settings:
 
 ```json
 "editor.formatOnSave": true,
@@ -52,6 +52,7 @@ For security purposes, new Executors must have:
 * No ERC20 token transfers
 * No `delegatecall`s
 * Only perform native ETH transfers if this behaviour is safely reflected in `getTransferData` or `getCallbackTransferData`
+* **Selector allowlist for caller-controlled calldata**: If `swap()` forwards caller-supplied calldata to an external contract, validate the first 4 bytes against an explicit allowlist of permitted function selectors before making the call. Without this check, an attacker can supply a selector for an arbitrary function on the settlement contract — for example, one that withdraws the router's balance to an attacker-controlled address.
 
 #### Running tests <a href="#running-tests" id="running-tests"></a>
 
@@ -76,7 +77,7 @@ Please **minimize** use of assembly for security reasons.
 
 #### Contract Analysis
 
-We use [Slither](https://github.com/crytic/slither) to detect any potential vulnerabilities in our contracts.
+We use <a href="https://github.com/crytic/slither" target="_blank" rel="noopener noreferrer">Slither</a> to detect any potential vulnerabilities in our contracts.
 
 To run locally, simply install Slither in your conda env and run it inside the contracts directory.
 
@@ -91,4 +92,4 @@ slither .
 
 ## Creating a Pull Request
 
-We use [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/) as our convention for formatting commit messages and PR titles.
+We use <a href="https://www.conventionalcommits.org/en/v1.0.0/" target="_blank" rel="noopener noreferrer">conventional commits</a> as our convention for formatting commit messages and PR titles.

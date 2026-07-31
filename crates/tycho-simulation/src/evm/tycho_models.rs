@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
+use tycho_common::simulation::errors::SimulationError;
 pub use tycho_common::{dto::ChangeType, models::Chain};
 
 use crate::{
-    evm::protocol::u256_num,
+    evm::protocol::{u256_num, utils::bytes_to_address},
     serde_helpers::{hex_bytes, hex_bytes_option},
 };
 
@@ -21,7 +22,6 @@ pub struct AccountUpdate {
 }
 
 impl AccountUpdate {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
         chain: Chain,
@@ -34,26 +34,25 @@ impl AccountUpdate {
     }
 }
 
-impl From<tycho_common::dto::AccountUpdate> for AccountUpdate {
-    fn from(value: tycho_common::dto::AccountUpdate) -> Self {
-        Self {
+impl TryFrom<tycho_common::dto::AccountUpdate> for AccountUpdate {
+    type Error = SimulationError;
+
+    fn try_from(value: tycho_common::dto::AccountUpdate) -> Result<Self, Self::Error> {
+        Ok(Self {
             chain: value.chain.into(),
-            address: Address::from_slice(&value.address[..20]), // Convert address field to Address
+            address: bytes_to_address(&value.address)?,
             slots: u256_num::map_slots_to_u256(value.slots),
             balance: value
                 .balance
                 .map(|balance| u256_num::bytes_to_u256(balance.into())),
             code: value.code.map(|code| code.to_vec()),
             change: value.change,
-        }
+        })
     }
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Default)]
 #[serde(rename = "Account")]
-/// Account struct for the response from Tycho server for a contract state request.
-///
-/// Code is serialized as a hex string instead of a list of bytes.
 pub struct ResponseAccount {
     pub chain: Chain,
     pub address: Address,
@@ -63,14 +62,9 @@ pub struct ResponseAccount {
     pub token_balances: HashMap<Address, U256>,
     #[serde(with = "hex_bytes")]
     pub code: Vec<u8>,
-    pub code_hash: B256,
-    pub balance_modify_tx: B256,
-    pub code_modify_tx: B256,
-    pub creation_tx: Option<B256>,
 }
 
 impl ResponseAccount {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         address: Address,
@@ -79,24 +73,8 @@ impl ResponseAccount {
         native_balance: U256,
         token_balances: HashMap<Address, U256>,
         code: Vec<u8>,
-        code_hash: B256,
-        balance_modify_tx: B256,
-        code_modify_tx: B256,
-        creation_tx: Option<B256>,
     ) -> Self {
-        Self {
-            chain,
-            address,
-            title,
-            slots,
-            native_balance,
-            token_balances,
-            code,
-            code_hash,
-            balance_modify_tx,
-            code_modify_tx,
-            creation_tx,
-        }
+        Self { chain, address, title, slots, native_balance, token_balances, code }
     }
 }
 
@@ -111,37 +89,120 @@ impl std::fmt::Debug for ResponseAccount {
             .field("native_balance", &self.native_balance)
             .field("token_balances", &self.token_balances)
             .field("code", &format!("[{} bytes]", self.code.len()))
-            .field("code_hash", &self.code_hash)
-            .field("balance_modify_tx", &self.balance_modify_tx)
-            .field("code_modify_tx", &self.code_modify_tx)
-            .field("creation_tx", &self.creation_tx)
             .finish()
     }
 }
 
-impl From<tycho_common::dto::ResponseAccount> for ResponseAccount {
+impl TryFrom<tycho_common::dto::ResponseAccount> for ResponseAccount {
+    type Error = SimulationError;
+
     #[allow(deprecated)]
-    fn from(value: tycho_common::dto::ResponseAccount) -> Self {
-        Self {
+    fn try_from(value: tycho_common::dto::ResponseAccount) -> Result<Self, Self::Error> {
+        let token_balances = value
+            .token_balances
+            .into_iter()
+            .map(|(address, balance)| {
+                Ok((bytes_to_address(&address)?, u256_num::bytes_to_u256(balance.into())))
+            })
+            .collect::<Result<HashMap<_, _>, SimulationError>>()?;
+
+        Ok(Self {
             chain: value.chain.into(),
-            address: Address::from_slice(&value.address[..20]), // Convert address field to Address
+            address: bytes_to_address(&value.address)?,
             title: value.title.clone(),
+            slots: u256_num::map_slots_to_u256(value.slots),
+            native_balance: u256_num::bytes_to_u256(value.native_balance.into()),
+            token_balances,
+            code: value.code.to_vec(),
+        })
+    }
+}
+
+impl From<tycho_common::models::contract::Account> for ResponseAccount {
+    fn from(value: tycho_common::models::contract::Account) -> Self {
+        Self {
+            chain: value.chain,
+            address: Address::from_slice(&value.address[..20]),
+            title: value.title,
             slots: u256_num::map_slots_to_u256(value.slots),
             native_balance: u256_num::bytes_to_u256(value.native_balance.into()),
             token_balances: value
                 .token_balances
                 .into_iter()
-                .map(|(address, balance)| {
-                    (Address::from_slice(&address[..20]), u256_num::bytes_to_u256(balance.into()))
+                .map(|(addr, ab)| {
+                    (Address::from_slice(&addr[..20]), u256_num::bytes_to_u256(ab.balance.into()))
                 })
                 .collect(),
             code: value.code.to_vec(),
-            code_hash: B256::from_slice(&value.code_hash[..]),
-            balance_modify_tx: B256::from_slice(&value.balance_modify_tx[..]),
-            code_modify_tx: B256::from_slice(&value.code_modify_tx[..]),
-            creation_tx: value
-                .creation_tx
-                .map(|tx| B256::from_slice(&tx[..])), // Optionally map creation_tx if present
         }
+    }
+}
+
+impl From<tycho_common::models::contract::AccountDelta> for AccountUpdate {
+    fn from(value: tycho_common::models::contract::AccountDelta) -> Self {
+        let code = value.code().clone().map(|c| c.to_vec());
+        let change = value.change_type().into();
+        Self {
+            chain: value.chain,
+            address: Address::from_slice(&value.address[..20]),
+            slots: value
+                .slots
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        u256_num::bytes_to_u256(k.into()),
+                        u256_num::bytes_to_u256(v.unwrap_or_default().into()),
+                    )
+                })
+                .collect(),
+            balance: value
+                .balance
+                .map(|b| u256_num::bytes_to_u256(b.into())),
+            code,
+            change,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_common::Bytes;
+
+    use super::*;
+
+    fn make_dto_response_account(address: Bytes) -> tycho_common::dto::ResponseAccount {
+        #[allow(deprecated)]
+        tycho_common::dto::ResponseAccount::new(
+            tycho_common::dto::Chain::Ethereum,
+            address,
+            "test".to_string(),
+            HashMap::new(),
+            Bytes::zero(32),
+            HashMap::new(),
+            Bytes::from(vec![0xDE, 0xAD]),
+            Bytes::from("0x00"),
+            Bytes::from("0x00"),
+            Bytes::from("0x00"),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_response_account_conversion_succeeds() {
+        let dto = make_dto_response_account(Bytes::zero(20));
+
+        let result = ResponseAccount::try_from(dto).unwrap();
+
+        assert_eq!(result.address, Address::ZERO);
+        assert_eq!(result.code, vec![0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn test_response_account_conversion_short_address_fails() {
+        let dto = make_dto_response_account(Bytes::from(vec![0x01]));
+
+        let result = ResponseAccount::try_from(dto);
+
+        assert!(result.is_err());
     }
 }

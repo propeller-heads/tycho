@@ -178,7 +178,7 @@ Before diving into these, it is useful to clarify a few terms:
 
 The encoder uses the **single** strategy when a Solution has exactly one swap on one pool.
 
-#### Sequential
+#### Sequential <a href="#sequential" id="sequential"></a>
 
 The encoder uses the **sequential** strategy when your Solution has multiple sequential swaps, and no splits (e.g. A → B → C). Outputs from one are equal to the input to the next swap.
 
