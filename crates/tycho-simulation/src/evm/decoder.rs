@@ -477,11 +477,12 @@ where
                         // delegatecall to the original (implementation) contract.
 
                         // Handle proxy token accounts
+                        let next_proxy_index = state_guard.proxy_token_addresses.len() as u32;
                         let (impl_addr, proxy_state) = match state_guard
                             .proxy_token_addresses
-                            .get(&original_address)
+                            .entry(original_address)
                         {
-                            Some(impl_addr) => {
+                            Entry::Occupied(entry) => {
                                 // Token already has a proxy contract, simply update it.
 
                                 // Note: we apply the snapshot as an update. This is to cover the
@@ -496,18 +497,14 @@ where
                                     None,
                                     ChangeType::Update,
                                 );
-                                (*impl_addr, proxy_state)
+                                (*entry.get(), proxy_state)
                             }
-                            None => {
+                            Entry::Vacant(entry) => {
                                 // Token does not have a proxy contract yet, create one
 
                                 // Assign original token contract to new address
-                                let impl_addr = generate_proxy_token_address(
-                                    state_guard.proxy_token_addresses.len() as u32,
-                                )?;
-                                state_guard
-                                    .proxy_token_addresses
-                                    .insert(original_address, impl_addr);
+                                let impl_addr = generate_proxy_token_address(next_proxy_index)?;
+                                entry.insert(impl_addr);
 
                                 // Add proxy token contract at original token address
                                 let proxy_state = create_proxy_token_account(
@@ -528,7 +525,7 @@ where
                         let impl_update = ResponseAccount {
                             address: impl_addr,
                             slots: HashMap::new(),
-                            ..account.clone()
+                            ..account
                         };
                         storage_by_address.insert(impl_addr, impl_update);
                     } else {
@@ -574,7 +571,6 @@ where
             // Construct a contract to token balances map: HashMap<ContractAddress,
             // HashMap<TokenAddress, Balance>>
             let account_balances = protocol_msg
-                .clone()
                 .snapshots
                 .get_vm_storage()
                 .iter()
@@ -598,21 +594,17 @@ where
                 let state_guard = self.state.read().await;
 
                 // PROCESS SNAPSHOTS
-                'snapshot_loop: for (id, snapshot) in protocol_msg
-                    .snapshots
-                    .get_states()
-                    .clone()
-                {
+                'snapshot_loop: for (id, snapshot) in protocol_msg.snapshots.get_states() {
                     // Skip any unsupported pools
-                    if !self.admits(protocol.as_str(), &snapshot) {
+                    if !self.admits(protocol.as_str(), snapshot) {
                         continue;
                     }
 
                     // Construct component from snapshot
                     let mut component_tokens = Vec::new();
                     let mut new_tokens_accounts = HashMap::new();
-                    for token in snapshot.component.tokens.clone() {
-                        match state_guard.tokens.get(&token) {
+                    for token in &snapshot.component.tokens {
+                        match state_guard.tokens.get(token) {
                             Some(token) => {
                                 component_tokens.push(token.clone());
 
@@ -708,7 +700,7 @@ where
                             .get(protocol.as_str())
                             .and_then(|provider| provider.subscribe(protocol.as_str()));
                         match state_decode_f(
-                            snapshot,
+                            snapshot.clone(),
                             header.clone(),
                             account_balances.clone(),
                             self.state.clone(),
@@ -764,7 +756,7 @@ where
             updated_states.extend(new_components);
 
             // PROCESS DELTAS
-            if let Some(deltas) = protocol_msg.deltas.clone() {
+            if let Some(deltas) = protocol_msg.deltas.as_ref() {
                 // Update engine with account changes
                 let mut state_guard = self.state.write().await;
 
@@ -795,35 +787,37 @@ where
                         // impl_addr).
 
                         // Handle proxy contract updates
+                        let next_proxy_index = state_guard.proxy_token_addresses.len() as u32;
                         let impl_addr = match state_guard
                             .proxy_token_addresses
-                            .get(&original_address)
+                            .entry(original_address)
                         {
-                            Some(impl_addr) => {
+                            Entry::Occupied(entry) => {
                                 // Token already has a proxy contract.
 
                                 // The proxy account already exists, so this is always a plain
-                                // storage update regardless of the incoming change type.
+                                // storage update regardless of the incoming change type. Built
+                                // field by field because the code is dropped here and may hold a
+                                // full contract bytecode.
                                 let proxy_update = AccountUpdate {
+                                    address: update.address,
+                                    chain: update.chain,
+                                    slots: update.slots.clone(),
+                                    balance: update.balance,
                                     code: None,
                                     change: ChangeType::Update,
-                                    ..update.clone()
                                 };
                                 account_update_by_address.insert(original_address, proxy_update);
 
-                                *impl_addr
+                                *entry.get()
                             }
-                            None => {
+                            Entry::Vacant(entry) => {
                                 // Token does not have a proxy contract yet, create one
 
                                 // Assign original token (implementation) contract to new proxy
                                 // address
-                                let impl_addr = generate_proxy_token_address(
-                                    state_guard.proxy_token_addresses.len() as u32,
-                                )?;
-                                state_guard
-                                    .proxy_token_addresses
-                                    .insert(original_address, impl_addr);
+                                let impl_addr = generate_proxy_token_address(next_proxy_index)?;
+                                entry.insert(impl_addr);
 
                                 // Create proxy token account with original account's storage (at
                                 // original address). Track it separately so it can be
@@ -847,7 +841,7 @@ where
                             let impl_update = AccountUpdate {
                                 address: impl_addr,
                                 slots: HashMap::new(),
-                                ..update.clone()
+                                ..update
                             };
                             account_update_by_address.insert(impl_addr, impl_update);
                         }
@@ -879,22 +873,15 @@ where
 
                 // Collect all pools related to the updated accounts
                 let mut pools_to_update = HashSet::new();
-                for (account, _update) in deltas.account_deltas {
+                for account in deltas.account_deltas.keys() {
                     // get new pools related to the account updated
-                    pools_to_update.extend(
-                        contracts_map
-                            .get(&account)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
+                    if let Some(pools) = contracts_map.get(account) {
+                        pools_to_update.extend(pools.iter().cloned());
+                    }
                     // get existing pools related to the account updated
-                    pools_to_update.extend(
-                        state_guard
-                            .contracts_map
-                            .get(&account)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
+                    if let Some(pools) = state_guard.contracts_map.get(account) {
+                        pools_to_update.extend(pools.iter().cloned());
+                    }
                 }
 
                 // Collect all balance changes this block
@@ -919,50 +906,47 @@ where
                             for (t, b) in bals {
                                 balances.insert(t.clone(), b.balance.clone());
                             }
-                            pools_to_update.extend(
-                                contracts_map
-                                    .get(account)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                            );
+                            if let Some(pools) = contracts_map.get(account) {
+                                pools_to_update.extend(pools.iter().cloned());
+                            }
                             (account.clone(), balances)
                         })
                         .collect(),
                 };
 
                 // update states with protocol state deltas (attribute changes etc.)
-                for (id, update) in deltas.state_deltas {
+                for (id, update) in &deltas.state_deltas {
                     // TODO: is this needed?
                     let update_with_block = Self::add_block_info_to_delta(
-                        ProtocolStateDelta::from(update),
+                        ProtocolStateDelta::from(update.clone()),
                         current_block.clone(),
                     );
                     match Self::apply_update(
-                        &id,
+                        id,
                         update_with_block,
                         &mut updated_states,
                         &state_guard,
                         &all_balances,
                     ) {
                         Ok(_) => {
-                            pools_to_update.remove(&id);
+                            pools_to_update.remove(id);
                         }
                         Err(e) => {
                             if self.skip_state_decode_failures {
                                 warn!(pool = id, error = %e, "Failed to apply state update, marking component as removed");
                                 // Remove from updated_states if it was there
-                                updated_states.remove(&id);
+                                updated_states.remove(id);
                                 // Try to get component from new_pairs first, then from state
-                                if let Some(component) = new_pairs.remove(&id) {
+                                if let Some(component) = new_pairs.remove(id) {
                                     removed_pairs.insert(id.clone(), component);
-                                } else if let Some(component) = state_guard.components.get(&id) {
+                                } else if let Some(component) = state_guard.components.get(id) {
                                     removed_pairs.insert(id.clone(), component.clone());
                                 } else {
                                     // Component not found in new_pairs or state, this shouldn't
                                     // happen
                                     warn!(pool = id, "Component not found in new_pairs or state, cannot add to removed_pairs");
                                 }
-                                pools_to_update.remove(&id);
+                                pools_to_update.remove(id);
 
                                 // Add to failed components
                                 msg_failed_components.insert(id.clone());
@@ -1062,12 +1046,7 @@ where
 
         state_guard.current_block_number = block_number_or_timestamp;
 
-        // Add new components to persistent state
-        for (id, component) in new_pairs.iter() {
-            state_guard
-                .components
-                .insert(id.clone(), component.clone());
-        }
+        // New components are already persisted as they are decoded, so nothing to add here.
 
         // Remove components from persistent state
         for id in removed_pairs.keys() {
