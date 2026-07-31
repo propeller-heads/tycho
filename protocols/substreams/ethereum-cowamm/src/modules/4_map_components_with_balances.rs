@@ -1,9 +1,7 @@
 use crate::{
+    abi::{b_cow_factory::events::CowammPoolCreated, gpv2_settlement::events::Trade},
     events::get_log_changed_balances,
-    modules::{
-        map_cowpools::parse_binds,
-        utils::{extract_address, Params},
-    },
+    modules::{map_cowpools::parse_binds, utils::Params},
     pb::cowamm::{
         Attribute, BlockBalanceDeltas, BlockPoolChanges, BlockTransactionProtocolComponents,
         CowBalanceDelta, CowPool, CowProtocolComponent, ProtocolType,
@@ -79,11 +77,7 @@ pub fn map_components_with_balances(
     binds: StoreGetString,
 ) -> Result<BlockPoolChanges, substreams::errors::Error> {
     let params = Params::parse_from_query(&params)?;
-    const COWAMM_POOL_CREATED_TOPIC: &str =
-        "0x0d03834d0d86c7f57e877af40e26f176dc31bd637535d4ba153d1ac9de88a7ea";
     const COW_PROTOCOL_GPV2_SETTLEMENT_ADDRESS: &str = "0x9008d19f58aabd9ed0d60971565aa8510560ab41";
-    const COW_PROTOCOL_GPV2_TOPIC: &str =
-        "0xa07a543ab8a018198e99ca0184c93fe9050a79400a0a723441f84de1d972cc17";
 
     let factory_address = params
         .decode_addresses()
@@ -103,17 +97,14 @@ pub fn map_components_with_balances(
             let tx_hash = tx.hash.clone();
             let tx_index = tx.index;
 
-            let is_pool_creation = log.address == factory_address &&
-                log.topics.first().map(|t| t.to_hex()) ==
-                    Some(COWAMM_POOL_CREATED_TOPIC.to_string());
+            let is_pool_creation =
+                log.address == factory_address && CowammPoolCreated::match_log(log);
             if is_pool_creation {
                 // Handle pool creation
-                let pool_address_topic = match log.topics.get(1) {
-                    Some(topic) => topic.as_slice()[12..].to_vec(),
-                    None => continue,
-                };
+                let creation = CowammPoolCreated::decode(log)
+                    .expect("COWAMMPoolCreated log matched but failed to decode");
 
-                let pool_address_hex = hex::encode(&pool_address_topic);
+                let pool_address_hex = hex::encode(&creation.b_co_w_pool);
                 let pool_key = format!("Pool:0x{}", pool_address_hex);
 
                 let bind_data = match binds.get_at(log.ordinal, &pool_address_hex) {
@@ -188,18 +179,10 @@ pub fn map_components_with_balances(
                 // to check the owner if its this pool
 
                 //https://etherscan.io/tx/0x530416d2f894e7d029a42854fc7656a1605a4bddf711707e41e4c8997becbac5#eventlog#504 example
-                if log.topics.first().map(|t| t.to_hex()) ==
-                    Some(COW_PROTOCOL_GPV2_TOPIC.to_string())
-                {
-                    if let Some(pool_address) = log.topics.get(1).map(|t| t.to_hex()) {
-                        //24 + 40 chars
-                        //pool is address is left padded with 24 '0's so we remove that
-                        //0x0000000000000000000000009bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1 left
-                        // padded to 44 bytes
-                        let address = extract_address(&pool_address, 40);
-                        if let Some(pool) = store.get_last(format!("Pool:{}", &address)) {
-                            tx_deltas.extend(get_log_changed_balances(&tx.into(), log, &pool));
-                        }
+                if Trade::match_log(log) {
+                    let trade = Trade::decode(log).expect("Trade log matched but failed to decode");
+                    if let Some(pool) = store.get_last(format!("Pool:{}", trade.owner.to_hex())) {
+                        tx_deltas.extend(get_log_changed_balances(&tx.into(), log, &pool));
                     }
                 }
             }

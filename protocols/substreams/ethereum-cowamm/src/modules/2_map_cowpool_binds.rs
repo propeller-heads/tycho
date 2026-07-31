@@ -3,13 +3,8 @@ use crate::{
     pb::cowamm::{BindingChangeType, CowPoolBind, CowPoolBinds},
 };
 use anyhow::Result;
-use substreams_ethereum::pb::eth::v2::Block;
+use substreams_ethereum::pb::eth::v2::{Block, Log};
 use substreams_helper::hex::Hexable;
-
-const BIND_TOPIC: &str = "0xe4e1e53800000000000000000000000000000000000000000000000000000000";
-const BIND_SELECTOR: &str = "e4e1e538";
-const UNBIND_TOPIC: &str = "0xcf5e7bd300000000000000000000000000000000000000000000000000000000";
-const UNBIND_SELECTOR: &str = "cf5e7bd3";
 
 #[substreams::handlers::map]
 pub fn map_cowpool_binds(block: Block) -> Result<CowPoolBinds> {
@@ -20,35 +15,19 @@ fn extract_cowpool_bindings(block: Block) -> CowPoolBinds {
     let mut binds = Vec::new();
     for tx in block.transactions() {
         for (log, call) in tx.logs_with_calls() {
-            let Some(topic) = log
-                .topics
-                .first()
-                .map(|topic| topic.to_hex())
-            else {
+            let is_bind = Bind::match_call(call.call);
+            if !is_bind && !Unbind::match_call(call.call) {
                 continue;
-            };
-            if topic != BIND_TOPIC && topic != UNBIND_TOPIC {
+            }
+            // A bind/unbind call emits several logs (its LOG_CALL plus token transfers);
+            // only the LOG_CALL event carries the binding change ordinal. Pairing each
+            // log with the call that emitted it also makes lookalike logs from other
+            // contracts unreachable here.
+            if !is_log_call_event(log, &call.call.input[..4]) {
                 continue;
             }
 
-            // This map scans logs from every contract on chain, and anyone can emit a log
-            // whose first topic collides with the BCoWPool bind/unbind LOG_CALL topics.
-            // Genuine BCoWPool events are always emitted by the bind/unbind call itself, so
-            // a log whose emitting call doesn't carry the matching selector, or whose input
-            // doesn't decode, is a lookalike from an unrelated contract. Skip it: erroring
-            // here would permanently halt the stream at this block.
-            let selector = if topic == BIND_TOPIC { BIND_SELECTOR } else { UNBIND_SELECTOR };
-            if call.call.input.len() <= 4 || hex::encode(&call.call.input[..4]) != selector {
-                substreams::log::info!(
-                    "skipping {} lookalike log at {} in tx {}: emitting call does not match the selector",
-                    selector,
-                    log.address.to_hex(),
-                    tx.hash.to_hex()
-                );
-                continue;
-            }
-
-            let decoded = if selector == BIND_SELECTOR {
+            let decoded = if is_bind {
                 Bind::decode(call.call).map(|bind| {
                     (
                         bind.token,
@@ -64,9 +43,10 @@ fn extract_cowpool_bindings(block: Block) -> CowPoolBinds {
             let (token, amount, weight, change_type) = match decoded {
                 Ok(decoded) => decoded,
                 Err(error) => {
+                    // Anyone can call a function whose selector collides with
+                    // bind/unbind; erroring here would halt the stream at this block.
                     substreams::log::info!(
-                        "skipping undecodable {} call at {} in tx {}: {}",
-                        selector,
+                        "skipping undecodable binding call at {} in tx {}: {}",
                         log.address.to_hex(),
                         tx.hash.to_hex(),
                         error
@@ -89,16 +69,29 @@ fn extract_cowpool_bindings(block: Block) -> CowPoolBinds {
     CowPoolBinds { binds }
 }
 
+/// The BCoWPool `LOG_CALL` event is anonymous: its only static topic is the four-byte
+/// selector of the executing function, right-padded to 32 bytes.
+fn is_log_call_event(log: &Log, selector: &[u8]) -> bool {
+    let Some(topic) = log.topics.first() else {
+        return false;
+    };
+    topic.len() == 32 && topic[..4] == *selector && topic[4..].iter().all(|byte| *byte == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use substreams::scalar::BigInt;
-    use substreams_ethereum::pb::eth::v2::{Call, Log, TransactionReceipt, TransactionTrace};
+    use substreams_ethereum::pb::eth::v2::{Call, TransactionReceipt, TransactionTrace};
+
+    // Pinned on-chain values; these fail if the generated ABI constants ever drift.
+    const BIND_TOPIC: &str = "e4e1e53800000000000000000000000000000000000000000000000000000000";
+    const UNBIND_TOPIC: &str = "cf5e7bd300000000000000000000000000000000000000000000000000000000";
 
     fn bind_log(address: &[u8], ordinal: u64) -> Log {
         Log {
             address: address.to_vec(),
-            topics: vec![hex::decode(&BIND_TOPIC[2..]).unwrap()],
+            topics: vec![hex::decode(BIND_TOPIC).unwrap()],
             ordinal,
             ..Default::default()
         }
@@ -126,10 +119,9 @@ mod tests {
         let pool = hex::decode("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1").unwrap();
         let token_a = hex::decode("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").unwrap();
         let token_b = hex::decode("7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0").unwrap();
-        let unbind_topic = hex::decode(&UNBIND_TOPIC[2..]).unwrap();
         let log_unbind = Log {
             address: pool.clone(),
-            topics: vec![unbind_topic],
+            topics: vec![hex::decode(UNBIND_TOPIC).unwrap()],
             ordinal: 3,
             ..Default::default()
         };

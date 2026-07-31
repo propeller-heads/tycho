@@ -22,15 +22,3 @@ impl Params {
         Ok(factory_address.try_into().unwrap())
     }
 }
-
-pub fn extract_address(word: &str, count: usize) -> String {
-    // Remove 0x prefix if present
-    let clean = word.trim_start_matches("0x");
-
-    // Last 40 hex chars = 20 bytes = ETH address
-    // Last 16 hex chars = 8 bytes = Denormalized weight
-    let addr_hex = &clean[clean.len() - count..];
-
-    // Return with 0x prefix
-    format!("0x{}", addr_hex)
-}
