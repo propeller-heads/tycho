@@ -484,8 +484,7 @@ fn _validate_amounts(
     }
     // The division rounds down, which can make the floor 0 for tiny expected
     // amounts — hence the explicit zero check.
-    let min_amount_out_floor =
-        expected_amount_out * (100 - MAX_SLIPPAGE_TOLERANCE_PERCENT) / 100;
+    let min_amount_out_floor = expected_amount_out * (100 - MAX_SLIPPAGE_TOLERANCE_PERCENT) / 100;
     if min_amount_out == 0 ||
         min_amount_out < min_amount_out_floor ||
         min_amount_out > expected_amount_out
