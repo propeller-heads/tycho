@@ -19,9 +19,9 @@ tests:
       - id: "0xf8F5B88328DFF3d19E5f4F11A9700293Ac8f638F" #BAL/WETH
         tokens:
           - "0xba100000625a3754423978a60c9317c58a424e3D"
-          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" 
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
           - "0xf8F5B88328DFF3d19E5f4F11A9700293Ac8f638F"
-        static_attributes: 
+        static_attributes:
            address: "0xf8F5B88328DFF3d19E5f4F11A9700293Ac8f638F"
            token_a: "0xba100000625a3754423978a60c9317c58a424e3D"
            token_b: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
@@ -31,16 +31,16 @@ tests:
            fee: "0x0"
         creation_tx: "0x4dca0db2ac7cf0d5b8cf97cd6b2365d8aa59d0df5b29b1d3e59bc02432143b60"
         skip_simulation: false
-        skip_execution: true 
+        skip_execution: true
 
       - id: "0xf706c50513446d709f08d3e5126cd74fb6bFDA19" #AAVE/WETH
         tokens:
           - "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"
-          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" 
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
           - "0xf706c50513446d709f08d3e5126cd74fb6bFDA19"
-        static_attributes: 
+        static_attributes:
            address: "0xf706c50513446d709f08d3e5126cd74fb6bFDA19"
-           token_a: "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9" 
+           token_a: "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"
            token_b: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
            lp_token: "0xf706c50513446d709f08d3e5126cd74fb6bFDA19"
            weight_a: "0x0de0b6b3a7640000" #50
@@ -48,16 +48,16 @@ tests:
            fee: "0x0"
         creation_tx: "0x218f6657a0ea1865c51beb55b3bd99ccd0826bd668f9e78096ff3b1f88822d43"
         skip_simulation: false
-        skip_execution: true 
+        skip_execution: true
 
       - id: "0x4359a8Ea4c353d93245c0B6b8608A28Bb48A05e2" #ARB/WETH
         tokens:
           - "0x4359a8Ea4c353d93245c0B6b8608A28Bb48A05e2"
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-          - "0xb50721bcf8d664c30412cfbc6cf7a15145234ad1" 
-        static_attributes: 
+          - "0xb50721bcf8d664c30412cfbc6cf7a15145234ad1"
+        static_attributes:
            address: "0x4359a8Ea4c353d93245c0B6b8608A28Bb48A05e2"
-           token_a: "0xb50721bcf8d664c30412cfbc6cf7a15145234ad1" 
+           token_a: "0xb50721bcf8d664c30412cfbc6cf7a15145234ad1"
            token_b: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
            lp_token: "0x4359a8Ea4c353d93245c0B6b8608A28Bb48A05e2"
            weight_a: "0x0de0b6b3a7640000" #50
@@ -65,16 +65,16 @@ tests:
            fee: "0x0"
         creation_tx: "0x59cb7792d348a6fc3ba19acba2292f0e836ddef786da21f7c8bba7c0cbbe5f25"
         skip_simulation: false
-        skip_execution: true 
+        skip_execution: true
 
       - id: "0x9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1" #COW/wstETH
         tokens:
           - "0xdef1ca1fb7fbcdc777520aa7f396b4e015f497ab"
-          - "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" 
+          - "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
           - "0x9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1"
-        static_attributes: 
+        static_attributes:
            address: "0x9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1"
-           token_a: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" 
+           token_a: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
            token_b: "0xdef1ca1fb7fbcdc777520aa7f396b4e015f497ab"
            lp_token: "0x9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1"
            weight_a: "0x0de0b6b3a7640000"
@@ -82,7 +82,7 @@ tests:
            fee: "0x0"
         creation_tx: "0xbedc6a4b23aadc836f76001c0feac79c3603719269e917e53afae22debaddb12"
         skip_simulation: false
-        skip_execution: true 
+        skip_execution: true
 
       - id: "0xfec04c31b6099ce76c4c5d6d754a34141884fd91"
         tokens:
