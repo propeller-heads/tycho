@@ -33,11 +33,8 @@ from being stored in the shell history.
 
 The FeeCalculator must be deployed **before** the TychoRouter, as the router requires its address.
 
-1. Set the fee setter address:
-   ```
-   export ROUTER_FEE_SETTER=<address-to-grant-fee-setter-role>
-   ```
-   `ROUTER_FEE_SETTER` receives `ROUTER_FEE_SETTER_ROLE` to manage fee configuration.
+1. Define the `ROUTER_FEE_SETTER` address for your network in `scripts/roles.json`. The first
+   address receives `ROUTER_FEE_SETTER_ROLE` to manage fee configuration.
 2. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
 3. Note the deployed address — you will need it in the next step.
 

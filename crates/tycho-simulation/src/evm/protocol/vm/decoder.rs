@@ -233,7 +233,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
                 .stateless_contracts(stateless_contracts)
                 .manual_updates(manual_updates)
                 .trace(vm_traces)
-                .block_overrides(block_overrides);
+                .block_overrides(block_overrides)
+                .spot_price_caller(spot_price_caller(protocol_name));
 
         if let Some(balance_owner) = balance_owner {
             pool_state_builder = pool_state_builder.balance_owner(balance_owner)
@@ -252,6 +253,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
 
         Ok(pool_state)
     }
+}
+
+/// The caller (`tx.origin`) for a protocol's adapter `price()` query.
+///
+/// Balancer V3's price path calls `querySwapExactIn`, which reverts with `NotStaticCall()` unless
+/// `tx.origin == address(0)` (its off-chain query-mode check). Every other adapter uses the
+/// default `EXTERNAL_ACCOUNT` caller (`None`).
+fn spot_price_caller(protocol_name: &str) -> Option<Address> {
+    (protocol_name == "balancer_v3").then_some(Address::ZERO)
 }
 
 #[cfg(test)]
@@ -428,9 +438,19 @@ mod tests {
             .insert(Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap());
         assert_eq!(res_pool.get_involved_contracts(), exp_involved_contracts);
         assert!(res_pool.get_manual_updates());
+        // vm_component() is vm:balancer_v2, so the price query uses the default caller.
+        assert_eq!(res_pool.get_spot_price_caller(), None);
         assert_eq!(
             res_pool.get_block_overrides(),
             Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) })
         );
+    }
+
+    #[test]
+    fn test_spot_price_caller() {
+        // Balancer V3 must query with tx.origin == address(0); everything else uses the default.
+        assert_eq!(spot_price_caller("balancer_v3"), Some(Address::ZERO));
+        assert_eq!(spot_price_caller("balancer_v2"), None);
+        assert_eq!(spot_price_caller("curve"), None);
     }
 }

@@ -12,7 +12,6 @@ pub struct HashflowAuth {
 
 /// Bebop authentication configuration
 pub struct BebopAuth {
-    pub user: String,
     pub key: String,
 }
 
@@ -57,16 +56,12 @@ pub fn get_liquorice_auth() -> Result<LiquoriceAuth, RFQError> {
 }
 
 /// Read Bebop authentication from environment variables
-/// Returns the BEBOP_USER and BEBOP_KEY environment variables
+/// Returns the BEBOP_KEY environment variable
 pub fn get_bebop_auth() -> Result<BebopAuth, RFQError> {
-    let user = env::var("BEBOP_USER").map_err(|_| {
-        RFQError::InvalidInput("BEBOP_USER environment variable is required".into())
-    })?;
-
     let key = env::var("BEBOP_KEY")
         .map_err(|_| RFQError::InvalidInput("BEBOP_KEY environment variable is required".into()))?;
 
-    Ok(BebopAuth { user, key })
+    Ok(BebopAuth { key })
 }
 
 /// Read Metric API configuration from environment variables.
@@ -126,37 +121,20 @@ mod tests {
 
     #[test]
     fn test_bebop_auth_success() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         let auth = get_bebop_auth().unwrap();
-        assert_eq!(auth.user, "test_user");
         assert_eq!(auth.key, "test_key");
-
-        env::remove_var("BEBOP_USER");
-        env::remove_var("BEBOP_KEY");
-    }
-
-    #[test]
-    fn test_bebop_auth_missing_user() {
-        env::remove_var("BEBOP_USER");
-        env::set_var("BEBOP_KEY", "test_key");
-
-        let result = get_bebop_auth();
-        assert!(result.is_err());
 
         env::remove_var("BEBOP_KEY");
     }
 
     #[test]
     fn test_bebop_auth_missing_key() {
-        env::set_var("BEBOP_USER", "test_user");
         env::remove_var("BEBOP_KEY");
 
         let result = get_bebop_auth();
         assert!(result.is_err());
-
-        env::remove_var("BEBOP_USER");
     }
 
     #[test]

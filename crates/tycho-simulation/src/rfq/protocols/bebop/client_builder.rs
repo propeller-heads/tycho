@@ -21,7 +21,6 @@ use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_ch
 ///
 /// let client = BebopClientBuilder::new(
 ///     Chain::Ethereum,
-///     "ws_user".to_string(),
 ///     "ws_key".to_string()
 /// )
 /// .tokens(tokens)
@@ -31,7 +30,6 @@ use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_ch
 /// ```
 pub struct BebopClientBuilder {
     chain: Chain,
-    ws_user: String,
     ws_key: String,
     tokens: HashSet<Bytes>,
     tvl: f64,
@@ -40,10 +38,9 @@ pub struct BebopClientBuilder {
 }
 
 impl BebopClientBuilder {
-    pub fn new(chain: Chain, ws_user: String, ws_key: String) -> Self {
+    pub fn new(chain: Chain, ws_key: String) -> Self {
         Self {
             chain,
-            ws_user,
             ws_key,
             tokens: HashSet::new(),
             tvl: 100.0, // Default $100 minimum TVL
@@ -89,7 +86,6 @@ impl BebopClientBuilder {
             self.chain,
             self.tokens,
             self.tvl,
-            self.ws_user,
             self.ws_key,
             quote_tokens,
             self.quote_timeout,

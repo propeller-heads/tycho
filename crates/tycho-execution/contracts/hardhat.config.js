@@ -70,6 +70,11 @@ module.exports = {
             url: process.env.RPC_URL,
             accounts: [process.env.PRIVATE_KEY],
             chainId: 137
+        },
+        plasma: {
+            url: process.env.RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 9745
         }
     },
 
@@ -88,6 +93,14 @@ module.exports = {
                 urls: {
                     apiURL: "https://api.uniscan.xyz/api",
                     browserURL: "https://www.uniscan.xyz/"
+                }
+            },
+            {
+                network: "plasma",
+                chainId: 9745,
+                urls: {
+                    apiURL: "https://api.routescan.io/v2/network/mainnet/evm/9745/etherscan/api",
+                    browserURL: "https://plasmascan.to/"
                 }
             }
         ]

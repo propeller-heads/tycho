@@ -67,12 +67,11 @@ impl RFQStreamProcessor {
         run_pamm_protocols: bool,
     ) -> miette::Result<Self> {
         let mut rfq_credentials = HashMap::new();
-        let (bebop_user, bebop_key) = (env::var("BEBOP_USER").ok(), env::var("BEBOP_KEY").ok());
-        if let (Some(user), Some(key)) = (bebop_user, bebop_key) {
+        if let Ok(key) = env::var("BEBOP_KEY") {
             info!("Bebop RFQ credentials found");
-            rfq_credentials.insert(RFQProtocol::Bebop, (user, key));
+            rfq_credentials.insert(RFQProtocol::Bebop, (String::new(), key));
         } else {
-            info!("Bebop RFQ credentials not found. Expected environment variables: BEBOP_USER, BEBOP_KEY");
+            info!("Bebop RFQ credentials not found. Expected environment variable: BEBOP_KEY");
         }
         let (hashflow_user, hashflow_key) =
             (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
@@ -97,7 +96,7 @@ impl RFQStreamProcessor {
                     "No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only."
                 );
             } else {
-                return Err(miette!("No RFQ credentials found. Please set BEBOP_USER and BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols."));
+                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols."));
             }
         }
         Ok(Self {
@@ -148,13 +147,12 @@ impl RFQStreamProcessor {
             info!("Adding {protocol} RFQ client...");
             match protocol {
                 RFQProtocol::Bebop => {
-                    let bebop_client =
-                        BebopClientBuilder::new(self.chain, user.clone(), key.clone())
-                            .tokens(rfq_tokens.clone())
-                            .tvl_threshold(self.tvl_threshold)
-                            .build()
-                            .into_diagnostic()
-                            .wrap_err("Failed to create Bebop RFQ client")?;
+                    let bebop_client = BebopClientBuilder::new(self.chain, key.clone())
+                        .tokens(rfq_tokens.clone())
+                        .tvl_threshold(self.tvl_threshold)
+                        .build()
+                        .into_diagnostic()
+                        .wrap_err("Failed to create Bebop RFQ client")?;
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<BebopState>("bebop", Box::new(bebop_client));
                 }

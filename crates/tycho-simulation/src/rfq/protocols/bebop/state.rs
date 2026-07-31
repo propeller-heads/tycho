@@ -305,7 +305,6 @@ mod tests {
             HashSet::new(),
             0.0,
             "".to_string(),
-            "".to_string(),
             HashSet::new(),
             Duration::from_secs(30),
         )

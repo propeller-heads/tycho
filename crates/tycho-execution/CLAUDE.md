@@ -233,6 +233,27 @@ from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`).
 
+### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
+
+Angstrom's Uniswap V4 pools start every block locked. A swap against one carries a pool unlock attestation, signed by
+the current Angstrom leader, as its `hookData`. The attestation is scoped to a block number and says nothing about the
+swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 5) serves every swap, pool and route.
+
+`AttestationCache` therefore keeps the window in a process-wide cache instead of fetching it during encoding:
+
+- A dedicated OS thread (`angstrom-attestations`) refreshes the window every
+  `ANGSTROM_ATTESTATION_REFRESH_INTERVAL`, twice per Ethereum block. Not a `tokio` task — the encoder must work without
+  a runtime, and `reqwest`'s blocking client cannot be driven from inside one.
+- `AttestationCache::global()` starts the thread on first call. `UniswapV4SwapEncoder::new` calls it when
+  `angstrom_hook_address` is configured for the chain (`config/protocol_specific_addresses.json`), so registry
+  construction warms the cache. `ANGSTROM_API_KEY` / `ANGSTROM_API_URL` / `ANGSTROM_BLOCKS_IN_FUTURE` are read once, at
+  that point; without the API key the thread never starts and Angstrom swaps fail to encode with a `FatalError`.
+- `encode_swap` reads the cache. A window older than `ANGSTROM_ATTESTATION_MAX_AGE` triggers one inline fetch on a
+  scoped thread, so encoding degrades to the old behavior instead of failing. Fetch failures are `RecoverableError`.
+- On chain, `UniswapV4Executor._selectAttestation` picks the 93-byte entry (8-byte block number + 85-byte attestation)
+  matching `block.number` and returns empty bytes when none match. Entries for blocks that already passed only cost
+  calldata; a window that covers no upcoming block falls back to Angstrom's protocol-driven empty-batch unlock.
+
 ### Gas estimation
 
 `Swap::new(component, token_in: Token, token_out: Token, estimated_gas: BigUint)` carries a per-swap simulation gas

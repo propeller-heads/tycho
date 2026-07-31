@@ -87,6 +87,16 @@ fn get_new_pools(
                         value: BigInt::from(0).to_signed_bytes_be(),
                         change: ChangeType::Creation.into(),
                     },
+                    Attribute {
+                        name: "dfc_initialFeeEnabled".to_string(),
+                        value: BigInt::from(0).to_signed_bytes_be(),
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "dfc_initialFee".to_string(),
+                        value: BigInt::from(0).to_signed_bytes_be(),
+                        change: ChangeType::Creation.into(),
+                    },
                 ],
             }],
             component_changes: vec![ProtocolComponent {

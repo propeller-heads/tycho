@@ -64,8 +64,15 @@
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
     "quickswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
     "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
+    "ramses_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
     "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
     "rfq:metric": "0x746Cdaf8Ef08A9d023155Dddc95291Ab8C9A7936"
+  },
+  "plasma": {
+    "uniswap_v3": "0xA6D43EFEc7870ac6e27c81232C2B5E11b17d40d4",
+    "fluid_v1": "0x5020a5012cDC3545d2E98B6fb3EA4b9dc90552a6",
+    "vm:curve": "0xC015Bc2f482b6CF31D6C30e663a57417A6761949",
+    "native_wrapper": "0x1D9220eA65cA79997C532ba8fbC79b1c463Bd505"
   }
 }

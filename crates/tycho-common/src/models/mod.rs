@@ -93,6 +93,8 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    Plasma,
+    Robinhood,
     /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
     Custom(CustomChainId),
 }
@@ -115,6 +117,8 @@ impl Chain {
             "bsc" => Some(Chain::Bsc),
             "unichain" => Some(Chain::Unichain),
             "polygon" => Some(Chain::Polygon),
+            "plasma" => Some(Chain::Plasma),
+            "robinhood" => Some(Chain::Robinhood),
             _ => None,
         }
     }
@@ -152,6 +156,8 @@ impl Display for Chain {
             Chain::Bsc => f.write_str("bsc"),
             Chain::Unichain => f.write_str("unichain"),
             Chain::Polygon => f.write_str("polygon"),
+            Chain::Plasma => f.write_str("plasma"),
+            Chain::Robinhood => f.write_str("robinhood"),
             Chain::Custom(name) => f.write_str(name.as_str()),
         }
     }
@@ -168,6 +174,8 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Bsc => Chain::Bsc,
             dto::Chain::Unichain => Chain::Unichain,
             dto::Chain::Polygon => Chain::Polygon,
+            dto::Chain::Plasma => Chain::Plasma,
+            dto::Chain::Robinhood => Chain::Robinhood,
             dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
                 panic!(
                     "received custom chain '{name}' with no registered config: {e}; install it via \
@@ -230,6 +238,18 @@ fn native_pol(chain: Chain) -> Token {
     )
 }
 
+fn native_xpl(chain: Chain) -> Token {
+    Token::new(
+        &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+        "XPL",
+        18,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
 /// Looks up a custom chain's config in the registry, returning [`ChainConfigError::UnknownChain`]
 /// when it is absent.
 fn try_resolve_custom<'a>(
@@ -274,6 +294,10 @@ fn wrapped_native_pol(chain: Chain, address: &str) -> Token {
     Token::new(&Bytes::from_str(address).unwrap(), "WMATIC", 18, 0, &[Some(2300)], chain, 100)
 }
 
+fn wrapped_native_xpl(chain: Chain, address: &str) -> Token {
+    Token::new(&Bytes::from_str(address).unwrap(), "WXPL", 18, 0, &[Some(2300)], chain, 100)
+}
+
 fn wrapped_native_custom(chain: Chain, cfg: &CustomChainConfig) -> Token {
     let addr = Bytes::from(
         cfg.wrapped_native
@@ -312,6 +336,8 @@ impl Chain {
             Chain::Bsc => 56,
             Chain::Unichain => 130,
             Chain::Polygon => 137,
+            Chain::Plasma => 9745,
+            Chain::Robinhood => 4663,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
         })
     }
@@ -344,7 +370,8 @@ impl Chain {
                 Chain::ZkSync |
                 Chain::Arbitrum |
                 Chain::Base |
-                Chain::Unichain,
+                Chain::Unichain |
+                Chain::Robinhood,
                 TvlThresholdTier::Low,
             ) => 10.0,
             (
@@ -353,13 +380,18 @@ impl Chain {
                 Chain::ZkSync |
                 Chain::Arbitrum |
                 Chain::Base |
-                Chain::Unichain,
+                Chain::Unichain |
+                Chain::Robinhood,
                 TvlThresholdTier::Medium,
             ) => 100.0,
 
             // Polygon (POL ≈ $0.10): 200_000 POL ≈ $20K, 2_000_000 POL ≈ $200K
             (Chain::Polygon, TvlThresholdTier::Low) => 200_000.0,
             (Chain::Polygon, TvlThresholdTier::Medium) => 2_000_000.0,
+
+            // Plasma (XPL ≈ $0.10): 200_000 XPL ≈ $20K, 2_000_000 XPL ≈ $200K
+            (Chain::Plasma, TvlThresholdTier::Low) => 200_000.0,
+            (Chain::Plasma, TvlThresholdTier::Medium) => 2_000_000.0,
 
             // BSC (BNB ≈ $630): 32 BNB ≈ $20K, 320 BNB ≈ $200K
             (Chain::Bsc, TvlThresholdTier::Low) => 32.0,
@@ -398,6 +430,8 @@ impl Chain {
             Chain::Bsc => native_bsc(Chain::Bsc),
             Chain::Unichain => native_eth(Chain::Unichain),
             Chain::Polygon => native_pol(Chain::Polygon),
+            Chain::Plasma => native_xpl(Chain::Plasma),
+            Chain::Robinhood => native_eth(Chain::Robinhood),
             Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
         })
     }
@@ -437,6 +471,12 @@ impl Chain {
             Chain::Polygon => {
                 wrapped_native_pol(Chain::Polygon, "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
             }
+            Chain::Plasma => {
+                wrapped_native_xpl(Chain::Plasma, "0x6100E367285b01F48D07953803A2d8dCA5D19873")
+            }
+            Chain::Robinhood => {
+                wrapped_native_eth(Chain::Robinhood, "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73")
+            }
             Chain::Custom(id) => {
                 wrapped_native_custom(*self, try_resolve_custom(id, chain_registry())?)
             }
@@ -461,6 +501,8 @@ impl Chain {
             Chain::Bsc => 1,
             Chain::Unichain => 1,
             Chain::Polygon => 2,
+            Chain::Plasma => 1,
+            Chain::Robinhood => 1,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
         })
     }
@@ -779,6 +821,54 @@ mod tests {
     #[test]
     fn test_chain_address_new_rejects_oversized_input() {
         assert_eq!(ChainAddress::new(&[0u8; 33]), Err(ChainConfigError::AddressTooLong(33)));
+    }
+
+    #[test]
+    fn test_robinhood_chain_id() {
+        assert_eq!(Chain::Robinhood.id(), 4663);
+    }
+
+    #[test]
+    fn test_robinhood_chain_display() {
+        assert_eq!(Chain::Robinhood.to_string(), "robinhood");
+    }
+
+    #[test]
+    fn test_robinhood_chain_from_str() {
+        assert_eq!("robinhood".parse::<Chain>().unwrap(), Chain::Robinhood);
+    }
+
+    #[test]
+    fn test_robinhood_native_token() {
+        let token = Chain::Robinhood.native_token();
+        assert_eq!(token.symbol, "ETH");
+        assert_eq!(token.chain, Chain::Robinhood);
+        assert_eq!(
+            token.address,
+            Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_robinhood_wrapped_native_token() {
+        let token = Chain::Robinhood.wrapped_native_token();
+        assert_eq!(token.symbol, "WETH");
+        assert_eq!(token.chain, Chain::Robinhood);
+        assert_eq!(
+            token.address,
+            Bytes::from_str("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_robinhood_default_tvl_threshold() {
+        assert_eq!(Chain::Robinhood.default_tvl_threshold(TvlThresholdTier::Low), 10.0);
+        assert_eq!(Chain::Robinhood.default_tvl_threshold(TvlThresholdTier::Medium), 100.0);
+    }
+
+    #[test]
+    fn test_robinhood_block_time_secs() {
+        assert_eq!(Chain::Robinhood.block_time_secs(), 1);
     }
 
     #[test]

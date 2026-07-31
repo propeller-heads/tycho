@@ -1,0 +1,11 @@
+[
+  {
+    "constant": true,
+    "inputs": [{ "internalType": "address", "name": "originalToken", "type": "address" }],
+    "name": "getWrappedToken",
+    "outputs": [{ "internalType": "address", "name": "wrappedToken", "type": "address" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

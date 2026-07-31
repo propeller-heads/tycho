@@ -1,0 +1,70 @@
+specVersion: v0.1.0
+package:
+  name: "arbitrum_balancer_v3"
+  version: v0.5.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_balancer_v3.wasm
+
+modules:
+  - name: map_components
+    kind: map
+    initialBlock: 297810187
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_components
+    kind: store
+    initialBlock: 297810187
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponents
+    inputs:
+      - map: map_components
+
+  - name: store_token_set
+    kind: store
+    initialBlock: 297810187
+    updatePolicy: set_if_not_exists
+    valueType: int64
+    inputs:
+      - map: map_components
+
+  - name: store_token_mapping
+    kind: store
+    initialBlock: 297810187
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 297810187
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - store: store_components
+      - store: store_token_set
+      - store: store_token_mapping
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_components: vault=ba1333333333a1ba1108e8412f11850a5c319ba9&vault_extension=0e8b07657d719b86e06bf0806d6729e3d528c9a9&batch_router=ad89051bed8d96f045e8912ae1672c6c0bf8a85e&permit2=000000000022d473030f116ddee9f6b43ac78ba3&weighted_factory=83bf399fa3dc49af8fb5c34031a50c7c93f56129&stable_factory=1fc7f1f84cfe61a04224ac8d3f87f56214fec08c&reclamm_factory=3ccd78683effffddc1a16f5553c896ac6d3ab7ff&skip_rate_provider_pools=true
+  store_token_mapping: vault=ba1333333333a1ba1108e8412f11850a5c319ba9&vault_extension=0e8b07657d719b86e06bf0806d6729e3d528c9a9&batch_router=ad89051bed8d96f045e8912ae1672c6c0bf8a85e&permit2=000000000022d473030f116ddee9f6b43ac78ba3&weighted_factory=83bf399fa3dc49af8fb5c34031a50c7c93f56129&stable_factory=1fc7f1f84cfe61a04224ac8d3f87f56214fec08c&reclamm_factory=3ccd78683effffddc1a16f5553c896ac6d3ab7ff
+  map_protocol_changes: vault=ba1333333333a1ba1108e8412f11850a5c319ba9&vault_extension=0e8b07657d719b86e06bf0806d6729e3d528c9a9&batch_router=ad89051bed8d96f045e8912ae1672c6c0bf8a85e&permit2=000000000022d473030f116ddee9f6b43ac78ba3&weighted_factory=83bf399fa3dc49af8fb5c34031a50c7c93f56129&stable_factory=1fc7f1f84cfe61a04224ac8d3f87f56214fec08c&reclamm_factory=3ccd78683effffddc1a16f5553c896ac6d3ab7ff

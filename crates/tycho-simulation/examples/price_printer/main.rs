@@ -20,6 +20,7 @@ use tycho_simulation::{
             ekubo_v3::state::EkuboV3State,
             filters::{balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter},
             pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -40,6 +41,10 @@ struct Cli {
     /// The target blockchain
     #[clap(long, default_value = "ethereum")]
     pub chain: String,
+    /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
+    /// dev instance (e.g. http://127.0.0.1:4242).
+    #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
+    no_tls: bool,
 }
 
 fn register_exchanges(
@@ -96,6 +101,9 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
+        Chain::Polygon => {
+            builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
         _ => {}
     }
     builder
@@ -129,7 +137,7 @@ async fn main() {
     let tycho_message_processor: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         let all_tokens = load_all_tokens(
             tycho_url.as_str(),
-            false,
+            cli.no_tls,
             Some(tycho_api_key.as_str()),
             true,
             chain,
@@ -145,6 +153,7 @@ async fn main() {
         let protocol_stream =
             register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter)
                 .auth_key(Some(tycho_api_key.clone()))
+                .no_tls(cli.no_tls)
                 .skip_state_decode_failures(true)
                 .set_tokens(all_tokens)
                 .await

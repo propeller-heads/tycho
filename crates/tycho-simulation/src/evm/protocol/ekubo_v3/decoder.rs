@@ -24,7 +24,8 @@ use tycho_common::{models::token::Token, Bytes};
 
 use super::{
     addresses::{
-        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS, TWAMM_ADDRESS,
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS,
     },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
     pool::{
@@ -45,6 +46,7 @@ pub enum ExtensionType {
     Twamm,
     MevCapture,
     BoostedFees,
+    SignedExclusiveSwap,
 }
 
 fn has_no_swap_call_points(extension: Address) -> bool {
@@ -64,6 +66,8 @@ pub fn extension_type(extension: Address) -> Option<ExtensionType> {
         ExtensionType::MevCapture
     } else if extension == BOOSTED_FEES_CONCENTRATED_ADDRESS {
         ExtensionType::BoostedFees
+    } else if extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+        ExtensionType::SignedExclusiveSwap
     } else {
         return None;
     })
@@ -241,6 +245,18 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     concentrated_pool(&state_attrs, pool_type_config)?;
 
                 Self::MevCapture(MevCapturePool::new(key, tick, concentrated_state, ticks)?)
+            }
+            ExtensionType::SignedExclusiveSwap => {
+                let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
+                    return Err(InvalidSnapshotError::ValueError(
+                        "expected concentrated pool type config for SignedExclusiveSwap pool"
+                            .to_string(),
+                    ));
+                };
+
+                let (key, state, tick, ticks) = concentrated_pool(&state_attrs, pool_type_config)?;
+
+                Self::Concentrated(ConcentratedPool::new(key, state, tick, ticks)?)
             }
             ExtensionType::BoostedFees => {
                 let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {

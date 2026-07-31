@@ -132,6 +132,8 @@ pub struct IntegrationTest {
     pub stop_block: u64,
     pub initialized_accounts: Option<Vec<String>>,
     pub expected_components: Vec<ProtocolComponentWithTestConfig>,
+    #[serde(default)]
+    pub excluded_components: Vec<String>,
 }
 
 /// Main integration test configuration

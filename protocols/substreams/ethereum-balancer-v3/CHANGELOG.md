@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.0
+
+- Add reCLAMM pool support via the `ReClammPoolFactory` (new `reclamm_factory`
+  deployment parameter).
+- Derive pool token balances from the Vault's `_poolTokenBalances` storage writes
+  instead of the amounts carried by `Swap`/`LiquidityAdded`/`LiquidityRemoved`
+  events. Event amounts miss fee, hook, and rounding adjustments that are
+  already reflected in the final storage write. Balances are reported as
+  absolute values straight from storage, so no relative-delta accounting is
+  needed and a missed write is corrected by the next observed one.
+- Add deployment manifests for Arbitrum (`arbitrum-balancer-v3.yaml`),
+  Base (`base-balancer-v3.yaml`), and Gnosis (`gnosis-balancer-v3.yaml`).
+- Add the `skip_rate_provider_pools` deployment parameter to exclude pools
+  configured with rate providers.
+- Remove the `manual_updates` static attribute from pools.
+- Store the wrapped-to-underlying buffer token mapping with a
+  set-if-not-exists policy so the first registration wins.
+
+## v0.4.3
+
+- Update `tycho-substreams` from `0.8.0` to `0.8.1`. Contract changes carrying only
+  token balance updates are no longer dropped by `TransactionChangesBuilder` (#1056).
+  The vault regularly nets storage writes out to no-ops while token balances still
+  change, so those balance updates were silently lost with `0.8.0`.
+
 ## v0.4.2
 
 - Pin the Rust toolchain to 1.96.0 for reproducible wasm builds. The package

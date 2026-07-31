@@ -4,6 +4,7 @@ use tycho_simulation::{
         protocol::{
             cowamm::state::CowAMMState, ekubo::state::EkuboState, fluid::FluidV1,
             lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State, ring_swap_v2::state::RingSwapV2State,
             rocketpool::state::RocketpoolState, uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State, uniswap_v4::state::UniswapV4State,
             vm::state::EVMPoolState,
@@ -33,6 +34,12 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
+        "ring_swap_v2" => stream_builder.exchange_with_decoder_context::<RingSwapV2State>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
         "pancakeswap_v2" => stream_builder.exchange_with_decoder_context::<PancakeswapV2State>(
             protocol_system,
             tvl_filter,
@@ -46,6 +53,12 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
+        "ramses_v3" => stream_builder.exchange_with_decoder_context::<RamsesV3State>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
         "ekubo_v2" => stream_builder.exchange_with_decoder_context::<EkuboState>(
             protocol_system,
             tvl_filter,

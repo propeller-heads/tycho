@@ -268,7 +268,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "base-aerodrome-slipstreams"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "base-lunarbase"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -316,7 +316,7 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-balancer-v2"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -785,12 +785,12 @@ dependencies = [
  "num-bigint",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "ethereum-balancer-v3"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -800,9 +800,11 @@ dependencies = [
  "keccak-hash",
  "num-bigint",
  "regex",
+ "serde",
+ "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -819,7 +821,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -843,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-curve"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -856,7 +858,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -910,12 +912,12 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.5.0)",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "ethereum-fermiswap"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -933,12 +935,12 @@ dependencies = [
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2",
  "tiny-keccak",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "ethereum-fluid_v1"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -951,7 +953,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?rev=b8aeaa3)",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1020,6 +1022,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-ring-swap-v2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "getrandom 0.2.17",
+ "hex",
+ "itertools 0.12.1",
+ "num-bigint",
+ "serde",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?rev=b8aeaa3)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-rocketpool"
 version = "0.2.1"
 dependencies = [
@@ -1032,7 +1052,7 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1128,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v2"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1164,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v3-logs-only"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1181,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-no-hooks"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "ethabi 18.0.0",
  "ethereum-uniswap-v4-shared",
@@ -1196,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-shared"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1897,6 +1917,22 @@ checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
  "der",
  "spki",
+]
+
+[[package]]
+name = "polygon-ramses-v3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "getrandom 0.2.17",
+ "hex",
+ "itertools 0.13.0",
+ "prost 0.11.9",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.4.0)",
+ "tycho-substreams 0.2.2",
 ]
 
 [[package]]
@@ -3152,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-substreams"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.22.1",
  "ethabi 18.0.0",
@@ -3169,9 +3205,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-substreams"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8158444c99f55b314f5d63837b794f4842975d148feb03ea8e2720ecab957eba"
+checksum = "e12c39162e44705f28402e2f114da2694e01a466a80dc6f7dca9af0b49f92c76"
 dependencies = [
  "ethabi 18.0.0",
  "hex",

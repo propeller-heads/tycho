@@ -67,12 +67,6 @@ pub fn address_map(
                     .with_attributes(&[
                         ("pool_type", "WeightedPoolFactoryV1".as_bytes()),
                         ("normalized_weights", &json_serialize_bigint_list(&create_call.weights)),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
-                        ),
                         ("manual_updates", &[1u8]),
                     ])
                     .as_swap_type("balancer_v2_pool", ImplementationType::Vm),
@@ -98,12 +92,6 @@ pub fn address_map(
                         (
                             "rate_providers",
                             &json_serialize_address_list(&create_call.rate_providers),
-                        ),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
                         ),
                         ("manual_updates", &[1u8]),
                     ])
@@ -131,12 +119,6 @@ pub fn address_map(
                             "rate_providers",
                             &json_serialize_address_list(&create_call.rate_providers),
                         ),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
-                        ),
                         ("manual_updates", &[1u8]),
                     ])
                     .as_swap_type("balancer_v2_pool", ImplementationType::Vm),
@@ -163,12 +145,6 @@ pub fn address_map(
                             "rate_providers",
                             &json_serialize_address_list(&create_call.rate_providers),
                         ),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
-                        ),
                         ("manual_updates", &[1u8]),
                     ])
                     .as_swap_type("balancer_v2_pool", ImplementationType::Vm),
@@ -191,12 +167,6 @@ pub fn address_map(
                     .with_attributes(&[
                         ("pool_type", "ComposableStablePoolFactory".as_bytes()),
                         ("bpt", &pool_created.pool),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
-                        ),
                         (
                             "rate_providers",
                             &json_serialize_address_list(&create_call.rate_providers),
@@ -235,12 +205,6 @@ pub fn address_map(
                         ("bpt", &pool_created.pool),
                         ("main_token", &create_call.main_token),
                         ("wrapped_token", &create_call.wrapped_token),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
-                        ),
                     ])
                     .as_swap_type("balancer_v2_pool", ImplementationType::Vm),
             )
@@ -261,12 +225,6 @@ pub fn address_map(
                     .with_attributes(&[
                         ("pool_type", "WeightedPool2TokensFactory".as_bytes()),
                         ("weights", &json_serialize_bigint_list(&create_call.weights)),
-                        (
-                            "fee",
-                            &create_call
-                                .swap_fee_percentage
-                                .to_signed_bytes_be(),
-                        ),
                         ("manual_updates", &[1u8]),
                     ])
                     .as_swap_type("balancer_v2_pool", ImplementationType::Vm),

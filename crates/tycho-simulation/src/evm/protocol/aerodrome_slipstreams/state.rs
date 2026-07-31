@@ -516,27 +516,13 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         {
             self.default_fee = u32::from(default_fee.clone());
         }
-        if let Some(dfc_base_fee) = delta
-            .updated_attributes
-            .get("dfc_baseFee")
-        {
-            self.dfc
-                .update_base_fee(u32::from(dfc_base_fee.clone()));
-        }
-        if let Some(dfc_fee_cap) = delta
-            .updated_attributes
-            .get("dfc_feeCap")
-        {
-            self.dfc
-                .update_fee_cap(u32::from(dfc_fee_cap.clone()));
-        }
-        if let Some(dfc_scaling_factor) = delta
-            .updated_attributes
-            .get("dfc_scalingFactor")
-        {
-            self.dfc
-                .update_scaling_factor(u64::from(dfc_scaling_factor.clone()));
-        }
+        self.dfc
+            .update_from_attributes(&delta.updated_attributes)
+            .map_err(|err| {
+                TransitionError::DecodeError(format!(
+                    "Failed to update dynamic fee module config: {err}"
+                ))
+            })?;
         if let Some(tick) = delta.updated_attributes.get("tick") {
             // This is a hotfix because if the tick has never been updated after creation, it's
             // currently encoded as H256::zero(), therefore, we can't decode this as i32.
@@ -683,9 +669,80 @@ mod tests {
             0,
             ticks,
             vec![Observation::default()],
-            DynamicFeeConfig::new(3000, 10_000, 1),
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
         )
         .expect("Failed to create pool")
+    }
+
+    fn dynamic_fee_delta(dynamic_fee_module: [u8; 20]) -> ProtocolStateDelta {
+        ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: HashMap::from([
+                ("dynamic_fee_module".to_string(), Bytes::from(dynamic_fee_module)),
+                ("dfc_baseFee".to_string(), Bytes::from(500_u32.to_be_bytes())),
+                ("dfc_scalingFactor".to_string(), Bytes::from(0_u64.to_be_bytes())),
+                ("dfc_feeCap".to_string(), Bytes::from(700_u32.to_be_bytes())),
+                ("dfc_initialFeeEnabled".to_string(), Bytes::from([0_u8])),
+                ("dfc_initialFee".to_string(), Bytes::from(0_u32.to_be_bytes())),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dynamic_fee_update_applies_for_supported_module() {
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(4500, 10_000, 1, false, 0);
+        let delta =
+            dynamic_fee_delta(hex_literal::hex!("090b2A6bb475c00e2256e2095A60887cD710803b"));
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("dynamic fee update should be valid");
+
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable"),
+            500
+        );
+    }
+
+    #[test]
+    fn dynamic_fee_update_falls_back_to_default_for_unsupported_module() {
+        // An unsupported-module delta resets to default rather than erroring; pool keeps
+        // default_fee.
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(4500, 10_000, 1, false, 0);
+        let delta =
+            dynamic_fee_delta(hex_literal::hex!("DB45818A6db280ecfeB33cbeBd445423d0216b5D"));
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("unsupported module delta should decode to the default config");
+
+        assert_eq!(pool.dfc, DynamicFeeConfig::default());
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable"),
+            3000
+        );
+    }
+
+    #[test]
+    fn applies_partial_dynamic_fee_updates_after_module_initialization() {
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(4500, 10_000, 1, false, 0);
+        let delta = ProtocolStateDelta {
+            component_id: "test-pool".to_string(),
+            updated_attributes: HashMap::from([(
+                "dfc_baseFee".to_string(),
+                Bytes::from(500_u32.to_be_bytes()),
+            )]),
+            ..Default::default()
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("partial dynamic fee update should be valid");
+
+        assert_eq!(pool.dfc, DynamicFeeConfig::new(500, 10_000, 1, false, 0));
     }
 
     #[test]
@@ -758,7 +815,7 @@ mod tests {
             tick,
             ticks,
             vec![Observation::default()],
-            DynamicFeeConfig::new(3000, 10_000, 1),
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
         )
         .expect("Failed to create pool");
 

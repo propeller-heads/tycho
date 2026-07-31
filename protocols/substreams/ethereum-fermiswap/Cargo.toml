@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-fermiswap"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 substreams = "0.5.22"
 substreams-ethereum = "0.9.13"
 substreams-helper = { path = "../crates/substreams-helper" }
-tycho-substreams = { path = "../crates/tycho-substreams" }
+tycho-substreams = "0.8.1"
 prost = "0.11"
 anyhow = "1.0.95"
 ethabi = "18.0.0"

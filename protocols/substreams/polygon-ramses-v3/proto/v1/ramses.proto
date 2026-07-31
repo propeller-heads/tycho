@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package ramses.v3;
+
+import "tycho/evm/v1/common.proto";
+
+message Pool {
+  bytes token0 = 1;
+  bytes token1 = 2;
+}
+
+// A change to a pool's tick.
+message TickDelta {
+  // The address of the pool.
+  bytes pool_address = 1;
+  // The index of the tick.
+  int32 tick_index = 2;
+  // The liquidity net delta of this tick. Bigint encoded as signed big endian bytes.
+  bytes liquidity_net_delta = 3;
+  // Used to determine the order of the balance changes. Necessary for the balance store.
+  uint64 ordinal = 4;
+  tycho.evm.v1.Transaction transaction = 5;
+}
+
+// A group of TickDelta
+message TickDeltas {
+    repeated TickDelta deltas = 1;
+}
+
+// A change to a pool's liquidity.
+message LiquidityChange {
+  // The address of the pool.
+  bytes pool_address = 1;
+  // The liquidity changed amount. Bigint encoded as signed big endian bytes.
+  bytes value = 2;
+  // The type of update, can be absolute or delta.
+  LiquidityChangeType change_type = 3;
+  // Used to determine the order of the balance changes. Necessary for the balance store.
+  uint64 ordinal = 4;
+  tycho.evm.v1.Transaction transaction = 5;
+}
+
+// A group of LiquidityChange
+message LiquidityChanges {
+    repeated LiquidityChange changes = 1;
+}
+
+enum LiquidityChangeType {
+  DELTA = 0;
+  ABSOLUTE = 1;
+}
+
+// All numeric amounts below are BigInt values encoded as signed big-endian bytes.
+message Events {
+  repeated PoolEvent pool_events = 1;
+
+  message PoolEvent {
+    oneof typ {
+      Initialize initialize = 1;
+      Mint mint = 2;
+      Collect collect = 3;
+      Burn burn = 4;
+      Swap swap = 5;
+      Flash flash = 6;
+      CollectProtocol collect_protocol = 7;
+      FeeAdjustment fee_adjustment = 8;
+    }
+    uint64 log_ordinal = 9;
+    bytes pool_address = 10;
+    bytes token0 = 11;
+    bytes token1 = 12;
+    tycho.evm.v1.Transaction transaction = 13;
+
+    message Initialize {
+      bytes sqrt_price = 1;
+      int32 tick = 2;
+    }
+
+    message Mint {
+      int32 tick_lower = 1;
+      int32 tick_upper = 2;
+      bytes amount = 3;
+      bytes amount_0 = 4;
+      bytes amount_1 = 5;
+    }
+
+    message Collect {
+      bytes amount_0 = 1;
+      bytes amount_1 = 2;
+    }
+
+    message Burn {
+      int32 tick_lower = 1;
+      int32 tick_upper = 2;
+      bytes amount = 3;
+    }
+
+    message Swap {
+      bytes amount_0 = 1;
+      bytes amount_1 = 2;
+      bytes sqrt_price = 3;
+      bytes liquidity = 4;
+      int32 tick = 5;
+    }
+
+    message Flash {
+      bytes paid_0 = 1;
+      bytes paid_1 = 2;
+    }
+
+    message CollectProtocol {
+      bytes amount_0 = 1;
+      bytes amount_1 = 2;
+    }
+
+    message FeeAdjustment {
+      bytes new_fee = 1;
+    }
+  }
+}
