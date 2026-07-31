@@ -582,7 +582,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         _updateNativeDeltaAccounting(amountIn);
         _tstoreTransferFromInfo(tokenIn, amountIn, false, false);
 
-        return _singleSwap(
+        return _singleSwapChecked(
             amountIn,
             tokenIn,
             tokenOut,
@@ -635,7 +635,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         );
         _tstoreTransferFromInfo(tokenIn, amountIn, false, true);
 
-        return _singleSwap(
+        return _singleSwapChecked(
             amountIn,
             tokenIn,
             tokenOut,
@@ -696,7 +696,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         }
         _tstoreTransferFromInfo(tokenIn, amountIn, true, false);
 
-        return _singleSwap(
+        return _singleSwapChecked(
             amountIn,
             tokenIn,
             tokenOut,
@@ -777,7 +777,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      */
     // State writes in _takeFees after external calls are safe because all public entry points use nonReentrant modifier
     // slither-disable-next-line reentrancy-benign
-    function _singleSwap(
+    function _singleSwapChecked(
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
