@@ -171,7 +171,7 @@ pub fn map_components_with_balances(
                 }
                 //this case extract any balance deltas from this log that is CowAMM related for the
                 // particular pool
-            } else if let Some(pool) = store.get_last(format!("Pool:{}", &log.address.to_hex())) {
+            } else if let Some(pool) = store.get_last(format!("Pool:{}", log.address.to_hex())) {
                 tx_deltas.extend(get_log_changed_balances(&tx.into(), log, &pool));
             } else if log.address.to_hex() == COW_PROTOCOL_GPV2_SETTLEMENT_ADDRESS {
                 //when a trade is settled on the CowAMM via the cowprotocol a delta also occurs but
