@@ -112,7 +112,11 @@ impl EkuboPool for BoostedFeesPool {
             .liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: EvmTokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let timestamp = estimate_block_timestamp(
             self.swap_state.swapped_this_block,
             self.swap_state.last_real_time,
@@ -121,7 +125,7 @@ impl EkuboPool for BoostedFeesPool {
         self.imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(self.swap_state.sdk_state),
                 meta: timestamp,
             })

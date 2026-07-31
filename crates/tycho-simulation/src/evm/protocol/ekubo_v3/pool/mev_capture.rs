@@ -79,13 +79,17 @@ impl EkuboPool for MevCapturePool {
         self.swap_state.sdk_state.liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: EvmTokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let first_swap_this_block = self.swap_state.active_tick.is_some();
 
         self.imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(EvmMevCapturePoolState {
                     last_update_time: 0,
                     concentrated_pool_state: self.swap_state.sdk_state,
