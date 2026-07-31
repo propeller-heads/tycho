@@ -30,3 +30,22 @@ pub fn map_cowpool_creations(params: String, block: Block) -> Result<CowPoolCrea
         .collect::<Vec<CowPoolCreation>>();
     Ok(CowPoolCreations { pools: cow_pool_creations })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use substreams_ethereum::pb::eth::v2::Log;
+
+    // Pinned on-chain value; fails if the generated ABI constant ever drifts.
+    const COWAMM_POOL_CREATED_TOPIC: &str =
+        "0d03834d0d86c7f57e877af40e26f176dc31bd637535d4ba153d1ac9de88a7ea";
+
+    #[test]
+    fn matches_the_onchain_pool_created_topic() {
+        let log = Log {
+            topics: vec![hex::decode(COWAMM_POOL_CREATED_TOPIC).unwrap(), vec![0u8; 32]],
+            ..Default::default()
+        };
+        assert!(CowammPoolCreated::match_log(&log));
+    }
+}

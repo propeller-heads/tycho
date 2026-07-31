@@ -210,3 +210,23 @@ pub fn map_components_with_balances(
         block_balance_deltas: Some(BlockBalanceDeltas { balance_deltas: final_deltas }),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use substreams_ethereum::pb::eth::v2::Log;
+
+    // Pinned on-chain value; fails if the generated ABI constant ever drifts.
+    const COW_PROTOCOL_GPV2_TRADE_TOPIC: &str =
+        "a07a543ab8a018198e99ca0184c93fe9050a79400a0a723441f84de1d972cc17";
+
+    #[test]
+    fn matches_the_onchain_gpv2_trade_topic() {
+        let log = Log {
+            topics: vec![hex::decode(COW_PROTOCOL_GPV2_TRADE_TOPIC).unwrap(), vec![0u8; 32]],
+            data: vec![0u8; 224],
+            ..Default::default()
+        };
+        assert!(Trade::match_log(&log));
+    }
+}
