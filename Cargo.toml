@@ -50,13 +50,13 @@ typetag = "0.2.21"
 uuid = { version = "1.4.1", features = ["serde", "macro-diagnostics"] }
 
 # --- Async & concurrency ---
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
 futures = "0.3.31"
 futures03 = { package = "futures", version = "0.3.31", features = ["compat"] }
 async-trait = "0.1.88"
 async-stream = "0.3.6"
 # Pinned at 0.20 for tycho-client; simulation's rfq feature uses 0.28 directly (separate semver)
-tokio-tungstenite = { version = "0.20.0", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.20.0", features = ["rustls-tls-native-roots"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 # --- Logging & tracing ---
@@ -91,7 +91,7 @@ unicode-segmentation = "1.12.0"
 clap = "4.5.48"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
-    "native-tls",
+    "rustls-tls-native-roots",
 ] }
 
 # --- Storage ---
