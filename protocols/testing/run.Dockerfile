@@ -35,6 +35,7 @@ RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
+            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -74,6 +75,7 @@ RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
+            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \

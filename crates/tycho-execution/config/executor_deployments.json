@@ -172,6 +172,13 @@
   },
   "bsc": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ring_swap_v2": {
+      "contract": "RingSwapV2Executor",
+      "args": [
+        "0xEeE400Eabfba8F60f4e6B351D8577394BeB972CD",
+        "0x4De602A30Ad7fEf8223dcf67A9fB704324C4dd9B"
+      ]
+    },
     "pancakeswap_v2": { "contract": "UniswapV2Executor", "args": [25] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
