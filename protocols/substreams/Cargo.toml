@@ -32,6 +32,7 @@ members = [
     "ethereum-liquidityparty",
     "ethereum-fermiswap",
     "ethereum-bopamm",
+    "ethereum-ring-swap-v2",
     "polygon-ramses-v3",
 ]
 resolver = "2"

@@ -40,7 +40,10 @@ pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
 const FERMISWAP_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
-const FERMISWAP_TARGET_ADDRESS: &str = "0xe514A3c48DA8B233f65b5d15BA1905d6d35BFE48";
+// The Fermi engine currently pointed at by the swapper's storage slot 2. Fermi migrates engines
+// by re-pointing the swapper (last: 2026-07-21, block 25581704); update this together with
+// `engine_address` in the fermiswap substreams params, or lane overwrites patch a dead slot.
+const FERMISWAP_TARGET_ADDRESS: &str = "0x90f73fEA1Ee2Dc514d4dbAc0bfF7ff04b933767f";
 // BopAMM prices its books from the same PrioUpdateRegistry as FermiSwap; only the registry
 // `target` differs — it is the pricing module, and the lane index is the book's `assetId`.
 const BOPAMM_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
@@ -209,7 +212,6 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
 /// Tokens that fail slot detection are silently skipped and not included in the result.
 pub(crate) async fn detect_token_slots(
     rpc_tools: &RPCTools,
-    block: &Block,
     token_addresses: &[Bytes],
     to_address: &Bytes,
 ) -> HashMap<Bytes, TokenSlots> {
@@ -233,47 +235,39 @@ pub(crate) async fn detect_token_slots(
         return token_slots;
     }
 
-    // Pending (flashblock) blocks have a zero hash — slot layouts are immutable so any
-    // valid confirmed block hash works for detection.
-    let detection_hash = if block.header.hash == B256::ZERO {
-        let latest = rpc_tools
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await
-            .ok()
-            .flatten();
-        match latest {
-            Some(b) => b.header.hash,
-            None => return HashMap::new(),
-        }
-    } else {
-        block.header.hash
-    };
-
     let balance_results = rpc_tools
         .evm_balance_slot_detector
-        .detect_balance_slots(&erc20_tokens, (**user_address).into(), (*detection_hash).into())
+        .detect_balance_slots(&erc20_tokens, (**user_address).into())
         .await;
 
     let allowance_results = rpc_tools
         .evm_allowance_slot_detector
-        .detect_allowance_slots(
-            &erc20_tokens,
-            (**user_address).into(),
-            to_address.clone(),
-            (*detection_hash).into(),
-        )
+        .detect_allowance_slots(&erc20_tokens, (**user_address).into(), to_address.clone())
         .await;
 
     for token_address in &erc20_tokens {
         let balance_slot_data = match balance_results.get(token_address) {
             Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(_)) | None => continue, // Skip tokens with detection failures
+            Some(Err(e)) => {
+                tracing::warn!(token=%token_address, error=?e, "Balance slot detection failed");
+                continue;
+            }
+            None => {
+                tracing::warn!(token=%token_address, "Balance slot detection returned no result");
+                continue;
+            }
         };
 
         let allowance_slot_data = match allowance_results.get(token_address) {
             Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(_)) | None => continue, // Skip tokens with detection failures
+            Some(Err(e)) => {
+                tracing::warn!(token=%token_address, error=?e, "Allowance slot detection failed");
+                continue;
+            }
+            None => {
+                tracing::warn!(token=%token_address, "Allowance slot detection returned no result");
+                continue;
+            }
         };
 
         token_slots.insert(

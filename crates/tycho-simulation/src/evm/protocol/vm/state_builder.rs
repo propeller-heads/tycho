@@ -98,6 +98,7 @@ where
     disable_overwrite_tokens: HashSet<Address>,
     self_contained_tokens: HashSet<Address>,
     block_overrides: Option<BlockEnvOverrides>,
+    spot_price_caller: Option<Address>,
 }
 
 impl<D> EVMPoolStateBuilder<D>
@@ -125,6 +126,7 @@ where
             disable_overwrite_tokens: HashSet::new(),
             self_contained_tokens: HashSet::new(),
             block_overrides: None,
+            spot_price_caller: None,
         }
     }
 
@@ -207,6 +209,12 @@ where
         self
     }
 
+    /// Sets [`EVMPoolState::spot_price_caller`] (the `price()` query caller); defaults to `None`.
+    pub fn spot_price_caller(mut self, spot_price_caller: Option<Address>) -> Self {
+        self.spot_price_caller = spot_price_caller;
+        self
+    }
+
     /// Build the final EVMPoolState object
     pub async fn build(mut self, db: D) -> Result<EVMPoolState<D>, SimulationError> {
         let engine = if let Some(engine) = &self.engine {
@@ -260,6 +268,7 @@ where
             self.disable_overwrite_tokens,
             self.self_contained_tokens,
             self.block_overrides,
+            self.spot_price_caller,
         ))
     }
 

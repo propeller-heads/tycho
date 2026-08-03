@@ -1,4 +1,5 @@
 mod aerodrome_v1;
+mod angstrom;
 mod balancer_v2;
 mod balancer_v3;
 mod bebop;
@@ -17,6 +18,7 @@ mod lunarbase;
 mod maverick_v2;
 mod metric;
 mod native_wrap;
+mod ring_swap_v2;
 mod rocketpool;
 mod slipstreams;
 pub mod swap_encoder_registry;

@@ -1,0 +1,100 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_ring_swap_v2"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_ring_swap_v2.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 20231667
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 20231667
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_pools_created
+
+  - name: store_few_wrappers
+    kind: store
+    initialBlock: 20231667
+    updatePolicy: set_if_not_exists
+    valueType: bytes
+    inputs:
+      - map: map_pools_created
+
+  - name: store_token_pools
+    kind: store
+    initialBlock: 20231667
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_pools_created
+
+  - name: map_wrapper_backing_deltas
+    kind: map
+    initialBlock: 20231667
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_few_wrappers
+        mode: deltas
+      - store: store_few_wrappers
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_wrapper_backings
+    kind: store
+    initialBlock: 20231667
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_wrapper_backing_deltas
+
+  - name: store_pool_reserves
+    kind: store
+    initialBlock: 20231667
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+
+  - name: map_pool_events
+    kind: map
+    initialBlock: 20231667
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+      - store: store_pool_reserves
+        mode: get
+      - map: map_wrapper_backing_deltas
+      - store: store_wrapper_backings
+        mode: get
+      - store: store_token_pools
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: factory_address=eb2A625B704d73e82946D8d026E1F588Eed06416&few_factory_address=7D86394139bf1122E82FDF45Bb4e3b038A4464DD

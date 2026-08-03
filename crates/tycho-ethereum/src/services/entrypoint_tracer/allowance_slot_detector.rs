@@ -2,11 +2,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use tracing::{debug, info};
-use tycho_common::{
-    models::{Address, BlockHash},
-    traits::AllowanceSlotDetector,
-    Bytes,
-};
+use tycho_common::{models::Address, traits::AllowanceSlotDetector, Bytes};
 
 use crate::services::entrypoint_tracer::slot_detector::{
     SlotDetectionStrategy, SlotDetector, SlotDetectorError,
@@ -57,7 +53,6 @@ impl AllowanceSlotDetector for EVMAllowanceSlotDetector {
         tokens: &[Address],
         owner: Address,
         spender: Address,
-        block_hash: BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), Self::Error>> {
         info!("Starting allowance slot detection for {} tokens", tokens.len());
 
@@ -79,7 +74,7 @@ impl AllowanceSlotDetector for EVMAllowanceSlotDetector {
 
         let params = (owner, spender);
         let results = self
-            .detect_slots_chunked(&filtered_tokens, &params, &block_hash)
+            .detect_slots_chunked(&filtered_tokens, &params)
             .await;
 
         info!("Allowance slot detection completed. Found results for {} tokens", results.len());
@@ -98,8 +93,6 @@ mod tests {
         rpc::EthereumRpcClient,
         test_fixtures::{USDC_STR, USDT_STR, WETH_STR},
     };
-
-    const BLOCK_HASH: &str = "0x658814e4cb074359f10dd71237cc57b1ae6791fc9de59fde570e724bd884cbb0";
 
     #[test]
     fn test_encode_allowance_calldata() {
@@ -136,13 +129,8 @@ mod tests {
         let owner = Address::from_str("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2").unwrap();
         let spender = Address::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap();
 
-        let block_hash = BlockHash::from_str(
-            "0x23efd28b949cff1bea0cce77277d4e113793ff029c0c9815a36b6528eaa187ca",
-        )
-        .unwrap();
-
         let results = detector
-            .detect_allowance_slots(std::slice::from_ref(&token), owner, spender, block_hash)
+            .detect_allowance_slots(std::slice::from_ref(&token), owner, spender)
             .await;
 
         match results.get(&token) {
@@ -193,13 +181,9 @@ mod tests {
 
         let tokens = vec![weth.clone(), usdc.clone(), usdt.clone()];
 
-        // Use a recent block
-        let block_hash = BlockHash::from_str(BLOCK_HASH).expect("Invalid block hash");
-        println!("Block hash: {block_hash}");
-
         let detector = EVMAllowanceSlotDetector::new(&rpc).with_max_token_batch_size(5);
         let results = detector
-            .detect_allowance_slots(&tokens, owner_address, spender_address, block_hash)
+            .detect_allowance_slots(&tokens, owner_address, spender_address)
             .await;
 
         // We should get results for the tokens

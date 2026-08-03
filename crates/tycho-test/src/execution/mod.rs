@@ -62,7 +62,7 @@ pub async fn simulate_swap_transaction(
         .into_iter()
         .collect();
 
-    let token_slots = detect_token_slots(rpc_tools, block, &token_addresses, &to_address).await;
+    let token_slots = detect_token_slots(rpc_tools, &token_addresses, &to_address).await;
 
     let router_overwrites: Option<AddressHashMap<AccountOverride>> =
         if let Some(router_overwrites_data) = router_overwrites_data {

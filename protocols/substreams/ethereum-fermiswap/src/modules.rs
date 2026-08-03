@@ -33,6 +33,7 @@ use tycho_substreams::{
     abi::{erc20, weth},
     attributes::json_serialize_address_list,
     balances::aggregate_balances_changes,
+    block_storage::get_block_storage_changes,
     contract::extract_contract_changes_builder,
     prelude::*,
 };
@@ -500,6 +501,8 @@ fn map_protocol_changes(
             .sorted_unstable_by_key(|(index, _)| *index)
             .filter_map(|(_, builder)| builder.build())
             .collect::<Vec<_>>(),
-        storage_changes: vec![],
+        // Currently these storage changes don't have a consumer. We still emit them for the case
+        // that we manually add DCI entrypoints later.
+        storage_changes: get_block_storage_changes(&block),
     })
 }
