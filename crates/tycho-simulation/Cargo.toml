@@ -106,6 +106,10 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
+# Balancer's own reference maths (MIT). Test-only for now: it backs the
+# `balancer_v3_native_parity` check that tracks whether `vm:balancer_v3` can move its hot path off
+# the VM adapter, and would graduate to a real dependency if that migration lands.
+balancer-maths-rust = "0.4.4"
 
 [features]
 default = ["evm", "rfq"]
