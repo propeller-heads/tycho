@@ -12,7 +12,10 @@ use tycho_common::{models::token::Token, Bytes};
 use crate::{
     evm::{
         engine_db::{create_engine, SHARED_TYCHO_DB},
-        protocol::balancer_v3::{state::BalancerV3State, vm},
+        protocol::{
+            balancer_v3::{state::BalancerV3State, vm},
+            vm::utils::load_stateless_contracts,
+        },
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -48,6 +51,13 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
                 .unwrap_or_default(),
         )
         .expect("Infallible");
+
+        // The pool's data getters read through the Vault, which delegatecalls into VaultExtension.
+        // That implementation is published as a stateless contract on the component, so its code
+        // has to be in the engine before any getter runs.
+        load_stateless_contracts(&engine, &value.state.attributes)
+            .await
+            .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
         let pool = AlloyAddress::from_slice(pool_address.as_ref());
         let pool_type = vm::resolve_pool_type(&value.component.static_attributes, &engine, &pool)

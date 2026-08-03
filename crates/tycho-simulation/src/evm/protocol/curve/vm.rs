@@ -4,18 +4,15 @@
 //! The getter set per variant mirrors the reference RPC consumer in
 //! `curve-adapter/tests/fuzz_registry.rs`, executed against the `SimulationEngine` instead of a
 //! live RPC node so values are read from the same indexed storage Tycho already tracks.
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 
 use alloy::{
     core::sol,
-    primitives::{Address as AlloyAddress, Keccak256, U256},
-    sol_types::{SolCall, SolValue},
+    primitives::{Address as AlloyAddress, U256},
+    sol_types::SolCall,
 };
-use revm::{
-    state::{AccountInfo, Bytecode},
-    DatabaseRef,
-};
-use tycho_common::{simulation::errors::SimulationError, Bytes};
+use revm::{state::AccountInfo, DatabaseRef};
+use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
@@ -430,111 +427,6 @@ where
         has_int128_balances: call_opt(engine, pool, ICurveOld::balancesCall { i: 0 }).is_some(),
         pool_address: *pool,
     }
-}
-
-/// Load the pool's stateless/implementation contracts (the `stateless_contract_addr_{i}` state
-/// attributes) into the engine's DB so getter calls on proxy pools resolve their delegatecall
-/// targets. Curve pools are commonly EIP-1167 proxies whose implementation code is not part of the
-/// indexed pool storage; without this, getters delegatecall into empty code and revert.
-///
-/// Addresses may be static (`0x…`) or dynamic (`call:0x<factory>:method()`), and code is fetched
-/// via RPC unless provided inline as `stateless_contract_code_{i}`. The engine shares its DB with
-/// `SHARED_TYCHO_DB`, so accounts loaded here persist for later `delta_transition` rebuilds.
-pub async fn load_stateless_contracts<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    attributes: &HashMap<String, Bytes>,
-) -> Result<(), SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let mut index = 0;
-    while let Some(encoded) = attributes.get(&format!("stateless_contract_addr_{index}")) {
-        let address = String::from_utf8(encoded.to_vec()).map_err(|e| {
-            SimulationError::FatalError(format!("curve stateless address not UTF-8: {e}"))
-        })?;
-        let inline_code = attributes
-            .get(&format!("stateless_contract_code_{index}"))
-            .map(|value| value.to_vec());
-        index += 1;
-
-        let (account, code) = match inline_code {
-            Some(bytecode) => (address, Bytecode::new_raw(bytecode.into())),
-            None => {
-                let resolved = if address.starts_with("call") {
-                    resolve_call_address(engine, &address)?
-                } else {
-                    address
-                };
-                let code = get_code_for_contract(&resolved, None).await?;
-                (resolved, code)
-            }
-        };
-        let account: AlloyAddress = account.parse().map_err(|_| {
-            SimulationError::FatalError(format!("curve stateless: invalid address {account}"))
-        })?;
-        engine
-            .state
-            .init_account(
-                account,
-                AccountInfo {
-                    balance: U256::ZERO,
-                    nonce: 0,
-                    code_hash: code.hash_slow(),
-                    code: Some(code),
-                },
-                None,
-                false,
-            )
-            .map_err(|e| {
-                SimulationError::FatalError(format!("curve stateless init_account failed: {e:?}"))
-            })?;
-    }
-    Ok(())
-}
-
-/// Resolve a dynamic `call:0x<address>:method()` directive to a concrete implementation address by
-/// simulating the parameterless `method()` view and decoding its returned address.
-fn resolve_call_address<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    directive: &str,
-) -> Result<String, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let method = directive
-        .split(':')
-        .next_back()
-        .ok_or_else(|| {
-            SimulationError::FatalError(format!(
-                "curve stateless: malformed call directive {directive}"
-            ))
-        })?;
-    let to: AlloyAddress = directive
-        .split(':')
-        .nth(1)
-        .ok_or_else(|| {
-            SimulationError::FatalError(format!(
-                "curve stateless: missing target in call directive {directive}"
-            ))
-        })?
-        .parse()
-        .map_err(|_| {
-            SimulationError::FatalError(format!(
-                "curve stateless: invalid target in call directive {directive}"
-            ))
-        })?;
-    let mut hasher = Keccak256::new();
-    hasher.update(method.as_bytes());
-    let selector = hasher.finalize()[..4].to_vec();
-    let res = engine
-        .simulate(&params(to, selector))
-        .map_err(|e| SimulationError::FatalError(format!("curve stateless call failed: {e}")))?;
-    let address = AlloyAddress::abi_decode(res.result.as_ref()).map_err(|e| {
-        SimulationError::FatalError(format!("curve stateless call decode failed: {e}"))
-    })?;
-    Ok(address.to_string())
 }
 
 fn params(to: AlloyAddress, data: Vec<u8>) -> SimulationParameters {
