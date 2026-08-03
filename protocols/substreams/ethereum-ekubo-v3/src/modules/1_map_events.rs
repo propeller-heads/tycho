@@ -14,7 +14,7 @@ use crate::{
         twamm::events as twamm_events,
     },
     addresses::{
-        BOOSTED_FEES_CONCENTRATED_ADDRESS, CORE_ADDRESS, TWAMM_ADDRESS_NEW, TWAMM_ADDRESS_OLD,
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, CORE_ADDRESS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
     },
     pb::ekubo::{
         block_transaction_events::{
@@ -123,15 +123,15 @@ fn maybe_pool_log(log: &Log) -> Option<PoolLog> {
                     ))
                     .to_be_bytes_trimmed_vec(),
                     has_time_rate_deltas: [
-                        TWAMM_ADDRESS_NEW,
-                        TWAMM_ADDRESS_OLD,
+                        TWAMM_ADDRESS_V2,
+                        TWAMM_ADDRESS_V1,
                         BOOSTED_FEES_CONCENTRATED_ADDRESS,
                     ]
                     .contains(&extension),
                 }),
             )
         }
-    } else if [TWAMM_ADDRESS_NEW, TWAMM_ADDRESS_OLD].contains(&emitter) {
+    } else if [TWAMM_ADDRESS_V2, TWAMM_ADDRESS_V1].contains(&emitter) {
         if log.topics.is_empty() {
             let data = &log.data;
 

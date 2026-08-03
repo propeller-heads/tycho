@@ -35,7 +35,7 @@ use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_NEW,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V2,
     },
     pool::{
         boosted_fees::BoostedFeesPool, full_range::FullRangePool, mev_capture::MevCapturePool,
@@ -449,7 +449,7 @@ pub fn twamm() -> TestCase {
         config: EvmTwammPoolConfig {
             fee: 0,
             pool_type_config: FullRangePoolTypeConfig,
-            extension: TWAMM_ADDRESS_NEW,
+            extension: TWAMM_ADDRESS_V2,
         },
     };
 
