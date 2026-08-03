@@ -647,7 +647,7 @@ where
 
             let detection_results = self
                 .balance_slot_detector
-                .detect_balance_slots(&tokens, pool_manager, context.block.hash.clone())
+                .detect_balance_slots(&tokens, pool_manager)
                 .await;
 
             // Convert token-based results to the expected format
@@ -1392,7 +1392,7 @@ mod tests {
         let token0_clone = token0.clone();
         mock_detector
             .expect_detect_balance_slots()
-            .returning(move |tokens, _holder, _block_hash| {
+            .returning(move |tokens, _holder| {
                 let mut result = HashMap::new();
                 for token in tokens {
                     let storage_addr = token.clone();
@@ -1497,7 +1497,7 @@ mod tests {
         let mut mock_detector = MockBalanceSlotDetector::new();
         mock_detector
             .expect_detect_balance_slots()
-            .returning(|tokens, _holder, _block_hash| {
+            .returning(|tokens, _holder| {
                 let mut result = HashMap::new();
                 for token in tokens {
                     result.insert(token.clone(), Err("Detection failed".to_string()));

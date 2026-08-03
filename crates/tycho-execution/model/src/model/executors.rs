@@ -42,6 +42,7 @@ pub enum Executor {
     NativeWrap,
     AerodromeV1,
     LiquidityParty,
+    LunarBase,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -62,7 +63,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 10] = [
+    pub const VARIANTS: [Executor; 11] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -73,6 +74,7 @@ impl Executor {
         Executor::NativeWrap,
         Executor::AerodromeV1,
         Executor::LiquidityParty,
+        Executor::LunarBase,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -301,6 +303,38 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
+            // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L76
+            Self::LunarBase => {
+                let token_in = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?;
+                let is_native_sell = token_in == Address::NativeETH;
+                Ok(TransferData {
+                    transfer_type: if is_native_sell {
+                        TransferType::TransferNativeInExecutor
+                    } else {
+                        TransferType::ProtocolWillDebit
+                    },
+                    receiver: if is_native_sell {
+                        Address::Zero
+                    } else {
+                        params.request(
+                            ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                            // trying more variants might find some very obscure bugs
+                            // in the future but slows down simulation a lot
+                            // and currently is ignored anyway
+                            Address::SENDER_CONTROLLED,
+                        )?
+                    },
+                    token_in,
+                    token_out: params.request(
+                        ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                        Address::POSSIBLY_ERC20_AND_NATIVE,
+                    )?,
+                    output_to_router: false,
+                })
+            }
         }
     }
 
@@ -560,6 +594,35 @@ impl Executor {
                     })
                 }
             }
+            // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L48
+            Self::LunarBase => {
+                let pool = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if !pool.is_sender_controlled() {
+                    return Err(Error::Ignore {
+                        reason: "lunarbase pool not sender controlled. not low hanging fruit. would require simulating real pool".into(),
+                    });
+                }
+
+                let token_in = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::VARIANTS,
+                )?;
+
+                // this simulates the transfer of eth to the pool
+                if token_in == Address::NativeETH {
+                    state.eth_send_value(Address::Router, pool, amount)?;
+                }
+
+                // if the sender controls the pool,
+                // the actual swap logic doesn't matter
+                Ok(())
+            }
         }
     }
 
@@ -594,6 +657,7 @@ impl Executor {
             Self::NativeWrap => unimplemented!(),
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
+            Self::LunarBase => unimplemented!(),
         }
     }
 
@@ -620,6 +684,7 @@ impl Executor {
             Self::NativeWrap => unimplemented!("Wrap doesn't use callbacks"),
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
+            Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
         }
     }
 
@@ -678,6 +743,8 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
+            // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L37
+            Self::LunarBase => Address::Router,
         })
     }
 }

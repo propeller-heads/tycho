@@ -159,11 +159,16 @@ impl ProtocolComponentState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, DeepSizeOf)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, DeepSizeOf)]
 pub struct ProtocolComponentStateDelta {
     pub component_id: ComponentId,
     pub updated_attributes: HashMap<AttrStoreKey, StoreVal>,
     pub deleted_attributes: HashSet<AttrStoreKey>,
+    /// Attribute names first introduced with `ChangeType::Creation` in this delta.
+    /// Skipped during serialization — this is an indexer-internal hint, not part of the public
+    /// delta format.
+    #[serde(skip)]
+    pub created_attributes: HashSet<AttrStoreKey>,
 }
 
 impl ProtocolComponentStateDelta {
@@ -172,7 +177,12 @@ impl ProtocolComponentStateDelta {
         updated_attributes: HashMap<AttrStoreKey, StoreVal>,
         deleted_attributes: HashSet<AttrStoreKey>,
     ) -> Self {
-        Self { component_id: component_id.to_string(), updated_attributes, deleted_attributes }
+        Self {
+            component_id: component_id.to_string(),
+            updated_attributes,
+            deleted_attributes,
+            created_attributes: HashSet::new(),
+        }
     }
 
     /// Merges this update with another one.
@@ -196,6 +206,7 @@ impl ProtocolComponentStateDelta {
         }
         for attr in &other.deleted_attributes {
             self.updated_attributes.remove(attr);
+            self.created_attributes.remove(attr);
         }
         for attr in other.updated_attributes.keys() {
             self.deleted_attributes.remove(attr);
@@ -204,6 +215,8 @@ impl ProtocolComponentStateDelta {
             .extend(other.updated_attributes);
         self.deleted_attributes
             .extend(other.deleted_attributes);
+        self.created_attributes
+            .extend(other.created_attributes);
         Ok(())
     }
 }
@@ -273,6 +286,7 @@ impl From<dto::ProtocolStateDelta> for ProtocolComponentStateDelta {
             component_id: value.component_id,
             updated_attributes: value.updated_attributes,
             deleted_attributes: value.deleted_attributes,
+            created_attributes: HashSet::new(),
         }
     }
 }
@@ -332,6 +346,7 @@ mod test {
             component_id: id,
             updated_attributes: attributes1,
             deleted_attributes: HashSet::new(),
+            ..Default::default()
         }
     }
 

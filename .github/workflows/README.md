@@ -49,11 +49,20 @@ Covers all Rust crates under `crates/` and `protocols/testing/`. Triggered on PR
 - **`lint`** — `cargo fmt` and `cargo clippy` on nightly toolchain.
 - **`test-unit`** — Unit tests excluding anything requiring a database, RPC, or anvil.
 - **`test-db`** — Tests requiring a live Postgres instance. Spins up a custom Postgres Docker image (built from `docker/postgres.Dockerfile`) with pg_cron. Runs parallel and serial DB test suites separately.
-- **`test-evm`** — Tests requiring a live Ethereum RPC. Uses `ETH_RPC_URL` secret.
 - **`doc`** — `cargo doc` with broken intra-doc link detection.
 - **`check-no-default-features`** — Ensures the workspace compiles without default features enabled.
 
 All jobs use `cargo nextest` and `--locked` to enforce lockfile consistency.
+
+---
+
+### `ci-rust-evm.yaml` — Rust EVM CI
+
+Runs the Rust tests that need live RPC access. Uses `pull_request_target` so approved fork PR workflow runs can access `ETH_RPC_URL`.
+
+**Jobs:**
+
+- **`test-evm`** — EVM and fork tests requiring a live Ethereum RPC.
 
 ---
 
@@ -129,5 +138,5 @@ Triggered on `protocols/substreams/v*` tags or manually.
 
 **Jobs:**
 
-- **`publish-crates`** — Publishes `substreams-helper` then `tycho-substreams` to crates.io.
-- **`release-substreams-package`** — Manual-only. Builds a named substreams package for `wasm32-unknown-unknown` and runs `release.sh` to publish it.
+- **`publish-crates`** — Publishes `substreams-helper` then `tycho-substreams` to crates.io. Versions already on crates.io are skipped, so the job is safe to re-run.
+- **`release-substreams-package`** — Manual-only. Runs `release.sh`, which builds the package for `wasm32-unknown-unknown` with the package's pinned toolchain and locked dependencies, packs the spkg, and uploads it to S3. See [protocols/substreams/Readme.md](../../protocols/substreams/Readme.md) for the full publishing procedure.

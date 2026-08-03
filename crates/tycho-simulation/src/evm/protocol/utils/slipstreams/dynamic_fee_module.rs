@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
+use alloy::primitives::{address, Address};
 use serde::{Deserialize, Serialize};
-use tycho_common::simulation::errors::SimulationError;
+use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::protocol::utils::slipstreams::observations::Observations;
 
@@ -7,28 +10,117 @@ pub(crate) const ZERO_FEE_INDICATOR: u32 = 420;
 pub(crate) const DEFAULT_SECONDS_AGO: u32 = 600;
 pub(crate) const MIN_SECONDS_AGO: u32 = 2;
 pub(crate) const DEFAULT_SCALING_FACTOR: u64 = 0;
-pub(crate) const DEFAULT_FEE_CAP: u32 = 10000;
+// The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
+pub(crate) const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
+const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 2] = [
+    address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
+    address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
+];
+const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynamicFeeConfig {
     base_fee: u32,
     fee_cap: u32,
     scaling_factor: u64,
+    initial_fee_enabled: bool,
+    initial_fee: u32,
+}
+
+fn is_supported_dynamic_fee_module(fee_module: &[u8]) -> bool {
+    SUPPORTED_DYNAMIC_FEE_MODULES
+        .iter()
+        .any(|supported| supported.as_slice() == fee_module)
 }
 
 impl DynamicFeeConfig {
-    pub fn new(base_fee: u32, fee_cap: u32, scaling_factor: u64) -> Self {
-        Self { base_fee, fee_cap, scaling_factor }
+    pub fn new(
+        base_fee: u32,
+        fee_cap: u32,
+        scaling_factor: u64,
+        initial_fee_enabled: bool,
+        initial_fee: u32,
+    ) -> Self {
+        Self { base_fee, fee_cap, scaling_factor, initial_fee_enabled, initial_fee }
     }
-    pub fn update_fee_cap(&mut self, fee_cap: u32) {
-        self.fee_cap = fee_cap;
+
+    /// Builds a config from a full snapshot's attributes.
+    ///
+    /// An absent or unsupported `dynamic_fee_module` marker yields the default config, whose
+    /// `base_fee == 0` makes `get_dynamic_fee` fall back to the pool's static `default_fee`. Only
+    /// errors when a supported marker is present but a dynamic-fee attribute is missing.
+    pub(crate) fn from_attributes(
+        attributes: &HashMap<String, Bytes>,
+    ) -> Result<Self, &'static str> {
+        if !attributes
+            .get(DYNAMIC_FEE_MODULE_ATTRIBUTE)
+            .is_some_and(|module| is_supported_dynamic_fee_module(module))
+        {
+            return Ok(Self::default());
+        }
+
+        Ok(Self {
+            base_fee: u32::from(
+                attributes
+                    .get("dfc_baseFee")
+                    .ok_or("missing dynamic fee attribute `dfc_baseFee`")?
+                    .clone(),
+            ),
+            fee_cap: u32::from(
+                attributes
+                    .get("dfc_feeCap")
+                    .ok_or("missing dynamic fee attribute `dfc_feeCap`")?
+                    .clone(),
+            ),
+            scaling_factor: u64::from(
+                attributes
+                    .get("dfc_scalingFactor")
+                    .ok_or("missing dynamic fee attribute `dfc_scalingFactor`")?
+                    .clone(),
+            ),
+            initial_fee_enabled: attributes
+                .get("dfc_initialFeeEnabled")
+                .is_some_and(|value| value.iter().any(|byte| *byte != 0)),
+            initial_fee: attributes
+                .get("dfc_initialFee")
+                .cloned()
+                .map(u32::from)
+                .unwrap_or_default(),
+        })
     }
-    pub fn update_scaling_factor(&mut self, scaling_factor: u64) {
-        self.scaling_factor = scaling_factor;
-    }
-    pub fn update_base_fee(&mut self, base_fee: u32) {
-        self.base_fee = base_fee;
+
+    /// Applies a delta's attribute updates.
+    ///
+    /// A delta carrying the `dynamic_fee_module` marker fully re-initializes the config; markerless
+    /// deltas apply only the dynamic-fee fields they contain, leaving the rest untouched.
+    pub(crate) fn update_from_attributes(
+        &mut self,
+        attributes: &HashMap<String, Bytes>,
+    ) -> Result<(), &'static str> {
+        if attributes.contains_key(DYNAMIC_FEE_MODULE_ATTRIBUTE) {
+            *self = Self::from_attributes(attributes)?;
+            return Ok(());
+        }
+
+        if let Some(base_fee) = attributes.get("dfc_baseFee") {
+            self.base_fee = u32::from(base_fee.clone());
+        }
+        if let Some(fee_cap) = attributes.get("dfc_feeCap") {
+            self.fee_cap = u32::from(fee_cap.clone());
+        }
+        if let Some(scaling_factor) = attributes.get("dfc_scalingFactor") {
+            self.scaling_factor = u64::from(scaling_factor.clone());
+        }
+        if let Some(initial_fee_enabled) = attributes.get("dfc_initialFeeEnabled") {
+            self.initial_fee_enabled = initial_fee_enabled
+                .iter()
+                .any(|byte| *byte != 0);
+        }
+        if let Some(initial_fee) = attributes.get("dfc_initialFee") {
+            self.initial_fee = u32::from(initial_fee.clone());
+        }
+        Ok(())
     }
 
     pub fn scaling_factor(&self) -> u64 {
@@ -51,6 +143,16 @@ pub(crate) fn get_dynamic_fee(
         return Ok(0);
     }
     let base_fee = if dfc.base_fee != 0 { dfc.base_fee } else { default_base_fee };
+
+    if dfc.initial_fee_enabled &&
+        observations.timestamp_at(observation_index, observation_cardinality)? != blocktime
+    {
+        return match dfc.initial_fee {
+            0 => Ok(base_fee),
+            ZERO_FEE_INDICATOR => Ok(0),
+            initial_fee => Ok(initial_fee),
+        };
+    }
 
     let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
         (dfc.scaling_factor, dfc.fee_cap)
@@ -82,14 +184,21 @@ fn calculate_dynamic_fee(
     if observation_cardinality < (DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO) as u16 {
         return Ok(0);
     };
-    let tw_avg_tick = match observations.observe(
+    // Mirror the on-chain module's `try pool.observe(...) { ... } catch { return 0; }`: a failed
+    // observation (e.g. a ring buffer Tycho only partially indexed) contributes no dynamic
+    // component instead of failing the whole quote.
+    let observed = match observations.observe(
         blocktime,
         &[DEFAULT_SECONDS_AGO, 0],
         current_tick,
         observation_index,
         liquidity,
         observation_cardinality,
-    )? {
+    ) {
+        Ok(observed) => observed,
+        Err(_) => return Ok(0),
+    };
+    let tw_avg_tick = match observed {
         (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {
             ((tick_cumulatives[1] - tick_cumulatives[0]) / DEFAULT_SECONDS_AGO as i64) as i32
         }
@@ -105,11 +214,64 @@ fn calculate_dynamic_fee(
 #[cfg(test)]
 mod tests {
     use hex_literal::hex;
+    use rstest::rstest;
 
     use super::*;
+    use crate::evm::protocol::utils::slipstreams::observations::Observation;
+
+    #[test]
+    fn returns_initial_fee_before_first_observation_in_block() {
+        let dfc = DynamicFeeConfig::new(150, 400, 6_000_000, true, 30);
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 99,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee, 30);
+    }
+
+    #[test]
+    fn uses_dynamic_fee_after_observation_is_written_in_block() {
+        let dfc = DynamicFeeConfig::new(150, 400, 0, true, 30);
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 100,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee, 150);
+    }
+
+    #[rstest]
+    #[case::base_fee_fallback(0, 150)]
+    #[case::zero_fee_indicator(ZERO_FEE_INDICATOR, 0)]
+    fn interprets_initial_fee_sentinel_values(#[case] initial_fee: u32, #[case] expected_fee: u32) {
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 99,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let dfc = DynamicFeeConfig::new(150, 400, 0, true, initial_fee);
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee, expected_fee);
+    }
+
     #[test]
     fn test_get_dynamic_fee() {
-        let dfc = DynamicFeeConfig::new(350, 550, 3000000);
+        let dfc = DynamicFeeConfig::new(350, 550, 3000000, false, 0);
 
         let items: &[(i32, [u8; 32])] = &[
             (534, hex!("01000006a0000001485073e3b9c1b1ba599e933717fff778eb3ff056690b05a1")),
@@ -147,5 +309,80 @@ mod tests {
                 .expect("Failed to calculate dynamic fee");
 
         assert_eq!(dynamic_fee, 380);
+    }
+
+    #[test]
+    fn applies_partial_config_updates_without_replacing_unchanged_fields() {
+        let mut config = DynamicFeeConfig::new(100, 1_000, 5_000_000, true, 50);
+
+        config
+            .update_from_attributes(&HashMap::from([(
+                "dfc_baseFee".to_string(),
+                Bytes::from(200_u32.to_be_bytes()),
+            )]))
+            .expect("partial dynamic fee update should be valid");
+
+        assert_eq!(config, DynamicFeeConfig::new(200, 1_000, 5_000_000, true, 50));
+    }
+
+    #[rstest]
+    #[case::missing_module(None)]
+    #[case::unsupported_module(Some(Bytes::from([0x11; 20])))]
+    fn from_attributes_defaults_for_missing_or_unsupported_module(#[case] module: Option<Bytes>) {
+        // Attributes are present but untrusted without a supported marker: fall back to default.
+        let mut attributes = HashMap::from([
+            ("dfc_baseFee".to_string(), Bytes::from(200_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(1_000_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(5_000_000_u64.to_be_bytes())),
+        ]);
+        if let Some(module) = module {
+            attributes.insert(DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), module);
+        }
+
+        assert_eq!(DynamicFeeConfig::from_attributes(&attributes), Ok(DynamicFeeConfig::default()));
+    }
+
+    #[test]
+    fn default_config_falls_back_to_static_default_fee() {
+        // base_fee == 0 must resolve to the pool's static default fee (3000 here).
+        let dfc = DynamicFeeConfig::default();
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 100,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 0, 1, &observations, 100)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee, 3000);
+    }
+
+    #[test]
+    fn observe_failure_falls_back_to_base_fee() {
+        // cardinality clears the min-history guard but exceeds the indexed buffer, so observe()
+        // errors out of bounds. Like the on-chain try/catch, the dynamic component is 0 and the
+        // fee falls back to the base fee, instead of failing the quote.
+        let dfc = DynamicFeeConfig::default();
+        let observations = Observations::new(vec![
+            Observation {
+                block_timestamp: 999_000,
+                initialized: true,
+                index: 0,
+                ..Default::default()
+            },
+            Observation {
+                block_timestamp: 999_500,
+                initialized: true,
+                index: 1,
+                ..Default::default()
+            },
+        ]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 1, 300, &observations, 1_000_000)
+            .expect("observe failure should fall back to the base fee, not error");
+
+        assert_eq!(fee, 3000);
     }
 }

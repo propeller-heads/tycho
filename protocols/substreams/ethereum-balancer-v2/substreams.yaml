@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_balancer_v2"
-  version: v0.4.1
+  version: v0.5.0
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-balancer-v2"
 
 protobuf:

@@ -16,7 +16,7 @@ use super::{
 };
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
-    simulation::{SimulationEngine, SimulationParameters, SimulationResult},
+    simulation::{BlockEnvOverrides, SimulationEngine, SimulationParameters, SimulationResult},
 };
 
 #[derive(Debug, Clone)]
@@ -130,6 +130,7 @@ where
         caller: Option<Address>,
         value: U256,
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+        block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<TychoSimulationResponse, SimulationError> {
         let call_data = self.encode_input(selector, args);
         let params = SimulationParameters {
@@ -140,6 +141,7 @@ where
             value,
             gas_limit: None,
             transient_storage,
+            block_overrides,
         };
 
         let sim_result = self.simulate(params)?;
@@ -326,7 +328,15 @@ mod tests {
         let selector = "test()";
 
         let res = contract
-            .call(selector, args, None, None, U256::from(0u64), Some(transient_storage_params))
+            .call(
+                selector,
+                args,
+                None,
+                None,
+                U256::from(0u64),
+                Some(transient_storage_params),
+                None,
+            )
             .unwrap();
 
         let decoded: U256 = U256::abi_decode(&res.return_value)
@@ -336,5 +346,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(decoded, storage_value);
+    }
+
+    #[test]
+    fn test_call_applies_block_overrides() {
+        let db = SimulationDB::new(
+            get_client(None).expect("Failed to create Tycho RPC client"),
+            get_runtime().expect("Failed to create Tokio runtime"),
+            None,
+        );
+        let mut engine = create_engine(db, false).expect("Failed to create simulation engine");
+        engine
+            .state
+            .set_block(Some(BlockHeader {
+                number: 1,
+                hash: tycho_common::Bytes::from_str(
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .unwrap(),
+                timestamp: 2,
+                ..Default::default()
+            }));
+
+        let contract_address = Address::from_str("0x0000000000000000000000000000000000001234")
+            .expect("Invalid contract address");
+        // Minimal runtime bytecode equivalent to the following Solidity contract:
+        //
+        // // SPDX-License-Identifier: UNLICENSED
+        // pragma solidity ^0.8.26;
+        //
+        // contract BlockNumberTest {
+        //     function test() external view returns (uint256) {
+        //         return block.number;
+        //     }
+        // }
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x43, // NUMBER
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]));
+        let contract = TychoSimulationContract::new_contract(contract_address, bytecode, engine)
+            .expect("Failed to create test contract");
+
+        let res = contract
+            .call(
+                "test()",
+                (),
+                None,
+                None,
+                U256::ZERO,
+                None,
+                Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+            )
+            .expect("contract call should apply block overrides");
+
+        assert_eq!(U256::from_be_slice(&res.return_value), U256::from(123));
     }
 }

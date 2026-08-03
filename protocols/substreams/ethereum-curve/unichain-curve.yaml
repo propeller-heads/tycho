@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "unichain_curve"
-  version: v0.3.7
+  version: v0.3.9
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-curve"
 
 protobuf:

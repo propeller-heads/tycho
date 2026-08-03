@@ -26,8 +26,7 @@ See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main
 You need to set up the API credentials of the desired RFQs to access live pricing data and quoting, as well as your private key if you wish to execute against the Tycho Router:
 
 ```bash
-export BEBOP_USER=<your-bebop-ws-username>
-export BEBOP_KEY=<your-bebop-ws-key>
+export BEBOP_KEY=<your-bebop-api-key>
 export HASHFLOW_USER=<your-hashflow-api-username>
 export HASHFLOW_KEY=<your-hashflow-api-key>
 export LIQUORICE_USER=<your-liquorice-api-username>
@@ -79,7 +78,7 @@ Each RFQ protocol will have its own client. The client can **stream live prices 
 Example setup for Bebop:
 
 ```rust
-let bebop_client = BebopClientBuilder::new(chain, bebop_ws_user, bebop_ws_key)
+let bebop_client = BebopClientBuilder::new(chain, bebop_key)
     .tokens(rfq_tokens)
     .quote_tokens(quote_tokens)
     .tvl_threshold(cli.tvl_threshold)

@@ -521,6 +521,7 @@ mod test {
                         component_id: "State1".to_owned(),
                         updated_attributes: attr,
                         deleted_attributes: HashSet::new(),
+                        ..Default::default()
                     },
                 )]);
                 let component_balances = HashMap::from([
@@ -583,6 +584,7 @@ mod test {
                                 Bytes::from(2_u64.to_be_bytes().to_vec()),
                             )]),
                             deleted_attributes: HashSet::new(),
+                            ..Default::default()
                         },
                     ),
                     (
@@ -594,6 +596,7 @@ mod test {
                                 ("reserve".to_owned(), Bytes::from(30_u64.to_be_bytes().to_vec())),
                             ]),
                             deleted_attributes: HashSet::new(),
+                            ..Default::default()
                         },
                     ),
                 ]);

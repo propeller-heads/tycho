@@ -34,7 +34,8 @@ use tycho_common::{
 use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
-        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS, TWAMM_ADDRESS_NEW,
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_NEW,
     },
     pool::{
         boosted_fees::BoostedFeesPool, full_range::FullRangePool, mev_capture::MevCapturePool,
@@ -965,6 +966,117 @@ pub fn mev_capture() -> TestCase {
     }
 }
 
+#[fixture]
+pub fn signed_exclusive_swap() -> TestCase {
+    const POOL_KEY: EvmConcentratedPoolKey = EvmConcentratedPoolKey {
+        token0: TOKEN0,
+        token1: TOKEN1,
+        config: EvmConcentratedPoolConfig {
+            fee: 0,
+            pool_type_config: TickSpacing(10),
+            extension: SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+        },
+    };
+
+    const LOWER_TICK: Tick = Tick { index: -10, liquidity_delta: 100_000_000 };
+    const UPPER_TICK: Tick =
+        Tick { index: -LOWER_TICK.index, liquidity_delta: -LOWER_TICK.liquidity_delta };
+
+    const TICK_INDEX_BETWEEN: i32 = 0;
+    const SQRT_RATIO_BETWEEN: U256 = U256::from_limbs([0, 0, 1, 0]);
+    const LIQUIDITY_BETWEEN: u128 = LOWER_TICK.liquidity_delta as u128;
+
+    TestCase {
+        component: component([
+            ("token0".to_string(), POOL_KEY.token0.into_array().into()),
+            ("token1".to_string(), POOL_KEY.token1.into_array().into()),
+            ("fee".to_string(), POOL_KEY.config.fee.into()),
+            (
+                "pool_type_config".to_string(),
+                B32::from(EvmPoolTypeConfig::Concentrated(POOL_KEY.config.pool_type_config))
+                    .0
+                    .into(),
+            ),
+            (
+                "extension".to_string(),
+                POOL_KEY
+                    .config
+                    .extension
+                    .into_array()
+                    .into(),
+            ),
+        ]),
+        state_before_transition: EkuboV3State::Concentrated(
+            ConcentratedPool::new(
+                POOL_KEY,
+                EvmConcentratedPoolState {
+                    sqrt_ratio: SQRT_RATIO_BETWEEN,
+                    liquidity: 0,
+                    active_tick_index: None,
+                },
+                TICK_INDEX_BETWEEN,
+                vec![],
+            )
+            .unwrap(),
+        ),
+        state_after_transition: EkuboV3State::Concentrated(
+            ConcentratedPool::new(
+                POOL_KEY,
+                EvmConcentratedPoolState {
+                    sqrt_ratio: SQRT_RATIO_BETWEEN,
+                    liquidity: LIQUIDITY_BETWEEN,
+                    active_tick_index: Some(0),
+                },
+                TICK_INDEX_BETWEEN,
+                vec![LOWER_TICK, UPPER_TICK],
+            )
+            .unwrap(),
+        ),
+        required_attributes: [
+            "token0".to_string(),
+            "token1".to_string(),
+            "fee".to_string(),
+            "pool_type_config".to_string(),
+            "extension".to_string(),
+            "liquidity".to_string(),
+            "sqrt_ratio".to_string(),
+            "tick".to_string(),
+        ]
+        .into(),
+        transition_attributes: [
+            ("liquidity".to_string(), LIQUIDITY_BETWEEN.to_be_bytes().into()),
+            (
+                format!("tick/{}", LOWER_TICK.index),
+                LOWER_TICK
+                    .liquidity_delta
+                    .to_be_bytes()
+                    .into(),
+            ),
+            (
+                format!("tick/{}", UPPER_TICK.index),
+                UPPER_TICK
+                    .liquidity_delta
+                    .to_be_bytes()
+                    .into(),
+            ),
+        ]
+        .into(),
+        state_attributes: [
+            ("liquidity".to_string(), 0_u128.to_be_bytes().into()),
+            (
+                "sqrt_ratio".to_string(),
+                SQRT_RATIO_BETWEEN
+                    .to_be_bytes_vec()
+                    .into(),
+            ),
+            ("tick".to_string(), TICK_INDEX_BETWEEN.to_be_bytes().into()),
+        ]
+        .into(),
+        swap_token0: (100_u8.into(), 99_u8.into()),
+        expected_limit_token0: 497_u16.into(),
+    }
+}
+
 #[template]
 #[rstest]
 #[case::concentrated(concentrated())]
@@ -974,6 +1086,7 @@ pub fn mev_capture() -> TestCase {
 #[case::twamm(twamm())]
 #[case::mev_capture(mev_capture())]
 #[case::boosted_fees(boosted_fees())]
+#[case::signed_exclusive_swap(signed_exclusive_swap())]
 pub fn all_cases(#[case] case: TestCase) {}
 
 fn component<const N: usize>(static_attributes: [(String, Bytes); N]) -> ProtocolComponent {

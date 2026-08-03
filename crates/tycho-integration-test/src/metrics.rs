@@ -53,6 +53,10 @@ pub fn initialize_metrics() {
         "Current synchronization state per protocol (1=Started, 2=Ready, 3=Delayed, 4=Stale, \
          5=Advanced, 6=Ended, 7=Skipped — Tycho reported Ready but RPC block was ahead)"
     );
+    describe_gauge!(
+        "tycho_integration_protocol_pool_count",
+        "Current number of pools (components) being streamed per protocol"
+    );
     describe_counter!(
         "tycho_integration_protocol_updates_skipped_total",
         "Total number of protocol updates skipped due to being behind current block"
@@ -185,6 +189,15 @@ pub fn record_protocol_sync_state(protocol: &str, sync_state: &SynchronizerState
         "protocol" => protocol.to_string()
     )
     .set(state_value);
+}
+
+/// Record the current number of pools (components) being streamed for a protocol.
+pub fn record_protocol_pool_count(protocol: &str, count: usize) {
+    gauge!(
+        "tycho_integration_protocol_pool_count",
+        "protocol" => protocol.to_string()
+    )
+    .set(count as f64);
 }
 
 /// Record that an update was skipped because the RPC block was ahead of the update block.

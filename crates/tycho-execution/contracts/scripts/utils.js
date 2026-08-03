@@ -2,6 +2,7 @@ const {ethers} = require("hardhat");
 const Safe = require('@safe-global/protocol-kit').default;
 const {EthersAdapter} = require('@safe-global/protocol-kit');
 const {default: SafeApiKit} = require("@safe-global/api-kit");
+const roles = require("./roles.json");
 
 const txServiceUrls = {
     ethereum: "https://safe-transaction-mainnet.safe.global",
@@ -10,6 +11,17 @@ const txServiceUrls = {
 };
 
 const txServiceUrl = txServiceUrls[hre.network.name];
+
+function resolveRolesNetwork(network) {
+    // Strip tenderly_ prefix to match roles.json keys
+    const base = network.replace(/^tenderly_/, "");
+    if (!roles[base]) {
+        throw new Error(
+            `No roles defined for network "${base}" in roles.json`
+        );
+    }
+    return roles[base];
+}
 
 async function proposeOrSendTransaction(safeAddress, txData, signer, methodName) {
     if (safeAddress) {
@@ -62,5 +74,6 @@ async function proposeTransaction(safeAddress, txData, signer, methodName) {
 }
 
 module.exports = {
-    proposeOrSendTransaction
+    proposeOrSendTransaction,
+    resolveRolesNetwork
 }

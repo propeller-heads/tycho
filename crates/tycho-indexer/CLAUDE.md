@@ -20,7 +20,6 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
-  protobuf_deserialisation.rs  Substreams protobuf → BlockChanges conversion
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache

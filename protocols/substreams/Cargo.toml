@@ -23,11 +23,17 @@ members = [
     "ethereum-lido",
     "ethereum-balancer-v3",
     "ethereum-fluid",
+    "base-aerodrome-v1",
     "base-aerodrome-slipstreams",
+    "base-lunarbase",
     "ethereum-erc4626",
     "ethereum-rocketpool",
     "unichain-velodrome",
     "ethereum-liquidityparty",
+    "ethereum-fermiswap",
+    "ethereum-bopamm",
+    "ethereum-ring-swap-v2",
+    "polygon-ramses-v3",
 ]
 resolver = "2"
 

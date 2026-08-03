@@ -65,7 +65,7 @@ use tycho_common::{
 use uuid::Uuid;
 use zstd;
 
-use crate::TYCHO_SERVER_VERSION;
+use crate::{client_metadata::CLIENT_METADATA_HEADER, TYCHO_SERVER_VERSION};
 
 #[derive(Error, Debug)]
 pub enum DeltasError {
@@ -192,6 +192,8 @@ pub struct WsDeltasClient {
     inner: Arc<Mutex<Option<Inner>>>,
     /// If set the client has exhausted its reconnection attempts
     dead: Arc<AtomicBool>,
+    /// Pre-serialized `X-Tycho-Client-Metadata` header value. `None` sends no header.
+    client_metadata_header: Option<String>,
 }
 
 type WebSocketSink =
@@ -253,7 +255,6 @@ impl Inner {
     }
 
     /// Registers a new pending subscription.
-    #[allow(clippy::result_large_err)]
     fn new_subscription(
         &mut self,
         id: &ExtractorIdentity,
@@ -304,7 +305,6 @@ impl Inner {
     }
 
     /// Sends a message to a subscription's receiver.
-    #[allow(clippy::result_large_err)]
     fn send(&mut self, id: &Uuid, msg: BlockAggregatedChanges) -> Result<(), DeltasError> {
         if let Some(sender) = self.sender.get_mut(id) {
             sender
@@ -403,10 +403,47 @@ impl Inner {
     }
 }
 
+/// Builds the WebSocket handshake request, including the optional auth and client-metadata
+/// headers. The metadata value is pre-validated by the serializer, so `.header()` cannot fail on
+/// it. `User-Agent` is always `tycho-client-{version}`.
+fn build_ws_handshake_request(
+    ws_uri: &str,
+    uri: &Uri,
+    auth_key: Option<&str>,
+    client_metadata_header: Option<&str>,
+) -> Result<Request, DeltasError> {
+    let mut request_builder = Request::builder()
+        .uri(ws_uri)
+        .header(SEC_WEBSOCKET_KEY, generate_key())
+        .header(SEC_WEBSOCKET_VERSION, 13)
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .header(
+            HOST,
+            uri.host().ok_or_else(|| {
+                DeltasError::UriParsing(
+                    ws_uri.to_string(),
+                    "No host found in tycho url".to_string(),
+                )
+            })?,
+        )
+        .header(USER_AGENT, format!("tycho-client-{version}", version = env!("CARGO_PKG_VERSION")));
+
+    if let Some(key) = auth_key {
+        request_builder = request_builder.header(AUTHORIZATION, key);
+    }
+    if let Some(meta) = client_metadata_header {
+        request_builder = request_builder.header(CLIENT_METADATA_HEADER, meta);
+    }
+
+    request_builder.body(()).map_err(|e| {
+        DeltasError::TransportError(format!("Failed to build connection request: {e}"))
+    })
+}
+
 /// Tycho client websocket implementation.
 impl WsDeltasClient {
     // Construct a new client with 5 reconnection attempts.
-    #[allow(clippy::result_large_err)]
     pub fn new(ws_uri: &str, auth_key: Option<&str>) -> Result<Self, DeltasError> {
         let uri = ws_uri
             .parse::<Uri>()
@@ -415,17 +452,17 @@ impl WsDeltasClient {
             uri,
             auth_key: auth_key.map(|s| s.to_string()),
             inner: Arc::new(Mutex::new(None)),
-            ws_buffer_size: 128,
-            subscription_buffer_size: 128,
+            ws_buffer_size: 256,
+            subscription_buffer_size: 256,
             conn_notify: Arc::new(Notify::new()),
             max_reconnects: 5,
             retry_cooldown: Duration::from_millis(500),
             dead: Arc::new(AtomicBool::new(false)),
+            client_metadata_header: None,
         })
     }
 
     // Construct a new client with a custom number of reconnection attempts.
-    #[allow(clippy::result_large_err)]
     pub fn new_with_reconnects(
         ws_uri: &str,
         auth_key: Option<&str>,
@@ -446,12 +483,18 @@ impl WsDeltasClient {
             max_reconnects,
             retry_cooldown,
             dead: Arc::new(AtomicBool::new(false)),
+            client_metadata_header: None,
         })
+    }
+
+    /// Sets the pre-serialized client-metadata header value. `None` sends no header.
+    pub fn with_client_metadata_header(mut self, header: Option<String>) -> Self {
+        self.client_metadata_header = header;
+        self
     }
 
     // Construct a new client with custom buffer sizes (for testing)
     #[cfg(test)]
-    #[allow(clippy::result_large_err)]
     pub fn new_with_custom_buffers(
         ws_uri: &str,
         auth_key: Option<&str>,
@@ -471,6 +514,7 @@ impl WsDeltasClient {
             max_reconnects: 5,
             retry_cooldown: Duration::from_millis(0),
             dead: Arc::new(AtomicBool::new(false)),
+            client_metadata_header: None,
         })
     }
 
@@ -487,29 +531,29 @@ impl WsDeltasClient {
     /// This method acquires the lock for inner for a short period, then waits until the
     /// connection is established if not already connected.
     async fn ensure_connection(&self) -> Result<(), DeltasError> {
-        if self.dead.load(Ordering::SeqCst) {
-            return Err(DeltasError::NotConnected);
+        // Loop until either permanently dead or successfully connected. A single wait-and-check
+        // is not enough: the WS can reconnect briefly then drop again (e.g. server restart),
+        // which would fire conn_notify but leave is_connected() false. Looping retries
+        // automatically on that transient race.
+        loop {
+            if self.dead.load(Ordering::SeqCst) {
+                return Err(DeltasError::NotConnected);
+            }
+            if self.is_connected().await {
+                return Ok(());
+            }
+            // Enable the future BEFORE re-checking is_connected to close the race window where
+            // the reconnect task calls notify_waiters() between is_connected() returning false
+            // and notified().await — without enable(), that notification would be lost.
+            let notified = self.conn_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_connected().await {
+                notified.await;
+            }
+            // Loop back: recheck dead and is_connected. If the WS dropped again between the
+            // notification and here, we wait for the next reconnect rather than failing.
         }
-        if self.is_connected().await {
-            return Ok(());
-        }
-        // Enable the future BEFORE re-checking is_connected to close the race window where
-        // the reconnect task calls notify_waiters() between is_connected() returning false and
-        // notified().await — without enable(), that notification would be lost and this call
-        // would block until the next reconnect.
-        let notified = self.conn_notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if !self.is_connected().await {
-            notified.await;
-        }
-        if self.dead.load(Ordering::SeqCst) {
-            return Err(DeltasError::NotConnected);
-        }
-        if !self.is_connected().await {
-            return Err(DeltasError::NotConnected);
-        }
-        Ok(())
     }
 
     /// Main message handling logic
@@ -872,35 +916,12 @@ impl DeltasClient for WsDeltasClient {
                     sleep(this.retry_cooldown).await;
                 }
 
-                // Create a WebSocket request
-                let mut request_builder = Request::builder()
-                    .uri(&ws_uri)
-                    .header(SEC_WEBSOCKET_KEY, generate_key())
-                    .header(SEC_WEBSOCKET_VERSION, 13)
-                    .header(CONNECTION, "Upgrade")
-                    .header(UPGRADE, "websocket")
-                    .header(
-                        HOST,
-                        this.uri.host().ok_or_else(|| {
-                            DeltasError::UriParsing(
-                                ws_uri.clone(),
-                                "No host found in tycho url".to_string(),
-                            )
-                        })?,
-                    )
-                    .header(
-                        USER_AGENT,
-                        format!("tycho-client-{version}", version = env!("CARGO_PKG_VERSION")),
-                    );
-
-                // Add Authorization if one is given
-                if let Some(ref key) = this.auth_key {
-                    request_builder = request_builder.header(AUTHORIZATION, key);
-                }
-
-                let request = request_builder.body(()).map_err(|e| {
-                    DeltasError::TransportError(format!("Failed to build connection request: {e}"))
-                })?;
+                let request = build_ws_handshake_request(
+                    &ws_uri,
+                    &this.uri,
+                    this.auth_key.as_deref(),
+                    this.client_metadata_header.as_deref(),
+                )?;
                 let (conn, _) = match connect_async(request).await {
                     Ok(conn) => conn,
                     Err(e) => {
@@ -1030,15 +1051,20 @@ impl DeltasClient for WsDeltasClient {
     #[instrument(skip(self))]
     async fn close(&self) -> Result<(), DeltasError> {
         info!("Closing TychoWebsocketClient");
-        let mut guard = self.inner.lock().await;
-        let inner = guard
-            .as_mut()
-            .ok_or_else(|| DeltasError::NotConnected)?;
-        inner
-            .cmd_tx
-            .send(())
-            .await
-            .map_err(|e| DeltasError::TransportError(e.to_string()))?;
+        {
+            let mut guard = self.inner.lock().await;
+            if let Some(inner) = guard.as_mut() {
+                inner
+                    .cmd_tx
+                    .send(())
+                    .await
+                    .map_err(|e| DeltasError::TransportError(e.to_string()))?;
+            }
+        }
+        // Mark dead and notify so any ensure_connection() callers blocked on conn_notify
+        // unblock immediately and return NotConnected rather than hanging forever.
+        self.dead.store(true, Ordering::SeqCst);
+        self.conn_notify.notify_waiters();
         Ok(())
     }
 }
@@ -1122,17 +1148,10 @@ mod tests {
     }
 
     fn subscribe_with_compression(compression: bool) -> String {
-        serde_json::json!({
-            "method": "subscribe",
-            "extractor_id": {
-                "chain": "ethereum",
-                "name": "vm:ambient"
-            },
-            "include_state": true,
-            "compression": compression,
-            "partial_blocks": false
-        })
-        .to_string()
+        // Field order matches Command::Subscribe's serde tag + struct field declaration order.
+        format!(
+            r#"{{"method":"subscribe","extractor_id":{{"chain":"ethereum","name":"vm:ambient"}},"include_state":true,"compression":{compression},"partial_blocks":false}}"#
+        )
     }
 
     fn subscription_confirmation() -> String {
@@ -1251,6 +1270,50 @@ mod tests {
         }
         "#
         .replace(|c: char| c.is_whitespace(), "")
+    }
+
+    #[test]
+    fn test_ws_handshake_sends_client_metadata_when_set() {
+        let uri = Uri::from_str("ws://localhost:4242/").unwrap();
+        let request = build_ws_handshake_request(
+            "ws://localhost:4242/v1/ws",
+            &uri,
+            None,
+            Some("fynd_version=0.57.0"),
+        )
+        .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(CLIENT_METADATA_HEADER)
+                .map(|v| v.to_str().unwrap()),
+            Some("fynd_version=0.57.0")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(USER_AGENT)
+                .unwrap(),
+            format!("tycho-client-{}", env!("CARGO_PKG_VERSION")).as_str()
+        );
+    }
+
+    #[test]
+    fn test_ws_handshake_omits_client_metadata_when_unset() {
+        let uri = Uri::from_str("ws://localhost:4242/").unwrap();
+        let request =
+            build_ws_handshake_request("ws://localhost:4242/v1/ws", &uri, None, None).unwrap();
+        assert!(request
+            .headers()
+            .get(CLIENT_METADATA_HEADER)
+            .is_none());
+        assert_eq!(
+            request
+                .headers()
+                .get(USER_AGENT)
+                .unwrap(),
+            format!("tycho-client-{}", env!("CARGO_PKG_VERSION")).as_str()
+        );
     }
 
     #[tokio::test]

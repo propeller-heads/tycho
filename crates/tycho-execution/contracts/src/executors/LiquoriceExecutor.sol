@@ -9,6 +9,7 @@ import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 /// @title LiquoriceExecutor
 /// @notice Executor for Liquorice RFQ (Request for Quote) swaps
@@ -20,7 +21,12 @@ contract LiquoriceExecutor is IExecutor {
 
     error LiquoriceExecutor__InvalidDataLength();
     error LiquoriceExecutor__ZeroAddress();
+    error LiquoriceExecutor__NotAContract();
     error LiquoriceExecutor__AmountBelowMinimum();
+    error LiquoriceExecutor__InvalidSelector();
+
+    bytes4 private constant _SETTLE_SINGLE_SELECTOR = 0x9935c868;
+    bytes4 private constant _SETTLE_SELECTOR = 0xcba673a7;
 
     /// @notice The Liquorice settlement contract address
     address public immutable liquoriceSettlement;
@@ -37,6 +43,12 @@ contract LiquoriceExecutor is IExecutor {
                 || _liquoriceBalanceManager == address(0)
         ) {
             revert LiquoriceExecutor__ZeroAddress();
+        }
+        if (
+            _liquoriceSettlement.code.length == 0
+                || _liquoriceBalanceManager.code.length == 0
+        ) {
+            revert LiquoriceExecutor__NotAContract();
         }
         liquoriceSettlement = _liquoriceSettlement;
         liquoriceBalanceManager = _liquoriceBalanceManager;
@@ -71,6 +83,12 @@ contract LiquoriceExecutor is IExecutor {
         amountIn =
             _clampAmount(amountIn, originalBaseTokenAmount, minBaseTokenAmount);
 
+        bytes4 selector = bytes4(liquoriceCalldata);
+        if (selector != _SETTLE_SINGLE_SELECTOR && selector != _SETTLE_SELECTOR)
+        {
+            revert LiquoriceExecutor__InvalidSelector();
+        }
+
         // Modify the fill amount in the calldata if partial fill is
         // supported. If partialFillOffset is 0, partial fill is not
         // supported.
@@ -81,7 +99,7 @@ contract LiquoriceExecutor is IExecutor {
             );
         }
 
-        uint256 ethValue = tokenIn == address(0) ? amountIn : 0;
+        uint256 ethValue = tokenIn == ETH_ADDRESS ? amountIn : 0;
 
         // Execute the swap by forwarding calldata to settlement contract
         // slither-disable-next-line unused-return
@@ -102,8 +120,9 @@ contract LiquoriceExecutor is IExecutor {
     {
         // Minimum fixed fields:
         // tokenIn (20) + tokenOut (20) + partialFillOffset (4) +
-        // originalBaseTokenAmount (32) + minBaseTokenAmount (32) = 108 bytes
-        if (data.length < 108) {
+        // originalBaseTokenAmount (32) + minBaseTokenAmount (32) +
+        // liquoriceCalldata selector (4) = 112 bytes
+        if (data.length < 112) {
             revert LiquoriceExecutor__InvalidDataLength();
         }
 
@@ -164,7 +183,7 @@ contract LiquoriceExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length < 108) {
+        if (data.length < 112) {
             revert LiquoriceExecutor__InvalidDataLength();
         }
 
@@ -174,6 +193,4 @@ contract LiquoriceExecutor is IExecutor {
         receiver = liquoriceBalanceManager;
         outputToRouter = true;
     }
-
-    receive() external payable {}
 }

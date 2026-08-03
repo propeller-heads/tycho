@@ -1,5 +1,6 @@
 use num_bigint::BigUint;
 
+use super::group_swaps::group_swaps;
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
 
 /// Default gas usage for an ERC-20 `transferFrom` or `transfer`. Used as fallback when the token
@@ -35,8 +36,16 @@ pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
 /// ProtocolWillDebit: the router must `approve(protocol)` before swapping.
 /// The protocol's `transferFrom` is inside `swap()` and already in the gas computation of
 /// `get_amount_out`, but the approval is not.
-pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] =
-    &["vm:balancer_v2", "vm:curve", "rfq:bebop", "rfq:hashflow", "rfq:liquorice", "erc4626"];
+pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
+    "vm:balancer_v2",
+    "vm:curve",
+    "rfq:bebop",
+    "rfq:hashflow",
+    "rfq:liquorice",
+    "rfq:metric",
+    "erc4626",
+    "ring_swap_v2",
+];
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
@@ -47,13 +56,14 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 
 /// Estimates the total gas cost for executing a `Solution`.
 ///
-/// Sums, for every swap in the solution:
+/// Groups consecutive swaps on the same groupable protocol (UniswapV4, BalancerV3, Ekubo) via
+/// `group_swaps`, which discounts intermediate token transfers saved by flash accounting. For each
+/// group (or ungrouped swap), sums:
 ///
-/// - **Pool gas** (`swap.estimated_gas()`): the simulation-reported cost of the protocol's `swap()`
-///   call, which might already include any transfers the pool performs internally (see
-///   `estimate_transfer_overhead` for the conventions).
+/// - **Pool gas** (`group.estimated_gas`): the simulation-reported cost with intermediate transfer
+///   savings already subtracted for multi-swap groups (see `compute_group_gas`).
 /// - **Transfer overhead**: the input transfer, approval, and output transfer gas that is NOT
-///   captured by `get_amount_out`, computed via `estimate_transfer_overhead`.
+///   captured by `get_amount_out`, computed via `estimate_transfer_overhead` once per group.
 /// - **Router overhead**: the user input transfer and — when `ROUTER_FEES_ACTIVE` — the extra
 ///   output transfer from the fee path. For non-split swaps, callback protocols already include a
 ///   regular `transferFrom` in their pool gas, so only the Permit2 delta (`USER_PERMIT2_TRANSFER -
@@ -63,20 +73,23 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   regardless of protocol type.
 pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     let mut total_gas = BigUint::ZERO;
-    for swap in solution.swaps() {
-        let swap_transfer_overhead = estimate_transfer_overhead(
-            &swap.component().protocol_system,
-            swap.token_in(),
-            swap.token_out(),
+    let swap_groups = group_swaps(solution.swaps());
+    for group in &swap_groups {
+        let first_swap = &group.swaps[0];
+        let last_swap = &group.swaps[group.swaps.len() - 1];
+        let group_transfer_overhead = estimate_transfer_overhead(
+            &group.protocol_system,
+            first_swap.token_in(),
+            last_swap.token_out(),
             &strategy,
         );
-        total_gas += swap_transfer_overhead + swap.estimated_gas();
+        total_gas += group_transfer_overhead + &group.estimated_gas;
     }
 
     // Add user transfer overhead
     if strategy != Strategy::Split {
-        if let Some(first_swap) = solution.swaps().first() {
-            let protocol: &str = &first_swap.component().protocol_system;
+        if let Some(first_group) = swap_groups.first() {
+            let protocol = first_group.protocol_system.as_str();
             // if the solution is not a split swap, the protocol gas usage for callback protocols
             // already includes a regular transfer gas usage:
             // - for the permit2 case we need to deduct the transfer usage already included
@@ -105,7 +118,8 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
 
     // Add fees overhead: when fees are active and the last swap's protocol does not
     // already route output through the router, the fee path adds an extra transfer.
-    if let Some(last_swap) = solution.swaps().last() {
+    if let Some(last_group) = swap_groups.last() {
+        let last_swap = &last_group.swaps[last_group.swaps.len() - 1];
         let protocol: &str = &last_swap.component().protocol_system;
         let final_swap_output_to_router = (ROUTER_FEES_ACTIVE || strategy == Strategy::Split) &&
             !PROTOCOLS_OUTPUT_TO_ROUTER.contains(&protocol);
@@ -212,6 +226,25 @@ mod tests {
         )
     }
 
+    fn make_swap_with_tokens(protocol: &str, token_in: Bytes, token_out: Bytes, gas: u64) -> Swap {
+        Swap::new(
+            ProtocolComponent { protocol_system: protocol.to_string(), ..Default::default() },
+            default_token(token_in),
+            default_token(token_out),
+            BigUint::from(gas),
+        )
+    }
+
+    fn token_a() -> Bytes {
+        Bytes::from(vec![0x01u8; 20])
+    }
+    fn token_b() -> Bytes {
+        Bytes::from(vec![0x02u8; 20])
+    }
+    fn token_c() -> Bytes {
+        Bytes::from(vec![0x03u8; 20])
+    }
+
     #[test]
     fn test_single_optimizable_transfer_in() {
         // uniswap_v2 is in PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: the router-to-pool input transfer is
@@ -225,6 +258,19 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER, fee path adds it
         assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_single_transfer_from_with_approval() {
+        let solution = make_solution(vec![make_swap("ring_swap_v2")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer (router → wrapper)    60_000  ← measured token gas
+        // approval (ProtocolWillDebit)         25_000  ← TOKEN_APPROVAL_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← measured token gas
+        assert_eq!(gas, BigUint::from(285_000u64));
     }
 
     #[test]
@@ -292,6 +338,44 @@ mod tests {
         // hop2 input transfer                       0  ← uniswap_v2 is optimizable
         // fee output transfer (last hop)        60_000  ← uniswap_v2 not in OUTPUT_TO_ROUTER
         assert_eq!(gas, BigUint::from(445_000u64));
+    }
+
+    #[test]
+    fn test_single_grouped_two_hops_usv4() {
+        // Two consecutive USV4 hops get grouped: intermediate transfer is saved.
+        // A→B→C on uniswap_v4 becomes one group with flash accounting.
+        let solution = make_solution(vec![
+            make_swap_with_tokens("uniswap_v4", token_a(), token_b(), 100_000),
+            make_swap_with_tokens("uniswap_v4", token_b(), token_c(), 100_000),
+        ]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // group estimated_gas: 200_000 - token_b.gas(60k) - token_b.gas(60k) = 80_000
+        //   (first.token_out=60k + last.token_in=60k subtracted by compute_group_gas)
+        // transfer overhead: 0 (callback protocol)
+        // user transfer: 0 (callback + TransferFrom)
+        // fee output transfer: 60_000 (not in OUTPUT_TO_ROUTER)
+        assert_eq!(gas, BigUint::from(140_000u64));
+    }
+
+    #[test]
+    fn test_sequential_mixed_grouped_and_ungrouped() {
+        // A→B→C on uniswap_v4 (grouped), then C→D on uniswap_v2 (separate).
+        let token_d = Bytes::from(vec![0x04u8; 20]);
+        let solution = make_solution(vec![
+            make_swap_with_tokens("uniswap_v4", token_a(), token_b(), 100_000),
+            make_swap_with_tokens("uniswap_v4", token_b(), token_c(), 100_000),
+            make_swap_with_tokens("uniswap_v2", token_c(), token_d.clone(), 100_000),
+        ]);
+        let gas = estimate_gas_usage(&solution, Strategy::Sequential);
+
+        // group1 (usv4): 200_000 - 60k - 60k = 80_000 (intermediate B transfers saved)
+        // group1 transfer overhead: 0 (callback)
+        // group2 (usv2): 100_000
+        // group2 transfer overhead: 0 (optimizable transfer in)
+        // user transfer: 0 (first group is callback + TransferFrom)
+        // fee output transfer: 60_000 (last swap is uniswap_v2, not in OUTPUT_TO_ROUTER)
+        assert_eq!(gas, BigUint::from(240_000u64));
     }
 
     #[test]

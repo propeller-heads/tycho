@@ -8,12 +8,14 @@ use crate::encoding::{
         constants::{DEFAULT_EXECUTORS_JSON, PROTOCOL_SPECIFIC_CONFIG},
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
-            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, curve::CurveSwapEncoder,
-            ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
-            etherfi::EtherfiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
-            hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
-            liquorice::LiquoriceSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            native_wrap::WrapSwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
+            curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
+            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, fermiswap::FermiSwapEncoder,
+            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
+            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
+            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
+            metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder,
+            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
             uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
@@ -103,6 +105,9 @@ impl SwapEncoderRegistry {
             "uniswap_v2" | "sushiswap_v2" | "pancakeswap_v2" | "quickswap_v2" => {
                 Ok(Box::new(UniswapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "ring_swap_v2" => {
+                Ok(Box::new(RingSwapV2SwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "aerodrome_v1" => {
                 Ok(Box::new(AerodromeV1SwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -120,6 +125,9 @@ impl SwapEncoderRegistry {
             }
             "ekubo_v3" => {
                 Ok(Box::new(EkuboV3SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "vm:bopamm" => {
+                Ok(Box::new(BopAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:curve" => {
                 Ok(Box::new(CurveSwapEncoder::new(executor_address, self.chain, config)?))
@@ -139,8 +147,14 @@ impl SwapEncoderRegistry {
             "rfq:liquorice" => {
                 Ok(Box::new(LiquoriceSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "rfq:metric" => {
+                Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "fluid_v1" => {
                 Ok(Box::new(FluidV1SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "vm:fermiswap" => {
+                Ok(Box::new(FermiSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:liquidityparty" => {
                 Ok(Box::new(LiquidityPartySwapEncoder::new(executor_address, self.chain, config)?))
@@ -154,7 +168,27 @@ impl SwapEncoderRegistry {
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "lunarbase" => {
+                Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "velodrome_slipstreams" => {
+                Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            // Ramses V3 reuses the standard Uniswap V3 executor unchanged, encoded via the
+            // Slipstreams encoder. Three things make this sound:
+            //   1. ABI match: the Ramses pool exposes the identical
+            //      `swap(address,bool,int256,uint160,bytes)` and calls `uniswapV3SwapCallback`,
+            //      which the router's selector-agnostic fallback routes back to the executor.
+            //   2. The executor's `_decodeData` reads only the pool address (bytes 43..63) and the
+            //      zero-for-one flag (byte 63): it calls `pool.swap` on that address without
+            //      recomputing it, and never touches the 3-byte slot at bytes 40..43. So it is
+            //      irrelevant both that Ramses keys pools by tick spacing rather than fee, and that
+            //      the Slipstreams encoder packs `tick_spacing` into that slot (where Uniswap V3
+            //      packs the fee).
+            //   3. The SlipstreamsExecutor contract is byte-for-byte identical to the
+            //      UniswapV3Executor, so the encoder choice does not imply a different on-chain
+            //      executor.
+            "ramses_v3" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "native_wrapper" => {
@@ -167,6 +201,35 @@ impl SwapEncoderRegistry {
                 "Unknown protocol system: {}",
                 protocol_system
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_encoders_build_for_every_configured_chain() {
+        let chains = [
+            Chain::Ethereum,
+            Chain::Base,
+            Chain::Unichain,
+            Chain::Arbitrum,
+            Chain::Bsc,
+            Chain::Polygon,
+            Chain::Plasma,
+        ];
+        for chain in chains {
+            let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {
+                panic!("default encoders failed to build for chain {chain}: {e}")
+            });
+            assert!(
+                registry
+                    .get_encoder("uniswap_v3")
+                    .is_some(),
+                "chain {chain} is missing the uniswap_v3 encoder"
+            );
         }
     }
 }

@@ -2824,6 +2824,7 @@ mod test {
             deleted_attributes: vec!["deleted2".to_owned()]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
         let expected = vec![state_delta, other_state_delta];
 
@@ -2928,6 +2929,7 @@ mod test {
             deleted_attributes: vec!["to_delete".to_owned()]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
         let expected = vec![state_delta];
 

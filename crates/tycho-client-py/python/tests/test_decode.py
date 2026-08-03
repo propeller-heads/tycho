@@ -6,6 +6,8 @@ from tycho_indexer_client.dto import (
     Chain,
     ContractId,
     ContractStateParams,
+    CustomChain,
+    ExtractorIdentity,
     FeedMessage,
     SynchronizerState,
     SynchronizerStateEnum,
@@ -45,6 +47,27 @@ def test_decode_deltas(asset_dir):
             revert=False,
         ),
     )
+
+
+# JSON shaped exactly as Tycho serialises `Chain::Custom("name")`: externally tagged with the chain
+# name as a string. If the Rust wire format changes, this fixture must change with it.
+CUSTOM_CHAIN_JSON = {"custom": "testchain"}
+
+
+def test_decode_extractor_identity_known_chain():
+    # Known chains serialise as a bare lowercase string.
+    ident = ExtractorIdentity(chain="ethereum", name="uniswap_v2")
+
+    assert ident.chain == Chain.ethereum
+
+
+def test_decode_extractor_identity_custom_chain():
+    ident = ExtractorIdentity(chain=CUSTOM_CHAIN_JSON, name="my_extractor")
+
+    assert isinstance(ident.chain, CustomChain)
+    assert ident.chain == CustomChain(name="testchain")
+    assert ident.chain.name == "testchain"
+    assert str(ident.chain) == "testchain"
 
 
 def test_decode_contract_state_params_backward_compatibility():

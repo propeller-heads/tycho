@@ -50,7 +50,9 @@ Entry (e.g. splitSwap)
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes amountIn, client, clientFeeBps], getEffectiveRouterFeeOnOutput).
+calculateFee [takes amountIn, client, clientFeeBps], getEffectiveRouterFeeOnOutput,
+getEffectiveRouterFeeOnOutputScaled [takes client → uint32],
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
 
 ### Vault (`Vault.sol`)
 
@@ -96,6 +98,17 @@ Three fee layers, deducted from swap output:
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
 removed to revert to defaults.
+
+**Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied), all fee
+read methods (`calculateFee`, `getEffectiveRouterFeeOnOutput`, `getEffectiveRouterFeeOnOutputScaled`) fall back to
+`tx.origin` for the custom fee lookup. This lets unsigned calls still benefit from a custom rate when the originating
+EOA is a registered client.
+
+**Fee scale**: Fees use 8-decimal-BPS units (1 unit = 0.0001 BPS; 100% = 100 000 000). Two public constants are
+queryable via RPC:
+- `MAX_FEE_BPS = 100_000_000` — 100% expressed in fee units
+- `MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_FEE_BPS²`; the combined denominator when both fees use the
+  sub-BPS scale
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
@@ -220,6 +233,27 @@ from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`).
 
+### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
+
+Angstrom's Uniswap V4 pools start every block locked. A swap against one carries a pool unlock attestation, signed by
+the current Angstrom leader, as its `hookData`. The attestation is scoped to a block number and says nothing about the
+swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 5) serves every swap, pool and route.
+
+`AttestationCache` therefore keeps the window in a process-wide cache instead of fetching it during encoding:
+
+- A dedicated OS thread (`angstrom-attestations`) refreshes the window every
+  `ANGSTROM_ATTESTATION_REFRESH_INTERVAL`, twice per Ethereum block. Not a `tokio` task — the encoder must work without
+  a runtime, and `reqwest`'s blocking client cannot be driven from inside one.
+- `AttestationCache::global()` starts the thread on first call. `UniswapV4SwapEncoder::new` calls it when
+  `angstrom_hook_address` is configured for the chain (`config/protocol_specific_addresses.json`), so registry
+  construction warms the cache. `ANGSTROM_API_KEY` / `ANGSTROM_API_URL` / `ANGSTROM_BLOCKS_IN_FUTURE` are read once, at
+  that point; without the API key the thread never starts and Angstrom swaps fail to encode with a `FatalError`.
+- `encode_swap` reads the cache. A window older than `ANGSTROM_ATTESTATION_MAX_AGE` triggers one inline fetch on a
+  scoped thread, so encoding degrades to the old behavior instead of failing. Fetch failures are `RecoverableError`.
+- On chain, `UniswapV4Executor._selectAttestation` picks the 93-byte entry (8-byte block number + 85-byte attestation)
+  matching `block.number` and returns empty bytes when none match. Entries for blocks that already passed only cost
+  calldata; a window that covers no upcoming block falls back to Angstrom's protocol-driven empty-batch unlock.
+
 ### Gas estimation
 
 `Swap::new(component, token_in: Token, token_out: Token, estimated_gas: BigUint)` carries a per-swap simulation gas
@@ -276,6 +310,11 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 5. Add Rust encoder in `src/encoding/evm/swap_encoder/` and register in `swap_encoder_registry.rs`
 6. Add integration tests in both `contracts/test/protocols/` and `tests/`
 7. Add test setup in `contracts/test/TychoRouterTestSetup.sol`
+8. If the executor gives the caller control over the called pool contract (e.g. the caller supplies the pool
+   address), model it in the security model (`model/src/model/executors.rs`): add a variant to the `Executor` enum
+   and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
+   `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
+   Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
 
 ## Security
 
@@ -295,6 +334,7 @@ Executors run via `delegatecall` inside TychoRouter — they have full access to
 - **Never write to state variables.** Any storage write in an executor writes to TychoRouter's storage.
 - **Do not execute `delegatecall`.** If unavoidable, ensure the caller cannot control the target address.
 - **Verify callback origin.** Call `verifyCallback` inside `handleCallback` to confirm `msg.sender` is a valid pool.
+- **Allowlist selectors when the caller controls calldata.** If `swap()` forwards caller-supplied calldata to an external contract (e.g. RFQ settlement), validate the first 4 bytes against an explicit allowlist of safe function selectors before making the call. An unrestricted selector lets an attacker invoke arbitrary functions on that contract — including ones that could drain TychoRouter's balance at the settlement contract. See `LiquoriceExecutor` for the pattern.
 - `handleCallback`'s `data` argument is raw ABI-encoded calldata the executor must decode manually.
 - `handleCallback`'s return value must be raw ABI-encoded data the executor encodes manually.
 

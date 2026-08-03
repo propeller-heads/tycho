@@ -970,6 +970,10 @@ fn test_single_encoding_strategy_bebop() {
                         .to_vec(),
                 ),
             ),
+            (
+                "tx_to".to_string(),
+                Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
+            ),
         ]),
     };
 
@@ -1047,6 +1051,10 @@ fn test_single_encoding_strategy_bebop_aggregate() {
                         .to_be_bytes()
                         .to_vec(),
                 ),
+            ),
+            (
+                "tx_to".to_string(),
+                Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
     };
@@ -1419,6 +1427,237 @@ fn test_single_encoding_strategy_rocketpool_burn() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_rocketpool_burn", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_bopamm_weth_usdc() {
+    // WETH -> (BopAMM) -> USDC
+    // Amount stays below the committed lane size at the test fork block
+    // (~0.646 WETH for book 0 at block 25266710).
+    let token_in = weth();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"),
+            protocol_system: String::from("vm:bopamm"),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("100000000000000000").unwrap(),
+        BigUint::from(160_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_bopamm_weth_usdc", hex_calldata.as_str());
+}
+
+fn ring_swap_v2_component() -> ProtocolComponent {
+    let mut static_attributes = HashMap::new();
+    static_attributes.insert(
+        "fw_token0".to_string(),
+        Bytes::from_str("0x8A6fe57C08C84e0f4eE97aAe68a62e820a37d259").unwrap(),
+    );
+    static_attributes.insert(
+        "fw_token1".to_string(),
+        Bytes::from_str("0xa250CC729Bb3323e7933022a67B52200fE354767").unwrap(),
+    );
+    static_attributes.insert(
+        "underlying_token0".to_string(),
+        Bytes::from_str("0x6B175474E89094C44Da98b954EedeAC495271d0F").unwrap(),
+    );
+    static_attributes.insert(
+        "underlying_token1".to_string(),
+        Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+    );
+
+    ProtocolComponent {
+        id: String::from("0x68C498Df05982d635914ee0Ae6501C749A78B473"),
+        protocol_system: "ring_swap_v2".to_string(),
+        static_attributes,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_single_encoding_strategy_ring_swap_v2() {
+    let token_in = dai();
+    let token_out = weth();
+    let swap = Swap::new(
+        ring_swap_v2_component(),
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("100000000000000000000").unwrap(),
+        BigUint::from(1_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_ring_swap_v2", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
+    let token_in = usdc();
+    let intermediate = dai();
+    let token_out = weth();
+
+    let uniswap_v2_swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0xAE461cA67B15dc8dc81CE7615e0320dA1A9aB8D5"),
+            protocol_system: "uniswap_v2".to_string(),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(intermediate.clone()),
+        BigUint::ZERO,
+    );
+    let ring_swap = Swap::new(
+        ring_swap_v2_component(),
+        default_token(intermediate),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("100000000").unwrap(),
+        BigUint::from(1_u64),
+        vec![uniswap_v2_swap, ring_swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_fermiswap_weth_usdc() {
+    // WETH -> (FermiSwap) -> USDC
+    let token_in = weth();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0"),
+            protocol_system: String::from("vm:fermiswap"),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        BigUint::from(2_114_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_fermiswap_weth_usdc",
+        hex_calldata.as_str(),
+    );
 }
 
 #[test]
@@ -2515,6 +2754,70 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
         "test_single_encoding_strategy_liquorice_settle_single",
         hex_calldata.as_str(),
     );
+}
+
+#[test]
+fn test_single_encoding_strategy_metric() {
+    // Generates calldata for TychoRouterForMetricTest Solidity integration test.
+    // WETH -> USDC via Metric RFQ on Base (wethusdc pool 0x770004fE).
+    // Uses the Never oracle update policy: the pool relies on its on-chain price
+    // at the fork block, so no signed oracle update is encoded.
+    let weth_base = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
+    let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
+
+    let metric_component = ProtocolComponent {
+        id: String::from("0x770004fE4411E42eA51a7fcAca32b267d791f3D4"),
+        protocol_system: String::from("rfq:metric"),
+        // Token order must match the pool's token0/token1 so the encoder can
+        // derive the swap direction (WETH = token0, USDC = token1).
+        tokens: vec![weth_base.clone(), usdc_base.clone()],
+        // oracle_update_policy = 0 (Never).
+        static_attributes: HashMap::from([(
+            "oracle_update_policy".to_string(),
+            Bytes::from(vec![0u8]),
+        )]),
+        ..Default::default()
+    };
+
+    let swap = Swap::new(
+        metric_component,
+        default_token(weth_base.clone()),
+        default_token(usdc_base.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth_base,
+        usdc_base,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        BigUint::from_str("1000").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_metric", hex_calldata.as_str());
 }
 
 #[test]

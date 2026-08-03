@@ -1,0 +1,27 @@
+substreams_yaml_path: ./polygon-ramses-v3.yaml
+protocol_system: "ramses_v3"
+protocol_type_names:
+  - "ramses_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # High-volume USDC / USD.e pool.
+  - name: test_usdc_usde_pool
+    start_block: 82221683
+    # Stop once Mint, Collect, Burn, and Swap have all been emitted at least once:
+    #   Mint:    0xcec6c8ab552bdf3017819ccc7babc132299d1b163ac192e0b3171d82fea077aa
+    #   Collect: 0x0e06d516e35b8e76f3b014d15da2d3e722b4f6ba7c7f9423e3e6caf93d88f0f7
+    #   Burn:    0x0e06d516e35b8e76f3b014d15da2d3e722b4f6ba7c7f9423e3e6caf93d88f0f7
+    #   Swap:    0xe1dcce474aa04862baaf2d39e769f139488c27a216413bfdc0b7493f4c081027
+    # Flash and CollectProtocol occur much later, so they fall outside this range.
+    stop_block: 82224183
+    expected_components:
+      - id: "0x7BCD99AE248E86EcaB7A5B23451D73825117F54D"
+        tokens:
+          - "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+          - "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+        static_attributes:
+          tick_spacing: "0x01"
+        creation_tx: "0xcec6c8ab552bdf3017819ccc7babc132299d1b163ac192e0b3171d82fea077aa"
+        skip_simulation: false

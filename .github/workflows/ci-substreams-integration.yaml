@@ -1,14 +1,8 @@
 name: Substreams Integration Tests
 
 env:
-  RPC_URL: ${{ secrets.RPC_URL_ARCHIVE }}
-  BASE_RPC_URL: ${{ secrets.BASE_RPC_URL_ARCHIVE }}
-  ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL_ARCHIVE }}
-  UNICHAIN_RPC_URL: ${{ secrets.UNICHAIN_RPC_URL_ARCHIVE }}
-  BSC_RPC_URL: ${{ secrets.BSC_RPC_URL_ARCHIVE }}
-  POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL_ARCHIVE }}
-  SUBSTREAMS_API_TOKEN: ${{ secrets.SUBSTREAMS_API_TOKEN }}
-  AUTH_API_KEY: ${{ secrets.AUTH_API_KEY }}
+  # Secrets are intentionally NOT defined here to keep them out of detect-changes scope.
+  # They are set at job level in test-protocols, the only job that needs them.
   EXCLUDED_SUBSTREAMS: target|crates|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid
 
 on:
@@ -83,8 +77,9 @@ jobs:
 
       - name: Get all substreams folders
         id: all_substreams
+        env:
+          CLONE_NAMES: ${{ steps.clone_mappings.outputs.clone_names }}
         run: |
-          CLONE_NAMES="${{ steps.clone_mappings.outputs.clone_names }}"
           FOLDERS=$(find protocols/substreams -mindepth 1 -maxdepth 1 -type d \
             -exec basename {} \; | sort | \
             grep -v -E "^(${EXCLUDED_SUBSTREAMS})$" | \
@@ -101,6 +96,9 @@ jobs:
       - name: Get changed substreams folders
         id: changes
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
+        env:
+          VALID: ${{ steps.all_substreams.outputs.all_substreams }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           # Read clone-to-base mappings parsed from test_runner.rs.
           declare -A CLONE_TO_BASE
@@ -108,11 +106,9 @@ jobs:
             CLONE_TO_BASE["$clone"]="$base"
           done < /tmp/clone_mappings.txt
 
-          VALID="${{ steps.all_substreams.outputs.all_substreams }}"
-
           # Detect changed top-level substreams directories from git diff.
           CHANGED_DIRS=$(git diff --name-only --diff-filter=d origin/main \
-            ${{ github.sha }} | \
+            "$HEAD_SHA" | \
             grep '^protocols/substreams/' | awk -F'/' '{print $3}' | sort -u)
 
           # Match against known protocols (base dirs and clone names).
@@ -134,19 +130,27 @@ jobs:
 
       - name: Determine target protocols
         id: target-protocols
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PROTOCOLS: ${{ github.event.inputs.protocols }}
+          ALL_SUBSTREAMS: ${{ steps.all_substreams.outputs.all_substreams }}
+          CHANGED_SUBSTREAMS: ${{ steps.changes.outputs.changed_substreams }}
+          DOCKERFILE_CHANGED: ${{ steps.dockerfile-changed.outputs.any_changed }}
+          CARGO_TOML_CHANGED: ${{ steps.cargo-toml-changed.outputs.any_changed }}
+          SUBSTREAMS_CHANGED: ${{ steps.substreams-files-changed.outputs.any_changed }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ -n "${{ github.event.inputs.protocols }}" ]]; then
-              PROTOCOLS="${{ github.event.inputs.protocols }}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ -n "$INPUT_PROTOCOLS" ]]; then
+              PROTOCOLS="$INPUT_PROTOCOLS"
             else
-              PROTOCOLS="${{ steps.all_substreams.outputs.all_substreams }}"
+              PROTOCOLS="$ALL_SUBSTREAMS"
             fi
-          elif [[ "${{ steps.dockerfile-changed.outputs.any_changed }}" == "true" ]]; then
-            PROTOCOLS="${{ steps.all_substreams.outputs.all_substreams }}"
-          elif [[ "${{ steps.cargo-toml-changed.outputs.any_changed }}" == "true" ]]; then
-            PROTOCOLS="${{ steps.all_substreams.outputs.all_substreams }}"
-          elif [[ "${{ steps.substreams-files-changed.outputs.any_changed }}" == "true" ]]; then
-            PROTOCOLS="${{ steps.changes.outputs.changed_substreams }}"
+          elif [[ "$DOCKERFILE_CHANGED" == "true" ]]; then
+            PROTOCOLS="$ALL_SUBSTREAMS"
+          elif [[ "$CARGO_TOML_CHANGED" == "true" ]]; then
+            PROTOCOLS="$ALL_SUBSTREAMS"
+          elif [[ "$SUBSTREAMS_CHANGED" == "true" ]]; then
+            PROTOCOLS="$CHANGED_SUBSTREAMS"
           else
             PROTOCOLS=""
           fi
@@ -155,8 +159,9 @@ jobs:
 
       - name: Create protocols matrix
         id: protocols-matrix
+        env:
+          PROTOCOLS: ${{ steps.target-protocols.outputs.protocols }}
         run: |
-          PROTOCOLS="${{ steps.target-protocols.outputs.protocols }}"
           if [[ -z "$PROTOCOLS" ]]; then
             echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
           else
@@ -179,6 +184,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-changes]
     if: needs.detect-changes.outputs.target-protocols != ''
+    # Fork PRs run unreviewed code with secrets in scope; gate them behind a
+    # required-reviewer environment. Internal-branch PRs (trusted collaborators)
+    # resolve to no environment and run without approval.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
     outputs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
@@ -215,11 +224,13 @@ jobs:
           docker save protocol-testing-db:latest -o /tmp/db-image.tar
 
       - name: Build and cache test-runner image
+        env:
+          TARGET_PROTOCOLS: ${{ needs.detect-changes.outputs.target-protocols }}
         run: |
           docker buildx build \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache \
-            --build-arg PROTOCOLS="${{ needs.detect-changes.outputs.target-protocols }}" \
+            --build-arg PROTOCOLS="$TARGET_PROTOCOLS" \
             -f protocols/testing/run.Dockerfile \
             -t protocol-testing-test-runner:latest \
             --load .
@@ -238,6 +249,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-changes, build-images]
     if: needs.detect-changes.outputs.target-protocols != ''
+    # See build-images: gate fork PRs behind required-reviewer approval.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
+    env:
+      RPC_URL: ${{ secrets.RPC_URL_ARCHIVE }}
+      BASE_RPC_URL: ${{ secrets.BASE_RPC_URL_ARCHIVE }}
+      ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL_ARCHIVE }}
+      UNICHAIN_RPC_URL: ${{ secrets.UNICHAIN_RPC_URL_ARCHIVE }}
+      BSC_RPC_URL: ${{ secrets.BSC_RPC_URL_ARCHIVE }}
+      POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL_ARCHIVE }}
+      SUBSTREAMS_API_TOKEN: ${{ secrets.SUBSTREAMS_API_TOKEN }}
+      AUTH_API_KEY: ${{ secrets.AUTH_API_KEY }}
     strategy:
       fail-fast: false
       max-parallel: 4

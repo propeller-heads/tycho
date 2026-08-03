@@ -54,6 +54,14 @@ impl<'a> SlipstreamsPoolStorage<'a> {
     ///     `Vec<Attribute>`: A vector containing Attributes for each change detected in the tracked
     /// slots. Returns an empty vector if no changes are detected.
     pub fn get_changed_attributes(&self, locations: Vec<&StorageLocation>) -> Vec<Attribute> {
+        self.get_changed_attributes_with_change_type(locations, false)
+    }
+
+    fn get_changed_attributes_with_change_type(
+        &self,
+        locations: Vec<&StorageLocation>,
+        delete_zero_values: bool,
+    ) -> Vec<Attribute> {
         let mut attributes = Vec::new();
 
         // For each storage change, check if it changes a tracked slot.
@@ -75,14 +83,35 @@ impl<'a> SlipstreamsPoolStorage<'a> {
 
                     // Check if there is a change in the data
                     if old_data != new_data {
-                        let value = match storage_location.signed {
+                        let new_value = match storage_location.signed {
                             true => BigInt::from_signed_bytes_be(new_data),
                             false => BigInt::from_unsigned_bytes_be(new_data),
                         };
+
+                        let change_type = if !delete_zero_values {
+                            ChangeType::Update
+                        } else {
+                            let old_value = match storage_location.signed {
+                                true => BigInt::from_signed_bytes_be(old_data),
+                                false => BigInt::from_unsigned_bytes_be(old_data),
+                            };
+
+                            let old_is_zero_or_empty = old_data.is_empty() || old_value.is_zero();
+                            let new_is_zero_or_empty = new_data.is_empty() || new_value.is_zero();
+
+                            if old_is_zero_or_empty {
+                                ChangeType::Creation
+                            } else if new_is_zero_or_empty {
+                                ChangeType::Deletion
+                            } else {
+                                ChangeType::Update
+                            }
+                        };
+
                         attributes.push(Attribute {
                             name: storage_location.name.to_string(),
-                            value: value.to_signed_bytes_be(),
-                            change: ChangeType::Update.into(),
+                            value: new_value.to_signed_bytes_be(),
+                            change: change_type.into(),
                         });
                     }
                 }
@@ -129,7 +158,7 @@ impl<'a> SlipstreamsPoolStorage<'a> {
             });
         }
 
-        self.get_changed_attributes(storage_locs.iter().collect())
+        self.get_changed_attributes_with_change_type(storage_locs.iter().collect(), true)
     }
 
     pub fn get_observations_changes(&self, observations_idx: Vec<&BigInt>) -> Vec<Attribute> {

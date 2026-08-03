@@ -181,6 +181,9 @@ contract Constants is
     // Bebop Settlement
     address BEBOP_SETTLEMENT = 0xbbbbbBB520d69a9775E85b458C58c648259FAD5F;
 
+    // Bebop Router
+    address BEBOP_ROUTER = 0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A;
+
     // Hashflow Router
     address HASHFLOW_ROUTER = 0x55084eE0fEf03f14a305cd24286359A35D735151;
 
@@ -204,6 +207,22 @@ contract Constants is
 
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
+
+    // FermiSwap
+    address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
+
+    // Metric oracle (Base)
+    address METRIC_ORACLE = 0x681E908B8ab57c49C74D770F369754CCC3E1ae09;
+
+    // BopAMM (Bebop on-chain PMM)
+    address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;
+    address BOPAMM_MODULE = 0xBC60639345dFa607d73b74e88C2d54D8B8AD7Cc3;
+    address BOPAMM_REGISTRY = 0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F;
+    address BOPAMM_MAKER = 0x6F7a3714D7FC266e3E84067AC31E7b1a3bE18060;
+
+    // Ring Swap V2
+    address RING_FEW_FACTORY = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
+    address RING_SWAP_FACTORY = 0xeb2A625B704d73e82946D8d026E1F588Eed06416;
 
     // Angstrom hook address
     address ANGSTROM_HOOK = 0x0000000aa232009084Bd71A5797d089AA4Edfad4;

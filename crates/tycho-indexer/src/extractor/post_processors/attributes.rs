@@ -35,6 +35,7 @@ pub fn add_default_attributes(mut changes: BlockChanges, attributes: &[&str]) ->
                         component_id: c_id.clone(),
                         updated_attributes: default_attr,
                         deleted_attributes: HashSet::new(),
+                        created_attributes: HashSet::new(),
                     },
                 );
             }
@@ -131,6 +132,7 @@ mod test {
                             Bytes::from(1_u64.to_be_bytes()),
                         )]),
                         deleted_attributes: HashSet::new(),
+                        ..Default::default()
                     },
                 )]),
                 protocol_components: HashMap::from([(
@@ -175,6 +177,7 @@ mod test {
                             ("liquidity".to_string(), Bytes::zero(32)),
                         ]),
                         deleted_attributes: HashSet::new(),
+                        ..Default::default()
                     },
                 )]),
                 protocol_components: changes
@@ -225,6 +228,7 @@ mod test {
                             Bytes::from(1_u64.to_be_bytes()),
                         )]),
                         deleted_attributes: HashSet::new(),
+                        ..Default::default()
                     },
                 )]),
                 ..Default::default()

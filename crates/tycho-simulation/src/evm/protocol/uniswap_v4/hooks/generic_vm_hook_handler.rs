@@ -162,6 +162,7 @@ where
             Some(self.pool_manager),
             U256::from(0u64),
             Some(transient_storage_params),
+            None,
         )?;
 
         let decoded = BeforeSwapSolOutput::abi_decode(&res.return_value).map_err(|e| {
@@ -224,6 +225,7 @@ where
             Some(self.pool_manager),
             U256::from(0u64),
             Some(transient_storage_params),
+            None,
         )?;
 
         let decoded = AfterSwapSolReturn::abi_decode(&res.return_value).map_err(|e| {
@@ -324,6 +326,7 @@ where
                 None,             // caller
                 U256::from(0u64), // value
                 None,             // transient_storage
+                None,             // block_overrides
             )?;
 
             let decoded = GetLimitsSolReturn::abi_decode(&res.return_value).map_err(|e| {

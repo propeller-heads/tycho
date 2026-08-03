@@ -28,12 +28,15 @@ use std::{collections::HashMap, default::Default, future::Future};
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tycho_client::feed::{HeaderLike, SynchronizerState};
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
     Bytes,
 };
+
+use crate::evm::override_stream::OverrideSnapshot;
 
 /// Context struct containing attributes for decoders
 ///
@@ -42,11 +45,16 @@ use tycho_common::{
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
+    /// Live per-block VM state override channel, wired into the pool at construction time.
+    ///
+    /// Set internally by the decoder from its registered override providers; not part of the
+    /// public API. External consumers never set this — overrides are fully handled by the library.
+    pub(crate) live_override: Option<watch::Receiver<OverrideSnapshot>>,
 }
 
 impl DecoderContext {
     pub fn new() -> Self {
-        Self { adapter_path: None, vm_traces: None }
+        Self { adapter_path: None, vm_traces: None, live_override: None }
     }
 
     pub fn vm_adapter_path<S: Into<String>>(mut self, path: S) -> Self {

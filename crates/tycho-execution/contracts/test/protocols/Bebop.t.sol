@@ -11,12 +11,15 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract BebopExecutorExposed is BebopExecutor {
-    constructor(address _bebopSettlement) BebopExecutor(_bebopSettlement) {}
+    constructor(address _bebopSettlement, address _bebopRouter)
+        BebopExecutor(_bebopSettlement, _bebopRouter)
+    {}
 
     function decodeData(bytes calldata data)
         external
         pure
         returns (
+            address target,
             uint8 partialFillOffset,
             uint256 originalFilledTakerAmount,
             bytes memory bebopCalldata
@@ -40,7 +43,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
 
     function testDecodeData() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), 22667985);
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         bytes memory bebopCalldata = abi.encodePacked(
             bytes4(0x4dcebcba), // swapSingle selector
@@ -49,15 +52,22 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
 
         uint256 originalAmountIn = 200000000; // 200 USDC
         bytes memory params = abi.encodePacked(
-            USDC_ADDR, ONDO_ADDR, uint8(2), originalAmountIn, bebopCalldata
+            USDC_ADDR,
+            ONDO_ADDR,
+            BEBOP_SETTLEMENT,
+            uint8(2),
+            originalAmountIn,
+            bebopCalldata
         );
 
         (
+            address decodedTarget,
             uint8 decodedPartialFillOffset,
             uint256 decodedOriginalAmountIn,
             bytes memory decodedBebopCalldata
         ) = bebopExecutor.decodeData(params);
 
+        assertEq(decodedTarget, BEBOP_SETTLEMENT, "target mismatch");
         assertEq(
             keccak256(decodedBebopCalldata),
             keccak256(bebopCalldata),
@@ -73,7 +83,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
 
     function testGetTransferData() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), 22667985);
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         bytes memory bebopCalldata = abi.encodePacked(
             bytes4(0x4dcebcba), // swapSingle selector
@@ -82,7 +92,12 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
 
         uint256 originalAmountIn = 200000000; // 200 USDC
         bytes memory params = abi.encodePacked(
-            USDC_ADDR, ONDO_ADDR, uint8(2), originalAmountIn, bebopCalldata
+            USDC_ADDR,
+            ONDO_ADDR,
+            BEBOP_SETTLEMENT,
+            uint8(2),
+            originalAmountIn,
+            bebopCalldata
         );
 
         (
@@ -109,7 +124,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         // 1 weth -> wbtc
         vm.createSelectFork(vm.rpcUrl("mainnet"), 23124275);
 
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         // Quote made manually using the BebopExecutor as the taker and receiver
         bytes memory bebopCalldata =
@@ -123,7 +138,12 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         deal(tokenIn, address(bebopExecutor), amountIn);
 
         bytes memory params = abi.encodePacked(
-            tokenIn, tokenOut, partialFillOffset, amountIn, bebopCalldata
+            tokenIn,
+            tokenOut,
+            BEBOP_SETTLEMENT,
+            partialFillOffset,
+            amountIn,
+            bebopCalldata
         );
 
         uint256 initialTokenOutBalance =
@@ -149,7 +169,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         // 0.5 weth -> wbtc with a quote for 1 weth
         vm.createSelectFork(vm.rpcUrl("mainnet"), 23124275);
 
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         // Quote made manually using the BebopExecutor as the taker and receiver (the same as testSingleOrder)
         bytes memory bebopCalldata =
@@ -166,6 +186,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         bytes memory params = abi.encodePacked(
             tokenIn,
             tokenOut,
+            BEBOP_SETTLEMENT,
             partialFillOffset,
             amountIn * 2, // this is the original amount in
             bebopCalldata
@@ -194,7 +215,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
     function testAggregateOrder() public {
         // 20k usdc -> ondo
         vm.createSelectFork(vm.rpcUrl("mainnet"), 23126278);
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         // Quote made manually using the BebopExecutor as the taker and receiver
         bytes memory bebopCalldata =
@@ -211,7 +232,12 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         deal(tokenIn, address(bebopExecutor), amountIn);
 
         bytes memory params = abi.encodePacked(
-            tokenIn, tokenOut, partialFillOffset, amountIn, bebopCalldata
+            tokenIn,
+            tokenOut,
+            BEBOP_SETTLEMENT,
+            partialFillOffset,
+            amountIn,
+            bebopCalldata
         );
 
         uint256 initialTokenOutBalance =
@@ -237,7 +263,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
     function testAggregateOrder_PartialFill() public {
         // 10k usdc -> ondo with a quote for 20k usdc
         vm.createSelectFork(vm.rpcUrl("mainnet"), 23126278);
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         // Quote made manually using the BebopExecutor as the taker and receiver
         bytes memory bebopCalldata =
@@ -256,6 +282,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         bytes memory params = abi.encodePacked(
             tokenIn,
             tokenOut,
+            BEBOP_SETTLEMENT,
             partialFillOffset,
             amountIn * 2, // this is the original amount from the quote
             bebopCalldata
@@ -282,7 +309,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
 
     function testInvalidDataLength() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), 22667985);
-        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT);
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
 
         // Create a mock bebop calldata
         bytes memory bebopCalldata = hex"47fb5891" // swapSingle selector
@@ -291,7 +318,12 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
         // Create params with correct length first
         uint256 originalAmountIn = 1e18;
         bytes memory validParams = abi.encodePacked(
-            WETH_ADDR, USDC_ADDR, uint8(2), originalAmountIn, bebopCalldata
+            WETH_ADDR,
+            USDC_ADDR,
+            BEBOP_SETTLEMENT,
+            uint8(2),
+            originalAmountIn,
+            bebopCalldata
         );
 
         // Verify valid params work
@@ -310,6 +342,101 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
 
         vm.expectRevert(BebopExecutor.BebopExecutor__InvalidDataLength.selector);
         bebopExecutor.decodeData(tooShortParams);
+    }
+
+    function testGetTransferDataRouterTarget() public {
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
+
+        bytes memory routerCalldata =
+            abi.encodePacked(bytes4(0x9586d0e8), hex"00");
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR,
+            ONDO_ADDR,
+            BEBOP_ROUTER,
+            uint8(0),
+            uint256(1e6),
+            routerCalldata
+        );
+
+        (
+            TransferManager.TransferType transferType,
+            address decodedReceiver,,,
+            bool outputToRouter
+        ) = bebopExecutor.getTransferData(params);
+
+        assertEq(
+            uint8(transferType),
+            uint8(TransferManager.TransferType.ProtocolWillDebit),
+            "transferType mismatch"
+        );
+        assertEq(decodedReceiver, BEBOP_ROUTER, "receiver should be router");
+        assertEq(outputToRouter, true, "outputToRouter mismatch");
+    }
+
+    function testGetTransferDataInvalidTarget() public {
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
+
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR,
+            ONDO_ADDR,
+            address(0xdead),
+            uint8(0),
+            uint256(1e6),
+            abi.encodePacked(bytes4(0x4dcebcba))
+        );
+
+        vm.expectRevert(BebopExecutor.BebopExecutor__InvalidTarget.selector);
+        bebopExecutor.getTransferData(params);
+    }
+
+    function testSwapInvalidTarget() public {
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
+
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR,
+            ONDO_ADDR,
+            address(0xdead),
+            uint8(0),
+            uint256(1e6),
+            abi.encodePacked(bytes4(0x4dcebcba))
+        );
+
+        vm.expectRevert(BebopExecutor.BebopExecutor__InvalidTarget.selector);
+        bebopExecutor.swap(1e6, params, address(this));
+    }
+
+    function testSwapInvalidSelectorOnSettlement() public {
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
+
+        // A selector the settlement does not expose
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR,
+            ONDO_ADDR,
+            BEBOP_SETTLEMENT,
+            uint8(0),
+            uint256(1e6),
+            abi.encodePacked(bytes4(0xdeadbeef))
+        );
+
+        vm.expectRevert(BebopExecutor.BebopExecutor__InvalidSelector.selector);
+        bebopExecutor.swap(1e6, params, address(this));
+    }
+
+    function testSwapRouterSelectorOnSettlementReverts() public {
+        bebopExecutor = new BebopExecutorExposed(BEBOP_SETTLEMENT, BEBOP_ROUTER);
+
+        // The router selector is not valid when the target is the settlement
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR,
+            ONDO_ADDR,
+            BEBOP_SETTLEMENT,
+            uint8(0),
+            uint256(1e6),
+            abi.encodePacked(bytes4(0x9586d0e8))
+        );
+
+        vm.expectRevert(BebopExecutor.BebopExecutor__InvalidSelector.selector);
+        bebopExecutor.swap(1e6, params, address(this));
     }
 }
 
