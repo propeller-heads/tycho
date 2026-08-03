@@ -1,6 +1,13 @@
 {
   "ethereum": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ring_swap_v2": {
+      "contract": "RingSwapV2Executor",
+      "args": [
+        "0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD",
+        "0xeb2A625B704d73e82946D8d026E1F588Eed06416"
+      ]
+    },
     "pancakeswap_v2": { "contract": "UniswapV2Executor", "args": [25] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
@@ -181,6 +188,24 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    }
+  },
+  "plasma": {
+    "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
+    "fluid_v1": {
+      "contract": "FluidV1Executor",
+      "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
+    },
+    "vm:curve": {
+      "contract": "CurveExecutor",
+      "args": [
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "0x0000000000000000000000000000000000000000"
+      ]
+    },
+    "native_wrapper": {
+      "contract": "NativeWrapExecutor",
+      "args": ["0x6100E367285b01F48D07953803A2d8dCA5D19873"]
     }
   }
 }

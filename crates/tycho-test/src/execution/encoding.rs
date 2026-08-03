@@ -40,7 +40,10 @@ pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
 const FERMISWAP_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
-const FERMISWAP_TARGET_ADDRESS: &str = "0xe514A3c48DA8B233f65b5d15BA1905d6d35BFE48";
+// The Fermi engine currently pointed at by the swapper's storage slot 2. Fermi migrates engines
+// by re-pointing the swapper (last: 2026-07-21, block 25581704); update this together with
+// `engine_address` in the fermiswap substreams params, or lane overwrites patch a dead slot.
+const FERMISWAP_TARGET_ADDRESS: &str = "0x90f73fEA1Ee2Dc514d4dbAc0bfF7ff04b933767f";
 // BopAMM prices its books from the same PrioUpdateRegistry as FermiSwap; only the registry
 // `target` differs — it is the pricing module, and the lane index is the book's `assetId`.
 const BOPAMM_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";

@@ -10,8 +10,7 @@ This quickstart guide enables you to:
 You need to set up the WebSocket credentials of the desired RFQs to access live pricing data:
 
 ```bash
-export BEBOP_USER=<your-bebop-ws-username>
-export BEBOP_KEY=<your-bebop-ws-key>
+export BEBOP_KEY=<your-bebop-api-key>
 
 export HASHFLOW_USER=<your-ws-hashflow-username>
 export HASHFLOW_KEY=<your-ws-hashflow-key>

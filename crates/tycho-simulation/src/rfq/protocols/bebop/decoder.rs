@@ -86,7 +86,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
             InvalidSnapshotError::ValueError(format!("Failed to get Bebop authentication: {e}"))
         })?;
 
-        let client = BebopClientBuilder::new(snapshot.component.chain, auth.user, auth.key)
+        let client = BebopClientBuilder::new(snapshot.component.chain, auth.key)
             .build()
             .map_err(|e| {
                 InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
@@ -186,7 +186,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_with_header() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         let (snapshot, tokens) = create_test_snapshot();
@@ -212,7 +211,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_missing_token() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         // Test missing second token (only one token in array)
@@ -231,7 +229,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_missing_bids() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         // Should decode an empty array of bids
@@ -251,7 +248,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_invalid_json() {
-        env::set_var("BEBOP_USER", "test_user");
         env::set_var("BEBOP_KEY", "test_key");
 
         let (mut snapshot, tokens) = create_test_snapshot();

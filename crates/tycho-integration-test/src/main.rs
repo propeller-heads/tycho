@@ -37,7 +37,7 @@ use tycho_simulation::{
         hashflow::{client::HashflowClient, state::HashflowState},
         liquorice::{client::LiquoriceClient, state::LiquoriceState},
     },
-    tycho_common::models::{Chain, TvlThresholdTier},
+    tycho_common::models::{chain_config::TvlThresholdTier, Chain},
     utils::load_all_tokens,
 };
 use tycho_test::{
@@ -1055,7 +1055,10 @@ async fn process_update(
         }
     }
     if n_reverts > 0 || n_failures > 0 {
-        warn!("For block {}, simulated {total_simulations} executions, {n_reverts} simulations reverted, {n_failures} executions setup failed", block.number())
+        warn!(
+            "For block {}, simulated {total_simulations} executions, {n_reverts} simulations reverted, {n_failures} executions setup failed",
+            block.number()
+        )
     }
 
     Ok(())

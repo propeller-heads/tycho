@@ -9,8 +9,10 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     hash::{Hash, Hasher},
+    str::FromStr,
 };
 
+use arrayvec::ArrayString;
 use chrono::{NaiveDateTime, Utc};
 use deepsize::{Context, DeepSizeOf};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -20,7 +22,10 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    models::{self, Address, Balance, Code, ComponentId, StoreKey, StoreVal},
+    models::{
+        self, chain_config::ChainConfigError, Address, Balance, Code, ComponentId, StoreKey,
+        StoreVal,
+    },
     serde_primitives::{
         hex_bytes, hex_bytes_option, hex_hashmap_key, hex_hashmap_key_value, hex_hashmap_value,
     },
@@ -28,23 +33,8 @@ use crate::{
 };
 
 /// Currently supported Blockchains
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumString,
-    Display,
-    Default,
-    ToSchema,
-    DeepSizeOf,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
 pub enum Chain {
     #[default]
     Ethereum,
@@ -55,14 +45,38 @@ pub enum Chain {
     Bsc,
     Unichain,
     Polygon,
+    Plasma,
+    Robinhood,
+    #[schema(value_type = String)]
+    Custom(ArrayString<32>),
 }
 
-pub use models::TvlThresholdTier;
+impl DeepSizeOf for Chain {
+    fn deep_size_of_children(&self, _context: &mut Context) -> usize {
+        0
+    }
+}
+
+pub use models::chain_config::TvlThresholdTier;
 
 impl Chain {
     /// Returns a default TVL threshold in native token units for the given tier.
     pub fn default_tvl_threshold(&self, tier: TvlThresholdTier) -> f64 {
         models::Chain::from(*self).default_tvl_threshold(tier)
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        models::Chain::from(*self).fmt(f)
+    }
+}
+
+impl FromStr for Chain {
+    type Err = ChainConfigError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        models::Chain::from_str(s).map(Self::from)
     }
 }
 
@@ -99,6 +113,12 @@ impl From<models::Chain> for Chain {
             models::Chain::Bsc => Chain::Bsc,
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
+            models::Chain::Plasma => Chain::Plasma,
+            models::Chain::Robinhood => Chain::Robinhood,
+            models::Chain::Custom(id) => Chain::Custom(
+                ArrayString::from(id.as_str())
+                    .expect("custom chain name is already within 32 bytes"),
+            ),
         }
     }
 }
@@ -610,6 +630,10 @@ impl AccountUpdate {
         Self { address, chain, slots, balance, code, change }
     }
 
+    /// Merges a newer update for the same account into this one.
+    ///
+    /// Fields absent in `other` keep their current values, matching
+    /// [`models::contract::AccountDelta::merge`].
     pub fn merge(&mut self, other: &Self) {
         self.slots.extend(
             other
@@ -617,8 +641,12 @@ impl AccountUpdate {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
-        self.balance.clone_from(&other.balance);
-        self.code.clone_from(&other.code);
+        if other.balance.is_some() {
+            self.balance.clone_from(&other.balance);
+        }
+        if other.code.is_some() {
+            self.code.clone_from(&other.code);
+        }
         self.change = self.change.merge(&other.change);
     }
 }
@@ -2996,6 +3024,41 @@ mod test {
 
         // Assert the new account1 equals to the expected state
         assert_eq!(account1, expected);
+    }
+
+    #[test]
+    fn test_account_update_merge_keeps_code_and_balance_when_other_carries_none() {
+        let mut creation = AccountUpdate::new(
+            Bytes::from(b"0x1234"),
+            Chain::Ethereum,
+            HashMap::from([(Bytes::from("0xaabb"), Bytes::from("0xccdd"))]),
+            Some(Bytes::from("0x1000")),
+            Some(Bytes::from("0xdeadbeaf")),
+            ChangeType::Creation,
+        );
+
+        // Storage-only delta for the same account, as produced during catch-up reduce(merge).
+        let storage_only_update = AccountUpdate::new(
+            Bytes::from(b"0x1234"),
+            Chain::Ethereum,
+            HashMap::from([(Bytes::from("0xeeff"), Bytes::from("0x11223344"))]),
+            None,
+            None,
+            ChangeType::Update,
+        );
+
+        creation.merge(&storage_only_update);
+
+        assert_eq!(creation.change, ChangeType::Creation);
+        assert_eq!(creation.code, Some(Bytes::from("0xdeadbeaf")));
+        assert_eq!(creation.balance, Some(Bytes::from("0x1000")));
+        assert_eq!(
+            creation.slots,
+            HashMap::from([
+                (Bytes::from("0xaabb"), Bytes::from("0xccdd")),
+                (Bytes::from("0xeeff"), Bytes::from("0x11223344")),
+            ])
+        );
     }
 
     #[test]

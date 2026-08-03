@@ -44,6 +44,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "rfq:liquorice",
     "rfq:metric",
     "erc4626",
+    "ring_swap_v2",
 ];
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
@@ -257,6 +258,19 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER, fee path adds it
         assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_single_transfer_from_with_approval() {
+        let solution = make_solution(vec![make_swap("ring_swap_v2")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer (router → wrapper)    60_000  ← measured token gas
+        // approval (ProtocolWillDebit)         25_000  ← TOKEN_APPROVAL_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← measured token gas
+        assert_eq!(gas, BigUint::from(285_000u64));
     }
 
     #[test]

@@ -472,8 +472,8 @@ where
                 .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
 
                 // Force-overwrite new proxy token accounts so that authoritative vm_storage data
-                // always wins over any empty placeholder previously inserted by another
-                // decoder's snapshot loop (which uses init_account / init-if-not-exists).
+                // always wins over any empty placeholder previously inserted by engine setup
+                // (which uses init_account / init-if-not-exists).
                 if !proxy_creates.is_empty() {
                     SHARED_TYCHO_DB
                         .force_update_accounts(proxy_creates)
@@ -718,8 +718,13 @@ where
                             Some(impl_addr) => {
                                 // Token already has a proxy contract.
 
-                                // Apply the storage update to proxy contract
-                                let proxy_update = AccountUpdate { code: None, ..update.clone() };
+                                // The proxy account already exists, so this is always a plain
+                                // storage update regardless of the incoming change type.
+                                let proxy_update = AccountUpdate {
+                                    code: None,
+                                    change: ChangeType::Update,
+                                    ..update.clone()
+                                };
                                 account_update_by_address.insert(original_address, proxy_update);
 
                                 *impl_addr
@@ -738,8 +743,8 @@ where
 
                                 // Create proxy token account with original account's storage (at
                                 // original address). Track it separately so it can be
-                                // force-overwritten and win over any placeholder that another
-                                // decoder's snapshot loop may have written earlier.
+                                // force-overwritten and win over any placeholder that an engine
+                                // setup routine may have written earlier.
                                 let proxy_state = create_proxy_token_account(
                                     original_address,
                                     Some(impl_addr),
@@ -780,7 +785,7 @@ where
                 .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
 
                 // Force-overwrite any newly-created proxy token accounts so they always win
-                // over placeholder entries inserted by other decoders' snapshot loops.
+                // over placeholder entries inserted by engine setup.
                 if !new_proxy_accounts.is_empty() {
                     SHARED_TYCHO_DB
                         .force_update_accounts(new_proxy_accounts)
@@ -1323,6 +1328,27 @@ mod tests {
         assert_eq!(res2.states.len(), 1);
         assert_eq!(res1.sync_states.len(), 1);
         assert_eq!(res2.sync_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_decode_token_creation_delta_with_existing_proxy() {
+        let decoder = setup_decoder(true).await;
+        let msg = load_test_msg("uniswap_v2_delta_token_creation");
+
+        // First decode: the token has no proxy yet, so the Creation delta takes the
+        // proxy-creating branch.
+        decoder
+            .decode(&msg)
+            .await
+            .expect("first decode (proxy creation) failed");
+
+        // Second decode: the proxy exists, so the same Creation delta must decode as a
+        // storage update on the proxy account — not a code-less Creation, which the
+        // engine rejects as "MissingCode".
+        decoder
+            .decode(&msg)
+            .await
+            .expect("decode of a token Creation delta with an existing proxy failed");
     }
 
     #[tokio::test]

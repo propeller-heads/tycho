@@ -33,7 +33,7 @@ use tycho_execution::encoding::{
         utils::biguint_to_u256,
     },
     models,
-    models::{EncodedSolution, Solution, Swap, UserTransferType},
+    models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
     protocol::models::{ProtocolComponent, Update},
@@ -125,19 +125,19 @@ async fn main() {
         env::var("TYCHO_API_KEY").unwrap_or_else(|_| "sampletoken".to_string());
 
     // Get credentials for any RFQ(s) we are using
-    let (bebop_user, bebop_key) = (env::var("BEBOP_USER").ok(), env::var("BEBOP_KEY").ok());
+    let bebop_key = env::var("BEBOP_KEY").ok();
     let (hashflow_user, hashflow_key) =
         (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
-    if (bebop_user.is_none() || bebop_key.is_none()) &&
+    if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
         (liquorice_user.is_none() || liquorice_key.is_none())
     {
         if cli.run_pamm_protocols {
             println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
         } else {
-            panic!("No RFQ credentials found. Please set BEBOP_USER and BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
         }
     }
 
@@ -202,9 +202,9 @@ async fn main() {
     let mut rfq_stream_builder = RFQStreamBuilder::new()
         .set_tokens(all_tokens.clone())
         .await;
-    if let (Some(user), Some(key)) = (bebop_user, bebop_key) {
+    if let Some(key) = bebop_key {
         println!("Setting up Bebop RFQ client...\n");
-        let bebop_client = BebopClientBuilder::new(chain, user, key)
+        let bebop_client = BebopClientBuilder::new(chain, key)
             .tokens(rfq_tokens.clone())
             .tvl_threshold(cli.tvl_threshold)
             .build()
@@ -836,12 +836,17 @@ fn encode_tycho_router_call(
         .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
     let signature = sign_permit(chain_id, &p, signer)?;
 
+    // The router's singleSwapPermit2 expects a ClientFeeParams struct after `receiver`.
+    // This quickstart charges no client fee, so pass the zeroed default.
+    let client_fee_params = ClientFeeParams::default().into_abi_params();
+
     let method_calldata = (
         given_amount,
         given_token,
         checked_token,
         min_amount_out,
         receiver,
+        client_fee_params,
         permit,
         signature.as_bytes().to_vec(),
         encoded_solution.swaps().to_vec(),
