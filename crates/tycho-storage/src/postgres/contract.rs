@@ -614,14 +614,6 @@ impl PostgresGateway {
         Ok(())
     }
 
-    /// Retrieve contract slots.
-    ///
-    /// Retrieve the storage slots of contracts at a given time/version.
-    ///
-    /// Will return the slots state after the given block/timestamp. Later we
-    /// might change to use VersionResult, but for now we keep it simple. Using
-    /// anything else then Version::Last is currently not supported.
-    ///
     /// Requests that are not pinned to a specific block can be served from the current state.
     ///
     /// Returns the version to read at, or `None` if the request asks for whatever is newest. Only
@@ -648,6 +640,14 @@ impl PostgresGateway {
         Some(version)
     }
 
+    /// Retrieve contract slots.
+    ///
+    /// Retrieve the storage slots of contracts at a given time/version.
+    ///
+    /// Will return the slots state after the given block/timestamp. Later we
+    /// might change to use VersionResult, but for now we keep it simple. Using
+    /// anything else then Version::Last is currently not supported.
+    ///
     /// # Parameters
     /// - `chain` The chain for which to retrieve slots for.
     /// - `contracts` Optionally allows filtering by contract address.
