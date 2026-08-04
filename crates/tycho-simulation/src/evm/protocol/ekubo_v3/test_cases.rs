@@ -35,7 +35,7 @@ use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS, VE33_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS, VE33_ROBINHOOD_ADDRESS,
     },
     pool::{
         boosted_fees::BoostedFeesPool,
@@ -378,7 +378,7 @@ pub fn ve33() -> TestCase {
         config: EvmFullRangePoolConfig {
             fee: 0,
             pool_type_config: FullRangePoolTypeConfig,
-            extension: VE33_ADDRESS,
+            extension: VE33_ROBINHOOD_ADDRESS,
         },
     };
 
@@ -403,25 +403,28 @@ pub fn ve33() -> TestCase {
     };
 
     TestCase {
-        component: component([
-            ("token0".to_string(), POOL_KEY.token0.into_array().into()),
-            ("token1".to_string(), POOL_KEY.token1.into_array().into()),
-            ("fee".to_string(), POOL_KEY.config.fee.into()),
-            (
-                "pool_type_config".to_string(),
-                B32::from(EvmPoolTypeConfig::FullRange(POOL_KEY.config.pool_type_config))
-                    .0
-                    .into(),
-            ),
-            (
-                "extension".to_string(),
-                POOL_KEY
-                    .config
-                    .extension
-                    .into_array()
-                    .into(),
-            ),
-        ]),
+        component: ProtocolComponent {
+            chain: Chain::Robinhood,
+            ..component([
+                ("token0".to_string(), POOL_KEY.token0.into_array().into()),
+                ("token1".to_string(), POOL_KEY.token1.into_array().into()),
+                ("fee".to_string(), POOL_KEY.config.fee.into()),
+                (
+                    "pool_type_config".to_string(),
+                    B32::from(EvmPoolTypeConfig::FullRange(POOL_KEY.config.pool_type_config))
+                        .0
+                        .into(),
+                ),
+                (
+                    "extension".to_string(),
+                    POOL_KEY
+                        .config
+                        .extension
+                        .into_array()
+                        .into(),
+                ),
+            ])
+        },
         state_before_transition: pool(EVM_MIN_SQRT_RATIO, 0),
         state_after_transition: pool(SQRT_RATIO, SWAP_FEE),
         required_attributes: [
