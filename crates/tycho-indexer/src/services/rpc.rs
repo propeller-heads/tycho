@@ -294,8 +294,7 @@ where
         // When addresses are given, the slice above already is the page, so the db must not
         // paginate again - its offset would be applied a second time and skip the whole page.
         // Without addresses the db owns pagination and also reports the total page count.
-        let db_pagination =
-            if paginated_addrs.is_some() { None } else { Some(&pagination_params) };
+        let db_pagination = if paginated_addrs.is_some() { None } else { Some(&pagination_params) };
 
         // Get the contract states from the database
         let account_data = self
@@ -1805,10 +1804,11 @@ mod tests {
             None,
         );
 
+        // The address and pagination arguments the gateway was called with.
+        type ObservedArgs = Option<(Option<Vec<Bytes>>, Option<PaginationParams>)>;
+
         let mut gw = MockGateway::new();
-        #[allow(clippy::type_complexity)]
-        let observed_args: Arc<Mutex<Option<(Option<Vec<Bytes>>, Option<PaginationParams>)>>> =
-            Arc::new(Mutex::new(None));
+        let observed_args: Arc<Mutex<ObservedArgs>> = Arc::new(Mutex::new(None));
         let args_writer = observed_args.clone();
         let response = expected.clone();
         gw.expect_get_contracts()
