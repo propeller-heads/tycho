@@ -28,11 +28,19 @@ networks:
     initialBlock:
       map_events: 24134506 # First pool creation
 
+# The Ve33 extension address for the indexed chain, or empty on chains
+# without a Ve33 deployment (e.g. Ethereum). Override at deployment time,
+# e.g. `-p map_events=0x... -p map_components=0x...`.
+params:
+  map_events: ""
+  map_components: ""
+
 modules:
   # Stage 1
   - name: map_events
     kind: map
     inputs:
+      - params: string
       - source: sf.ethereum.type.v2.Block
     output:
       type: proto:ekubo.BlockTransactionEvents
@@ -41,6 +49,7 @@ modules:
   - name: map_components
     kind: map
     inputs:
+      - params: string
       - map: map_events
     output:
       type: proto:tycho.evm.v1.BlockChanges

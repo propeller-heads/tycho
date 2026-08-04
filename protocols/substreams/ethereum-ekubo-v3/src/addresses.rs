@@ -7,4 +7,3 @@ pub const BOOSTED_FEES_CONCENTRATED_ADDRESS: Address =
 // TODO: replace with the deployed SignedExclusiveSwap extension address.
 pub const SIGNED_EXCLUSIVE_SWAP_ADDRESS: Address =
     address!("0x5519eD5e5e5E5E5e5E5E5e5e5e5E5e5e5e5E5E5E");
-pub const VE33_ADDRESS: Address = address!("0xD18685a514E59b06d59824e16Db07e73345d9953");

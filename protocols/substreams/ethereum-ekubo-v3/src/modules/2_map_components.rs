@@ -1,4 +1,4 @@
-use alloy_primitives::{aliases::B32, B256};
+use alloy_primitives::{aliases::B32, Address, B256};
 use ekubo_sdk::chain::evm::EvmPoolConfig;
 use itertools::Itertools;
 use substreams::scalar::BigInt;
@@ -9,7 +9,7 @@ use tycho_substreams::models::{
 };
 
 use crate::{
-    addresses::{CORE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS, VE33_ADDRESS},
+    addresses::{CORE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS},
     pb::ekubo::{
         block_transaction_events::transaction_events::{pool_log::Event, PoolLog},
         BlockTransactionEvents,
@@ -17,7 +17,9 @@ use crate::{
 };
 
 #[substreams::handlers::map]
-fn map_components(block_tx_events: BlockTransactionEvents) -> BlockChanges {
+fn map_components(params: String, block_tx_events: BlockTransactionEvents) -> BlockChanges {
+    let ve33_address = crate::params::ve33_address(&params);
+
     BlockChanges {
         block: None,
         changes: block_tx_events
@@ -27,7 +29,9 @@ fn map_components(block_tx_events: BlockTransactionEvents) -> BlockChanges {
                 let (components, entities, balance_changes): (Vec<_>, Vec<_>, Vec<_>) = tx_events
                     .pool_logs
                     .into_iter()
-                    .filter_map(|log| maybe_create_component(log, block_tx_events.timestamp))
+                    .filter_map(|log| {
+                        maybe_create_component(log, block_tx_events.timestamp, ve33_address)
+                    })
                     .multiunzip();
 
                 (!components.is_empty()).then(|| TransactionChanges {
@@ -50,6 +54,7 @@ fn map_components(block_tx_events: BlockTransactionEvents) -> BlockChanges {
 fn maybe_create_component(
     log: PoolLog,
     timestamp: u64,
+    ve33_address: Option<Address>,
 ) -> Option<(ProtocolComponent, EntityChanges, Vec<BalanceChange>)> {
     let Event::PoolInitialized(pi) = log.event.unwrap() else {
         return None;
@@ -104,7 +109,7 @@ fn maybe_create_component(
     )
     .expect("pool config to be valid");
 
-    if pool_config.extension == VE33_ADDRESS {
+    if Some(pool_config.extension) == ve33_address {
         entity_attributes.push(Attribute {
             change: ChangeType::Creation.into(),
             name: "swap_fee".to_string(),
