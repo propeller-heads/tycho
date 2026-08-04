@@ -166,7 +166,14 @@ impl RamsesV3State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::Empty => {
+                        return Err(SimulationError::RecoverableError("No liquidity".to_string()))
+                    }
+                    TickListErrorKind::NotFound |
+                    TickListErrorKind::BelowSmallest |
+                    TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -606,6 +613,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.amount, BigUint::from_str("64352395915550406461").unwrap());
+    }
+
+    /// A pool whose ticks have all been removed can still carry non-zero `liquidity`, because the
+    /// two are updated independently: tick deltas drop entries at zero net liquidity without
+    /// touching the pool's liquidity attribute. Quoting such a pool must report no liquidity
+    /// rather than indexing an empty tick list. Ramses's `has_initialized_ticks` guard already
+    /// stops the swap before the tick walk, so this test pins that guard rather than the
+    /// `Empty` handling below it.
+    #[test]
+    fn test_empty_tick_list_with_liquidity_errors_instead_of_panicking() {
+        let wbtc = Token::new(
+            &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let pool = RamsesV3State::new(
+            377952820878029838,
+            U256::from_str("28437325270877025820973479874632004").unwrap(),
+            500,
+            10,
+            255830,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+
+        let result = pool.get_amount_out(500000000.to_biguint().unwrap(), &wbtc, &weth);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {result:?}"
+        );
     }
 
     #[test]

@@ -202,7 +202,14 @@ impl AerodromeSlipstreamsState {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::Empty => {
+                        return Err(SimulationError::RecoverableError("No liquidity".to_string()))
+                    }
+                    TickListErrorKind::NotFound |
+                    TickListErrorKind::BelowSmallest |
+                    TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -653,6 +660,68 @@ mod tests {
             },
         },
     };
+
+    /// A pool whose ticks have all been removed can still carry non-zero `liquidity`, because the
+    /// two are updated independently: tick deltas drop entries at zero net liquidity without
+    /// touching the pool's liquidity attribute. Swapping such a pool must report no liquidity
+    /// rather than indexing an empty tick list.
+    #[test]
+    fn test_empty_tick_list_with_liquidity_errors_instead_of_panicking() {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let pool = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            0,
+            1,
+            3000,
+            1,
+            0,
+            vec![],
+            vec![Observation::default()],
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
+        )
+        .expect("an empty tick list is a valid pool state");
+        let amount =
+            I256::checked_from_sign_and_abs(Sign::Positive, U256::from(100_000_000_000_000_000u64))
+                .unwrap();
+
+        let result = pool.swap(true, amount, None);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {result:?}"
+        );
+    }
+
+    /// `get_limits` walks the tick list from the current tick. With no ticks to walk there is no
+    /// tradeable range, which it reports as zero limits rather than by indexing the empty list.
+    #[test]
+    fn test_get_limits_on_empty_tick_list_returns_zero() {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let pool = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            0,
+            1,
+            3000,
+            1,
+            0,
+            vec![],
+            vec![Observation::default()],
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
+        )
+        .expect("an empty tick list is a valid pool state");
+
+        let limits = pool
+            .get_limits(Bytes::from([0_u8; 20]), Bytes::from([1_u8; 20]))
+            .expect("limits of a pool without ticks are computable");
+
+        assert_eq!(limits, (BigUint::zero(), BigUint::zero()));
+    }
 
     fn create_basic_test_pool() -> AerodromeSlipstreamsState {
         let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");

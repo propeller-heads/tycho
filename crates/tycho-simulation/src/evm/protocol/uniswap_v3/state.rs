@@ -162,7 +162,14 @@ impl UniswapV3State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::Empty => {
+                        return Err(SimulationError::RecoverableError("No liquidity".to_string()))
+                    }
+                    TickListErrorKind::NotFound |
+                    TickListErrorKind::BelowSmallest |
+                    TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -504,7 +511,9 @@ impl ProtocolSim for UniswapV3State {
     /// until the target price is reached.
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
         if self.liquidity == 0 {
-            return Err(SimulationError::FatalError("No liquidity".to_string()));
+            // Recoverable, not fatal: an uninitialized pool stays in the state map so later
+            // deltas can populate it, and a fatal error would let consumers blacklist it forever.
+            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
 
         match params.swap_constraint() {
@@ -633,6 +642,148 @@ mod tests {
         symbol: &'static str,
         sell: BigUint,
         exp: BigUint,
+    }
+
+    /// A pool whose ticks have all been removed can still carry non-zero `liquidity`, because
+    /// the two are updated independently: tick deltas drop entries at zero net liquidity without
+    /// touching the pool's liquidity attribute. Quoting such a pool must report no liquidity
+    /// rather than indexing an empty tick list.
+    #[test]
+    fn test_empty_tick_list_with_liquidity_errors_instead_of_panicking() {
+        let wbtc = Token::new(
+            &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let pool = UniswapV3State::new(
+            377952820878029838,
+            U256::from_str("28437325270877025820973479874632004").unwrap(),
+            FeeAmount::Low,
+            255830,
+            vec![],
+        )
+        .unwrap();
+
+        let result = pool.get_amount_out(BigUint::from(1000u32), &wbtc, &weth);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {result:?}"
+        );
+    }
+
+    /// The reason the decoder keeps tick-less pools instead of rejecting them: a pool that quotes
+    /// nothing today becomes tradeable again as soon as a delta delivers its ticks. Rejecting the
+    /// snapshot would drop the state, and the delta would have nothing to apply to.
+    #[test]
+    fn test_empty_pool_recovers_after_delta_repopulates_ticks() {
+        let token_x = Token::new(
+            &Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
+            "X",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let token_y = Token::new(
+            &Bytes::from_str("0xf1ca9cb74685755965c7458528a36934df52a3ef").unwrap(),
+            "Y",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let mut pool = UniswapV3State::new(
+            8330443394424070888454257,
+            U256::from_str("188562464004052255423565206602").unwrap(),
+            FeeAmount::Medium,
+            17342,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+        let sell_amount = BigUint::from_str("11_000_000000000000000000").unwrap();
+
+        let before = pool.get_amount_out(sell_amount.clone(), &token_x, &token_y);
+
+        assert!(
+            matches!(before, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {before:?}"
+        );
+
+        let attributes: HashMap<String, Bytes> = [
+            (
+                "liquidity".to_string(),
+                Bytes::from(
+                    8330443394424070888454257_u128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            ),
+            (
+                "sqrt_price_x96".to_string(),
+                Bytes::from(
+                    188562464004052255423565206602_u128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            ),
+            ("tick".to_string(), Bytes::from(17342_i32.to_be_bytes().to_vec())),
+            ("ticks/0/net_liquidity".to_string(), Bytes::from(10000_i128.to_be_bytes().to_vec())),
+            (
+                "ticks/46080/net_liquidity".to_string(),
+                Bytes::from((-10000_i128).to_be_bytes().to_vec()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: attributes,
+            deleted_attributes: HashSet::new(),
+        };
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("a delta carrying ticks applies to a pool that has none");
+
+        let after = pool
+            .get_amount_out(sell_amount, &token_x, &token_y)
+            .expect("a repopulated pool quotes again");
+
+        assert!(after.amount > BigUint::zero(), "expected a non-zero quote, got {}", after.amount);
+    }
+
+    /// `get_limits` walks the tick list from the current tick. With no ticks to walk there is no
+    /// tradeable range, which it reports as zero limits rather than by indexing the empty list.
+    #[test]
+    fn test_get_limits_on_empty_tick_list_returns_zero() {
+        let pool = UniswapV3State::new(
+            1000000,
+            U256::from_str("79228162514264337593543950336").unwrap(),
+            FeeAmount::Medium,
+            0,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+
+        let limits = pool
+            .get_limits(Bytes::from([0_u8; 20]), Bytes::from([1_u8; 20]))
+            .expect("limits of a pool without ticks are computable");
+
+        assert_eq!(limits, (BigUint::zero(), BigUint::zero()));
     }
 
     #[test]

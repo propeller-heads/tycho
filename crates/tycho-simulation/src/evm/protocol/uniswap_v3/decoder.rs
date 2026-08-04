@@ -116,15 +116,26 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
             })
             .collect();
 
-        let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
-                .into_iter()
-                .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
-            _ => return Err(InvalidSnapshotError::MissingAttribute("tick_liquidities".to_string())),
-        };
+        // An empty tick list is valid: a pool that is not yet initialized (or whose ticks have all
+        // been drained to zero net liquidity) decodes to a state that gracefully returns
+        // "No liquidity" on quote. Rejecting it here would leave no state for later deltas to
+        // repopulate, keeping the pool invisible until the next snapshot.
+        let mut ticks: Vec<_> = ticks?
+            .into_iter()
+            .filter(|tick| tick.net_liquidity != 0)
+            .collect();
 
         ticks.sort_by_key(|tick| tick.index);
+
+        if liquidity != 0 && ticks.is_empty() {
+            // On-chain, nonzero in-range liquidity implies at least one initialized tick, so this
+            // combination only arises from incomplete tick data upstream. The state still decodes
+            // and quotes report no liquidity; the log preserves the data-quality signal.
+            tracing::warn!(
+                pool_id = %snapshot.component.id,
+                "snapshot carries nonzero liquidity but no initialized ticks"
+            );
+        }
 
         UniswapV3State::new(liquidity, sqrt_price, fee, tick, ticks)
             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
@@ -206,21 +217,73 @@ mod tests {
         assert_eq!(result.unwrap(), expected);
     }
 
+    /// A snapshot whose ticks all carry zero net liquidity decodes to an empty tick list rather
+    /// than being rejected: the pool must exist so later deltas can repopulate it, and quoting it
+    /// meanwhile reports no liquidity instead of indexing the empty list.
+    #[tokio::test]
+    async fn test_usv3_try_from_all_zero_ticks_decodes_to_empty_list() {
+        let mut attributes = usv3_attributes();
+        attributes.insert(
+            "ticks/60/net_liquidity".to_string(),
+            Bytes::from(0_i128.to_be_bytes().to_vec()),
+        );
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv3_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let decoded = try_decode_snapshot_with_defaults::<UniswapV3State>(snapshot)
+            .await
+            .expect("an all-zero tick set is a decodable, empty pool");
+
+        let expected =
+            UniswapV3State::new(100, U256::from(200), FeeAmount::Medium, 300, vec![]).unwrap();
+        assert_eq!(decoded, expected);
+    }
+
+    /// A snapshot carrying no `ticks/*` attributes at all decodes to an empty tick list. Such a
+    /// snapshot describes a pool whose ticks the indexer has not delivered yet; keeping the state
+    /// lets a later delta fill in the ticks instead of hiding the pool until the next snapshot.
+    #[tokio::test]
+    async fn test_usv3_try_from_no_tick_attributes_decodes_to_empty_list() {
+        let mut attributes = usv3_attributes();
+        attributes.retain(|key, _| !key.starts_with("ticks/"));
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv3_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let decoded = try_decode_snapshot_with_defaults::<UniswapV3State>(snapshot)
+            .await
+            .expect("a snapshot without tick attributes is a decodable, empty pool");
+
+        let expected =
+            UniswapV3State::new(100, U256::from(200), FeeAmount::Medium, 300, vec![]).unwrap();
+        assert_eq!(decoded, expected);
+    }
+
     #[tokio::test]
     #[rstest]
     #[case::missing_liquidity("liquidity")]
     #[case::missing_sqrt_price("sqrt_price")]
     #[case::missing_tick("tick")]
-    #[case::missing_tick_liquidity("tick_liquidities")]
     #[case::missing_fee("fee")]
     async fn test_usv3_try_from_invalid(#[case] missing_attribute: String) {
         // remove missing attribute
         let mut attributes = usv3_attributes();
         attributes.remove(&missing_attribute);
-
-        if missing_attribute == "tick_liquidities" {
-            attributes.remove("ticks/60/net_liquidity");
-        }
 
         if missing_attribute == "sqrt_price" {
             attributes.remove("sqrt_price_x96");

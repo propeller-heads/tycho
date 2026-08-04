@@ -39,6 +39,9 @@ pub(crate) enum TickListErrorKind {
     BelowSmallest,
     AtOrAboveLargest,
     TicksExeeded,
+    /// The list holds no ticks, so no tick can bound a swap step. Callers treat this as the
+    /// pool having no tradeable range, the same way they treat zero liquidity.
+    Empty,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,8 +139,13 @@ impl TickList {
                 }
             }
             Err(insert_idx) => {
-                self.ticks
-                    .insert(insert_idx, TickInfo::new(tick, liquidity)?);
+                // An absent tick and a zero-net tick are the same state: the removal branch above
+                // already deletes entries that reach zero, so inserting a zero would let a delta
+                // re-create the inconsistent list shape the emptiness guards protect against.
+                if liquidity != 0 {
+                    self.ticks
+                        .insert(insert_idx, TickInfo::new(tick, liquidity)?);
+                }
             }
         }
         Ok(())
@@ -191,6 +199,12 @@ impl TickList {
     }
 
     fn next_initialized_tick(&self, index: i32, lte: bool) -> Result<&TickInfo, TickListError> {
+        // Defensive: the only production caller, next_initialized_tick_within_one_word, guards
+        // first — but the bounds helpers below index `ticks[0]` directly, so this function must
+        // stay safe on an empty list in its own right.
+        if self.ticks.is_empty() {
+            return Err(TickListError { kind: TickListErrorKind::Empty });
+        }
         if lte {
             if self.is_below_smallest(index) {
                 return Err(TickListError { kind: TickListErrorKind::BelowSmallest });
@@ -229,6 +243,11 @@ impl TickList {
         tick: i32,
         lte: bool,
     ) -> Result<(i32, bool), TickListError> {
+        // Both branches below consult the smallest and largest tick, which index the list
+        // directly. An empty list would panic there, so reject it up front.
+        if self.ticks.is_empty() {
+            return Err(TickListError { kind: TickListErrorKind::Empty });
+        }
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -677,5 +696,57 @@ mod tests {
 
         assert!(tick_list.get_tick(-10).is_err());
         assert!(tick_list.get_tick(10).is_err());
+    }
+
+    /// Zeroing a tick the list does not hold must not create it: the list represents an absent
+    /// tick and a zero-net tick as the same state, and inserting one would reintroduce the
+    /// zero-net entries the removal branch exists to drop.
+    #[test]
+    fn test_set_tick_liquidity_zero_on_absent_tick_leaves_list_unchanged() {
+        let mut tick_list =
+            TickList::from(10, vec![create_tick_info(10, 10), create_tick_info(20, -5)]).unwrap();
+        let unchanged = tick_list.clone();
+
+        tick_list
+            .set_tick_liquidity(30, 0)
+            .unwrap();
+
+        assert_eq!(tick_list, unchanged);
+    }
+
+    #[test]
+    fn test_set_tick_liquidity_zero_removes_existing_tick() {
+        let mut tick_list =
+            TickList::from(10, vec![create_tick_info(10, 10), create_tick_info(20, -5)]).unwrap();
+
+        tick_list
+            .set_tick_liquidity(20, 0)
+            .unwrap();
+
+        assert_eq!(tick_list.ticks, vec![create_tick_info(10, 10)]);
+    }
+
+    /// An empty tick list has no first or last tick, and the bounds helpers index both directly.
+    /// Both lookups must report `Empty` rather than panicking, because a pool can reach this
+    /// state with liquidity still set — see the CLMM states' `Empty` handling.
+    #[test]
+    fn test_empty_tick_list_reports_empty_instead_of_panicking() {
+        let tick_list = TickList::from(10, vec![]).unwrap();
+
+        for lte in [true, false] {
+            let within_word = tick_list.next_initialized_tick_within_one_word(0, lte);
+            assert_eq!(
+                within_word.unwrap_err().kind,
+                TickListErrorKind::Empty,
+                "next_initialized_tick_within_one_word(lte={lte})"
+            );
+
+            let next = tick_list.next_initialized_tick(0, lte);
+            assert_eq!(
+                next.unwrap_err().kind,
+                TickListErrorKind::Empty,
+                "next_initialized_tick(lte={lte})"
+            );
+        }
     }
 }

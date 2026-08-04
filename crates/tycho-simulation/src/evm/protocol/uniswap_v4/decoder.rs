@@ -127,24 +127,27 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             .static_attributes
             .get("hooks");
 
-        let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
-                .into_iter()
-                .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
-            _ => {
-                // there might be pools where the liquidity is managed by the hook
-                if hook_address.is_some() {
-                    Vec::new()
-                } else {
-                    return Err(InvalidSnapshotError::MissingAttribute(
-                        "tick_liquidities".to_string(),
-                    ));
-                }
-            }
-        };
+        // An empty tick list is valid: a pool that is not yet initialized, whose ticks have all
+        // been drained to zero net liquidity, or whose liquidity is managed by a hook decodes to
+        // a state that gracefully returns "No liquidity" on quote. Rejecting it here would leave
+        // no state for later deltas to repopulate, keeping the pool invisible until the next
+        // snapshot.
+        let mut ticks: Vec<_> = ticks?
+            .into_iter()
+            .filter(|tick| tick.net_liquidity != 0)
+            .collect();
 
         ticks.sort_by_key(|tick| tick.index);
+
+        if liquidity != 0 && ticks.is_empty() {
+            // On-chain, nonzero in-range liquidity implies at least one initialized tick, so this
+            // combination only arises from incomplete tick data upstream. The state still decodes
+            // and quotes report no liquidity; the log preserves the data-quality signal.
+            tracing::warn!(
+                pool_id = %snapshot.component.id,
+                "snapshot carries nonzero liquidity but no initialized ticks"
+            );
+        }
 
         let mut state = UniswapV4State::new(liquidity, sqrt_price, fees, tick, tick_spacing, ticks)
             .map_err(|err| {
@@ -204,15 +207,31 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
 mod tests {
     use std::str::FromStr;
 
+    use alloy::primitives::aliases::U24;
     use chrono::DateTime;
+    use num_bigint::BigUint;
     use rstest::rstest;
-    use tycho_common::models::{
-        protocol::{ProtocolComponent, ProtocolComponentState},
-        Chain, ChangeType,
+    use tycho_common::{
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            Chain, ChangeType,
+        },
+        simulation::errors::SimulationError,
     };
 
     use super::*;
-    use crate::evm::protocol::test_utils::try_decode_snapshot_with_defaults;
+    use crate::evm::protocol::{
+        test_utils::try_decode_snapshot_with_defaults,
+        uniswap_v4::hooks::{
+            angstrom::hook_handler::{AngstromFees, AngstromHookHandler},
+            hook_handler_creator::initialize_hook_handlers,
+        },
+    };
+
+    // The Angstrom hook is the only hook whose handler is built without an EVM engine, so it is
+    // the one hooked pool a unit test can decode.
+    const ANGSTROM_HOOK_ADDRESS: [u8; 20] =
+        hex_literal::hex!("0000000aa232009084Bd71A5797d089AA4Edfad4");
 
     fn usv4_component() -> ProtocolComponent {
         let creation_time = DateTime::from_timestamp(1622526000, 0)
@@ -256,6 +275,37 @@ mod tests {
         ])
     }
 
+    fn usv4_hooked_component() -> ProtocolComponent {
+        let mut component = usv4_component();
+        component
+            .static_attributes
+            .insert("hooks".to_string(), Bytes::from(ANGSTROM_HOOK_ADDRESS));
+        component
+    }
+
+    fn usv4_hooked_attributes() -> HashMap<String, Bytes> {
+        let mut attributes = usv4_attributes();
+        attributes.extend([
+            ("balance_owner".to_string(), Bytes::from([0_u8; 20])),
+            ("angstrom_unlocked_fee".to_string(), Bytes::from([0_u8; 3])),
+            ("angstrom_protocol_unlocked_fee".to_string(), Bytes::from([0_u8; 3])),
+            ("angstrom_removed_pool".to_string(), Bytes::from([0_u8])),
+        ]);
+        attributes
+    }
+
+    fn token(last_byte: u8) -> Token {
+        let mut address = [0_u8; 20];
+        address[19] = last_byte;
+        Token::new(&Bytes::from(address), "TKN", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
+    }
+
+    fn limits(state: &UniswapV4State) -> (BigUint, BigUint) {
+        state
+            .get_limits(token(0).address, token(1).address)
+            .expect("limits of a pool without ticks are computable")
+    }
+
     #[tokio::test]
     async fn test_usv4_try_from() {
         let snapshot = ComponentWithState {
@@ -286,12 +336,148 @@ mod tests {
         assert_eq!(result, expected);
     }
 
+    /// A snapshot whose ticks all carry zero net liquidity decodes to an empty tick list rather
+    /// than being rejected: the pool must exist so later deltas can repopulate it, and quoting it
+    /// meanwhile reports no liquidity instead of indexing the empty list.
+    #[tokio::test]
+    async fn test_usv4_try_from_all_zero_ticks_decodes_to_empty_list() {
+        let mut attributes = usv4_attributes();
+        attributes.insert(
+            "ticks/60/net_liquidity".to_string(),
+            Bytes::from(0_i128.to_be_bytes().to_vec()),
+        );
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let decoded = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .expect("an all-zero tick set is a decodable, empty pool");
+
+        // `PartialEq for UniswapV4State` only compares hook handlers, so equality cannot witness
+        // the tick list. The limits do: the fixture's liquidity is non-zero, so a pool that kept
+        // its ticks would report a tradeable range here instead of zero.
+        assert_eq!(limits(&decoded), (BigUint::from(0u32), BigUint::from(0u32)));
+    }
+
+    /// A snapshot carrying no `ticks/*` attributes at all decodes to an empty tick list. Such a
+    /// snapshot describes a pool whose ticks the indexer has not delivered yet, or one whose
+    /// liquidity lives in a hook; keeping the state lets a later delta fill in the ticks instead
+    /// of hiding the pool until the next snapshot.
+    #[tokio::test]
+    async fn test_usv4_try_from_no_tick_attributes_decodes_to_empty_list() {
+        let mut attributes = usv4_attributes();
+        attributes.retain(|key, _| !key.starts_with("ticks/"));
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let decoded = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .expect("a snapshot without tick attributes is a decodable, empty pool");
+
+        assert_eq!(limits(&decoded), (BigUint::from(0u32), BigUint::from(0u32)));
+        let quote = decoded.get_amount_out(BigUint::from(1000u32), &token(0), &token(1));
+        assert!(
+            matches!(quote, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {quote:?}"
+        );
+    }
+
+    /// The same input on a pool whose liquidity is managed by a hook: the hook handler is still
+    /// built, and the pool keeps an empty tick list rather than being rejected.
+    #[tokio::test]
+    async fn test_usv4_try_from_hooked_pool_no_tick_attributes_decodes_to_empty_list() {
+        initialize_hook_handlers().expect("hook handlers should register");
+        let mut attributes = usv4_hooked_attributes();
+        attributes.retain(|key, _| !key.starts_with("ticks/"));
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_hooked_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let decoded = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .expect("a hooked snapshot without tick attributes is a decodable, empty pool");
+
+        // Equality on `UniswapV4State` compares hook handlers only, so it witnesses the hook and
+        // the limits witness the empty tick list.
+        let mut expected = UniswapV4State::new(
+            100,
+            U256::from(79228162514264337593543950336_u128),
+            UniswapV4Fees::new(0, 0, 500),
+            300,
+            60,
+            vec![],
+        )
+        .unwrap();
+        expected.set_hook_handler(Box::new(AngstromHookHandler::new(
+            Address::from(ANGSTROM_HOOK_ADDRESS),
+            Address::ZERO,
+            AngstromFees { unlock: U24::ZERO, protocol_unlock: U24::ZERO },
+            false,
+        )));
+        assert_eq!(decoded, expected);
+        assert_eq!(limits(&decoded), (BigUint::from(0u32), BigUint::from(0u32)));
+    }
+
+    /// A tick attribute the decoder cannot parse is a corrupt snapshot, not an empty pool. Hook
+    /// pools took the same "no ticks" shortcut for parse failures as for missing ticks, which
+    /// turned a corrupt snapshot into a silently liquidity-free pool.
+    #[tokio::test]
+    async fn test_usv4_try_from_hooked_pool_rejects_malformed_tick_index() {
+        initialize_hook_handlers().expect("hook handlers should register");
+        let mut attributes = usv4_hooked_attributes();
+        attributes.insert(
+            "ticks/not-a-number/net_liquidity".to_string(),
+            Bytes::from(400_i128.to_be_bytes().to_vec()),
+        );
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_hooked_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let error = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .expect_err("an unparseable tick index must not decode");
+
+        assert!(
+            matches!(&error, InvalidSnapshotError::ValueError(msg) if msg.contains("invalid digit")),
+            "expected the tick index parse failure to surface, got {error:?}"
+        );
+    }
+
     #[tokio::test]
     #[rstest]
     #[case::missing_liquidity("liquidity")]
     #[case::missing_sqrt_price("sqrt_price")]
     #[case::missing_tick("tick")]
-    #[case::missing_tick_liquidity("tick_liquidities")]
     #[case::missing_fee("key_lp_fee")]
     #[case::missing_fee("protocol_fees/one2zero")]
     #[case::missing_fee("protocol_fees/zero2one")]
@@ -300,10 +486,6 @@ mod tests {
         let mut component = usv4_component();
         let mut attributes = usv4_attributes();
         attributes.remove(&missing_attribute);
-
-        if missing_attribute == "tick_liquidities" {
-            attributes.remove("ticks/60/net_liquidity");
-        }
 
         if missing_attribute == "sqrt_price" {
             attributes.remove("sqrt_price_x96");
