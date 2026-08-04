@@ -291,6 +291,12 @@ where
             );
         }
 
+        // When addresses are given, the slice above already is the page, so the db must not
+        // paginate again - its offset would be applied a second time and skip the whole page.
+        // Without addresses the db owns pagination and also reports the total page count.
+        let db_pagination =
+            if paginated_addrs.is_some() { None } else { Some(&pagination_params) };
+
         // Get the contract states from the database
         let account_data = self
             .db_gateway
@@ -299,7 +305,7 @@ where
                 paginated_addrs.as_deref(),
                 Some(&db_version),
                 true,
-                Some(&pagination_params),
+                db_pagination,
             )
             .await
             .map_err(|err| {
@@ -1515,7 +1521,7 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // reliably when it is placed on the macro invocation itself.
 #[allow(clippy::extra_unused_lifetimes)]
 mod tests {
-    use std::{collections::HashMap, env, str::FromStr};
+    use std::{collections::HashMap, env, str::FromStr, sync::Mutex};
 
     use actix_web::{test, App};
     use chrono::{NaiveDateTime, TimeDelta};
@@ -1776,6 +1782,74 @@ mod tests {
         assert_eq!(state.accounts.len(), 2);
         assert_eq!(state.accounts[0], expected.into());
         assert_eq!(state.accounts[1], buf_expected.into());
+        assert_eq!(state.pagination.total, 2);
+    }
+
+    /// The requested address list is sliced to the page before the db call, so the db must not
+    /// apply the offset a second time - doing so skipped every account on pages after the first.
+    #[tokio::test]
+    async fn test_get_contract_state_second_page() {
+        let first_page_addr = Bytes::from_str("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap();
+        let second_page_addr = Bytes::from_str("388C818CA8B9251b393131C08a736A67ccB19297").unwrap();
+        let expected = Account::new(
+            Chain::Ethereum,
+            second_page_addr.clone(),
+            "account1".to_owned(),
+            evm_contract_slots([(0, 2)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C1C1C1"),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            None,
+        );
+
+        let mut gw = MockGateway::new();
+        #[allow(clippy::type_complexity)]
+        let observed_args: Arc<Mutex<Option<(Option<Vec<Bytes>>, Option<PaginationParams>)>>> =
+            Arc::new(Mutex::new(None));
+        let args_writer = observed_args.clone();
+        let response = expected.clone();
+        gw.expect_get_contracts()
+            .return_once(move |_, addresses, _, _, pagination| {
+                *args_writer.lock().unwrap() =
+                    Some((addresses.map(|a| a.to_vec()), pagination.cloned()));
+                Box::pin(async move { Ok(WithTotal { entity: vec![response], total: Some(1) }) })
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![first_page_addr, second_page_addr.clone()]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 1, page_size: 1 },
+        };
+        let state = req_handler
+            .get_contract_state_inner(request)
+            .await
+            .unwrap();
+
+        let (addresses, pagination) = observed_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("get_contracts was not called");
+        assert_eq!(addresses, Some(vec![second_page_addr]));
+        assert_eq!(pagination, None);
+
+        assert_eq!(state.accounts.len(), 1);
+        assert_eq!(state.accounts[0], expected.into());
+        // Paging is over the requested address list, so the total is its length.
         assert_eq!(state.pagination.total, 2);
     }
 
