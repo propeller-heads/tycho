@@ -4,15 +4,18 @@ use std::{
 };
 
 use alloy::{
-    primitives::{Address as AlloyAddress, B256, U256},
-    rpc::types::trace::geth::{FourByteFrame, GethTrace, PreStateFrame},
+    primitives::{Address as AlloyAddress, U256},
+    rpc::types::{
+        trace::geth::{FourByteFrame, GethTrace, PreStateFrame},
+        BlockId,
+    },
     transports::TransportResult,
 };
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{debug, error, warn};
 use tycho_common::{
-    models::{blockchain::RPCTracerParams, Address, BlockHash},
+    models::{blockchain::RPCTracerParams, Address},
     Bytes,
 };
 
@@ -123,12 +126,15 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         self
     }
 
-    /// Detect slots for tokens using batched requests (debug_traceCall + eth_call per token)
+    /// Detect slots for tokens using batched requests (debug_traceCall + eth_call per token).
+    ///
+    /// All requests query the latest block: results are cached across blocks anyway, and pinning
+    /// a fresh block hash makes detection fail on RPC backends that have not made that block
+    /// canonical yet.
     async fn detect_token_slots(
         &self,
         tokens: &[Address],
         params: &S::Params,
-        block_hash: &BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), SlotDetectorError>> {
         if tokens.is_empty() {
             return HashMap::new();
@@ -156,12 +162,12 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
         // Create batched request: 2 requests per token (debug_traceCall + eth_call)
         let calldata = S::encode_calldata(params);
-        let requests = self.create_value_requests(&request_tokens, &calldata, block_hash);
+        let requests = self.create_value_requests(&request_tokens, &calldata);
 
         // Send the batched request
         let responses = match self
             .rpc
-            .slot_detector_trace(requests, &calldata, &B256::from_bytes(block_hash))
+            .slot_detector_trace(requests, &calldata)
             .await
         {
             Ok(responses) => responses,
@@ -179,7 +185,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
         // Detect the correct slot by testing candidates with storage overrides
         let detected_results = self
-            .detect_correct_slots(token_slots, &calldata, block_hash)
+            .detect_correct_slots(token_slots, &calldata)
             .await;
 
         // Update cache and prepare final results
@@ -204,12 +210,12 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         final_results
     }
 
-    /// Detect slots for multiple tokens in chunks
+    /// Detect slots for multiple tokens in chunks. Detection always queries the latest block —
+    /// see [`Self::detect_token_slots`].
     pub async fn detect_slots_chunked(
         &self,
         tokens: &[Address],
         params: &S::Params,
-        block_hash: &BlockHash,
     ) -> HashMap<Address, Result<(Address, Bytes), SlotDetectorError>> {
         let mut all_results = HashMap::new();
 
@@ -220,7 +226,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
             debug!("Processing chunk {} with {} tokens", chunk_idx, chunk.len());
 
             let chunk_results = self
-                .detect_token_slots(chunk, params, block_hash)
+                .detect_token_slots(chunk, params)
                 .await;
             all_results.extend(chunk_results);
         }
@@ -236,7 +242,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         &self,
         tokens: &[Address],
         calldata: &Bytes,
-        block_hash: &BlockHash,
     ) -> Vec<SlotDetectorValueRequest> {
         let tracer_params = RPCTracerParams::new(None, calldata.clone());
 
@@ -246,7 +251,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
                 let tracer_params = EVMEntrypointService::create_trace_call_params(
                     token,
                     &tracer_params,
-                    block_hash,
+                    BlockId::latest(),
                 );
 
                 SlotDetectorValueRequest { token: AlloyAddress::from_bytes(token), tracer_params }
@@ -287,7 +292,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         &self,
         slots_to_test: Vec<SlotMetadata>,
         calldata: &Bytes,
-        block_hash: &BlockHash,
     ) -> TokenSlotResults {
         let mut detected_results = HashMap::new();
         let mut current_attempts = slots_to_test;
@@ -320,7 +324,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
             let responses = match self
                 .rpc
-                .slot_detector_tests(&requests, calldata, &B256::from_bytes(block_hash))
+                .slot_detector_tests(&requests, calldata)
                 .await
             {
                 Ok(responses) => responses,
@@ -433,7 +437,6 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         &self,
         token_slots: DetectedSlotsResults,
         calldata: &Bytes,
-        block_hash: &BlockHash,
     ) -> TokenSlotResults {
         let mut detected_results = HashMap::new();
         let mut slots_to_test = Vec::new();
@@ -467,7 +470,7 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
 
         // Test all slot candidates, trying alternate slots if needed
         let test_results = self
-            .test_slots_with_fallback(slots_to_test, calldata, block_hash)
+            .test_slots_with_fallback(slots_to_test, calldata)
             .await;
         detected_results.extend(test_results);
 
@@ -648,10 +651,7 @@ mod tests {
         transports::TransportResult,
     };
     use serde_json::{json, Value};
-    use tycho_common::{
-        models::{Address, BlockHash},
-        Bytes,
-    };
+    use tycho_common::{models::Address, Bytes};
 
     use crate::{
         rpc::EthereumRpcClient,
@@ -846,11 +846,10 @@ mod tests {
         let token1 = Address::from([0x11u8; 20]);
         let token2 = Address::from([0x22u8; 20]);
         let owner = Address::from([0x33u8; 20]);
-        let block_hash = BlockHash::from([0x44u8; 32]);
 
         let tokens = vec![token1.clone(), token2.clone()];
         let calldata = BalanceStrategy::encode_calldata(&owner);
-        let requests = detector.create_value_requests(&tokens, &calldata, &block_hash);
+        let requests = detector.create_value_requests(&tokens, &calldata);
 
         // Should create one joint requests per token
         let array = requests;
@@ -900,7 +899,6 @@ mod tests {
 
         let token = Address::from([0x11u8; 20]);
         let holder = Address::from([0x22u8; 20]);
-        let block_hash = BlockHash::from([0x33u8; 32]);
 
         let trace_response = json!([
             {
@@ -950,7 +948,7 @@ mod tests {
 
         // First call - should populate the cache
         let results1 = detector
-            .detect_slots_chunked(std::slice::from_ref(&token), &holder, &block_hash)
+            .detect_slots_chunked(std::slice::from_ref(&token), &holder)
             .await;
         assert!(results1[&token].is_ok(), "First call should succeed: {:?}", results1[&token]);
 
@@ -960,7 +958,7 @@ mod tests {
 
         // Second call - should use the cache
         let results2 = detector
-            .detect_slots_chunked(std::slice::from_ref(&token), &holder, &block_hash)
+            .detect_slots_chunked(std::slice::from_ref(&token), &holder)
             .await;
         assert!(results2[&token].is_ok(), "Second call should succeed from cache");
 

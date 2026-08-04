@@ -55,6 +55,9 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    /// `caller` sets the simulation's `tx.origin`/`msg.sender`; `None` defaults to
+    /// `EXTERNAL_ACCOUNT`.
+    #[allow(clippy::too_many_arguments)]
     pub fn price(
         &self,
         pair_id: &str,
@@ -62,13 +65,14 @@ where
         buy_token: Address,
         amounts: Vec<U256>,
         overwrites: Option<HashMap<Address, Overwrites>>,
+        caller: Option<Address>,
         block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<Vec<f64>, SimulationError> {
         let args = (string_to_bytes32(pair_id)?, sell_token, buy_token, amounts);
         let selector = "price(bytes32,address,address,uint256[])";
 
         let res = self
-            .call(selector, args, overwrites, None, U256::from(0u64), None, block_overrides)?
+            .call(selector, args, overwrites, caller, U256::from(0u64), None, block_overrides)?
             .return_value;
 
         let decoded: PriceReturn = PriceReturn::abi_decode(&res).map_err(|e| {

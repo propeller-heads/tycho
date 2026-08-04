@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::LazyLock,
+    time::Duration,
 };
 
 use tycho_common::{models::Chain, Bytes};
@@ -47,6 +48,61 @@ pub static ROUTER_ETH_ADDRESS: LazyLock<Bytes> = LazyLock::new(|| {
 /// expiring if the transaction is not sent fast enough.
 pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 5;
 
+/// The endpoint serving Angstrom pool unlock attestations.
+pub(crate) const ANGSTROM_DEFAULT_API_URL: &str =
+    "https://attestations.angstrom.xyz/getAttestations";
+
+/// The size of a single Angstrom attestation, without its block number prefix.
+///
+/// The Uniswap V4 executor rejects attestation data that is not a whole number of
+/// `8 + ANGSTROM_ATTESTATION_SIZE` byte entries.
+pub(crate) const ANGSTROM_ATTESTATION_SIZE: usize = 85;
+
+/// The shortest time Ethereum can take to produce a block, which both the refresh interval and
+/// the maximum window age derive from.
+///
+/// Ethereum proposes at most one block every 12 seconds, and a skipped proposal only makes the
+/// gap longer. Treating 12 seconds as one block therefore always overestimates how many blocks
+/// have elapsed, which is the safe direction for both constants below.
+const ETHEREUM_MIN_BLOCK_TIME_SECS: u64 = 12;
+
+/// How many times per block the background prefetcher refreshes the attestation window.
+///
+/// The window's contents only change when a block is produced, so refreshing more than once per
+/// block fetches nothing new. It is still more than once because the refresher has no block feed
+/// to align to: sampling twice a block bounds how long it keeps serving the previous block's
+/// window after a new one becomes available, without polling the API for the sake of it.
+const ANGSTROM_ATTESTATION_REFRESHES_PER_BLOCK: u64 = 2;
+
+/// How long the background prefetcher waits between Angstrom attestation refreshes.
+pub(crate) const ANGSTROM_ATTESTATION_REFRESH_INTERVAL: Duration =
+    Duration::from_secs(ETHEREUM_MIN_BLOCK_TIME_SECS / ANGSTROM_ATTESTATION_REFRESHES_PER_BLOCK);
+
+/// How many of the fetched window's blocks may elapse before the cache refetches while encoding.
+///
+/// A window fetched during block `N` covers `N` through `N + ANGSTROM_BLOCKS_IN_FUTURE`. Every
+/// block that elapses before encoding spends one of those: it removes a block the transaction
+/// could still have landed in, and adds an attestation the executor will skip. Keeping this at a
+/// single block preserves all but one block of the caller's slack, at the price of refetching
+/// inline sooner when the background refresh stalls.
+const ANGSTROM_ATTESTATION_MAX_AGE_BLOCKS: u64 = 1;
+
+/// How old a cached Angstrom attestation window may be before it is refetched while encoding.
+///
+/// Only reached when the background refresh has stopped keeping up: a healthy refresher replaces
+/// the window every `ANGSTROM_ATTESTATION_REFRESH_INTERVAL`.
+pub(crate) const ANGSTROM_ATTESTATION_MAX_AGE: Duration =
+    Duration::from_secs(ETHEREUM_MIN_BLOCK_TIME_SECS * ANGSTROM_ATTESTATION_MAX_AGE_BLOCKS);
+
+/// How long a single request to the Angstrom API may take before it is aborted.
+///
+/// Half the refresh interval, so one timed-out refresh cannot reach the encoding path: the next
+/// refresh still replaces the window within `ANGSTROM_ATTESTATION_MAX_AGE` of the previous one
+/// (3s aborted + 6s sleep + at most 3s for the retry). The slowest read measured against the
+/// live API was 902ms, including DNS and TLS on a cold connection.
+pub(crate) const ANGSTROM_API_TIMEOUT: Duration =
+    Duration::from_secs(ANGSTROM_ATTESTATION_REFRESH_INTERVAL.as_secs() / 2);
+
 /// These protocols support the optimization of grouping swaps.
 ///
 /// This requires special encoding to send call data of multiple swaps to a single executor,
@@ -69,3 +125,22 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set.insert("ekubo_v3");
     set
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus
+    /// the retry that follows it still fit inside the maximum window age.
+    #[test]
+    fn test_one_timed_out_refresh_cannot_stale_the_window() {
+        let slowest_recovery =
+            ANGSTROM_API_TIMEOUT + ANGSTROM_ATTESTATION_REFRESH_INTERVAL + ANGSTROM_API_TIMEOUT;
+
+        assert!(
+            slowest_recovery <= ANGSTROM_ATTESTATION_MAX_AGE,
+            "a single timed-out refresh leaves the window stale for {slowest_recovery:?}, past \
+             the {ANGSTROM_ATTESTATION_MAX_AGE:?} maximum age"
+        );
+    }
+}

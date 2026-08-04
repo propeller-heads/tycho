@@ -212,7 +212,6 @@ fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
 /// Tokens that fail slot detection are silently skipped and not included in the result.
 pub(crate) async fn detect_token_slots(
     rpc_tools: &RPCTools,
-    block: &Block,
     token_addresses: &[Bytes],
     to_address: &Bytes,
 ) -> HashMap<Bytes, TokenSlots> {
@@ -236,47 +235,39 @@ pub(crate) async fn detect_token_slots(
         return token_slots;
     }
 
-    // Pending (flashblock) blocks have a zero hash — slot layouts are immutable so any
-    // valid confirmed block hash works for detection.
-    let detection_hash = if block.header.hash == B256::ZERO {
-        let latest = rpc_tools
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await
-            .ok()
-            .flatten();
-        match latest {
-            Some(b) => b.header.hash,
-            None => return HashMap::new(),
-        }
-    } else {
-        block.header.hash
-    };
-
     let balance_results = rpc_tools
         .evm_balance_slot_detector
-        .detect_balance_slots(&erc20_tokens, (**user_address).into(), (*detection_hash).into())
+        .detect_balance_slots(&erc20_tokens, (**user_address).into())
         .await;
 
     let allowance_results = rpc_tools
         .evm_allowance_slot_detector
-        .detect_allowance_slots(
-            &erc20_tokens,
-            (**user_address).into(),
-            to_address.clone(),
-            (*detection_hash).into(),
-        )
+        .detect_allowance_slots(&erc20_tokens, (**user_address).into(), to_address.clone())
         .await;
 
     for token_address in &erc20_tokens {
         let balance_slot_data = match balance_results.get(token_address) {
             Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(_)) | None => continue, // Skip tokens with detection failures
+            Some(Err(e)) => {
+                tracing::warn!(token=%token_address, error=?e, "Balance slot detection failed");
+                continue;
+            }
+            None => {
+                tracing::warn!(token=%token_address, "Balance slot detection returned no result");
+                continue;
+            }
         };
 
         let allowance_slot_data = match allowance_results.get(token_address) {
             Some(Ok((storage_addr, slot))) => (storage_addr.clone(), slot.clone()),
-            Some(Err(_)) | None => continue, // Skip tokens with detection failures
+            Some(Err(e)) => {
+                tracing::warn!(token=%token_address, error=?e, "Allowance slot detection failed");
+                continue;
+            }
+            None => {
+                tracing::warn!(token=%token_address, "Allowance slot detection returned no result");
+                continue;
+            }
         };
 
         token_slots.insert(

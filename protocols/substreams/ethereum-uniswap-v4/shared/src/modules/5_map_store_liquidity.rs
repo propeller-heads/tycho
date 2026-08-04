@@ -24,7 +24,7 @@ pub fn map_liquidity_changes(
         .map(|e| {
             (
                 pools_current_tick_store
-                    .get_at(e.log_ordinal, format!("pool:{0}", &e.pool_id))
+                    .get_at(e.log_ordinal, format!("pool:{0}", e.pool_id))
                     .unwrap_or(0),
                 e,
             )
@@ -45,14 +45,14 @@ pub fn store_liquidity(ticks_deltas: LiquidityChanges, store: StoreSetSumBigInt)
             LiquidityChangeType::Delta => {
                 store.sum(
                     changes.ordinal,
-                    format!("pool:{0}", &changes.pool_address.to_hex()),
+                    format!("pool:{0}", changes.pool_address.to_hex()),
                     BigInt::from_signed_bytes_be(&changes.value),
                 );
             }
             LiquidityChangeType::Absolute => {
                 store.set(
                     changes.ordinal,
-                    format!("pool:{0}", &changes.pool_address.to_hex()),
+                    format!("pool:{0}", changes.pool_address.to_hex()),
                     BigInt::from_signed_bytes_be(&changes.value),
                 );
             }

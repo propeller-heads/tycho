@@ -60,12 +60,20 @@ if [[ ! -f "$yaml_file" ]]; then
     exit 1
 fi
 
-# Determine the version prefix based on the YAML file name
+# Determine the artifact name based on the YAML file name. The manifest name identifies the
+# chain and fork being published, which the source directory does not: packing
+# robinhood-uniswap-v4-no-hooks.yaml from ethereum-uniswap-v4/no-hooks must not publish under
+# "ethereum". Fall back to the Cargo package name, which flattens nested package paths, so no
+# "/" ever leaks into the S3 key.
 if [ "$yaml_name" = "substreams" ]; then
-    version_prefix="$package"
+    version_prefix="$cargo_package_name"
 else
     version_prefix="${yaml_name}"
 fi
+
+REPOSITORY=${REPOSITORY:-"s3://repo.propellerheads-propellerheads/substreams"}
+repository_path="$REPOSITORY/$version_prefix/$version_prefix-$version.spkg"
+output_file="./target/spkg/$version_prefix-$version.spkg"
 
 set -e  # Exit the script if any command fails
 
@@ -73,6 +81,7 @@ echo ""
 echo "Substreams package: $package"
 echo "YAML config: $yaml_file"
 echo "Version: $version"
+echo "Destination: $repository_path"
 echo ""
 
 # Ask for confirmation before proceeding
@@ -92,10 +101,6 @@ cargo build --target wasm32-unknown-unknown --release -p "$cargo_package_name"
 mkdir -p ./target/spkg/
 
 # Pack and upload the substreams package
-REPOSITORY=${REPOSITORY:-"s3://repo.propellerheads-propellerheads/substreams"}
-repository_path="$REPOSITORY/$package/$version_prefix-$version.spkg"
-output_file="./target/spkg/$version_prefix-$version.spkg"
-
 substreams pack "$yaml_file" -o "$output_file"
 
 # Check if the file already exists in S3 before uploading

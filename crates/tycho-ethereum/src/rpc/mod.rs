@@ -775,10 +775,9 @@ impl EthereumRpcClient {
         &self,
         requests: Vec<SlotDetectorValueRequest>,
         calldata: &Bytes,
-        block_hash: &B256,
     ) -> Result<Vec<(GethTrace, U256)>, RPCError> {
         if let Some(max_batch_size) = self.batching.max_batch_size() {
-            self.batch_slot_detector_trace(requests, calldata, block_hash, max_batch_size)
+            self.batch_slot_detector_trace(requests, calldata, max_batch_size)
                 .await
         } else {
             Err(RPCError::SetupError(
@@ -794,7 +793,6 @@ impl EthereumRpcClient {
         &self,
         requests: Vec<SlotDetectorValueRequest>,
         calldata: &Bytes,
-        block_hash: &B256,
         batch_size: usize,
     ) -> Result<Vec<(GethTrace, U256)>, RPCError> {
         let chunk_size = batch_size / 2; // we make 2 requests in a batch call: trace + eth_call
@@ -822,7 +820,7 @@ impl EthereumRpcClient {
                                 "to": token.to_string(),
                                 "data": calldata.to_string()
                             },
-                            block_hash.to_string()
+                            "latest"
                         ]);
                         let eth_call = batch.add_call::<_, U256>("eth_call", &eth_call_param)?;
 
@@ -851,12 +849,7 @@ impl EthereumRpcClient {
                 .call_with_retry(|| async { batch_call().await })
                 .await
                 .map_err(|e| {
-                    RPCError::from_alloy(
-                        format!(
-                    "Failed to send batch request for slot detector traces for block {block_hash}"
-                ),
-                        e,
-                    )
+                    RPCError::from_alloy("Failed to send batch request for slot detector traces", e)
                 })?;
 
             result.extend(chunk_results);
@@ -872,10 +865,9 @@ impl EthereumRpcClient {
         &self,
         requests: &[SlotDetectorSlotTestRequest],
         calldata: &Bytes,
-        block_hash: &B256,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         if let Some(max_batch_size) = self.batching.max_batch_size() {
-            self.batch_slot_detector_tests(requests, calldata, block_hash, max_batch_size)
+            self.batch_slot_detector_tests(requests, calldata, max_batch_size)
                 .await
         } else {
             Err(RPCError::SetupError(
@@ -891,7 +883,6 @@ impl EthereumRpcClient {
         &self,
         requests: &[SlotDetectorSlotTestRequest],
         calldata: &Bytes,
-        block_hash: &B256,
         batch_size: usize,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         let chunk_size = batch_size; // we make 1 request per test
@@ -919,7 +910,7 @@ impl EthereumRpcClient {
                                     "to": token,
                                     "data": calldata
                                 },
-                                block_hash.to_string(),
+                                "latest",
                                 {
                                     storage_address.to_string(): {
                                         "stateDiff": {
@@ -1004,13 +995,8 @@ impl EthereumRpcClient {
             }
 
             let chunk_results = last_batch_result.map_err(|e| {
-                    RPCError::from_alloy(
-                        format!(
-                            "Failed to send batch request for slot detector tests for block {block_hash}"
-                        ),
-                        e,
-                    )
-                })?;
+                RPCError::from_alloy("Failed to send batch request for slot detector tests", e)
+            })?;
 
             result.extend(chunk_results);
         }
@@ -1614,15 +1600,14 @@ mod tests {
         let usdc = parse_address(USDC_STR);
         let usdt = parse_address(USDT_STR);
 
-        // Holder address that has balances in all three tokens
-        let holder = parse_address(USDC_HOLDER_ADDR);
+        // Use the USDT token contract itself as the holder: tokens mistakenly sent to it are
+        // stuck (it has no rescue path), so its balances of USDT, WETH, and USDC form a permanent
+        // non-zero floor that cannot drain to zero. For USDT this is self-referential (holder ==
+        // token), which is fine for balance-slot detection.
+        let holder = parse_address(USDT_STR);
         let calldata: Bytes = balanceOfCall { _owner: holder }
             .abi_encode()
             .into();
-
-        // Verified block hash where all tokens have non-zero balances
-        let block_hash_str = "0x658814e4cb074359f10dd71237cc57b1ae6791fc9de59fde570e724bd884cbb0";
-        let block_hash = B256::from_str(block_hash_str).expect("Failed to parse block hash");
 
         // Create requests with different tokens to test order preservation
         // The eth_call uses the same calldata, but we call different token contracts
@@ -1635,9 +1620,7 @@ mod tests {
                         "to": token.to_string(),
                         "input": calldata.to_string()
                     },
-                    {
-                        "blockHash": block_hash_str
-                    },
+                    "latest",
                     {
                         "tracer": "prestateTracer",
                         "enableReturnData": true
@@ -1648,31 +1631,23 @@ mod tests {
             .collect();
 
         let results = client
-            .slot_detector_trace(requests.clone(), &calldata, &block_hash)
+            .slot_detector_trace(requests.clone(), &calldata)
             .await
             .expect("Batch slot detector trace failed");
 
         // Verify all results returned and order preserved
         assert_eq!(results.len(), tokens.len(), "Should receive result for each request");
 
-        let expected_balances = [
-            U256::from_str("911262488844363150815").unwrap(), // WETH balance
-            U256::from(69346617579396u64),                    // USDC balance
-            U256::from(52511836228219u64),                    // USDT balance
-        ];
-
-        // Each token should return a result in expected order with the correct balance
+        // Each token should return a result in expected order with a non-zero balance (the USDT
+        // contract permanently holds all three tokens). Balances are queried at the latest block,
+        // so exact values cannot be asserted.
         for (idx, (trace, value)) in results.iter().enumerate() {
             assert!(
                 matches!(trace, GethTrace::PreStateTracer(_)),
                 "Request {} should return PreStateTracer",
                 idx
             );
-            assert_eq!(
-                *value, expected_balances[idx],
-                "Request {} balance mismatch. Expected: {}, Got: {}",
-                idx, expected_balances[idx], *value
-            );
+            assert!(!value.is_zero(), "Request {} should return a non-zero balance", idx);
         }
     }
 
@@ -1707,12 +1682,8 @@ mod tests {
             "Calldata should match verified test case"
         );
 
-        // Verified block hash where all slots contain actual balances
-        let block_hash_str = "0x658814e4cb074359f10dd71237cc57b1ae6791fc9de59fde570e724bd884cbb0";
-        let block_hash = B256::from_str(block_hash_str).expect("Failed to parse block hash");
-
         // Create test requests with verified slot locations and test values
-        // These are real balance storage slots for the holder at this block
+        // These are real balance storage slots for the holder
         let requests = vec![
             // USDT: slot and test_value verified to work
             SlotDetectorSlotTestRequest {
@@ -1747,7 +1718,7 @@ mod tests {
         ];
 
         let results = client
-            .slot_detector_tests(&requests, &calldata, &block_hash)
+            .slot_detector_tests(&requests, &calldata)
             .await
             .expect("Batch slot detector tests failed");
 
@@ -1803,7 +1774,7 @@ mod tests {
         let calldata: Bytes = Bytes::new();
 
         let result = rpc_client
-            .slot_detector_tests(&batch_request, &calldata, &B256::ZERO)
+            .slot_detector_tests(&batch_request, &calldata)
             .await;
 
         result

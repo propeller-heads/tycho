@@ -1,6 +1,13 @@
 {
   "ethereum": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ring_swap_v2": {
+      "contract": "RingSwapV2Executor",
+      "args": [
+        "0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD",
+        "0xeb2A625B704d73e82946D8d026E1F588Eed06416"
+      ]
+    },
     "pancakeswap_v2": { "contract": "UniswapV2Executor", "args": [25] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
