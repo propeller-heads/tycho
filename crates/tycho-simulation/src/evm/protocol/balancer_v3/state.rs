@@ -10,7 +10,7 @@ use balancer_maths_rust::{
         types::{PoolState, PoolStateOrBuffer, SwapInput, SwapKind, SwapParams},
         utils::{compute_and_charge_aggregate_swap_fees, to_scaled_18_apply_rate_round_down},
     },
-    pools::{stable::StablePool, weighted::WeightedPool},
+    pools::{reclammv2::ReClammV2Pool, stable::StablePool, weighted::WeightedPool},
     vault::Vault,
 };
 use num_bigint::{BigUint, ToBigUint};
@@ -41,6 +41,8 @@ const WAD: f64 = 1e18;
 const SWAP_GAS: u64 = 210_000;
 /// Fraction of the input balance probed to approximate the marginal price (`1e-6`).
 const SPOT_PRICE_PROBE_DIVISOR: u64 = 1_000_000;
+/// Attribute the stream decoder attaches to every delta, carrying the block's timestamp.
+const BLOCK_TIMESTAMP_ATTRIBUTE: &str = "block_timestamp";
 /// How many times [`ProtocolSim::get_limits`] halves its candidate before giving up.
 const LIMIT_PROBE_HALVINGS: u32 = 12;
 
@@ -61,6 +63,9 @@ pub struct BalancerV3State {
     pool_type: BalancerPoolType,
     /// Token addresses in pool registration order.
     tokens: Vec<Bytes>,
+    /// Timestamp of the block this state was read at. reCLAMM quotes depend on it, so it is
+    /// refreshed on every update; the other families ignore it.
+    block_timestamp: u64,
     /// Pool state in the form the maths library consumes.
     state: PoolState,
 }
@@ -72,9 +77,10 @@ impl BalancerV3State {
         vault: Bytes,
         pool_type: BalancerPoolType,
         tokens: Vec<Bytes>,
+        block_timestamp: u64,
         state: PoolState,
     ) -> Self {
-        Self { pool_address, vault, pool_type, tokens, state }
+        Self { pool_address, vault, pool_type, tokens, block_timestamp, state }
     }
 
     /// Token addresses in pool registration order.
@@ -120,6 +126,7 @@ impl BalancerV3State {
         match &self.state {
             PoolState::Weighted(state) => Ok(Box::new(WeightedPool::from(state.clone()))),
             PoolState::Stable(state) => Ok(Box::new(StablePool::new(state.mutable.clone()))),
+            PoolState::ReClammV2(state) => Ok(Box::new(ReClammV2Pool::new(state.clone()))),
             other => Err(SimulationError::FatalError(format!(
                 "balancer_v3 pool {} holds unsupported state `{}`",
                 self.pool_address,
@@ -205,6 +212,7 @@ impl BalancerV3State {
         match &mut self.state {
             PoolState::Weighted(state) => state.base.balances_live_scaled_18 = balances,
             PoolState::Stable(state) => state.base.balances_live_scaled_18 = balances,
+            PoolState::ReClammV2(state) => state.base.balances_live_scaled_18 = balances,
             _ => {}
         }
     }
@@ -314,15 +322,27 @@ impl ProtocolSim for BalancerV3State {
 
     fn delta_transition(
         &mut self,
-        _delta: ProtocolStateDelta,
+        delta: ProtocolStateDelta,
         _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        // The decoder attaches the current block's timestamp to every delta. reCLAMM quotes move
+        // with it, so take it when present and keep the previous one otherwise.
+        if let Some(timestamp) = delta
+            .updated_attributes
+            .get(BLOCK_TIMESTAMP_ATTRIBUTE)
+            .and_then(|raw| raw.as_ref().try_into().ok())
+            .map(u64::from_be_bytes)
+        {
+            self.block_timestamp = timestamp;
+        }
+
         let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
         let pool = AlloyAddress::from_slice(self.pool_address.as_ref());
         let vault = AlloyAddress::from_slice(self.vault.as_ref());
-        self.state = vm::read_pool_state(&engine, &pool, &vault, self.pool_type)
-            .map_err(TransitionError::SimulationError)?;
+        self.state =
+            vm::read_pool_state(&engine, &pool, &vault, self.pool_type, self.block_timestamp)
+                .map_err(TransitionError::SimulationError)?;
         Ok(())
     }
 

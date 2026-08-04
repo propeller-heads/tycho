@@ -14,6 +14,7 @@ use alloy::primitives::U256;
 use balancer_maths_rust::{
     common::types::{BasePoolState, PoolState},
     pools::{
+        reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
         stable::stable_data::{StableMutable, StableState},
         weighted::WeightedState,
     },
@@ -69,7 +70,7 @@ fn token_list(value: &Value) -> Vec<String> {
 
 /// Rebuilds the maths library's state from a recorded entry, standing in for what
 /// `vm::read_pool_state` produces from live storage.
-fn pool_state(state: &Value) -> (BalancerPoolType, PoolState) {
+fn pool_state(state: &Value, timestamp: u64) -> (BalancerPoolType, PoolState) {
     let base = BasePoolState {
         pool_address: state["pool_address"]
             .as_str()
@@ -106,6 +107,27 @@ fn pool_state(state: &Value) -> (BalancerPoolType, PoolState) {
                 mutable: StableMutable { amp: uint(state, "amp") },
             }),
         ),
+        "RECLAMM" => (
+            BalancerPoolType::Reclamm,
+            PoolState::ReClammV2(ReClammV2State {
+                immutable: ReClammV2Immutable {
+                    pool_address: base.pool_address.clone(),
+                    tokens: base.tokens.clone(),
+                },
+                base,
+                mutable: ReClammV2Mutable {
+                    last_virtual_balances: uint_list(state, "last_virtual_balances"),
+                    daily_price_shift_base: uint(state, "daily_price_shift_base"),
+                    last_timestamp: uint(state, "last_timestamp"),
+                    current_timestamp: U256::from(timestamp),
+                    centeredness_margin: uint(state, "centeredness_margin"),
+                    start_fourth_root_price_ratio: uint(state, "start_fourth_root_price_ratio"),
+                    end_fourth_root_price_ratio: uint(state, "end_fourth_root_price_ratio"),
+                    price_ratio_update_start_time: uint(state, "price_ratio_update_start_time"),
+                    price_ratio_update_end_time: uint(state, "price_ratio_update_end_time"),
+                },
+            }),
+        ),
         other => panic!("dataset carries pool type `{other}`, which the decoder cannot build"),
     }
 }
@@ -120,18 +142,25 @@ fn token(raw: &str) -> Token {
     Token::new(&address(raw), "TKN", 18, 0, &[Some(0)], Chain::Ethereum, 100)
 }
 
-fn load_dataset() -> Vec<Value> {
+/// Loads the recorded entries together with the block timestamp they were taken at.
+fn load_dataset() -> (u64, Vec<Value>) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DATASET);
     let raw = fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path:?}: {e}"));
-    serde_json::from_str::<Value>(&raw)
-        .expect("dataset is not valid JSON")
+    let root: Value = serde_json::from_str(&raw).expect("dataset is not valid JSON");
+    let timestamp = root["block_timestamp"]
+        .as_str()
+        .expect("block_timestamp must be a decimal string")
+        .parse()
+        .expect("block_timestamp must be a u64");
+    let pools = root["pools"]
         .as_array()
-        .expect("dataset must be an array")
-        .clone()
+        .expect("dataset must carry a `pools` array")
+        .clone();
+    (timestamp, pools)
 }
 
-fn build_state(entry: &Value) -> BalancerV3State {
-    let (pool_type, state) = pool_state(&entry["state"]);
+fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
+    let (pool_type, state) = pool_state(&entry["state"], timestamp);
     let tokens = state
         .base()
         .tokens
@@ -147,20 +176,21 @@ fn build_state(entry: &Value) -> BalancerV3State {
         address(VAULT),
         pool_type,
         tokens,
+        timestamp,
         state,
     )
 }
 
 #[test]
 fn get_amount_out_matches_onchain_quotes() {
-    let dataset = load_dataset();
+    let (timestamp, dataset) = load_dataset();
     assert!(!dataset.is_empty(), "dataset is empty");
 
     let mut compared = 0usize;
     let mut failures = Vec::new();
 
     for entry in &dataset {
-        let pool = build_state(entry);
+        let pool = build_state(entry, timestamp);
         let kind = entry["state"]["pool_type"]
             .as_str()
             .expect("pool_type");
@@ -215,9 +245,9 @@ fn get_amount_out_matches_onchain_quotes() {
 
 #[test]
 fn swapping_moves_balances_in_the_right_direction() {
-    let dataset = load_dataset();
+    let (timestamp, dataset) = load_dataset();
     let entry = &dataset[0];
-    let pool = build_state(entry);
+    let pool = build_state(entry, timestamp);
     let swap = &entry["swaps"][0];
     let token_in = token(
         swap["token_in"]
@@ -256,8 +286,9 @@ fn swapping_moves_balances_in_the_right_direction() {
 
 #[test]
 fn limits_bound_a_quotable_amount() {
-    for entry in load_dataset() {
-        let pool = build_state(&entry);
+    let (timestamp, dataset) = load_dataset();
+    for entry in dataset {
+        let pool = build_state(&entry, timestamp);
         let tokens = pool.token_addresses().to_vec();
         let (max_in, max_out) = pool
             .get_limits(tokens[0].clone(), tokens[1].clone())
@@ -274,8 +305,9 @@ fn limits_bound_a_quotable_amount() {
 
 #[test]
 fn spot_price_is_positive_in_both_directions() {
-    for entry in load_dataset() {
-        let pool = build_state(&entry);
+    let (timestamp, dataset) = load_dataset();
+    for entry in dataset {
+        let pool = build_state(&entry, timestamp);
         for (base, quote) in [(0, 1), (1, 0)] {
             let price = pool
                 .spot_price(&token_at(&pool, base), &token_at(&pool, quote))
@@ -285,10 +317,57 @@ fn spot_price_is_positive_in_both_directions() {
     }
 }
 
+/// reCLAMM shifts its price range with time, so a quote must depend on the timestamp the state was
+/// read at. This guards the plumbing: if the timestamp stopped reaching the maths, quotes would
+/// silently freeze at whatever moment the pool was decoded.
+#[test]
+fn reclamm_quotes_move_with_the_block_timestamp() {
+    let (timestamp, dataset) = load_dataset();
+    let reclamm: Vec<_> = dataset
+        .iter()
+        .filter(|e| e["state"]["pool_type"] == "RECLAMM")
+        .collect();
+    assert!(!reclamm.is_empty(), "dataset carries no reCLAMM pools");
+
+    let mut moved = 0usize;
+    for entry in &reclamm {
+        let swap = &entry["swaps"][0];
+        let token_in = token(
+            swap["token_in"]
+                .as_str()
+                .expect("token_in"),
+        );
+        let token_out = token(
+            swap["token_out"]
+                .as_str()
+                .expect("token_out"),
+        );
+        let amount_in =
+            BigUint::from_str(swap["amount"].as_str().expect("amount")).expect("decimal amount");
+
+        // A full day later the range has shifted, so at least one pool must quote differently.
+        let now = build_state(entry, timestamp)
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .expect("quote at the recorded timestamp");
+        let later = build_state(entry, timestamp + 86_400)
+            .get_amount_out(amount_in, &token_in, &token_out)
+            .expect("quote a day later");
+        if now.amount != later.amount {
+            moved += 1;
+        }
+    }
+
+    assert!(
+        moved > 0,
+        "no reCLAMM pool changed its quote when the timestamp advanced a day; the timestamp is \
+         probably not reaching the maths"
+    );
+}
+
 #[test]
 fn unknown_tokens_are_rejected() {
-    let dataset = load_dataset();
-    let pool = build_state(&dataset[0]);
+    let (timestamp, dataset) = load_dataset();
+    let pool = build_state(&dataset[0], timestamp);
     let stranger = token("0x0000000000000000000000000000000000000001");
     let known = token_at(&pool, 0);
 

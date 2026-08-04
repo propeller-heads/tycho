@@ -1,758 +1,1322 @@
-[
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "balances_live_scaled_18": [
-        "53906858949024425125171355",
-        "9610732121187528769"
-      ],
-      "hook_type": null,
-      "pool_address": "0x1846c6cbe0d433e152fa358e5ff27968e18bce7c",
-      "pool_type": "WEIGHTED",
-      "scaling_factors": [
-        "1",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": false,
-      "swap_fee": "10000000000000000",
-      "token_rates": [
-        "1000000000000000000",
-        "1000000000000000000"
-      ],
-      "tokens": [
-        "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
-        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      ],
-      "total_supply": "2357287379737006324671097",
-      "weights": [
-        "800000000000000000",
-        "200000000000000000"
+{
+  "block": "25681410",
+  "block_timestamp": "1785844811",
+  "pools": [
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "54810534500019425125171355",
+          "8996904467265054118"
+        ],
+        "hook_type": null,
+        "pool_address": "0x1846c6cbe0d433e152fa358e5ff27968e18bce7c",
+        "pool_type": "WEIGHTED",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": false,
+        "swap_fee": "10000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ],
+        "total_supply": "2357287379737006324671097",
+        "weights": [
+          "800000000000000000",
+          "200000000000000000"
+        ]
+      },
+      "swaps": [
+        {
+          "amount": "5481053450001942512517",
+          "chain": "3561892556993571",
+          "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "899690446726505",
+          "chain": "1356476797364069597523",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
+        },
+        {
+          "amount": "54810534500019425125171",
+          "chain": "35539737321428848",
+          "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "8996904467265054",
+          "chain": "13557219796024547707592",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
+        },
+        {
+          "amount": "548105345000194251251713",
+          "chain": "347631166958623126",
+          "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "89969044672650541",
+          "chain": "134822883559620092057225",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
+        },
+        {
+          "amount": "5481053450001942512517135",
+          "chain": "2829501302523870658",
+          "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "899690446726505411",
+          "chain": "1278393384586576730226366",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
+        }
       ]
     },
-    "swaps": [
-      {
-        "amount": "5390685894902442512517",
-        "chain": "3804908158608370",
-        "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "246208226610161401128625",
+          "2140096286000000000000"
+        ],
+        "hook_type": null,
+        "pool_address": "0xf91c11ba4220b7a72e1dc5e92f2b48d3fdf62726",
+        "pool_type": "WEIGHTED",
+        "scaling_factors": [
+          "1",
+          "1000000000000"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "3000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0x440017a1b021006d556d7fc06a54c32e42eb745b",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ],
+        "total_supply": "22821347791486355737395",
+        "weights": [
+          "500000000000000000",
+          "500000000000000000"
+        ]
       },
-      {
-        "amount": "961073212118752",
-        "chain": "1334112211277621669848",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
-      },
-      {
-        "amount": "53906858949024425125171",
-        "chain": "37964490597448155",
-        "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "9610732121187528",
-        "chain": "13333698383929424593461",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
-      },
-      {
-        "amount": "539068589490244251251713",
-        "chain": "371348838344480385",
-        "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "96107321211875287",
-        "chain": "132600023580259167666142",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
-      },
-      {
-        "amount": "5390685894902442512517135",
-        "chain": "3022548383619173990",
-        "token_in": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "961073212118752876",
-        "chain": "1257316180053856323355825",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0x6c0aeceedc55c9d55d8b99216a670d85330941c3"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "balances_live_scaled_18": [
-        "246711062370095766894889",
-        "2135724611000000000000"
-      ],
-      "hook_type": null,
-      "pool_address": "0xf91c11ba4220b7a72e1dc5e92f2b48d3fdf62726",
-      "pool_type": "WEIGHTED",
-      "scaling_factors": [
-        "1",
-        "1000000000000"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "3000000000000000",
-      "token_rates": [
-        "1000000000000000000",
-        "1000000000000000000"
-      ],
-      "tokens": [
-        "0x440017a1b021006d556d7fc06a54c32e42eb745b",
-        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-      ],
-      "total_supply": "22821347791486355737395",
-      "weights": [
-        "500000000000000000",
-        "500000000000000000"
+      "swaps": [
+        {
+          "amount": "24620822661016140112",
+          "chain": "213346",
+          "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "214009",
+          "chain": "24544441018867152748",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
+        },
+        {
+          "amount": "246208226610161401128",
+          "chain": "2131550",
+          "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "2140096",
+          "chain": "245225079754214577565",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
+        },
+        {
+          "amount": "2462082266101614011286",
+          "chain": "21126132",
+          "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "21400962",
+          "chain": "2430464193624404087915",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
+        },
+        {
+          "amount": "24620822661016140112862",
+          "chain": "194023460",
+          "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "214009628",
+          "chain": "22321505983861276355054",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
+        }
       ]
     },
-    "swaps": [
-      {
-        "amount": "24671106237009576689",
-        "chain": "212910",
-        "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "2195315268647741929163",
+          "2490046438839975181888"
+        ],
+        "hook_type": null,
+        "pool_address": "0x8115054a485d7775e13a8a420dd986ff595824fa",
+        "pool_type": "WEIGHTED",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "20000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
+          "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+        ],
+        "total_supply": "2239200611362349708529",
+        "weights": [
+          "600000000000000000",
+          "400000000000000000"
+        ]
       },
-      {
-        "amount": "213572",
-        "chain": "24594587738410222130",
-        "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
-      },
-      {
-        "amount": "246711062370095766894",
-        "chain": "2127196",
-        "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-      },
-      {
-        "amount": "2135724",
-        "chain": "245725870191757638999",
-        "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
-      },
-      {
-        "amount": "2467110623700957668948",
-        "chain": "21082977",
-        "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-      },
-      {
-        "amount": "21357246",
-        "chain": "2435428061512954690824",
-        "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
-      },
-      {
-        "amount": "24671106237009576689488",
-        "chain": "193627119",
-        "token_in": "0x440017a1b021006d556d7fc06a54c32e42eb745b",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-      },
-      {
-        "amount": "213572461",
-        "chain": "22367093669024017292648",
-        "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "token_out": "0x440017a1b021006d556d7fc06a54c32e42eb745b"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "balances_live_scaled_18": [
-        "2230156742302849513348",
-        "2431048901369010675170"
-      ],
-      "hook_type": null,
-      "pool_address": "0x8115054a485d7775e13a8a420dd986ff595824fa",
-      "pool_type": "WEIGHTED",
-      "scaling_factors": [
-        "1",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "20000000000000000",
-      "token_rates": [
-        "1000000000000000000",
-        "1000000000000000000"
-      ],
-      "tokens": [
-        "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
-        "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
-      ],
-      "total_supply": "2239200611362349708529",
-      "weights": [
-        "600000000000000000",
-        "400000000000000000"
+      "swaps": [
+        {
+          "amount": "219531526864774192",
+          "chain": "365991992099410286",
+          "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
+          "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+        },
+        {
+          "amount": "249004643883997518",
+          "chain": "143415551990043853",
+          "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+          "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
+        },
+        {
+          "amount": "2195315268647741929",
+          "chain": "3655889434949889474",
+          "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
+          "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+        },
+        {
+          "amount": "2490046438839975181",
+          "chain": "1433102338939866658",
+          "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+          "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
+        },
+        {
+          "amount": "21953152686477419291",
+          "chain": "36160358270808392819",
+          "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
+          "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+        },
+        {
+          "amount": "24900464388399751818",
+          "chain": "14226605425120963762",
+          "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+          "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
+        },
+        {
+          "amount": "219531526864774192916",
+          "chain": "325813829180042908580",
+          "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
+          "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+        },
+        {
+          "amount": "249004643883997518188",
+          "chain": "132650402394445515322",
+          "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+          "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
+        }
       ]
     },
-    "swaps": [
-      {
-        "amount": "223015674230284951",
-        "chain": "357320416368470446",
-        "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
-        "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "57363420000000000",
+          "243908534361696533058"
+        ],
+        "hook_type": null,
+        "pool_address": "0x571bea0e99e139cd0b6b7d9352ca872dfe0d72dd",
+        "pool_type": "WEIGHTED",
+        "scaling_factors": [
+          "10000000000",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "3000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "0x4a220e6096b25eadb88358cb44068a3248254675"
+        ],
+        "total_supply": "45487042089822473537",
+        "weights": [
+          "200000000000000000",
+          "800000000000000000"
+        ]
       },
-      {
-        "amount": "243104890136901067",
-        "chain": "145691675719403114",
-        "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
-        "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
-      },
-      {
-        "amount": "2230156742302849513",
-        "chain": "3569269173350013042",
-        "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
-        "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
-      },
-      {
-        "amount": "2431048901369010675",
-        "chain": "1455846861378323932",
-        "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
-        "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
-      },
-      {
-        "amount": "22301567423028495133",
-        "chain": "35303598308918130928",
-        "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
-        "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
-      },
-      {
-        "amount": "24310489013690106751",
-        "chain": "14452393449829727516",
-        "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
-        "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
-      },
-      {
-        "amount": "223015674230284951334",
-        "chain": "318094208655791576988",
-        "token_in": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5",
-        "token_out": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
-      },
-      {
-        "amount": "243104890136901067517",
-        "chain": "134755674273328025129",
-        "token_in": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
-        "token_out": "0xb4444468e444f89e1c2cac2f1d3ee7e336cbd1f5"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "balances_live_scaled_18": [
-        "58236340000000000",
-        "242975701469425418590"
-      ],
-      "hook_type": null,
-      "pool_address": "0x571bea0e99e139cd0b6b7d9352ca872dfe0d72dd",
-      "pool_type": "WEIGHTED",
-      "scaling_factors": [
-        "10000000000",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "3000000000000000",
-      "token_rates": [
-        "1000000000000000000",
-        "1000000000000000000"
-      ],
-      "tokens": [
-        "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        "0x4a220e6096b25eadb88358cb44068a3248254675"
-      ],
-      "total_supply": "45487042089822473537",
-      "weights": [
-        "200000000000000000",
-        "800000000000000000"
+      "swaps": [
+        {
+          "amount": "573",
+          "chain": "6072320956747766",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
+        },
+        {
+          "amount": "24390853436169653",
+          "chain": "2287",
+          "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
+          "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+        },
+        {
+          "amount": "5736",
+          "chain": "60752728072684203",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
+        },
+        {
+          "amount": "243908534361696533",
+          "chain": "22819",
+          "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
+          "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+        },
+        {
+          "amount": "57363",
+          "chain": "604177485854498840",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
+        },
+        {
+          "amount": "2439085343616965330",
+          "chain": "223175",
+          "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
+          "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+        },
+        {
+          "amount": "573634",
+          "chain": "5726805270709092176",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
+        },
+        {
+          "amount": "24390853436169653305",
+          "chain": "1814066",
+          "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
+          "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+        }
       ]
     },
-    "swaps": [
-      {
-        "amount": "582",
-        "chain": "6052013376473433",
-        "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "28621139069547852101",
+          "287820377438216470659823"
+        ],
+        "hook_type": null,
+        "pool_address": "0xbda917a67c7d9ae67da92c4ea87e10e5d6c11b54",
+        "pool_type": "WEIGHTED",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "3000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
+        ],
+        "total_supply": "2789797333225129277396",
+        "weights": [
+          "500000000000000000",
+          "500000000000000000"
+        ]
       },
-      {
-        "amount": "24297570146942541",
-        "chain": "2321",
-        "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
-        "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
-      },
-      {
-        "amount": "5823",
-        "chain": "60517399332306089",
-        "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
-      },
-      {
-        "amount": "242975701469425418",
-        "chain": "23166",
-        "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
-        "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
-      },
-      {
-        "amount": "58236",
-        "chain": "601867684747701781",
-        "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
-      },
-      {
-        "amount": "2429757014694254185",
-        "chain": "226571",
-        "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
-        "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
-      },
-      {
-        "amount": "582363",
-        "chain": "5704901174751499819",
-        "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        "token_out": "0x4a220e6096b25eadb88358cb44068a3248254675"
-      },
-      {
-        "amount": "24297570146942541859",
-        "chain": "1841671",
-        "token_in": "0x4a220e6096b25eadb88358cb44068a3248254675",
-        "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "balances_live_scaled_18": [
-        "28178234121290802426",
-        "292265644397163471854570"
-      ],
-      "hook_type": null,
-      "pool_address": "0xbda917a67c7d9ae67da92c4ea87e10e5d6c11b54",
-      "pool_type": "WEIGHTED",
-      "scaling_factors": [
-        "1",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "3000000000000000",
-      "token_rates": [
-        "1000000000000000000",
-        "1000000000000000000"
-      ],
-      "tokens": [
-        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
-      ],
-      "total_supply": "2789797333225129277396",
-      "weights": [
-        "500000000000000000",
-        "500000000000000000"
+      "swaps": [
+        {
+          "amount": "2862113906954785",
+          "chain": "28692830955343883257",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
+        },
+        {
+          "amount": "28782037743821647065",
+          "chain": "2853243096897155",
+          "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "28621139069547852",
+          "chain": "286671105214003397487",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
+        },
+        {
+          "amount": "287820377438216470659",
+          "chain": "28506854318583574",
+          "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "286211390695478521",
+          "chain": "2841241980513300320930",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
+        },
+        {
+          "amount": "2878203774382164706598",
+          "chain": "282535873860997907",
+          "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "2862113906954785210",
+          "chain": "26094108966618334159072",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
+        },
+        {
+          "amount": "28782037743821647065982",
+          "chain": "2594823647571083795",
+          "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
       ]
     },
-    "swaps": [
-      {
-        "amount": "2817823412129080",
-        "chain": "29135979889202192814",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "21987099530165337947",
+          "83514359604479682758634"
+        ],
+        "hook_type": null,
+        "pool_address": "0x1535d7ca00323aa32bd62aeddf7ca651e4b95966",
+        "pool_type": "WEIGHTED",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "3000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
+        ],
+        "total_supply": "15893525967832436726629",
+        "weights": [
+          "200000000000000000",
+          "800000000000000000"
+        ]
       },
-      {
-        "amount": "29226564439716347185",
-        "chain": "2809089875632087",
-        "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "28178234121290802",
-        "chain": "291098622137700630573",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
-      },
-      {
-        "amount": "292265644397163471854",
-        "chain": "28065717898182436",
-        "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "281782341212908024",
-        "chain": "2885123790448943555356",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
-      },
-      {
-        "amount": "2922656443971634718545",
-        "chain": "278163702079536295",
-        "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "2817823412129080242",
-        "chain": "26497121711737017453010",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
-      },
-      {
-        "amount": "29226564439716347185457",
-        "chain": "2554669402466757294",
-        "token_in": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "balances_live_scaled_18": [
-        "22224384931565497168",
-        "83289384552219985997006"
-      ],
-      "hook_type": null,
-      "pool_address": "0x1535d7ca00323aa32bd62aeddf7ca651e4b95966",
-      "pool_type": "WEIGHTED",
-      "scaling_factors": [
-        "1",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "3000000000000000",
-      "token_rates": [
-        "1000000000000000000",
-        "1000000000000000000"
-      ],
-      "tokens": [
-        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
-      ],
-      "total_supply": "15893525967832436726629",
-      "weights": [
-        "200000000000000000",
-        "800000000000000000"
+      "swaps": [
+        {
+          "amount": "2198709953016533",
+          "chain": "2081465712590477873",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
+        },
+        {
+          "amount": "8351435960447968275",
+          "chain": "8766270190868337",
+          "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "21987099530165337",
+          "chain": "20802992880334507751",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
+        },
+        {
+          "amount": "83514359604479682758",
+          "chain": "87466434215160095",
+          "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "219870995301653379",
+          "chain": "206872068284896667118",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
+        },
+        {
+          "amount": "835143596044796827586",
+          "chain": "855418466569673826",
+          "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "2198709953016533794",
+          "chain": "1960860587370044446869",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
+        },
+        {
+          "amount": "8351435960447968275863",
+          "chain": "6953220819769096888",
+          "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
       ]
     },
-    "swaps": [
-      {
-        "amount": "2222438493156549",
-        "chain": "2075858558806571094",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "amp": "500000",
+        "balances_live_scaled_18": [
+          "117711863421264378340",
+          "601375494799687440774"
+        ],
+        "hook_type": null,
+        "pool_address": "0x57c23c58b1d8c3292c15becf07c62c5c52457a42",
+        "pool_type": "STABLE",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "20000000000000",
+        "token_rates": [
+          "1068952579419556581",
+          "1076377514671073138"
+        ],
+        "tokens": [
+          "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
+          "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+        ],
+        "total_supply": "694256495227640545154"
       },
-      {
-        "amount": "8328938455221998599",
-        "chain": "8860876027266568",
-        "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "22224384931565497",
-        "chain": "20746952764208653945",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
-      },
-      {
-        "amount": "83289384552219985997",
-        "chain": "88410374452630281",
-        "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "222243849315654971",
-        "chain": "206314786224735006753",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
-      },
-      {
-        "amount": "832893845522199859970",
-        "chain": "864650166909530676",
-        "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      },
-      {
-        "amount": "2222438493156549716",
-        "chain": "1955578325550558584703",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df"
-      },
-      {
-        "amount": "8328938455221998599700",
-        "chain": "7028260175959724341",
-        "token_in": "0xdbdb4d16eda451d0503b854cf79d55697f90c8df",
-        "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "amp": "500000",
-      "balances_live_scaled_18": [
-        "115536808305265790821",
-        "603447519449200881214"
-      ],
-      "hook_type": null,
-      "pool_address": "0x57c23c58b1d8c3292c15becf07c62c5c52457a42",
-      "pool_type": "STABLE",
-      "scaling_factors": [
-        "1",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "20000000000000",
-      "token_rates": [
-        "1068807267566517048",
-        "1076162941469373999"
-      ],
-      "tokens": [
-        "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
-        "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
-      ],
-      "total_supply": "694256495227640545154"
+      "swaps": [
+        {
+          "amount": "11011889100621507",
+          "chain": "11033361492356616",
+          "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
+          "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+        },
+        {
+          "amount": "55870320076557161",
+          "chain": "55759045293104572",
+          "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
+          "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
+        },
+        {
+          "amount": "110118891006215071",
+          "chain": "110332696269703195",
+          "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
+          "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+        },
+        {
+          "amount": "558703200765571612",
+          "chain": "557566790904783117",
+          "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
+          "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
+        },
+        {
+          "amount": "1101188910062150711",
+          "chain": "1103235988317127362",
+          "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
+          "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+        },
+        {
+          "amount": "5587032007655716122",
+          "chain": "5573180566544823602",
+          "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
+          "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
+        },
+        {
+          "amount": "11011889100621507111",
+          "chain": "11024072496611580195",
+          "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
+          "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+        },
+        {
+          "amount": "55870320076557161221",
+          "chain": "55247024251801491155",
+          "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
+          "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
+        },
+        {
+          "amount": "55059445503107535556",
+          "chain": "54995619579115085348",
+          "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
+          "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+        },
+        {
+          "amount": "279351600382785806106",
+          "chain": "109598606333767745259",
+          "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
+          "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
+        }
+      ]
     },
-    "swaps": [
-      {
-        "amount": "10809886805891551",
-        "chain": "10835427895202605",
-        "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
-        "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "amp": "5000000",
+        "balances_live_scaled_18": [
+          "1509418921763274106",
+          "4240498938456187949"
+        ],
+        "hook_type": null,
+        "pool_address": "0xc4ce391d82d164c166df9c8336ddf84206b2f812",
+        "pool_type": "STABLE",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "20000000000000",
+        "token_rates": [
+          "1040612511709368323",
+          "1245677781911199417"
+        ],
+        "tokens": [
+          "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
+          "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+        ],
+        "total_supply": "5475346073102908347"
       },
-      {
-        "amount": "56074027535072457",
-        "chain": "55939281338285158",
-        "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
-        "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
-      },
-      {
-        "amount": "108098868058915513",
-        "chain": "108353343664509708",
-        "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
-        "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
-      },
-      {
-        "amount": "560740275350724574",
-        "chain": "559367659628450861",
-        "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
-        "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
-      },
-      {
-        "amount": "1080988680589155135",
-        "chain": "1083440815558793996",
-        "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
-        "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
-      },
-      {
-        "amount": "5607402753507245740",
-        "chain": "5591029488015942342",
-        "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
-        "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
-      },
-      {
-        "amount": "10809886805891551359",
-        "chain": "10825971259112203614",
-        "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
-        "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
-      },
-      {
-        "amount": "56074027535072457402",
-        "chain": "55383944852847804416",
-        "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
-        "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
-      },
-      {
-        "amount": "54049434029457756799",
-        "chain": "54002909711224299474",
-        "token_in": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202",
-        "token_out": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38"
-      },
-      {
-        "amount": "280370137675362287014",
-        "chain": "107589400492088475780",
-        "token_in": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
-        "token_out": "0x0bfc9d54fc184518a81162f8fb99c2eaca081202"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "amp": "5000000",
-      "balances_live_scaled_18": [
-        "2493765336191128501",
-        "3254312598970809550"
-      ],
-      "hook_type": null,
-      "pool_address": "0xc4ce391d82d164c166df9c8336ddf84206b2f812",
-      "pool_type": "STABLE",
-      "scaling_factors": [
-        "1",
-        "1"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "20000000000000",
-      "token_rates": [
-        "1040463588705912378",
-        "1245447892742192676"
-      ],
-      "tokens": [
-        "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
-        "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
-      ],
-      "total_supply": "5475346073102908347"
+      "swaps": [
+        {
+          "amount": "145051050555285",
+          "chain": "121208488147350",
+          "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
+          "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+        },
+        {
+          "amount": "340417003877592",
+          "chain": "407363069812576",
+          "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
+          "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
+        },
+        {
+          "amount": "1450510505552859",
+          "chain": "1212084468569273",
+          "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
+          "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+        },
+        {
+          "amount": "3404170038775924",
+          "chain": "4073626785387505",
+          "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
+          "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
+        },
+        {
+          "amount": "14505105055528594",
+          "chain": "12120803776142531",
+          "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
+          "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+        },
+        {
+          "amount": "34041700387759240",
+          "chain": "40735866042951604",
+          "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
+          "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
+        },
+        {
+          "amount": "145051050555285946",
+          "chain": "121204292289555083",
+          "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
+          "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+        },
+        {
+          "amount": "340417003877592408",
+          "chain": "407303759936771416",
+          "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
+          "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
+        },
+        {
+          "amount": "725255252776429733",
+          "chain": "605963192928866004",
+          "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
+          "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+        },
+        {
+          "amount": "1702085019387962040",
+          "chain": "1449338383766061279",
+          "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
+          "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
+        }
+      ]
     },
-    "swaps": [
-      {
-        "amount": "239678294958994",
-        "chain": "200237374928562",
-        "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
-        "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "amp": "5000000",
+        "balances_live_scaled_18": [
+          "971986652465496781101",
+          "196878392388326861786"
+        ],
+        "hook_type": null,
+        "pool_address": "0x89bb794097234e5e930446c0cec0ea66b35d7570",
+        "pool_type": "STABLE",
+        "scaling_factors": [
+          "1000000000000",
+          "1000000000000"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "1000000000000",
+        "token_rates": [
+          "1171052057369670024",
+          "1180771501985802209"
+        ],
+        "tokens": [
+          "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
+          "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+        ],
+        "total_supply": "1099581430179345768181"
       },
-      {
-        "amount": "261296568126491",
-        "chain": "312751843209239",
-        "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
-        "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
-      },
-      {
-        "amount": "2396782949589943",
-        "chain": "2002373402464204",
-        "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
-        "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
-      },
-      {
-        "amount": "2612965681264916",
-        "chain": "3127517724410456",
-        "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
-        "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
-      },
-      {
-        "amount": "23967829495899434",
-        "chain": "20023699494422785",
-        "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
-        "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
-      },
-      {
-        "amount": "26129656812649168",
-        "chain": "31275106051788327",
-        "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
-        "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
-      },
-      {
-        "amount": "239678294958994344",
-        "chain": "200233665744222742",
-        "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
-        "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
-      },
-      {
-        "amount": "261296568126491681",
-        "chain": "312743401899635359",
-        "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
-        "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
-      },
-      {
-        "amount": "1198391474794971720",
-        "chain": "1001094093671171628",
-        "token_in": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9",
-        "token_out": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29"
-      },
-      {
-        "amount": "1306482840632458407",
-        "chain": "1563329262263686332",
-        "token_in": "0x775f661b0bd1739349b9a2a3ef60be277c5d2d29",
-        "token_out": "0x0fe906e030a44ef24ca8c7dc7b7c53a6c4f00ce9"
-      }
-    ]
-  },
-  {
-    "state": {
-      "aggregate_swap_fee": "250000000000000000",
-      "amp": "5000000",
-      "balances_live_scaled_18": [
-        "979994176460722705123",
-        "188600114256728021510"
-      ],
-      "hook_type": null,
-      "pool_address": "0x89bb794097234e5e930446c0cec0ea66b35d7570",
-      "pool_type": "STABLE",
-      "scaling_factors": [
-        "1000000000000",
-        "1000000000000"
-      ],
-      "supports_unbalanced_liquidity": true,
-      "swap_fee": "1000000000000",
-      "token_rates": [
-        "1170756458820092904",
-        "1180393401203876752"
-      ],
-      "tokens": [
-        "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
-        "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
-      ],
-      "total_supply": "1099581430179345768181"
+      "swaps": [
+        {
+          "amount": "83001",
+          "chain": "82248",
+          "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
+          "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+        },
+        {
+          "amount": "16673",
+          "chain": "16825",
+          "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
+          "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+        },
+        {
+          "amount": "830011",
+          "chain": "822479",
+          "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
+          "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+        },
+        {
+          "amount": "166737",
+          "chain": "168262",
+          "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
+          "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+        },
+        {
+          "amount": "8300118",
+          "chain": "8224462",
+          "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
+          "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+        },
+        {
+          "amount": "1667371",
+          "chain": "1682613",
+          "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
+          "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+        },
+        {
+          "amount": "83001189",
+          "chain": "82177880",
+          "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
+          "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+        },
+        {
+          "amount": "16673718",
+          "chain": "16824930",
+          "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
+          "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+        },
+        {
+          "amount": "415005948",
+          "chain": "166656969",
+          "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
+          "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+        },
+        {
+          "amount": "83368590",
+          "chain": "84106426",
+          "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
+          "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+        }
+      ]
     },
-    "swaps": [
-      {
-        "amount": "83706",
-        "chain": "82945",
-        "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
-        "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "1408467000000000000",
+          "146263219752757"
+        ],
+        "centeredness_margin": "500000000000000000",
+        "daily_price_shift_base": "999995988736371732",
+        "end_fourth_root_price_ratio": "1007101037684903986",
+        "hook_type": null,
+        "last_timestamp": "1785840647",
+        "last_virtual_balances": [
+          "98568899513234374750",
+          "54086161460427104"
+        ],
+        "pool_address": "0xda66e8ddf9959e4db759bfd06256730d8a8b2d13",
+        "pool_type": "RECLAMM",
+        "price_ratio_update_end_time": "1779199739",
+        "price_ratio_update_start_time": "1779199739",
+        "scaling_factors": [
+          "1000000000000",
+          "1"
+        ],
+        "start_fourth_root_price_ratio": "1007101037684903986",
+        "supports_unbalanced_liquidity": false,
+        "swap_fee": "500000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ],
+        "total_supply": "18712002799470492077231"
       },
-      {
-        "amount": "15977",
-        "chain": "16123",
-        "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
-        "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+      "swaps": [
+        {
+          "amount": "140",
+          "chain": "74413281936",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "14626321975",
+          "chain": "27",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "281",
+          "chain": "149357877448",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "29252643950",
+          "chain": "54",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "704",
+          "chain": "374190400308",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "73131609876",
+          "chain": "137",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "1408",
+          "chain": "748375550275",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "146263219752",
+          "chain": "274",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "3521",
+          "chain": "1871430986130",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "365658049381",
+          "chain": "687",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "7042",
+          "chain": "3742730650217",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "731316098763",
+          "chain": "1374",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      ]
+    },
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "31958040299000000000000",
+          "8462008743648810077"
+        ],
+        "centeredness_margin": "250000000000000000",
+        "daily_price_shift_base": "999999839549454870",
+        "end_fourth_root_price_ratio": "1106682575819184905",
+        "hook_type": null,
+        "last_timestamp": "1785843851",
+        "last_virtual_balances": [
+          "214970686402020923957580",
+          "123512366896741641670"
+        ],
+        "pool_address": "0x3aa14db771113b8707ea0f3d9a591b543045a8b6",
+        "pool_type": "RECLAMM",
+        "price_ratio_update_end_time": "1783527155",
+        "price_ratio_update_start_time": "1783527155",
+        "scaling_factors": [
+          "1000000000000",
+          "1"
+        ],
+        "start_fourth_root_price_ratio": "1106682575819184905",
+        "supports_unbalanced_liquidity": false,
+        "swap_fee": "500000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ],
+        "total_supply": "2462158995907920225289"
       },
-      {
-        "amount": "837060",
-        "chain": "829454",
-        "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
-        "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+      "swaps": [
+        {
+          "amount": "3195804",
+          "chain": "1707164281967583",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "846200874364881",
+          "chain": "1582470",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "6391608",
+          "chain": "3414284398207200",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "1692401748729762",
+          "chain": "3164919",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "15979020",
+          "chain": "8535379769696636",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "4231004371824405",
+          "chain": "7912147",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "31958040",
+          "chain": "17069655567564649",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "8462008743648810",
+          "chain": "15823787",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "79895100",
+          "chain": "42665861271608510",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "21155021859122025",
+          "chain": "39555666",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        {
+          "amount": "159790201",
+          "chain": "85304145186818027",
+          "token_in": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "42310043718244050",
+          "chain": "79098661",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      ]
+    },
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "82397105150573107033",
+          "1911510946040133282"
+        ],
+        "centeredness_margin": "250000000000000000",
+        "daily_price_shift_base": "999999991977472744",
+        "end_fourth_root_price_ratio": "1121166204113053572",
+        "hook_type": null,
+        "last_timestamp": "1785841247",
+        "last_virtual_balances": [
+          "477976498433516204647",
+          "25719808480327690972"
+        ],
+        "pool_address": "0x1bb7928d25ffb9d02625c7f793d1de002a47adca",
+        "pool_type": "RECLAMM",
+        "price_ratio_update_end_time": "1783715183",
+        "price_ratio_update_start_time": "1783715183",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "start_fourth_root_price_ratio": "1121166204113053572",
+        "supports_unbalanced_liquidity": false,
+        "swap_fee": "3000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ],
+        "total_supply": "9893681825252505450"
       },
-      {
-        "amount": "159777",
-        "chain": "161240",
-        "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
-        "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
+      "swaps": [
+        {
+          "amount": "8239710515057310",
+          "chain": "405064981550809",
+          "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "191151094604013",
+          "chain": "3864959953823056",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+        },
+        {
+          "amount": "16479421030114621",
+          "chain": "810118087068379",
+          "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "382302189208026",
+          "chain": "7729866593884310",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+        },
+        {
+          "amount": "41198552575286553",
+          "chain": "2025206152644284",
+          "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "955755473020066",
+          "chain": "19324266642528175",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+        },
+        {
+          "amount": "82397105150573107",
+          "chain": "4050115456679380",
+          "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "1911510946040133",
+          "chain": "38647200551316499",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+        },
+        {
+          "amount": "205992762876432767",
+          "chain": "10123062929653668",
+          "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "4778777365100333",
+          "chain": "96608007253816149",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+        },
+        {
+          "amount": "411985525752865535",
+          "chain": "20238711166451318",
+          "token_in": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+          "token_out": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        {
+          "amount": "9557554730200666",
+          "chain": "193182709947023970",
+          "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "token_out": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+        }
+      ]
+    },
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "622145919849686164446",
+          "5551950538439071334114"
+        ],
+        "centeredness_margin": "500000000000000000",
+        "daily_price_shift_base": "999999839549454870",
+        "end_fourth_root_price_ratio": "1414213562373095048",
+        "hook_type": null,
+        "last_timestamp": "1785743615",
+        "last_virtual_balances": [
+          "1399742917201562629351",
+          "14258437564227185443064"
+        ],
+        "pool_address": "0xa1aac37642c7a057daa7dd4f8837b26e11a0a8aa",
+        "pool_type": "RECLAMM",
+        "price_ratio_update_end_time": "1782746183",
+        "price_ratio_update_start_time": "1782746183",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "start_fourth_root_price_ratio": "1414213562373095048",
+        "supports_unbalanced_liquidity": false,
+        "swap_fee": "5000000000000000",
+        "token_rates": [
+          "1039918027933428301",
+          "1406310490362291895"
+        ],
+        "tokens": [
+          "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        ],
+        "total_supply": "7156276954638523861524"
       },
-      {
-        "amount": "8370607",
-        "chain": "8294158",
-        "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
-        "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+      "swaps": [
+        {
+          "amount": "59826548681389598",
+          "chain": "431278028984507523",
+          "token_in": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "token_out": "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        },
+        {
+          "amount": "394796463251085707",
+          "chain": "54216393353494261",
+          "token_in": "0xb45ad160634c528cc3d2926d9807104fa3157305",
+          "token_out": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994"
+        },
+        {
+          "amount": "119653097362779197",
+          "chain": "862529650936499182",
+          "token_in": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "token_out": "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        },
+        {
+          "amount": "789592926502171415",
+          "chain": "108429763130460547",
+          "token_in": "0xb45ad160634c528cc3d2926d9807104fa3157305",
+          "token_out": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994"
+        },
+        {
+          "amount": "299132743406947993",
+          "chain": "2156126098848579300",
+          "token_in": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "token_out": "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        },
+        {
+          "amount": "1973982316255428539",
+          "chain": "271051733531292916",
+          "token_in": "0xb45ad160634c528cc3d2926d9807104fa3157305",
+          "token_out": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994"
+        },
+        {
+          "amount": "598265486813895987",
+          "chain": "4311592264351729498",
+          "token_in": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "token_out": "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        },
+        {
+          "amount": "3947964632510857079",
+          "chain": "542027902936169756",
+          "token_in": "0xb45ad160634c528cc3d2926d9807104fa3157305",
+          "token_out": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994"
+        },
+        {
+          "amount": "1495663717034739967",
+          "chain": "10774034189221155914",
+          "token_in": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "token_out": "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        },
+        {
+          "amount": "9869911581277142698",
+          "chain": "1354503342248084734",
+          "token_in": "0xb45ad160634c528cc3d2926d9807104fa3157305",
+          "token_out": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994"
+        },
+        {
+          "amount": "2991327434069479935",
+          "chain": "21531600301358391641",
+          "token_in": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994",
+          "token_out": "0xb45ad160634c528cc3d2926d9807104fa3157305"
+        },
+        {
+          "amount": "19739823162554285397",
+          "chain": "2707120737254879698",
+          "token_in": "0xb45ad160634c528cc3d2926d9807104fa3157305",
+          "token_out": "0x08d23468a467d2bb86fae0e32f247a26c7e2e994"
+        }
+      ]
+    },
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "195935759660942093066618",
+          "1172843268739222200"
+        ],
+        "centeredness_margin": "250000000000000000",
+        "daily_price_shift_base": "999999839549454870",
+        "end_fourth_root_price_ratio": "1257433926727261145",
+        "hook_type": null,
+        "last_timestamp": "1785736835",
+        "last_virtual_balances": [
+          "456235028975660649650671",
+          "10822292568718012328"
+        ],
+        "pool_address": "0x0dfc69c976be4d1c0bb29cd13de97151f11d3edc",
+        "pool_type": "RECLAMM",
+        "price_ratio_update_end_time": "1784815283",
+        "price_ratio_update_start_time": "1784815283",
+        "scaling_factors": [
+          "1",
+          "1"
+        ],
+        "start_fourth_root_price_ratio": "1257433926727261145",
+        "supports_unbalanced_liquidity": false,
+        "swap_fee": "8000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1249596907074709588"
+        ],
+        "tokens": [
+          "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        ],
+        "total_supply": "2161993070932250376987"
       },
-      {
-        "amount": "1597773",
-        "chain": "1612396",
-        "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
-        "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
-      },
-      {
-        "amount": "83706072",
-        "chain": "82860174",
-        "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
-        "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
-      },
-      {
-        "amount": "15977735",
-        "chain": "16122703",
-        "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
-        "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
-      },
-      {
-        "amount": "418530361",
-        "chain": "159701146",
-        "token_in": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8",
-        "token_out": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
-      },
-      {
-        "amount": "79888675",
-        "chain": "80594538",
-        "token_in": "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e",
-        "token_out": "0x7bc3485026ac48b6cf9baf0a377477fff5703af8"
-      }
-    ]
-  }
-]
+      "swaps": [
+        {
+          "amount": "19593575966094209306",
+          "chain": "286079224874735",
+          "token_in": "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "token_out": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        },
+        {
+          "amount": "93858312452252",
+          "chain": "6325666839856956577",
+          "token_in": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8",
+          "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
+        },
+        {
+          "amount": "39187151932188418613",
+          "chain": "572141398568459",
+          "token_in": "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "token_out": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        },
+        {
+          "amount": "187716624904505",
+          "chain": "12651210970529380835",
+          "token_in": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8",
+          "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
+        },
+        {
+          "amount": "97967879830471046533",
+          "chain": "1430225627806722",
+          "token_in": "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "token_out": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        },
+        {
+          "amount": "469291562261263",
+          "chain": "31627107143143594380",
+          "token_in": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8",
+          "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
+        },
+        {
+          "amount": "195935759660942093066",
+          "chain": "2860025128492510",
+          "token_in": "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "token_out": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        },
+        {
+          "amount": "938583124522527",
+          "chain": "63251146913698419576",
+          "token_in": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8",
+          "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
+        },
+        {
+          "amount": "489839399152355232666",
+          "chain": "7146868771403708",
+          "token_in": "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "token_out": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        },
+        {
+          "amount": "2346457811306319",
+          "chain": "158104866451542676180",
+          "token_in": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8",
+          "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
+        },
+        {
+          "amount": "979678798304710465333",
+          "chain": "14283103383583903",
+          "token_in": "0x77146784315ba81904d654466968e3a7c196d1f3",
+          "token_out": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8"
+        },
+        {
+          "amount": "4692915622612639",
+          "chain": "316133093192520424100",
+          "token_in": "0xd11c452fc99cf405034ee446803b6f6c1f6d5ed8",
+          "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
+        }
+      ]
+    }
+  ]
+}

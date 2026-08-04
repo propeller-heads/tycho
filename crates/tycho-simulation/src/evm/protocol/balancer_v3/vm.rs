@@ -17,6 +17,7 @@ use alloy::{
 use balancer_maths_rust::{
     common::types::{BasePoolState, PoolState},
     pools::{
+        reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
         stable::stable_data::{StableMutable, StableState},
         weighted::WeightedState,
     },
@@ -97,17 +98,94 @@ sol! {
     }
 
     #[allow(missing_docs)]
+    struct ReClammPoolDynamicData {
+        uint256[] balancesLiveScaled18;
+        uint256[] tokenRates;
+        uint256 staticSwapFeePercentage;
+        uint256 totalSupply;
+        uint256 lastTimestamp;
+        uint256[] lastVirtualBalances;
+        uint256 dailyPriceShiftExponent;
+        uint256 dailyPriceShiftBase;
+        uint256 centerednessMargin;
+        uint256 currentPriceRatio;
+        uint256 currentFourthRootPriceRatio;
+        uint256 startFourthRootPriceRatio;
+        uint256 endFourthRootPriceRatio;
+        uint32 priceRatioUpdateStartTime;
+        uint32 priceRatioUpdateEndTime;
+        bool isPoolInitialized;
+        bool isPoolPaused;
+        bool isPoolInRecoveryMode;
+    }
+
+    #[allow(missing_docs)]
+    struct ReClammPoolImmutableData {
+        address[] tokens;
+        uint256[] decimalScalingFactors;
+        bool tokenAPriceIncludesRate;
+        bool tokenBPriceIncludesRate;
+        uint256 minSwapFeePercentage;
+        uint256 maxSwapFeePercentage;
+        uint256 initialMinPrice;
+        uint256 initialMaxPrice;
+        uint256 initialTargetPrice;
+        uint256 initialDailyPriceShiftExponent;
+        uint256 initialCenterednessMargin;
+        uint256 minPriceRatio;
+        uint256 maxPriceRatio;
+        uint256 maxCenterednessMargin;
+        uint256 maxDailyPriceShiftExponent;
+        uint256 maxDailyPriceRatioUpdateRate;
+        uint256 minPriceRatioUpdateDuration;
+        uint256 minPriceRatioDelta;
+        uint256 balanceRatioAndPriceTolerance;
+    }
+
+    #[allow(missing_docs)]
     interface IBalancerV3Pool {
         function getVault() external view returns (address);
         function getWeightedPoolDynamicData() external view returns (WeightedPoolDynamicData memory);
         function getWeightedPoolImmutableData() external view returns (WeightedPoolImmutableData memory);
         function getStablePoolDynamicData() external view returns (StablePoolDynamicData memory);
         function getStablePoolImmutableData() external view returns (StablePoolImmutableData memory);
+        function getReClammPoolDynamicData() external view returns (ReClammPoolDynamicData memory);
+        function getReClammPoolImmutableData() external view returns (ReClammPoolImmutableData memory);
+    }
+
+    #[allow(missing_docs)]
+    struct HooksConfig {
+        bool enableHookAdjustedAmounts;
+        bool shouldCallBeforeInitialize;
+        bool shouldCallAfterInitialize;
+        bool shouldCallComputeDynamicSwapFee;
+        bool shouldCallBeforeSwap;
+        bool shouldCallAfterSwap;
+        bool shouldCallBeforeAddLiquidity;
+        bool shouldCallAfterAddLiquidity;
+        bool shouldCallBeforeRemoveLiquidity;
+        bool shouldCallAfterRemoveLiquidity;
+        address hooksContract;
     }
 
     #[allow(missing_docs)]
     interface IBalancerV3Vault {
         function getPoolConfig(address pool) external view returns (PoolConfig memory);
+        function getHooksConfig(address pool) external view returns (HooksConfig memory);
+    }
+}
+
+impl HooksConfig {
+    /// Whether a hook takes part in swapping, which the hookless maths here cannot reproduce.
+    ///
+    /// Liquidity hooks are ignored: they cannot change a swap's outcome. A dynamic-fee hook is
+    /// enough on its own — quoting such a pool with its static fee produces an amount the Vault
+    /// then refuses with `DynamicSwapFeeHookFailed`.
+    fn affects_swaps(&self) -> bool {
+        self.enableHookAdjustedAmounts ||
+            self.shouldCallComputeDynamicSwapFee ||
+            self.shouldCallBeforeSwap ||
+            self.shouldCallAfterSwap
     }
 }
 
@@ -116,14 +194,16 @@ const POOL_TYPE_ATTRIBUTE: &str = "pool_type";
 
 /// The pool families this module can quote natively.
 ///
-/// Balancer V3 exposes far more (reCLAMM, Gyro, QuantAMM, LBP, and anything built on the hook
-/// system); those are deliberately rejected at decode time rather than approximated.
+/// Balancer V3 exposes far more (Gyro, QuantAMM, LBP, and anything built on the hook system);
+/// those are deliberately rejected at decode time rather than approximated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BalancerPoolType {
     /// Constant weighted product pools.
     Weighted,
     /// StableMath pools, including pools whose amplification is mid-update.
     Stable,
+    /// AutoRange pools, whose price range shifts with time.
+    Reclamm,
 }
 
 impl BalancerPoolType {
@@ -132,14 +212,19 @@ impl BalancerPoolType {
         match self {
             Self::Weighted => "WeightedPoolFactory",
             Self::Stable => "StablePoolFactory",
+            Self::Reclamm => "ReClammPoolFactory",
         }
     }
 
     /// The `pool_type` string `balancer_maths_rust` keys its pool implementations on.
+    ///
+    /// The V3-generation pools we index share their swap maths with the library's V2
+    /// implementation, which Balancer confirmed, so both map onto `RECLAMM_V2`.
     fn maths_marker(self) -> &'static str {
         match self {
             Self::Weighted => "WEIGHTED",
             Self::Stable => "STABLE",
+            Self::Reclamm => "RECLAMM_V2",
         }
     }
 }
@@ -179,8 +264,11 @@ where
     if call::<D, _, _>(engine, pool, IBalancerV3Pool::getStablePoolImmutableDataCall {}).is_ok() {
         return Ok(BalancerPoolType::Stable);
     }
+    if call::<D, _, _>(engine, pool, IBalancerV3Pool::getReClammPoolImmutableDataCall {}).is_ok() {
+        return Ok(BalancerPoolType::Reclamm);
+    }
     Err(SimulationError::FatalError(format!(
-        "balancer_v3 pool {pool} exposes neither the weighted nor the stable getters"
+        "balancer_v3 pool {pool} exposes none of the weighted, stable or reCLAMM getters"
     )))
 }
 
@@ -199,12 +287,15 @@ where
 /// Builds the maths library's pool state for `pool` from the indexed storage.
 ///
 /// The returned state is a snapshot for the block the engine's database is at; callers rebuild it
-/// on every update rather than applying deltas to it.
+/// on every update rather than applying deltas to it. `block_timestamp` is the timestamp quotes
+/// should be evaluated at — reCLAMM shifts its price range with time, so it needs the current
+/// block's timestamp rather than the pool's last-updated one.
 pub(super) fn read_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
     pool: &AlloyAddress,
     vault: &AlloyAddress,
     pool_type: BalancerPoolType,
+    block_timestamp: u64,
 ) -> Result<PoolState, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
@@ -217,6 +308,17 @@ where
     if !config.isPoolInitialized {
         return Err(SimulationError::RecoverableError(format!(
             "balancer_v3 pool {pool} is not initialized"
+        )));
+    }
+
+    // The factory a pool came from says nothing about its hooks: a StablePoolFactory pool can carry
+    // a dynamic-fee hook, and quoting it as hookless yields amounts the Vault rejects.
+    let hooks: HooksConfig =
+        call(engine, vault, IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
+    if hooks.affects_swaps() {
+        return Err(SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} uses swap hook {:?}, which the native maths does not model",
+            hooks.hooksContract
         )));
     }
 
@@ -262,6 +364,45 @@ where
             Ok(PoolState::Stable(StableState {
                 base,
                 mutable: StableMutable { amp: dynamic.amplificationParameter },
+            }))
+        }
+        BalancerPoolType::Reclamm => {
+            let dynamic: ReClammPoolDynamicData =
+                call(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
+            let immutable: ReClammPoolImmutableData =
+                call(engine, pool, IBalancerV3Pool::getReClammPoolImmutableDataCall {})?;
+            let base = base_state(
+                pool,
+                pool_type,
+                &immutable.tokens,
+                immutable.decimalScalingFactors,
+                dynamic.tokenRates,
+                dynamic.balancesLiveScaled18,
+                dynamic.staticSwapFeePercentage,
+                config.aggregateSwapFeePercentage,
+                dynamic.totalSupply,
+                &config.liquidityManagement,
+            );
+            // Unlike the other families, the maths recomputes the virtual balances itself from
+            // `last_timestamp` to `current_timestamp`, so the quote depends on the block being
+            // quoted rather than only on stored state.
+            Ok(PoolState::ReClammV2(ReClammV2State {
+                immutable: ReClammV2Immutable {
+                    pool_address: base.pool_address.clone(),
+                    tokens: base.tokens.clone(),
+                },
+                base,
+                mutable: ReClammV2Mutable {
+                    last_virtual_balances: dynamic.lastVirtualBalances,
+                    daily_price_shift_base: dynamic.dailyPriceShiftBase,
+                    last_timestamp: dynamic.lastTimestamp,
+                    current_timestamp: U256::from(block_timestamp),
+                    centeredness_margin: dynamic.centerednessMargin,
+                    start_fourth_root_price_ratio: dynamic.startFourthRootPriceRatio,
+                    end_fourth_root_price_ratio: dynamic.endFourthRootPriceRatio,
+                    price_ratio_update_start_time: U256::from(dynamic.priceRatioUpdateStartTime),
+                    price_ratio_update_end_time: U256::from(dynamic.priceRatioUpdateEndTime),
+                },
             }))
         }
     }
@@ -347,8 +488,10 @@ mod tests {
     fn maps_factory_markers_to_pool_types() {
         assert_eq!(BalancerPoolType::Weighted.factory_marker(), "WeightedPoolFactory");
         assert_eq!(BalancerPoolType::Stable.factory_marker(), "StablePoolFactory");
+        assert_eq!(BalancerPoolType::Reclamm.factory_marker(), "ReClammPoolFactory");
         assert_eq!(BalancerPoolType::Weighted.maths_marker(), "WEIGHTED");
         assert_eq!(BalancerPoolType::Stable.maths_marker(), "STABLE");
+        assert_eq!(BalancerPoolType::Reclamm.maths_marker(), "RECLAMM_V2");
     }
 
     #[test]
@@ -356,6 +499,7 @@ mod tests {
         for (marker, expected) in [
             ("WeightedPoolFactory", BalancerPoolType::Weighted),
             ("StablePoolFactory", BalancerPoolType::Stable),
+            ("ReClammPoolFactory", BalancerPoolType::Reclamm),
         ] {
             let attrs = attributes(marker);
             let raw = attrs

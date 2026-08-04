@@ -6,6 +6,7 @@
 use std::{collections::HashMap, str::FromStr};
 
 use alloy::primitives::Address as AlloyAddress;
+use tracing::debug;
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
@@ -33,7 +34,7 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
     /// rates and weights are all indexed in the former.
     async fn try_from_with_header(
         value: ComponentWithState,
-        _block: tycho_client::feed::BlockHeader,
+        block: tycho_client::feed::BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         _all_tokens: &HashMap<Bytes, Token>,
         decoder_context: &DecoderContext,
@@ -64,7 +65,7 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
         let vault = vm::read_vault(&engine, &pool)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
-        let state = vm::read_pool_state(&engine, &pool, &vault, pool_type)
+        let state = vm::read_pool_state(&engine, &pool, &vault, pool_type, block.timestamp)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
         let tokens = state
@@ -80,11 +81,14 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        debug!(pool = %pool_address, ?pool_type, "Decoded balancer_v3 pool natively");
+
         Ok(BalancerV3State::new(
             pool_address,
             Bytes::from(vault.into_array().to_vec()),
             pool_type,
             tokens,
+            block.timestamp,
             state,
         ))
     }

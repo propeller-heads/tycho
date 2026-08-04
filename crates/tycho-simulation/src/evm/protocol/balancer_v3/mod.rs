@@ -5,9 +5,11 @@
 //! that keep rate providers and other referenced contracts fresh. What changes is the hot path: a
 //! quote no longer executes the Vault in REVM, it evaluates the pool's maths directly.
 //!
-//! Only weighted and stable pools are decoded here. Balancer V3's hook system is open-ended by
-//! design, and reCLAMM, Gyro, QuantAMM and LBP pools each need maths this decoder does not build
-//! yet, so [`vm::resolve_pool_type`] rejects them instead of pricing them with the wrong curve.
+//! Weighted, stable and reCLAMM pools are decoded here. The V3-generation reCLAMM pools we index
+//! share their swap maths with the library's V2 implementation, which Balancer confirmed, so they
+//! reuse it. Gyro, QuantAMM and LBP pools, and anything carrying a swap hook, still need maths this
+//! decoder does not build, so [`vm::resolve_pool_type`] and the hook check reject them rather than
+//! pricing them with the wrong curve.
 mod decoder;
 mod state;
 #[cfg(test)]

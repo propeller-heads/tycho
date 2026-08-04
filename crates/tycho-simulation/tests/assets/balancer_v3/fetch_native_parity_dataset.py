@@ -4,7 +4,10 @@
 For every pool the script reads the state that `balancer-maths-rust` needs (from the Vault and the
 pool's own getters) and the `amountOut` that `BatchRouter.querySwapExactIn` returns for a spread of
 swap sizes, all at one fixed block. The result is written as JSON that
-`tests/balancer_v3_native_parity.rs` replays without any RPC access.
+the module's parity test replays without any RPC access.
+
+The output is an object holding the block, its timestamp (reCLAMM quotes depend on it) and the
+per-pool entries.
 
 Integers are emitted as decimal strings so the dataset stays readable in review and does not depend
 on how `alloy` serializes `U256`.
@@ -50,9 +53,22 @@ STABLE_DYNAMIC = (
     "bool,bool,bool,bool))"
 )
 STABLE_IMMUTABLE = "getStablePoolImmutableData()((address[],uint256[],uint256))"
+RECLAMM_DYNAMIC = (
+    "getReClammPoolDynamicData()"
+    "((uint256[],uint256[],uint256,uint256,uint256,uint256[],uint256,uint256,uint256,uint256,"
+    "uint256,uint256,uint256,uint32,uint32,bool,bool,bool))"
+)
+RECLAMM_IMMUTABLE = (
+    "getReClammPoolImmutableData()"
+    "((address[],uint256[],bool,bool,uint256,uint256,uint256,uint256,uint256,uint256,uint256,"
+    "uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))"
+)
 
 # Swap sizes as basis points of the input token's raw balance: 0.01% up to half the pool.
 SWAP_SIZES_BPS = (1, 10, 100, 1000, 5000)
+# reCLAMM concentrates liquidity in a narrow range, so anything but a small swap leaves it and
+# reverts on chain. Probe finer sizes there instead.
+RECLAMM_SWAP_SIZES_BPS = (1, 2, 5, 10, 25, 50)
 
 WEIGHTED_POOLS = (
     "0x1846c6cbe0d433e152fa358e5ff27968e18bce7c",
@@ -61,6 +77,21 @@ WEIGHTED_POOLS = (
     "0x571bea0e99e139cd0b6b7d9352ca872dfe0d72dd",
     "0xbda917a67c7d9ae67da92c4ea87e10e5d6c11b54",
     "0x1535d7ca00323aa32bd62aeddf7ca651e4b95966",
+)
+# reCLAMM shifts its price range with time, so its quotes are only reproducible together with the
+# timestamp of the block they were taken at.
+RECLAMM_POOLS = (
+    "0xda66e8dDf9959e4DB759BFD06256730d8a8B2D13",
+    "0x3Aa14db771113B8707ea0F3D9a591B543045a8b6",
+    "0x1bB7928D25fFB9D02625C7F793D1de002a47aDCa",
+    "0x4fb5a4dfE0036EaaB707B41A697C1Aa2C979226f",
+    "0xb29e5CaE37eB9c9cfa2FC7a3a4b0c7a054cFC2CA",
+    "0xB47AEC7F043d4c34f76990443e5EE44e54970070",
+    "0x02Bf1e41462cE08B764B752C8A61D5B4a46fc2f4",
+    "0x3eed43Ed1585A9bA0c4dd6D83B83ed7327E7731E",
+    "0xa1aac37642C7A057DAa7dD4f8837B26e11a0a8AA",
+    "0x7229677EBFD10Cd73cb3C66D9263D3c3EF62f30E",
+    "0x0dFC69C976bE4D1C0bb29Cd13De97151F11d3Edc",
 )
 STABLE_POOLS = (
     "0x57c23c58B1D8C3292c15BEcF07c62C5c52457A42",
@@ -86,6 +117,17 @@ def call(rpc: str, block: str, *args: str, sender: str | None = None):
         return None
 
 
+def block_timestamp(rpc: str, block: str) -> str:
+    """Reads the timestamp of `block`, which reCLAMM quotes are evaluated at."""
+    out = subprocess.run(
+        ["cast", "block", "--rpc-url", rpc, block, "-f", "timestamp"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
 def dec(value) -> str:
     """Normalizes cast's mix of ints and strings into a decimal string."""
     return str(int(value))
@@ -97,6 +139,9 @@ def fetch_pool(rpc: str, block: str, pool: str, kind: str):
     if kind == "WEIGHTED":
         dynamic = call(rpc, block, pool, WEIGHTED_DYNAMIC)
         immutable = call(rpc, block, pool, WEIGHTED_IMMUTABLE)
+    elif kind == "RECLAMM":
+        dynamic = call(rpc, block, pool, RECLAMM_DYNAMIC)
+        immutable = call(rpc, block, pool, RECLAMM_IMMUTABLE)
     else:
         dynamic = call(rpc, block, pool, STABLE_DYNAMIC)
         immutable = call(rpc, block, pool, STABLE_IMMUTABLE)
@@ -126,11 +171,21 @@ def fetch_pool(rpc: str, block: str, pool: str, kind: str):
     }
     if kind == "WEIGHTED":
         state["weights"] = [dec(weight) for weight in immutable[2]]
+    elif kind == "RECLAMM":
+        state["last_timestamp"] = dec(dynamic[4])
+        state["last_virtual_balances"] = [dec(v) for v in dynamic[5]]
+        state["daily_price_shift_base"] = dec(dynamic[7])
+        state["centeredness_margin"] = dec(dynamic[8])
+        state["start_fourth_root_price_ratio"] = dec(dynamic[11])
+        state["end_fourth_root_price_ratio"] = dec(dynamic[12])
+        state["price_ratio_update_start_time"] = dec(dynamic[13])
+        state["price_ratio_update_end_time"] = dec(dynamic[14])
     else:
         state["amp"] = dec(dynamic[5])
 
     swaps = []
-    for bps in SWAP_SIZES_BPS:
+    sizes = RECLAMM_SWAP_SIZES_BPS if kind == "RECLAMM" else SWAP_SIZES_BPS
+    for bps in sizes:
         for token_in_index, token_out_index in ((0, 1), (1, 0)):
             amount = balances_raw[token_in_index] * bps // 10_000
             if amount == 0:
@@ -170,6 +225,7 @@ def main() -> int:
 
     pools = [(pool, "WEIGHTED") for pool in WEIGHTED_POOLS]
     pools += [(pool, "STABLE") for pool in STABLE_POOLS]
+    pools += [(pool, "RECLAMM") for pool in RECLAMM_POOLS]
 
     entries = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool_executor:
@@ -186,7 +242,16 @@ def main() -> int:
         print("no pool yielded usable data", file=sys.stderr)
         return 1
 
-    json.dump(entries, sys.stdout, indent=2, sort_keys=True)
+    json.dump(
+        {
+            "block": block,
+            "block_timestamp": block_timestamp(rpc, block),
+            "pools": entries,
+        },
+        sys.stdout,
+        indent=2,
+        sort_keys=True,
+    )
     sys.stdout.write("\n")
     swap_count = sum(len(entry["swaps"]) for entry in entries)
     print(
