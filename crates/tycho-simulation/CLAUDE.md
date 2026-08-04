@@ -37,15 +37,6 @@ fallback for protocols too complex to port, not a default.
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
 
-### Ekubo V3 Ve33 pools
-
-`ekubo_v3::pool::Ve33Pool` wraps full-range, stableswap, or concentrated native pool math. Ve33
-pools must have a zero Core fee; the simulator reads the extension-managed `swap_fee` state
-attribute and applies it to both exact-input and exact-output quotes. The Ekubo V3 Substreams
-package initializes that attribute and updates it from `VoteWeightApplied` events. On Robinhood,
-Ve33 is deployed at `0xD18685a514E59b06d59824e16Db07e73345d9953`; keep this address
-synchronized between the simulator, Substreams package, and executor.
-
 ## Features
 
 | Feature | Default | Contents |

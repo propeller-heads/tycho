@@ -164,10 +164,6 @@ Metric): Also implement `ICallback`. Flow:
 `_currentSwappingExecutor` is stored in transient storage so `fallback()` knows which executor to route to. Cleared
 after the callback to prevent re-entrancy.
 
-Ekubo V3 normally calls `Core.swap`, but extension-owned swap call points require forwarding.
-Ve33 hops are detected by their extension address and sent through `Core.forward` with the Ve33
-selectorless swap payload; their packed hop encoding remains the normal fixed 52 bytes.
-
 Transfer types returned by executors:
 
 ```
