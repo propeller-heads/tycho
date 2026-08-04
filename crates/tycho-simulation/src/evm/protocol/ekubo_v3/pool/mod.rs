@@ -45,6 +45,6 @@ pub trait EkuboPool {
     fn quote(
         &self,
         token_amount: EvmTokenAmount,
-    ) -> Result<super::pool::EkuboPoolQuote, SimulationError>;
+    ) -> Result<crate::evm::protocol::ekubo_v3::pool::EkuboPoolQuote, SimulationError>;
     fn get_limit(&self, token_in: Address) -> Result<i128, SimulationError>;
 }

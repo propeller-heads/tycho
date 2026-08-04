@@ -21,6 +21,7 @@ use crate::{evm::protocol::ekubo_v3::state::EkuboV3State, protocol::errors::Inva
 const GAS_COST_OF_FEE_ACCUMULATION: u64 = 20_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[enum_delegate::implement(EkuboPool)]
 pub enum Ve33UnderlyingPool {
     Concentrated(ConcentratedPool),
     FullRange(FullRangePool),
@@ -36,72 +37,6 @@ impl Ve33UnderlyingPool {
             _ => Err(SimulationError::FatalError(
                 "Ve33 underlying quote returned an unexpected pool type".to_string(),
             )),
-        }
-    }
-}
-
-impl EkuboPool for Ve33UnderlyingPool {
-    fn key(&self) -> EvmPoolKey {
-        match self {
-            Self::Concentrated(pool) => pool.key(),
-            Self::FullRange(pool) => pool.key(),
-            Self::Stableswap(pool) => pool.key(),
-        }
-    }
-
-    fn sqrt_ratio(&self) -> U256 {
-        match self {
-            Self::Concentrated(pool) => pool.sqrt_ratio(),
-            Self::FullRange(pool) => pool.sqrt_ratio(),
-            Self::Stableswap(pool) => pool.sqrt_ratio(),
-        }
-    }
-
-    fn set_sqrt_ratio(&mut self, sqrt_ratio: U256) {
-        match self {
-            Self::Concentrated(pool) => pool.set_sqrt_ratio(sqrt_ratio),
-            Self::FullRange(pool) => pool.set_sqrt_ratio(sqrt_ratio),
-            Self::Stableswap(pool) => pool.set_sqrt_ratio(sqrt_ratio),
-        }
-    }
-
-    fn set_liquidity(&mut self, liquidity: u128) {
-        match self {
-            Self::Concentrated(pool) => pool.set_liquidity(liquidity),
-            Self::FullRange(pool) => pool.set_liquidity(liquidity),
-            Self::Stableswap(pool) => pool.set_liquidity(liquidity),
-        }
-    }
-
-    fn finish_transition(
-        &mut self,
-        updated_attributes: HashMap<String, Bytes>,
-        deleted_attributes: HashSet<String>,
-    ) -> Result<(), TransitionError> {
-        match self {
-            Self::Concentrated(pool) => {
-                pool.finish_transition(updated_attributes, deleted_attributes)
-            }
-            Self::FullRange(pool) => pool.finish_transition(updated_attributes, deleted_attributes),
-            Self::Stableswap(pool) => {
-                pool.finish_transition(updated_attributes, deleted_attributes)
-            }
-        }
-    }
-
-    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
-        match self {
-            Self::Concentrated(pool) => pool.quote(token_amount),
-            Self::FullRange(pool) => pool.quote(token_amount),
-            Self::Stableswap(pool) => pool.quote(token_amount),
-        }
-    }
-
-    fn get_limit(&self, token_in: Address) -> Result<i128, SimulationError> {
-        match self {
-            Self::Concentrated(pool) => pool.get_limit(token_in),
-            Self::FullRange(pool) => pool.get_limit(token_in),
-            Self::Stableswap(pool) => pool.get_limit(token_in),
         }
     }
 }
