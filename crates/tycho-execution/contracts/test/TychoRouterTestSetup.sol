@@ -6,7 +6,9 @@ import {BalancerV3Executor} from "../src/executors/BalancerV3Executor.sol";
 import {BebopExecutor} from "../src/executors/BebopExecutor.sol";
 import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
 import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
-import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
+import {
+    EkuboV3EthereumExecutor
+} from "../src/executors/EkuboV3EthereumExecutor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
@@ -120,7 +122,7 @@ contract TychoRouterTestSetup is
     RocketpoolExecutor public rocketpoolExecutor;
     ERC4626Executor public erc4626Executor;
     NativeWrapExecutor public nativeWrapExecutor;
-    EkuboV3Executor public ekuboV3Executor;
+    EkuboV3EthereumExecutor public ekuboV3Executor;
     EtherfiExecutor public etherfiExecutor;
     LiquidityPartyExecutor public liquidityPartyExecutor;
     LiquoriceExecutor public liquoriceExecutor;
@@ -215,7 +217,7 @@ contract TychoRouterTestSetup is
         rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
         erc4626Executor = new ERC4626Executor();
         nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor();
+        ekuboV3Executor = new EkuboV3EthereumExecutor();
         // Etch placeholder bytecode if Etherfi contracts are not yet deployed
         // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
         if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));

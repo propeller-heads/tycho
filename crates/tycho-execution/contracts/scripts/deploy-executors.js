@@ -32,6 +32,9 @@ const deploy_protocols = {
         "vm:bopamm",
         "rfq:metric",
     ],
+    "robinhood": [
+        "ekubo_v3",
+    ],
     "base": [
         "uniswap_v2",
         "uniswap_v3",
