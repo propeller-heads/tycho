@@ -1,3 +1,8 @@
+//! Drops events for pools whose initialization has not been registered in the
+//! pool details store. When the package is synced from its intended start
+//! block every pool initialization is seen, so this filter is a no-op; it
+//! exists to support range integration tests, which don't sync from the start.
+
 use substreams::store::{StoreGet, StoreGetProto};
 use substreams_helper::hex::Hexable;
 
@@ -25,11 +30,12 @@ fn map_filtered_events(
                             .as_ref()
                             .expect("pool log should have an event")
                         {
-                            Event::PoolInitialized(_) |
+                            Event::PoolInitialized(_) => true,
+                            Event::Swapped(_) |
+                            Event::PositionUpdated(_) |
                             Event::VirtualExecution(_) |
                             Event::RateUpdated(_) |
-                            Event::SwapFeeUpdated(_) => true,
-                            Event::Swapped(_) | Event::PositionUpdated(_) => {
+                            Event::SwapFeeUpdated(_) => {
                                 pool_details_store.has_last(log.pool_id.to_hex())
                             }
                         }
