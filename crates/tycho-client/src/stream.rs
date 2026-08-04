@@ -16,6 +16,11 @@ use tycho_common::{
     },
 };
 
+// Re-exported from their own module for backwards compatibility: consumers import these from
+// `tycho_client::stream`.
+pub use crate::retry::{
+    ConstantRetryConfiguration, ExponentialRetryConfiguration, RetryConfiguration,
+};
 use crate::{
     client_metadata::serialize_client_metadata,
     deltas::DeltasClient,
@@ -27,6 +32,11 @@ use crate::{
     HttpRPCClient, WsDeltasClient,
 };
 
+/// Ceiling for a single retry delay. Long enough that a client waiting out a multi-minute outage
+/// stops contributing meaningful load, short enough that it recovers within a block or two of the
+/// server coming back.
+const MAX_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
 #[derive(Error, Debug)]
 pub enum StreamError {
     #[error("Error during stream set up: {0}")]
@@ -37,24 +47,6 @@ pub enum StreamError {
 
     #[error("BlockSynchronizer error: {0}")]
     BlockSynchronizerError(String),
-}
-
-#[non_exhaustive]
-#[derive(Clone, Debug)]
-pub enum RetryConfiguration {
-    Constant(ConstantRetryConfiguration),
-}
-
-impl RetryConfiguration {
-    pub fn constant(max_attempts: u64, cooldown: Duration) -> Self {
-        RetryConfiguration::Constant(ConstantRetryConfiguration { max_attempts, cooldown })
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ConstantRetryConfiguration {
-    max_attempts: u64,
-    cooldown: Duration,
 }
 
 /// Loads and validates the custom-chain config once, before the stream starts. A missing or
@@ -105,13 +97,15 @@ impl TychoStreamBuilder {
             timeout,
             startup_timeout: Duration::from_secs(block_time * max_missed_blocks),
             max_missed_blocks,
-            state_sync_retry_config: RetryConfiguration::constant(
+            state_sync_retry_config: RetryConfiguration::exponential(
                 32,
                 Duration::from_secs(max(block_time / 4, 2)),
+                MAX_RETRY_COOLDOWN,
             ),
-            websockets_retry_config: RetryConfiguration::constant(
+            websockets_retry_config: RetryConfiguration::exponential(
                 128,
                 Duration::from_secs(max(block_time / 6, 1)),
+                MAX_RETRY_COOLDOWN,
             ),
             no_state: false,
             auth_key: None,
@@ -186,10 +180,12 @@ impl TychoStreamBuilder {
     }
 
     fn warn_on_potential_timing_issues(&self) {
-        let (RetryConfiguration::Constant(state_config), RetryConfiguration::Constant(ws_config)) =
-            (&self.state_sync_retry_config, &self.websockets_retry_config);
-
-        if ws_config.cooldown >= state_config.cooldown {
+        if self
+            .websockets_retry_config
+            .initial_cooldown() >=
+            self.state_sync_retry_config
+                .initial_cooldown()
+        {
             warn!(
                 "Websocket cooldown should be < than state syncronizer cooldown \
                 to avoid spending retries due to disconnected websocket."
@@ -271,12 +267,11 @@ impl TychoStreamBuilder {
     }
 
     /// Overrides the maximum number of retry attempts for state synchronizer startup.
-    /// The retry cooldown is derived from the chain's block time and is not affected.
+    /// The retry pacing is derived from the chain's block time and is not affected.
     pub fn max_retries(mut self, max_retries: u64) -> Self {
-        let cooldown = match &self.state_sync_retry_config {
-            RetryConfiguration::Constant(c) => c.cooldown,
-        };
-        self.state_sync_retry_config = RetryConfiguration::constant(max_retries, cooldown);
+        self.state_sync_retry_config = self
+            .state_sync_retry_config
+            .with_max_attempts(max_retries);
         self
     }
 
@@ -336,14 +331,11 @@ impl TychoStreamBuilder {
         };
 
         // Initialize the WebSocket client
-        let ws_client = match &self.websockets_retry_config {
-            RetryConfiguration::Constant(config) => WsDeltasClient::new_with_reconnects(
-                &tycho_ws_url,
-                auth_key.as_deref(),
-                config.max_attempts,
-                config.cooldown,
-            ),
-        }
+        let ws_client = WsDeltasClient::new_with_retry_config(
+            &tycho_ws_url,
+            auth_key.as_deref(),
+            self.websockets_retry_config.clone(),
+        )
         .map_err(|e| StreamError::SetUpError(e.to_string()))?
         .with_client_metadata_header(metadata_header.clone());
         let rpc_client = HttpRPCClient::new(
@@ -390,23 +382,20 @@ impl TychoStreamBuilder {
             info!("Registering exchange: {}", name);
             let id = ExtractorIdentity { chain: self.chain, name: name.clone() };
             let uses_dci = dci_protocols.contains(&name);
-            let sync = match &self.state_sync_retry_config {
-                RetryConfiguration::Constant(retry_config) => ProtocolStateSynchronizer::new(
-                    id.clone(),
-                    true,
-                    filter,
-                    retry_config.max_attempts,
-                    retry_config.cooldown,
-                    !self.no_state,
-                    self.include_tvl,
-                    self.compression,
-                    rpc_client.clone(),
-                    ws_client.clone(),
-                    self.block_time + self.timeout,
-                )
-                .with_dci(uses_dci)
-                .with_partial_blocks(self.partial_blocks),
-            };
+            let sync = ProtocolStateSynchronizer::new_with_retry_config(
+                id.clone(),
+                true,
+                filter,
+                self.state_sync_retry_config.clone(),
+                !self.no_state,
+                self.include_tvl,
+                self.compression,
+                rpc_client.clone(),
+                ws_client.clone(),
+                self.block_time + self.timeout,
+            )
+            .with_dci(uses_dci)
+            .with_partial_blocks(self.partial_blocks);
             block_sync = block_sync.register_synchronizer(id, sync);
         }
 
@@ -562,12 +551,45 @@ mod tests {
     #[test]
     fn test_retry_configuration_constant() {
         let config = RetryConfiguration::constant(5, Duration::from_secs(10));
-        match config {
-            RetryConfiguration::Constant(c) => {
-                assert_eq!(c.max_attempts, 5);
-                assert_eq!(c.cooldown, Duration::from_secs(10));
-            }
-        }
+        assert_eq!(config.max_attempts(), 5);
+        assert_eq!(config.delay(0), Duration::from_secs(10));
+        assert_eq!(config.delay(4), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_default_retry_configs_back_off() {
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
+
+        // 12s blocks: the state synchronizer starts at 3s and the websocket at 2s, and both grow
+        // until they hit the shared ceiling.
+        let state = &builder.state_sync_retry_config;
+        assert_eq!(state.delay_bound(0), Duration::from_secs(3));
+        assert_eq!(state.delay_bound(1), Duration::from_secs(6));
+        assert_eq!(state.delay_bound(10), MAX_RETRY_COOLDOWN);
+
+        let ws = &builder.websockets_retry_config;
+        assert_eq!(ws.delay_bound(0), Duration::from_secs(2));
+        assert_eq!(ws.delay_bound(1), Duration::from_secs(4));
+        assert_eq!(ws.delay_bound(10), MAX_RETRY_COOLDOWN);
+    }
+
+    #[test]
+    fn test_max_retries_keeps_backoff() {
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum).max_retries(4);
+
+        assert_eq!(
+            builder
+                .state_sync_retry_config
+                .max_attempts(),
+            4
+        );
+        assert_eq!(
+            builder
+                .state_sync_retry_config
+                .delay_bound(1),
+            Duration::from_secs(6),
+            "overriding the attempt budget must not fall back to a constant cooldown"
+        );
     }
 
     #[test]
@@ -581,14 +603,12 @@ mod tests {
             .state_synchronizer_retry_config(&state_config);
 
         // Verify configs are stored correctly by checking they match expected values
-        match (&builder.websockets_retry_config, &builder.state_sync_retry_config) {
-            (RetryConfiguration::Constant(ws), RetryConfiguration::Constant(state)) => {
-                assert_eq!(ws.max_attempts, 10);
-                assert_eq!(ws.cooldown, Duration::from_secs(2));
-                assert_eq!(state.max_attempts, 20);
-                assert_eq!(state.cooldown, Duration::from_secs(5));
-            }
-        }
+        let ws = &builder.websockets_retry_config;
+        let state = &builder.state_sync_retry_config;
+        assert_eq!(ws.max_attempts(), 10);
+        assert_eq!(ws.delay(0), Duration::from_secs(2));
+        assert_eq!(state.max_attempts(), 20);
+        assert_eq!(state.delay(0), Duration::from_secs(5));
     }
 
     #[test]

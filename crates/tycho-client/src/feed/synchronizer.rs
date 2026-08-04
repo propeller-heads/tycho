@@ -33,6 +33,7 @@ use crate::{
         component_tracker::{ComponentFilter, ComponentTracker},
         BlockHeader, HeaderLike,
     },
+    retry::RetryConfiguration,
     rpc::{
         RPCClient, RPCError, SnapshotParameters, TracedEntryPointsPaginatedParams,
         RPC_CLIENT_CONCURRENCY,
@@ -119,8 +120,8 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     retrieve_balances: bool,
     rpc_client: R,
     deltas_client: D,
-    max_retries: u64,
-    retry_cooldown: Duration,
+    /// How many times a failed sync run is restarted, and how long to wait in between.
+    retry_config: RetryConfiguration,
     include_snapshots: bool,
     component_tracker: ComponentTracker<R>,
     last_synced_block: Option<BlockHeader>,
@@ -404,7 +405,12 @@ where
     R: RPCClient + Clone + Send + Sync + 'static,
     D: DeltasClient + Clone + Send + Sync + 'static,
 {
-    /// Creates a new state synchronizer.
+    /// Creates a new state synchronizer that waits a fixed `retry_cooldown` between sync
+    /// attempts.
+    ///
+    /// Prefer [`Self::new_with_retry_config`] with [`RetryConfiguration::exponential`]: a failing
+    /// sync run re-requests the whole snapshot, so a fixed cooldown keeps that load on the server
+    /// at a constant rate for as long as the failure lasts.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         extractor_id: ExtractorIdentity,
@@ -412,6 +418,34 @@ where
         component_filter: ComponentFilter,
         max_retries: u64,
         retry_cooldown: Duration,
+        include_snapshots: bool,
+        include_tvl: bool,
+        compression: bool,
+        rpc_client: R,
+        deltas_client: D,
+        timeout: u64,
+    ) -> Self {
+        Self::new_with_retry_config(
+            extractor_id,
+            retrieve_balances,
+            component_filter,
+            RetryConfiguration::constant(max_retries, retry_cooldown),
+            include_snapshots,
+            include_tvl,
+            compression,
+            rpc_client,
+            deltas_client,
+            timeout,
+        )
+    }
+
+    /// Creates a new state synchronizer with custom retry pacing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_retry_config(
+        extractor_id: ExtractorIdentity,
+        retrieve_balances: bool,
+        component_filter: ComponentFilter,
+        retry_config: RetryConfiguration,
         include_snapshots: bool,
         include_tvl: bool,
         compression: bool,
@@ -431,8 +465,7 @@ where
                 component_filter,
                 rpc_client,
             ),
-            max_retries,
-            retry_cooldown,
+            retry_config,
             last_synced_block: None,
             timeout,
             include_tvl,
@@ -1114,7 +1147,7 @@ where
             let mut current_end_rx = end_rx;
             let mut final_error = None;
 
-            while retry_count < self.max_retries {
+            while retry_count < self.retry_config.max_attempts() {
                 info!(extractor_id=%&self.extractor_id, retry_count, "(Re)starting synchronization loop");
 
                 let prev_block = self
@@ -1169,14 +1202,19 @@ where
                         }
                     }
                 }
-                sleep(self.retry_cooldown).await;
                 // A run that processed blocks is a healthy run — reset the counter so
-                // transient failures after a long successful period get a fresh retry budget.
+                // transient failures after a long successful period get a fresh retry budget, and
+                // so the backoff does not carry over into it.
                 if made_progress {
                     retry_count = 0;
                 } else {
                     retry_count += 1;
                 }
+                let cooldown = self
+                    .retry_config
+                    .delay(retry_count.saturating_sub(1));
+                debug!(extractor_id=%&self.extractor_id, ?cooldown, retry_count, "Waiting before restarting synchronization");
+                sleep(cooldown).await;
             }
             if let Some(e) = final_error {
                 warn!(extractor_id=%&self.extractor_id, retry_count, error=%e, "Max retries exceeded");
@@ -3136,6 +3174,79 @@ mod test {
         // The task should complete (not hang) after max retries
         let task_result = tokio::time::timeout(Duration::from_secs(2), jh).await;
         assert!(task_result.is_ok(), "Synchronizer task should complete after max retries");
+    }
+
+    /// Drives the retry loop against a deltas client that always fails, and returns how much
+    /// (virtual) time the loop spent sleeping between attempts. Runs on a paused clock, so the
+    /// cooldowns are auto-advanced rather than waited out.
+    async fn measure_retry_cooldowns(retry_config: RetryConfiguration) -> Duration {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+
+        let mut deltas_client = MockDeltasClient::new();
+        // A transport error is transient, so every attempt is retried until the budget is spent.
+        deltas_client
+            .expect_subscribe()
+            .returning(|_, _| Err(DeltasError::TransportError("server is down".to_string())));
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+
+        let mut state_sync = ProtocolStateSynchronizer::new_with_retry_config(
+            ExtractorIdentity::new(Chain::Ethereum, "test-protocol"),
+            true,
+            ComponentFilter::with_tvl_range(0.0, 1000.0),
+            retry_config,
+            true,
+            false,
+            true,
+            ArcRPCClient(Arc::new(rpc_client)),
+            ArcDeltasClient(Arc::new(deltas_client)),
+            1000_u64,
+        );
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let start = tokio::time::Instant::now();
+        let (handle, mut rx) = state_sync.start().await;
+        let (jh, _close_tx) = handle.split();
+
+        let res = rx.recv().await.expect("channel open");
+        assert!(res.is_err(), "the synchronizer must report the error that exhausted its retries");
+        jh.await
+            .expect("synchronizer task should complete after max retries");
+
+        start.elapsed()
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_constant_retry_cooldown_is_flat() {
+        let elapsed =
+            measure_retry_cooldowns(RetryConfiguration::constant(4, Duration::from_secs(10))).await;
+
+        // 4 attempts, each followed by a fixed 10s cooldown.
+        assert_eq!(elapsed, Duration::from_secs(40));
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_exponential_retry_cooldown_stays_within_bounds() {
+        let elapsed = measure_retry_cooldowns(RetryConfiguration::exponential(
+            4,
+            Duration::from_secs(10),
+            Duration::from_secs(40),
+        ))
+        .await;
+
+        // Cooldowns are drawn from [0, 10s], [0, 20s], [0, 40s] and [0, 40s] — only the upper
+        // bound is deterministic under full jitter.
+        assert!(
+            elapsed <= Duration::from_secs(110),
+            "cooldowns must stay within the configured bounds, waited {elapsed:?}"
+        );
     }
 
     #[test_log::test(tokio::test)]
