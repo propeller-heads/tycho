@@ -40,5 +40,12 @@
     "block": 16428133,
     "tx_hash": "a2f51048265f2fe9ffaf69b94cb5a2a4113be49bdecd2040d530dd6f68facc42",
     "asset": "6b175474e89094c44da98b954eedeac495271d0f"
+  },
+  {
+    "name": "svZCHF",
+    "address": "e5f130253ff137f9917c0107659a4c5262abf6b0",
+    "block": 24118106,
+    "tx_hash": "100220050204815b4445040fee1974455a4f43e5f78b7f666733a0bf4cda16e4",
+    "asset": "b58e61c3098d85632df34eecfb899a1ed80921cb"
   }
 ]

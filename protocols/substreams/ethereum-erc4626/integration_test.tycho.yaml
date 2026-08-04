@@ -89,3 +89,17 @@ tests:
   #       creation_tx: "0xa2f51048265f2fe9ffaf69b94cb5a2a4113be49bdecd2040d530dd6f68facc42"
   #       skip_simulation: false
   #       skip_execution: true
+
+  - name: test_svZCHF
+    start_block: 24118106
+    stop_block: 24168106
+    expected_components:
+      - id: "0xe5f130253ff137f9917c0107659a4c5262abf6b0"
+        tokens:
+          - "0xb58e61c3098d85632df34eecfb899a1ed80921cb"
+          - "0xe5f130253ff137f9917c0107659a4c5262abf6b0"
+        static_attributes:
+          name: "0x73765a434846"
+        creation_tx: "0x100220050204815b4445040fee1974455a4f43e5f78b7f666733a0bf4cda16e4"
+        skip_simulation: false
+        skip_execution: true
