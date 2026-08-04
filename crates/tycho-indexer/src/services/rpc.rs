@@ -291,6 +291,14 @@ where
             );
         }
 
+        // TODO(entity-cache): cache insertion point for the tip snapshot class. When
+        // `deltas_version` is `Some` the db version was downgraded to `Latest` (see
+        // `calculate_versions`), which is the only case the entity cache can serve, and it is the
+        // case clients hit: `fetch_snapshot` pins requests to the tip block, which is normally
+        // uncommitted. The order below is load bearing (invariant I4 in `entity_cache.rs`): capture
+        // the pending patch from the buffer *first*, then read the cache, then read the db for the
+        // misses only. Reading the cache first can miss a block that gets drained while the db read
+        // for the misses is in flight.
         // Get the contract states from the database
         let account_data = self
             .db_gateway
@@ -540,6 +548,10 @@ where
 
         debug!(n_ids = paginated_ids.len(), "Getting protocol states for paginated IDs.");
 
+        // TODO(entity-cache): same insertion point as in `get_contract_state_inner`, keyed by
+        // (protocol_system, component_id). Note that only this read disappears — the
+        // `protocol_ids: None` branch above still resolves the component list through
+        // `get_protocol_components_inner`.
         // Get the protocol states from the database. We skip pagination because we have already
         // paginated the protocol IDs.
         let state_data = self

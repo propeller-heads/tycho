@@ -133,6 +133,14 @@ impl PendingDeltas {
                     );
                     guard.insert_block((*message).clone())?;
                     if let Some(height) = message.db_committed_block_height {
+                        // TODO(entity-cache): this is the cache update hook. `drain_blocks_until`
+                        // already returns the drained blocks, which are exactly the ones this
+                        // extractor has committed to the database and are at or below
+                        // `finalized_block_height`, so they can never be reverted. Feeding them to
+                        // `EntityCache::apply_committed` here — still holding the buffer lock, and
+                        // before the blocks become unreachable — is what makes the cache the
+                        // continuation of the buffer rather than a second, racing view of it
+                        // (invariants I2/I4 in `entity_cache.rs`).
                         guard.drain_blocks_until(height + 1)?;
                     }
                 }

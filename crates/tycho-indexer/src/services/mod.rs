@@ -36,6 +36,9 @@ mod client_metadata;
 #[cfg(feature = "jemalloc")]
 mod debug;
 mod deltas_buffer;
+// Scaffold for the delta-fed entity cache. Not wired into the serving path yet.
+#[allow(dead_code)]
+mod entity_cache;
 mod middleware;
 mod rpc;
 mod ws;
