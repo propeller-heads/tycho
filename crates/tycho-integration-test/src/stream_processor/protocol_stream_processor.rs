@@ -16,6 +16,7 @@ use tycho_simulation::{
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
+            balancer_v3::BalancerV3State,
             cowamm::state::CowAMMState,
             curve::CurveState,
             ekubo::state::EkuboState,
@@ -389,11 +390,8 @@ impl ProtocolStreamProcessor {
                 stream = stream.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
             "vm:balancer_v3" => {
-                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:balancer_v3",
-                    tvl_filter.clone(),
-                    None,
-                );
+                stream =
+                    stream.exchange::<BalancerV3State>("vm:balancer_v3", tvl_filter.clone(), None);
             }
             _ => {
                 return Err(miette::miette!("Unknown protocol: {}", protocol));
