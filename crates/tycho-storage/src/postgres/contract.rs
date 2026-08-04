@@ -18,7 +18,7 @@ use tycho_common::{
         AccountToContractStoreDeltas, Address, Balance, Chain, ChangeType, Code, ContractId,
         ContractStoreDeltas, PaginationParams, StoreKey, StoreVal, TxHash,
     },
-    storage::{BlockOrTimestamp, StorageError, Version, WithTotal},
+    storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind, WithTotal},
     Bytes,
 };
 
@@ -622,6 +622,32 @@ impl PostgresGateway {
     /// might change to use VersionResult, but for now we keep it simple. Using
     /// anything else then Version::Last is currently not supported.
     ///
+    /// Requests that are not pinned to a specific block can be served from the current state.
+    ///
+    /// Returns the version to read at, or `None` if the request asks for whatever is newest. Only
+    /// `None` (meaning "now") and [BlockIdentifier::Latest] qualify. A request that names a block
+    /// by number or hash stays pinned even when that block happens to be the chain head, because
+    /// the head may move on between resolving the version and running the query - such a request
+    /// must keep reading the historical partitions.
+    ///
+    /// Note [BlockIdentifier::Latest] cannot be built from a client's version parameter (see
+    /// `BlockOrTimestamp::TryFrom<&dto::VersionParam>`); the RPC layer produces it in
+    /// `calculate_versions` when it downgrades an uncommitted or unseen version to "latest
+    /// committed" and applies the pending deltas buffer on top.
+    fn pinned_version(at: Option<&Version>) -> Option<&Version> {
+        let Some(version) = at else {
+            // No version means "now", which is always newer than the chain head.
+            return None;
+        };
+        if matches!(
+            version,
+            Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(_)), VersionKind::Last)
+        ) {
+            return None;
+        }
+        Some(version)
+    }
+
     /// # Parameters
     /// - `chain` The chain for which to retrieve slots for.
     /// - `contracts` Optionally allows filtering by contract address.
@@ -635,35 +661,68 @@ impl PostgresGateway {
         at: Option<&Version>,
         conn: &mut AsyncPgConnection,
     ) -> Result<HashMap<Address, ContractStoreDeltas>, StorageError> {
-        let version_ts = match &at {
-            Some(version) => maybe_lookup_version_ts(version, conn).await?,
-            None => Utc::now().naive_utc(),
-        };
+        let chain_id = self.get_chain_id(chain)?;
 
-        let slots = {
-            use schema::{account, contract_storage::dsl::*};
+        let slots = match Self::pinned_version(at) {
+            None => {
+                // The current state lives entirely in the default partition, which holds exactly
+                // one row per (account_id, slot) - enforced by
+                // contract_storage_default_unique_pk. Reading it directly avoids both the Append
+                // over every historical partition and the DISTINCT ON sort below, which spills to
+                // disk once a page covers more slots than work_mem can hold.
+                use schema::{account, contract_storage_default::dsl::*};
 
-            let chain_id = self.get_chain_id(chain)?;
-            let mut q = contract_storage
-                .inner_join(account::table)
-                .filter(account::chain_id.eq(chain_id))
-                .filter(
-                    valid_from
-                        .le(version_ts)
-                        .and(valid_to.gt(version_ts)),
-                )
-                .order_by((account::id, slot, valid_from.desc(), ordinal.desc()))
-                .select((account::id, slot, value))
-                .distinct_on((account::id, slot))
-                .into_boxed();
-            if let Some(addresses) = contracts {
-                #[allow(clippy::mutable_key_type)]
-                let filter_val: HashSet<_> = addresses.iter().collect();
-                q = q.filter(account::address.eq_any(filter_val));
+                // Live rows carry valid_to = MAX_TS. The predicate is still needed because an
+                // archived row whose valid_to has no matching partition also lands here (see
+                // docs/for-solvers/self-hosted-evm-chain.md), as do rows whose account was
+                // deleted by `delete_contract`.
+                //
+                // There is deliberately no valid_from predicate: if a block commits between the
+                // version being resolved and this query running, filtering on valid_from would
+                // drop every slot that block touched, since the superseded row has already moved
+                // out of this partition. Without it the query returns the newer value instead,
+                // which is a valid answer for a request that asked for "latest".
+                // TODO: confirm this is the tradeoff we want before removing the scaffold label.
+                let mut q = contract_storage_default
+                    .inner_join(account::table)
+                    .filter(account::chain_id.eq(chain_id))
+                    .filter(valid_to.gt(*MAX_VERSION_TS))
+                    .select((account::id, slot, value))
+                    .into_boxed();
+                if let Some(addresses) = contracts {
+                    #[allow(clippy::mutable_key_type)]
+                    let filter_val: HashSet<_> = addresses.iter().collect();
+                    q = q.filter(account::address.eq_any(filter_val));
+                }
+                q.get_results::<(i64, Bytes, Option<Bytes>)>(conn)
+                    .await
+                    .map_err(PostgresError::from)?
             }
-            q.get_results::<(i64, Bytes, Option<Bytes>)>(conn)
-                .await
-                .map_err(PostgresError::from)?
+            Some(version) => {
+                use schema::{account, contract_storage::dsl::*};
+
+                let version_ts = maybe_lookup_version_ts(version, conn).await?;
+                let mut q = contract_storage
+                    .inner_join(account::table)
+                    .filter(account::chain_id.eq(chain_id))
+                    .filter(
+                        valid_from
+                            .le(version_ts)
+                            .and(valid_to.gt(version_ts)),
+                    )
+                    .order_by((account::id, slot, valid_from.desc(), ordinal.desc()))
+                    .select((account::id, slot, value))
+                    .distinct_on((account::id, slot))
+                    .into_boxed();
+                if let Some(addresses) = contracts {
+                    #[allow(clippy::mutable_key_type)]
+                    let filter_val: HashSet<_> = addresses.iter().collect();
+                    q = q.filter(account::address.eq_any(filter_val));
+                }
+                q.get_results::<(i64, Bytes, Option<Bytes>)>(conn)
+                    .await
+                    .map_err(PostgresError::from)?
+            }
         };
         let accounts = orm::Account::get_addresses_by_id(slots.iter().map(|(cid, _, _)| cid), conn)
             .await
@@ -2512,6 +2571,45 @@ mod test {
             .unwrap();
 
         assert_eq!(res, exp);
+    }
+
+    /// The default-partition read must agree with the versioned read at the chain head, both for a
+    /// full snapshot and for a filtered request.
+    #[rstest]
+    #[case::all_contracts(None)]
+    #[case::single_contract(Some(vec![Bytes::from("6B175474E89094C44Da98b954EedeAC495271d0F")]))]
+    #[tokio::test]
+    async fn test_get_slots_latest_matches_head_block(#[case] addresses: Option<Vec<Address>>) {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let addresses: Option<&[Address]> = addresses.as_deref();
+
+        let latest = gw
+            .get_contract_slots(&Chain::Ethereum, addresses, None, &mut conn)
+            .await
+            .unwrap();
+        let head_block = Version(
+            BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
+            VersionKind::Last,
+        );
+        let at_head = gw
+            .get_contract_slots(&Chain::Ethereum, addresses, Some(&head_block), &mut conn)
+            .await
+            .unwrap();
+        // Block 3 is the chain head in the fixture and carries no changes of its own.
+        let pinned_head = gw
+            .get_contract_slots(
+                &Chain::Ethereum,
+                addresses,
+                Some(&Version::from_block_number(Chain::Ethereum, 3)),
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(latest, pinned_head);
+        assert_eq!(at_head, pinned_head);
     }
 
     #[tokio::test]
