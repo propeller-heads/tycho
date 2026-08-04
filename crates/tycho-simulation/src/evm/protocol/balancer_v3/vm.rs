@@ -207,6 +207,17 @@ pub enum BalancerPoolType {
 }
 
 impl BalancerPoolType {
+    /// Every family this module handles. Kept next to [`Self::from_factory_marker`] so adding a
+    /// variant means touching both.
+    const ALL: [Self; 3] = [Self::Weighted, Self::Stable, Self::Reclamm];
+
+    /// Resolves the `pool_type` attribute value the Substreams package writes into a family.
+    fn from_factory_marker(marker: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.factory_marker() == marker)
+    }
+
     /// The `pool_type` attribute value the Substreams package writes for this family.
     fn factory_marker(self) -> &'static str {
         match self {
@@ -248,14 +259,11 @@ where
         let marker = String::from_utf8(raw.to_vec()).map_err(|e| {
             SimulationError::FatalError(format!("balancer_v3 pool_type is not UTF-8: {e}"))
         })?;
-        for candidate in [BalancerPoolType::Weighted, BalancerPoolType::Stable] {
-            if candidate.factory_marker() == marker {
-                return Ok(candidate);
-            }
-        }
-        return Err(SimulationError::FatalError(format!(
-            "balancer_v3 pool {pool} has unsupported pool_type `{marker}`"
-        )));
+        return BalancerPoolType::from_factory_marker(&marker).ok_or_else(|| {
+            SimulationError::FatalError(format!(
+                "balancer_v3 pool {pool} has unsupported pool_type `{marker}`"
+            ))
+        });
     }
 
     if call::<D, _, _>(engine, pool, IBalancerV3Pool::getWeightedPoolImmutableDataCall {}).is_ok() {
@@ -495,18 +503,25 @@ mod tests {
     }
 
     #[test]
-    fn attributes_carry_enough_to_resolve_supported_types() {
-        for (marker, expected) in [
-            ("WeightedPoolFactory", BalancerPoolType::Weighted),
-            ("StablePoolFactory", BalancerPoolType::Stable),
-            ("ReClammPoolFactory", BalancerPoolType::Reclamm),
-        ] {
-            let attrs = attributes(marker);
+    fn resolves_every_supported_factory_marker() {
+        for expected in BalancerPoolType::ALL {
+            let attrs = attributes(expected.factory_marker());
             let raw = attrs
                 .get(POOL_TYPE_ATTRIBUTE)
                 .expect("attribute present");
-            let decoded = String::from_utf8(raw.to_vec()).expect("utf-8");
-            assert_eq!(decoded, expected.factory_marker());
+            let marker = String::from_utf8(raw.to_vec()).expect("utf-8");
+            assert_eq!(
+                BalancerPoolType::from_factory_marker(&marker),
+                Some(expected),
+                "`{marker}` must resolve back to the family that emits it"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_families_the_maths_cannot_price() {
+        for marker in ["GyroECLPPoolFactory", "QuantAMMWeightedPoolFactory", "LBPoolFactory"] {
+            assert_eq!(BalancerPoolType::from_factory_marker(marker), None);
         }
     }
 }
