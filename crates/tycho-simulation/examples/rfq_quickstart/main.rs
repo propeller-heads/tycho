@@ -1,4 +1,10 @@
-use std::{collections::HashSet, env, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -39,10 +45,10 @@ use tycho_simulation::{
     protocol::models::{ProtocolComponent, Update},
     rfq::{
         protocols::{
-            bebop::{client_builder::BebopClientBuilder, state::BebopState},
-            hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
-            liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
-            metric::{client_builder::MetricClientBuilder, state::MetricState},
+            bebop::client_builder::BebopClientBuilder,
+            hashflow::client_builder::HashflowClientBuilder,
+            liquorice::client_builder::LiquoriceClientBuilder,
+            metric::client_builder::MetricClientBuilder,
         },
         stream::RFQStreamBuilder,
     },
@@ -194,14 +200,18 @@ async fn main() {
         .build()
         .expect("Failed to build encoder");
 
-    // Set up RFQ client using the builder pattern
-    let mut rfq_tokens = HashSet::new();
-    rfq_tokens.insert(sell_token_address.clone());
-    rfq_tokens.insert(buy_token_address.clone());
+    // Set up RFQ client using the builder pattern. Clients receive the traded tokens with
+    // their metadata and construct ready-to-simulate states directly.
+    let mut rfq_tokens = HashMap::new();
+    for address in [&sell_token_address, &buy_token_address] {
+        let token = all_tokens
+            .get(address)
+            .expect("Traded token not found in Tycho token list")
+            .clone();
+        rfq_tokens.insert(address.clone(), token);
+    }
 
-    let mut rfq_stream_builder = RFQStreamBuilder::new()
-        .set_tokens(all_tokens.clone())
-        .await;
+    let mut rfq_stream_builder = RFQStreamBuilder::new();
     if let Some(key) = bebop_key {
         println!("Setting up Bebop RFQ client...\n");
         let bebop_client = BebopClientBuilder::new(chain, key)
@@ -209,8 +219,7 @@ async fn main() {
             .tvl_threshold(cli.tvl_threshold)
             .build()
             .expect("Failed to create Bebop RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<BebopState>("bebop", Box::new(bebop_client))
+        rfq_stream_builder = rfq_stream_builder.add_client(Box::new(bebop_client))
     }
     if let (Some(user), Some(key)) = (hashflow_user, hashflow_key) {
         println!("Setting up Hashflow RFQ client...\n");
@@ -220,8 +229,7 @@ async fn main() {
             .poll_time(Duration::from_secs(5))
             .build()
             .expect("Failed to create Hashflow RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
+        rfq_stream_builder = rfq_stream_builder.add_client(Box::new(hashflow_client))
     }
     if let (Some(user), Some(key)) = (liquorice_user, liquorice_key) {
         println!("Setting up Liquorice RFQ client...\n");
@@ -230,20 +238,18 @@ async fn main() {
             .tvl_threshold(cli.tvl_threshold)
             .build()
             .expect("Failed to create Liquorice RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+        rfq_stream_builder = rfq_stream_builder.add_client(Box::new(liquorice_client))
     }
     if cli.run_pamm_protocols {
         println!("Setting up Metric RFQ client...\n");
         match MetricClientBuilder::new(chain)
-            .tokens(rfq_tokens.clone())
+            .tokens(rfq_tokens.keys().cloned().collect())
             .token_metadata(all_tokens.clone())
             .tvl_threshold(cli.tvl_threshold)
             .build()
         {
             Ok(metric_client) => {
-                rfq_stream_builder =
-                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
+                rfq_stream_builder = rfq_stream_builder.add_client(Box::new(metric_client));
             }
             Err(e) => eprintln!("Skipping Metric RFQ client: {e}"),
         }

@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    fmt::Display,
-    time::Duration,
-};
+use std::{collections::HashMap, env, fmt::Display, str::FromStr, time::Duration};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
 use rand::prelude::IteratorRandom;
@@ -13,19 +8,17 @@ use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
 };
+use tycho_execution::encoding::evm::get_router_address;
 use tycho_simulation::rfq::{
     protocols::{
-        bebop::{client::BebopClient, client_builder::BebopClientBuilder, state::BebopState},
-        hashflow::{
-            client::HashflowClient, client_builder::HashflowClientBuilder, state::HashflowState,
-        },
-        liquorice::{
-            client::LiquoriceClient, client_builder::LiquoriceClientBuilder, state::LiquoriceState,
-        },
-        metric::{client::MetricClient, client_builder::MetricClientBuilder, state::MetricState},
+        bebop::{client::BebopClient, client_builder::BebopClientBuilder},
+        hashflow::{client::HashflowClient, client_builder::HashflowClientBuilder},
+        liquorice::{client::LiquoriceClient, client_builder::LiquoriceClientBuilder},
+        metric::{client::MetricClient, client_builder::MetricClientBuilder},
     },
     stream::RFQStreamBuilder,
 };
+use tycho_test::execution::encoding::USER_ADDR;
 
 use crate::stream_processor::{StreamUpdate, UpdateType};
 
@@ -115,14 +108,13 @@ impl RFQStreamProcessor {
         stream_tx: Sender<miette::Result<StreamUpdate>>,
     ) -> miette::Result<JoinHandle<()>> {
         info!("Starting RFQ stream processor for chain {:?}", self.chain);
-        // Set up RFQ stream
-        let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
-        let mut rfq_stream_builder = RFQStreamBuilder::new()
-            .set_tokens(all_tokens.clone())
-            .await;
+        // Set up RFQ stream. Clients receive the full token map and construct
+        // ready-to-simulate states directly.
+        let rfq_tokens: HashMap<Bytes, Token> = all_tokens.clone();
+        let mut rfq_stream_builder = RFQStreamBuilder::new();
         let metric_enabled = if self.run_pamm_protocols {
             match MetricClientBuilder::new(self.chain)
-                .tokens(rfq_tokens.clone())
+                .tokens(rfq_tokens.keys().cloned().collect())
                 .token_metadata(all_tokens.clone())
                 .tvl_threshold(self.tvl_threshold)
                 .poll_time(Duration::from_secs(30))
@@ -130,8 +122,7 @@ impl RFQStreamProcessor {
             {
                 Ok(metric_client) => {
                     info!("Adding {} RFQ client...", RFQProtocol::Metric);
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<MetricState>("metric", Box::new(metric_client));
+                    rfq_stream_builder = rfq_stream_builder.add_client(Box::new(metric_client));
                     true
                 }
                 Err(e) => {
@@ -147,14 +138,26 @@ impl RFQStreamProcessor {
             info!("Adding {protocol} RFQ client...");
             match protocol {
                 RFQProtocol::Bebop => {
-                    let bebop_client = BebopClientBuilder::new(self.chain, key.clone())
+                    // Bebop can require origin identification per API account; identify the
+                    // simulated flow with the test user EOA and the router the encoded
+                    // transactions target.
+                    let mut bebop_builder = BebopClientBuilder::new(self.chain, key.clone())
                         .tokens(rfq_tokens.clone())
                         .tvl_threshold(self.tvl_threshold)
+                        .origin_address(
+                            Bytes::from_str(USER_ADDR)
+                                .into_diagnostic()
+                                .wrap_err("Invalid test user address")?,
+                        )
+                        .origin_source("tycho-integration-test".to_string());
+                    if let Ok(router_address) = get_router_address(&self.chain) {
+                        bebop_builder = bebop_builder.origin_target(router_address.clone());
+                    }
+                    let bebop_client = bebop_builder
                         .build()
                         .into_diagnostic()
                         .wrap_err("Failed to create Bebop RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<BebopState>("bebop", Box::new(bebop_client));
+                    rfq_stream_builder = rfq_stream_builder.add_client(Box::new(bebop_client));
                 }
                 RFQProtocol::Hashflow => {
                     let hashflow_client =
@@ -165,8 +168,7 @@ impl RFQStreamProcessor {
                             .build()
                             .into_diagnostic()
                             .wrap_err("Failed to create Hashflow RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
+                    rfq_stream_builder = rfq_stream_builder.add_client(Box::new(hashflow_client))
                 }
                 RFQProtocol::Liquorice => {
                     let liquorice_client =
@@ -177,8 +179,7 @@ impl RFQStreamProcessor {
                             .build()
                             .into_diagnostic()
                             .wrap_err("Failed to create Liquorice RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+                    rfq_stream_builder = rfq_stream_builder.add_client(Box::new(liquorice_client))
                 }
                 RFQProtocol::Metric => unreachable!("Metric RFQ does not use credential storage"),
             }

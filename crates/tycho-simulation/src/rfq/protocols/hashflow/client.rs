@@ -13,24 +13,26 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{interval, timeout, Duration};
 use tracing::{error, info, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
+    models::{protocol::GetAmountOutParams, token::Token, Chain},
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
     Bytes,
 };
 
 use crate::{
     evm::protocol::u256_num::biguint_to_u256,
+    protocol::models::{ProtocolComponent, Update},
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
-        protocols::hashflow::models::{
-            HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
-            HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse, HashflowRFQ,
+        protocols::hashflow::{
+            models::{
+                HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
+                HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse,
+                HashflowRFQ,
+            },
+            state::HashflowState,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,8 +41,8 @@ pub struct HashflowClient {
     price_levels_endpoint: String,
     market_makers_endpoint: String,
     quote_endpoint: String,
-    // Tokens that we want prices for
-    tokens: HashSet<Bytes>,
+    // Tokens that we want prices for, with their metadata
+    tokens: HashMap<Bytes, Token>,
     // Min tvl value in the quote token.
     tvl: f64,
     #[serde(skip_serializing, default)]
@@ -59,7 +61,7 @@ impl HashflowClient {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
-        tokens: HashSet<Bytes>,
+        tokens: HashMap<Bytes, Token>,
         tvl: f64,
         quote_tokens: HashSet<Bytes>,
         auth_user: String,
@@ -116,39 +118,35 @@ impl HashflowClient {
         Ok(0.0)
     }
 
-    fn create_component_with_state(
+    /// Builds the simulation component and state for one streamed pair. The state embeds a
+    /// clone of this client, so binding quotes carry this client's full configuration.
+    fn build_pair(
         &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
+        component_id: &str,
+        base_token: Token,
+        quote_token: Token,
         mm_name: &str,
         mm_level: &HashflowMarketMakerLevels,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "hashflow_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![], // empty for RFQ
-            ..Default::default()
-        };
-
-        let mut attributes = HashMap::new();
-
-        // Store price levels as JSON string
-        if !mm_level.levels.is_empty() {
-            let levels_json = serde_json::to_string(&mm_level.levels).unwrap_or_default();
-            attributes.insert("levels".to_string(), levels_json.as_bytes().to_vec().into());
-        }
-        attributes.insert("mm".to_string(), mm_name.as_bytes().to_vec().into());
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }
+    ) -> (ProtocolComponent, HashflowState) {
+        let component = ProtocolComponent::new(
+            Bytes::from(component_id),
+            Self::PROTOCOL_SYSTEM.to_string(),
+            "hashflow_pool".to_string(),
+            self.chain,
+            vec![base_token.clone(), quote_token.clone()],
+            vec![], // no contracts for RFQ
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        let state = HashflowState::new(
+            base_token,
+            quote_token,
+            mm_level.clone(),
+            mm_name.to_string(),
+            self.clone(),
+        );
+        (component, state)
     }
 
     async fn fetch_market_makers(&mut self) -> Result<Vec<String>, RFQError> {
@@ -250,13 +248,11 @@ impl HashflowClient {
 
 #[async_trait]
 impl RFQClient for HashflowClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
+    fn stream(&self) -> BoxStream<'static, Result<Update, RFQError>> {
         let mut client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_components: HashMap<String, ProtocolComponent> = HashMap::new();
             let mut ticker = interval(client.poll_time);
 
             info!("Starting Hashflow price levels polling every {} seconds", client.poll_time.as_secs());
@@ -279,18 +275,20 @@ impl RFQClient for HashflowClient {
 
                 match client.fetch_price_levels(&market_makers).await {
                     Ok(levels_by_mm) => {
-                        let mut new_components = HashMap::new();
+                        let mut new_pairs = HashMap::new();
+                        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
 
                         info!("Fetched price levels from {} market makers", levels_by_mm.len());
                         // Process all market maker levels
                         for (mm_name, mm_levels) in levels_by_mm.iter() {
                             for mm_level in mm_levels {
-                                let base_token = &mm_level.pair.base_token;
-                                let quote_token = &mm_level.pair.quote_token;
+                                let base_bytes = &mm_level.pair.base_token;
+                                let quote_bytes = &mm_level.pair.quote_token;
 
                                 // Check if both tokens are in our tokens set
-                                if client.tokens.contains(base_token) && client.tokens.contains(quote_token) {
-                                    let tokens = vec![base_token.clone(), quote_token.clone()];
+                                if let (Some(base_token), Some(quote_token)) =
+                                    (client.tokens.get(base_bytes), client.tokens.get(quote_bytes))
+                                {
                                     let tvl = mm_level.calculate_tvl();
 
                                     // Apply TVL normalization if needed
@@ -301,7 +299,7 @@ impl RFQClient for HashflowClient {
                                     )?;
 
                                     // Hash the pair for component id
-                                    let pair_str = format!("hashflow_{}/{}", hex::encode(base_token), hex::encode(quote_token));
+                                    let pair_str = format!("hashflow_{}/{}", hex::encode(base_bytes), hex::encode(quote_bytes));
                                     let component_id = format!("{}", keccak256(pair_str.as_bytes()));
 
                                     if normalized_tvl < client.tvl {
@@ -310,46 +308,37 @@ impl RFQClient for HashflowClient {
                                         continue;
                                     }
 
-                                    let component_with_state = client.create_component_with_state(
-                                        component_id.clone(),
-                                        tokens,
+                                    let (component, state) = client.build_pair(
+                                        &component_id,
+                                        base_token.clone(),
+                                        quote_token.clone(),
                                         mm_name,
                                         mm_level,
-                                        normalized_tvl
                                     );
-                                    new_components.insert(component_id, component_with_state);
+                                    new_pairs.insert(component_id.clone(), component);
+                                    states.insert(component_id, Box::new(state) as Box<dyn ProtocolSim>);
                                 }
                             }
                         }
 
                         // Find components that were removed
-                        let removed_components: HashMap<String, ProtocolComponent> = current_components
+                        let removed_pairs: HashMap<String, ProtocolComponent> = current_components
                             .iter()
-                            .filter(|&(id, _)| !new_components.contains_key(id))
-                            .map(|(k, v)| (k.clone(), v.component.clone()))
+                            .filter(|&(id, _)| !new_pairs.contains_key(id))
+                            .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
 
                         // Update current state
-                        current_components = new_components.clone();
+                        current_components = new_pairs.clone();
 
-                        let snapshot = Snapshot {
-                            states: new_components,
-                            vm_storage: HashMap::new(),
-                        };
                         let timestamp = SystemTime::now().duration_since(
                             SystemTime::UNIX_EPOCH
                         ).map_err(
                             |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
                         )?.as_secs();
 
-                        let msg = StateSyncMessage::<TimestampHeader> {
-                            header: TimestampHeader { timestamp },
-                            snapshots: snapshot,
-                            deltas: None,
-                            removed_components,
-                        };
-
-                        yield Ok(("hashflow".to_string(), msg));
+                        yield Ok(Update::new(timestamp, states, new_pairs)
+                            .set_removed_pairs(removed_pairs));
                     },
                     Err(e) => {
                         error!("Failed to fetch price levels from Hashflow API: {}", e);
@@ -638,7 +627,10 @@ mod tests {
     use super::*;
     use crate::rfq::{
         constants::get_hashflow_auth,
-        protocols::hashflow::models::{HashflowPair, HashflowPriceLevel},
+        protocols::{
+            hashflow::models::{HashflowPair, HashflowPriceLevel},
+            utils::test_token_map,
+        },
     };
 
     #[test]
@@ -701,7 +693,7 @@ mod tests {
 
         HashflowClient::new(
             Chain::Ethereum,
-            HashSet::new(),
+            HashMap::new(),
             1.0,
             quote_tokens,
             "test_user".to_string(),
@@ -721,7 +713,7 @@ mod tests {
         let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
 
-        let tokens = HashSet::from([wbtc, weth.clone()]);
+        let tokens = test_token_map(&[(&wbtc, "WBTC", 8), (&weth, "WETH", 18)]);
 
         let quote_tokens = HashSet::from([
             Bytes::from_str("0xa0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
@@ -749,36 +741,24 @@ mod tests {
 
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((component_id, msg)) => {
-                        println!("Received message with ID: {component_id}");
+                    Ok(update) => {
+                        assert!(update.block_number_or_timestamp > 0);
+                        total_components_received += update.new_pairs.len();
 
-                        assert!(!component_id.is_empty());
-                        assert_eq!(component_id, "hashflow");
-                        assert!(msg.header.timestamp > 0);
+                        println!("Received {} components in this update (Total so far: {})",
+                                update.new_pairs.len(), total_components_received);
 
-                        let snapshot = &msg.snapshots;
-                        total_components_received += snapshot.states.len();
-
-                        println!("Received {} components in this message (Total so far: {})",
-                                snapshot.states.len(), total_components_received);
-
-                        for (id, component_with_state) in &snapshot.states {
-                            let attributes = &component_with_state.state.attributes;
-                            let levels: &Bytes = attributes.get("levels").unwrap();
-                            // Check that levels exist
-                            if attributes.contains_key("levels") {
-                                println!("{levels:?}");
-                                assert!(!attributes["levels"].is_empty());
-                            }
-                            // Check that mm name exist
-                            if attributes.contains_key("mm") {
-                                assert!(!attributes["mm"].is_empty());
-                            }
-
-                            if let Some(tvl) = component_with_state.component_tvl {
-                                assert!(tvl >= 1.0);
-                                println!("Component {id} TVL: ${tvl:.2}");
-                            }
+                        for (id, component) in &update.new_pairs {
+                            assert_eq!(component.protocol_system, "rfq:hashflow");
+                            let state = update
+                                .states
+                                .get(id)
+                                .expect("state missing for streamed component");
+                            let hashflow_state = state
+                                .as_any()
+                                .downcast_ref::<HashflowState>()
+                                .expect("state is not a HashflowState");
+                            assert!(!hashflow_state.market_maker.is_empty());
                         }
 
                         message_count += 1;
@@ -816,7 +796,7 @@ mod tests {
 
         let client = HashflowClient::new(
             Chain::Ethereum,
-            HashSet::from_iter(vec![weth.clone(), wbtc.clone()]),
+            test_token_map(&[(&weth, "WETH", 18), (&wbtc, "WBTC", 8)]),
             10.0,
             HashSet::new(),
             auth_user,
@@ -924,7 +904,7 @@ mod tests {
             price_levels_endpoint: "http://unused/price-levels".to_string(),
             market_makers_endpoint: "http://unused/market-makers".to_string(),
             quote_endpoint,
-            tokens: HashSet::from([token_in, token_out]),
+            tokens: test_token_map(&[(&token_in, "WETH", 18), (&token_out, "WBTC", 8)]),
             tvl: 10.0,
             auth_key: "test_key".to_string(),
             auth_user: "test_user".to_string(),
@@ -1087,7 +1067,7 @@ mod tests {
             price_levels_endpoint: "https://api.hashflow.com/price_levels".to_string(),
             market_makers_endpoint: "https://api.hashflow.com/market_makers".to_string(),
             quote_endpoint: "https://api.hashflow.com/quote".to_string(),
-            tokens: HashSet::from([token_in.clone(), token_out.clone()]),
+            tokens: test_token_map(&[(&token_in, "WETH", 18), (&token_out, "WBTC", 8)]),
             tvl: 50.5,
             auth_key: "secret_key".to_string(),
             auth_user: "secret_user".to_string(),
@@ -1126,7 +1106,7 @@ mod tests {
             "price_levels_endpoint": "https://api.hashflow.com/price_levels",
             "market_makers_endpoint": "https://api.hashflow.com/market_makers",
             "quote_endpoint": "https://api.hashflow.com/quote",
-            "tokens": [],
+            "tokens": {},
             "tvl": 10.0,
             "auth_key": "provided_key",
             "auth_user": "provided_user",

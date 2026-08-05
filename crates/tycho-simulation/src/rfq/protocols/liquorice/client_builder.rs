@@ -1,7 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tokio::time::Duration;
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::{
+    models::{token::Token, Chain},
+    Bytes,
+};
 
 use super::client::LiquoriceClient;
 use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
@@ -10,7 +13,7 @@ pub struct LiquoriceClientBuilder {
     chain: Chain,
     auth_solver: String,
     auth_key: String,
-    tokens: HashSet<Bytes>,
+    tokens: HashMap<Bytes, Token>,
     tvl: f64,
     quote_tokens: Option<HashSet<Bytes>>,
     poll_time: Duration,
@@ -24,7 +27,7 @@ impl LiquoriceClientBuilder {
             chain,
             auth_solver,
             auth_key,
-            tokens: HashSet::new(),
+            tokens: HashMap::new(),
             tvl: 100.0,
             quote_tokens: None,
             poll_time: Duration::from_secs(5),
@@ -33,7 +36,7 @@ impl LiquoriceClientBuilder {
         }
     }
 
-    pub fn tokens(mut self, tokens: HashSet<Bytes>) -> Self {
+    pub fn tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
         self.tokens = tokens;
         self
     }

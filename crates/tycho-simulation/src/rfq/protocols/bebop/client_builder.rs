@@ -1,7 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tokio::time::Duration;
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::{
+    models::{token::Token, Chain},
+    Bytes,
+};
 
 use super::client::BebopClient;
 use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
@@ -14,19 +17,17 @@ use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_ch
 /// rejecting quote requests in which a required field is missing. See
 /// <https://docs.bebop.xyz/rfq-api/guides/best-practices#6-pass-origin-so-we-can-identify-legitimate-flow>.
 ///
-/// Note: states decoded from the RFQ stream rebuild their client from the environment, not from
-/// the client added to the stream builder. To apply origins on that path, set the
-/// BEBOP_ORIGIN_ADDRESS, BEBOP_ORIGIN_TARGET and BEBOP_ORIGIN_SOURCE environment variables.
-///
 /// # Example
 /// ```rust
 /// use tycho_simulation::rfq::protocols::bebop::client_builder::BebopClientBuilder;
-/// use tycho_common::{models::Chain, Bytes};
-/// use std::{collections::HashSet, str::FromStr};
+/// use tycho_common::{models::{token::Token, Chain}, Bytes};
+/// use std::{collections::HashMap, str::FromStr};
 ///
-/// let mut tokens = HashSet::new();
-/// tokens.insert(Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap()); // WETH
-/// tokens.insert(Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap()); // USDC
+/// let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+/// let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+/// let mut tokens = HashMap::new();
+/// tokens.insert(weth.clone(), Token::new(&weth, "WETH", 18, 0, &[Some(15_000)], Chain::Ethereum, 100));
+/// tokens.insert(usdc.clone(), Token::new(&usdc, "USDC", 6, 0, &[Some(40_000)], Chain::Ethereum, 100));
 ///
 /// let client = BebopClientBuilder::new(
 ///     Chain::Ethereum,
@@ -40,7 +41,7 @@ use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_ch
 pub struct BebopClientBuilder {
     chain: Chain,
     ws_key: String,
-    tokens: HashSet<Bytes>,
+    tokens: HashMap<Bytes, Token>,
     tvl: f64,
     quote_tokens: Option<HashSet<Bytes>>,
     quote_timeout: Duration,
@@ -54,7 +55,7 @@ impl BebopClientBuilder {
         Self {
             chain,
             ws_key,
-            tokens: HashSet::new(),
+            tokens: HashMap::new(),
             tvl: 100.0, // Default $100 minimum TVL
             quote_tokens: None,
             quote_timeout: Duration::from_secs(5), // Default 5 second timeout
@@ -64,8 +65,8 @@ impl BebopClientBuilder {
         }
     }
 
-    /// Set the tokens for which to monitor prices
-    pub fn tokens(mut self, tokens: HashSet<Bytes>) -> Self {
+    /// Set the tokens for which to monitor prices, with their metadata
+    pub fn tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
         self.tokens = tokens;
         self
     }

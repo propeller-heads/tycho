@@ -26,3 +26,27 @@ pub fn default_quote_tokens_for_chain(chain: &Chain) -> Result<HashSet<Bytes>, R
         _ => Ok(HashSet::new()),
     }
 }
+
+/// Builds a token metadata map for RFQ client tests.
+#[cfg(test)]
+pub(crate) fn test_token_map(
+    entries: &[(&Bytes, &str, u32)],
+) -> std::collections::HashMap<Bytes, tycho_common::models::token::Token> {
+    entries
+        .iter()
+        .map(|(address, symbol, decimals)| {
+            (
+                (*address).clone(),
+                tycho_common::models::token::Token::new(
+                    address,
+                    symbol,
+                    decimals.to_owned(),
+                    0,
+                    &[Some(10_000)],
+                    Chain::Ethereum,
+                    100,
+                ),
+            )
+        })
+        .collect()
+}

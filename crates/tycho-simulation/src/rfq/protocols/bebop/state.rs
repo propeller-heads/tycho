@@ -302,7 +302,7 @@ mod tests {
     fn empty_bebop_client() -> BebopClient {
         BebopClient::new(
             Chain::Ethereum,
-            HashSet::new(),
+            HashMap::new(),
             0.0,
             "".to_string(),
             HashSet::new(),

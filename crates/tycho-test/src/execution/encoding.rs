@@ -32,7 +32,8 @@ use crate::{
     rpc_tools::RPCTools,
 };
 
-const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
+/// Simulated end-user EOA used as sender/receiver of encoded test solutions.
+pub const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
 const GAS_LIMIT: u64 = 100_000_000;
 // 1_000 native tokens (10^21 wei): covers 100M gas at up to ~10_000 gwei
 const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);

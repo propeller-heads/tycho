@@ -267,7 +267,7 @@ mod tests {
     fn empty_hashflow_client() -> HashflowClient {
         HashflowClient::new(
             Chain::Ethereum,
-            HashSet::new(),
+            HashMap::new(),
             0.0,
             HashSet::new(),
             "".to_string(),

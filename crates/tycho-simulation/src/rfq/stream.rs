@@ -1,58 +1,33 @@
-use std::collections::HashMap;
-
 use futures::{stream::select_all, StreamExt};
-use tycho_client::feed::{synchronizer::ComponentWithState, FeedMessage};
-use tycho_common::{
-    models::token::Token,
-    simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
-    Bytes,
-};
+use tycho_common::simulation::errors::SimulationError;
 
-use crate::{
-    evm::decoder::TychoStreamDecoder,
-    protocol::{
-        errors::InvalidSnapshotError,
-        models::{TryFromWithBlock, Update},
-    },
-    rfq::{client::RFQClient, models::TimestampHeader},
-};
+use crate::{protocol::models::Update, rfq::client::RFQClient};
 
 /// `RFQStreamBuilder` is a utility for constructing and managing a merged stream of RFQ (Request
 /// For Quote) providers in Tycho.
 ///
-/// It allows you to:
-/// - Register multiple `RFQClient` implementations, each providing its own stream of RFQ price
-///   updates.
-/// - Dynamically decode incoming updates into `Update` objects using `TychoStreamDecoder`.
+/// It merges the update streams of the registered `RFQClient` implementations. Each client emits
+/// ready-to-simulate `Update`s with fully constructed protocol states.
 ///
-/// The `build` method consumes the builder and runs the event loop, sending decoded `Update`s
-/// through the provided `mpsc::Sender`. It returns an error if decoding an update or forwarding
-/// it to the channel fails.
+/// The `build` method consumes the builder and runs the event loop, sending `Update`s through the
+/// provided `mpsc::Sender`. It returns an error if forwarding an update to the channel fails.
 ///
 /// ### Error Handling:
-/// - Each `RFQClient`'s stream is expected to yield `Result<(String, StateSyncMessage), RFQError>`.
+/// - Each `RFQClient`'s stream is expected to yield `Result<Update, RFQError>`.
 /// - If a client's stream returns an `Err` (e.g., `RFQError::FatalError`), the client is
 ///   **removed** from the merged stream, and the system continues running without it.
 #[derive(Default)]
 pub struct RFQStreamBuilder {
     clients: Vec<Box<dyn RFQClient>>,
-    decoder: TychoStreamDecoder<TimestampHeader>,
 }
 
 impl RFQStreamBuilder {
     pub fn new() -> Self {
-        Self { clients: Vec::new(), decoder: TychoStreamDecoder::new() }
+        Self { clients: Vec::new() }
     }
 
-    pub fn add_client<T>(mut self, name: &str, provider: Box<dyn RFQClient>) -> Self
-    where
-        T: ProtocolSim
-            + TryFromWithBlock<ComponentWithState, TimestampHeader, Error = InvalidSnapshotError>
-            + Send
-            + 'static,
-    {
+    pub fn add_client(mut self, provider: Box<dyn RFQClient>) -> Self {
         self.clients.push(provider);
-        self.decoder.register_decoder::<T>(name);
         self
     }
 
@@ -67,17 +42,7 @@ impl RFQStreamBuilder {
 
         while let Some(next) = merged.next().await {
             match next {
-                Ok((provider, msg)) => {
-                    let update = self
-                        .decoder
-                        .decode(&FeedMessage {
-                            state_msgs: HashMap::from([(provider.clone(), msg)]),
-                            sync_states: HashMap::new(),
-                        })
-                        .await
-                        .map_err(|e| {
-                            SimulationError::RecoverableError(format!("Decoding error: {e}"))
-                        })?;
+                Ok(update) => {
                     tx.send(update).await.map_err(|e| {
                         SimulationError::RecoverableError(format!(
                             "Failed to send update through channel: {e}"
@@ -94,20 +59,11 @@ impl RFQStreamBuilder {
 
         Ok(())
     }
-
-    /// Provides token metadata used to decode startup snapshots and initialize protocol states.
-    ///
-    /// This is not an ongoing stream filter. Components arriving after startup include their
-    /// own token metadata for decoding.
-    pub async fn set_tokens(self, tokens: HashMap<Bytes, Token>) -> Self {
-        self.decoder.set_tokens(tokens).await;
-        self
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, time::Duration};
+    use std::{any::Any, collections::HashMap, time::Duration};
 
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -115,23 +71,19 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::IntervalStream;
-    use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
     use tycho_common::{
         dto::ProtocolStateDelta,
-        models::{
-            protocol::{GetAmountOutParams, ProtocolComponent, ProtocolComponentState},
-            token::Token,
-        },
+        models::{protocol::GetAmountOutParams, token::Token},
         simulation::{
             errors::{SimulationError, TransitionError},
             indicatively_priced::SignedQuote,
-            protocol_sim::{Balances, GetAmountOutResult},
+            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
         },
         Bytes,
     };
 
     use super::*;
-    use crate::{protocol::models::DecoderContext, rfq::errors::RFQError};
+    use crate::{protocol::models::ProtocolComponent, rfq::errors::RFQError};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct DummyProtocol;
@@ -188,19 +140,6 @@ mod tests {
         }
     }
 
-    impl TryFromWithBlock<ComponentWithState, TimestampHeader> for DummyProtocol {
-        type Error = InvalidSnapshotError;
-        async fn try_from_with_header(
-            _value: ComponentWithState,
-            _header: TimestampHeader,
-            _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-            _all_tokens: &HashMap<Bytes, Token>,
-            _decoder_context: &DecoderContext,
-        ) -> Result<Self, Self::Error> {
-            Ok(DummyProtocol)
-        }
-    }
-
     pub struct MockRFQClient {
         name: String,
         interval: Duration,
@@ -215,10 +154,7 @@ mod tests {
 
     #[async_trait]
     impl RFQClient for MockRFQClient {
-        fn stream(
-            &self,
-        ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>>
-        {
+        fn stream(&self) -> BoxStream<'static, Result<Update, RFQError>> {
             let name = self.name.clone();
             let error_at_time = self.error_at_time;
             let mut current_time: u128 = 0;
@@ -232,34 +168,29 @@ mod tests {
                             )));
                         };
                     };
-                    let protocol_component =
-                        ProtocolComponent { protocol_system: name.clone(), ..Default::default() };
+                    let component = ProtocolComponent::new(
+                        Bytes::from(name.as_bytes().to_vec()),
+                        name.clone(),
+                        format!("{name}_pool"),
+                        Default::default(),
+                        vec![],
+                        vec![],
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                    );
 
-                    let snapshot = Snapshot {
-                        states: HashMap::from([(
+                    let update = Update::new(
+                        current_time as u64,
+                        HashMap::from([(
                             name.clone(),
-                            ComponentWithState {
-                                state: ProtocolComponentState {
-                                    component_id: name.clone(),
-                                    attributes: HashMap::new(),
-                                    balances: HashMap::new(),
-                                },
-                                component: protocol_component,
-                                component_tvl: None,
-                                entrypoints: vec![],
-                            },
+                            Box::new(DummyProtocol) as Box<dyn ProtocolSim>,
                         )]),
-                        vm_storage: HashMap::new(),
-                    };
-
-                    let msg = StateSyncMessage {
-                        header: TimestampHeader { timestamp: current_time as u64 },
-                        snapshots: snapshot,
-                        ..Default::default()
-                    };
+                        HashMap::from([(name.clone(), component)]),
+                    );
 
                     current_time += interval.as_millis();
-                    Ok((name.clone(), msg))
+                    Ok(update)
                 });
             Box::pin(interval)
         }
@@ -280,18 +211,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Update>(10);
 
         let builder = RFQStreamBuilder::new()
-            .add_client::<DummyProtocol>(
+            .add_client(Box::new(MockRFQClient::new(
                 "bebop",
-                Box::new(MockRFQClient::new("bebop", Duration::from_millis(100), Some(300))),
-            )
-            .add_client::<DummyProtocol>(
-                "hashflow",
-                Box::new(MockRFQClient::new("hashflow", Duration::from_millis(200), None)),
-            );
+                Duration::from_millis(100),
+                Some(300),
+            )))
+            .add_client(Box::new(MockRFQClient::new("hashflow", Duration::from_millis(200), None)));
 
         tokio::spawn(builder.build(tx));
 
-        // Collect only the first 10 messages
+        // Collect only the first 6 messages
         let mut updates = Vec::new();
         for _ in 0..6 {
             let update = rx.recv().await.unwrap();
