@@ -14,6 +14,10 @@ use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_ch
 /// rejecting quote requests in which a required field is missing. See
 /// <https://docs.bebop.xyz/rfq-api/guides/best-practices#6-pass-origin-so-we-can-identify-legitimate-flow>.
 ///
+/// Note: states decoded from the RFQ stream rebuild their client from the environment, not from
+/// the client added to the stream builder. To apply origins on that path, set the
+/// BEBOP_ORIGIN_ADDRESS, BEBOP_ORIGIN_TARGET and BEBOP_ORIGIN_SOURCE environment variables.
+///
 /// # Example
 /// ```rust
 /// use tycho_simulation::rfq::protocols::bebop::client_builder::BebopClientBuilder;
