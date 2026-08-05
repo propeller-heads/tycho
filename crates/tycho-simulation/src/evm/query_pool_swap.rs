@@ -23,7 +23,8 @@ use tycho_common::{
     simulation::{
         errors::SimulationError,
         protocol_sim::{
-            PoolSwap, Price, PricePoint, ProtocolSim, QueryPoolSwapParams, SwapConstraint,
+            GetAmountOutResult, PoolSwap, Price, PricePoint, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
         },
     },
 };
@@ -55,11 +56,12 @@ const IQI_THRESHOLD: f64 = 0.01;
 /// - `amount_in`: Input token amount
 /// - `amount_out`: Output token amount
 /// - `new_state`: Pool state after the swap
-/// - `price_points`: Search history for debugging (includes 2 initial boundary points)
+/// - `price_points`: Search history for debugging (boundary points and probe measurements)
 ///
 /// # Errors
 ///
-/// Returns `SimulationError::InvalidInput` if target is unreachable (above spot or below limit).
+/// Returns `SimulationError::InvalidInput` if the target is above spot, below the price at
+/// `max_in`, or — for a trade-limit target — not reached at any probed size.
 pub fn query_pool_swap(
     state: &dyn ProtocolSim,
     params: &QueryPoolSwapParams,
@@ -128,6 +130,10 @@ fn price_to_f64_with_decimals(
 /// Each iteration narrows the bracket using [`next_amount`] until convergence
 /// or the bracket width reaches 1 (integer precision limit).
 ///
+/// Targeting an execution price, the low end of the bracket comes from
+/// [`probe_execution_price`]: a positive low end halves the ratio `high / low` each step, where
+/// `low` at zero degrades [`geometric_mean`] to arithmetic halving.
+///
 /// Based on the van Wijngaarden-Dekker-Brent method for root finding.
 /// See: Brent, R.P. (1973). "Algorithms for Minimization without Derivatives"
 fn search(
@@ -175,21 +181,83 @@ fn search(
 
     let mut low = BigUint::zero();
     let mut high = max_in.clone();
-    let mut price_points: Vec<PricePoint> = vec![
-        PricePoint::new(BigUint::zero(), BigUint::zero(), spot),
-        PricePoint::new(max_in, limit_result.amount.clone(), limit_price),
-    ];
 
-    let mut best: Option<PoolSwap> = Some(PoolSwap::new(
-        BigUint::zero(),
-        BigUint::zero(),
-        state.clone_box(),
-        Some(price_points.clone()),
-    ));
-    let mut best_error = (spot - target_price) / target_price;
+    // In trade mode zero is not on the curve: execution starts at the fee-adjusted rate.
+    let mut price_points: Vec<PricePoint> = if use_trade_price {
+        vec![PricePoint::new(max_in.clone(), limit_result.amount.clone(), limit_price)]
+    } else {
+        vec![
+            PricePoint::new(BigUint::zero(), BigUint::zero(), spot),
+            PricePoint::new(max_in.clone(), limit_result.amount.clone(), limit_price),
+        ]
+    };
+
+    // A zero-amount seed answers a spot target the pool already meets; in trade mode the seed
+    // must come from a probe that was actually priced, or a miss would report a zero depth.
+    let (mut best, mut best_error) = if use_trade_price {
+        let probed = probe_execution_price(
+            state,
+            spot,
+            target_price,
+            token_in,
+            token_out,
+            &max_in,
+            &mut price_points,
+        )?;
+
+        // `max_in` is only a candidate when it prices exactly at the target: the caller already
+        // rejected anything below it, and anything above it a probe would have found.
+        let probe = match probed {
+            Some(probe) => Some(probe),
+            None if limit_price >= target_price => Some((max_in, limit_result, limit_price)),
+            None => None,
+        };
+
+        // A target no probe reaches is out of reach at any size.
+        let Some((probe_amount, probe_result, probe_price)) = probe else {
+            let best_measured = price_points
+                .iter()
+                .map(|point| point.price)
+                .fold(f64::NEG_INFINITY, f64::max);
+            return Err(SimulationError::InvalidInput(
+                format!(
+                    "no trade size reaches target price {target_price}: the best execution price \
+                     measured was {best_measured} (spot {spot})"
+                ),
+                None,
+            ));
+        };
+
+        // The probe seeds the bracket and the fallback answer but skips the tolerance
+        // early-exit: quantized dust prices land inside the tolerance band routinely.
+        let probe_swap = PoolSwap::new(
+            probe_amount.clone(),
+            probe_result.amount.clone(),
+            probe_result.new_state.clone(),
+            Some(price_points.clone()),
+        );
+        low = probe_amount;
+        (probe_swap, (probe_price - target_price) / target_price)
+    } else {
+        (
+            PoolSwap::new(
+                BigUint::zero(),
+                BigUint::zero(),
+                state.clone_box(),
+                Some(price_points.clone()),
+            ),
+            (spot - target_price) / target_price,
+        )
+    };
 
     for _ in 0..MAX_ITERATIONS {
         let amount = next_amount(&price_points, &low, &high, target_price);
+
+        // f64 cannot resolve the gap; re-probing a measured point cannot move the bracket.
+        if amount <= low || amount >= high {
+            break;
+        }
+
         let result = state.get_amount_out(amount.clone(), token_in, token_out)?;
 
         let price = if use_trade_price {
@@ -211,12 +279,12 @@ fn search(
             let error = (price - target_price) / target_price;
             if error < best_error {
                 best_error = error;
-                best = Some(PoolSwap::new(
+                best = PoolSwap::new(
                     amount.clone(),
                     result.amount.clone(),
                     result.new_state.clone(),
                     Some(price_points.clone()),
-                ));
+                );
             }
         }
 
@@ -235,9 +303,86 @@ fn search(
         }
     }
 
-    Ok(best.unwrap_or_else(|| {
-        PoolSwap::new(BigUint::zero(), BigUint::zero(), state.clone_box(), Some(price_points))
-    }))
+    Ok(best)
+}
+
+/// Probes power-of-ten inputs from [`first_nonzero_output_exponent`] up to `max_in`, returning
+/// the smallest one that executes at or above `target_price` with its swap result and price.
+///
+/// Dust trades understate the execution rate (outputs floor, integer fees round up, VM adapters
+/// carry fixed-point error), so measured prices rise with size until the true, decreasing curve
+/// takes over. A probe pricing below its predecessor is past that peak, so no larger amount can
+/// clear the target and `None` is returned.
+///
+/// # Errors
+///
+/// Propagates a probe's error once an earlier probe has priced, and the last error seen when
+/// no probe could be priced at all.
+fn probe_execution_price(
+    state: &dyn ProtocolSim,
+    spot: f64,
+    target_price: f64,
+    token_in: &Token,
+    token_out: &Token,
+    max_in: &BigUint,
+    price_points: &mut Vec<PricePoint>,
+) -> Result<Option<(BigUint, GetAmountOutResult, f64)>, SimulationError> {
+    // `10^bits(max_in)` exceeds `max_in`, so the clamp bounds the allocation for garbage
+    // decimals without changing which probes run.
+    let max_exponent = u32::try_from(max_in.bits()).unwrap_or(u32::MAX);
+    let first_exponent = first_nonzero_output_exponent(spot, token_in.decimals, token_out.decimals)
+        .min(max_exponent);
+    let mut amount = BigUint::from(10u64).pow(first_exponent);
+    let mut previous_price = 0.0;
+    let mut priced_any_probe = false;
+    let mut last_probe_error = None;
+
+    while &amount <= max_in {
+        // A rejection below an adapter's minimum describes the probe, not the pool: step up.
+        let result = match state.get_amount_out(amount.clone(), token_in, token_out) {
+            Ok(result) => result,
+            Err(error) if priced_any_probe => return Err(error),
+            Err(error) => {
+                last_probe_error = Some(error);
+                amount *= 10u32;
+                continue;
+            }
+        };
+        priced_any_probe = true;
+
+        let price = calculate_trade_price(
+            amount.to_f64().unwrap_or(0.0),
+            result.amount.to_f64().unwrap_or(0.0),
+            token_in.decimals,
+            token_out.decimals,
+        );
+        price_points.push(PricePoint::new(amount.clone(), result.amount.clone(), price));
+
+        if price >= target_price {
+            return Ok(Some((amount, result, price)));
+        }
+        if price < previous_price {
+            break;
+        }
+        previous_price = price;
+        amount *= 10u32;
+    }
+
+    match last_probe_error {
+        Some(error) if !priced_any_probe => Err(error),
+        _ => Ok(None),
+    }
+}
+
+/// Exponent of the smallest power-of-ten input expected to return a nonzero output:
+/// `amount_in = 10^(decimals_in - decimals_out) / spot` yields one raw unit of the output token.
+/// Never below one wei.
+fn first_nonzero_output_exponent(spot: f64, decimals_in: u32, decimals_out: u32) -> u32 {
+    if spot <= 0.0 || !spot.is_finite() {
+        return 0;
+    }
+    let exponent = (decimals_in as f64 - decimals_out as f64 - spot.log10()).ceil();
+    exponent.max(0.0) as u32
 }
 
 /// Calculates the trade price as `amount_out / amount_in`, adjusted for decimal differences.
@@ -368,7 +513,11 @@ mod tests {
     use tycho_common::{hex_bytes::Bytes, models::Chain, simulation::protocol_sim::Price};
 
     use super::*;
-    use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+    use crate::evm::protocol::{
+        uniswap_v2::state::UniswapV2State,
+        uniswap_v3::{enums::FeeAmount, state::UniswapV3State},
+        utils::uniswap::tick_list::TickInfo,
+    };
 
     fn create_token(address: &str, symbol: &str, decimals: u32) -> Token {
         Token::new(
@@ -1017,6 +1166,221 @@ mod tests {
             );
             prev_amount = amount;
         }
+    }
+
+    /// An unreachable trade-limit target must surface as an error, not a zero-amount swap that
+    /// callers would store as a measured depth. A limit within `(1 - fee)^2` of spot qualifies.
+    #[test]
+    fn test_trade_limit_price_unreachable_target_errors() {
+        let state = UniswapV2State::new(U256::from(1_000_000_000u64), U256::from(1_000_000_000u64));
+        let token_in = token_0();
+        let token_out = token_1();
+
+        let spot = state
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        // UniswapV2 charges 0.3% and spot carries the reciprocal markup, so no amount executes
+        // within 0.1% of spot.
+        let target_price = to_price(spot * 0.999, &token_in, &token_out);
+
+        let params = QueryPoolSwapParams::new(
+            token_in,
+            token_out,
+            SwapConstraint::TradeLimitPrice {
+                limit: target_price,
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+
+        match query_pool_swap(&state, &params) {
+            Err(SimulationError::InvalidInput(msg, _)) => {
+                // The best measured price must be the fee-implied ceiling `spot * (1 - fee)^2`,
+                // not an artefact of giving up early.
+                assert!(
+                    msg.contains("no trade size reaches target price"),
+                    "expected an unreachable-target error, got: {msg}"
+                );
+                let measured: f64 = msg
+                    .split("measured was ")
+                    .nth(1)
+                    .and_then(|rest| rest.split(' ').next())
+                    .expect("error should report the best measured price")
+                    .parse()
+                    .expect("measured price should parse");
+                let ceiling = spot * 0.997 * 0.997;
+                assert!(
+                    (measured - ceiling).abs() / ceiling < 1e-3,
+                    "probing should reach the fee-implied ceiling {ceiling}, measured {measured}"
+                );
+            }
+            Err(other) => panic!("expected InvalidInput, got: {other:?}"),
+            Ok(swap) => panic!(
+                "expected an error, got Ok(amount_in = {}) — a zero here would be stored as a \
+                 measured depth",
+                swap.amount_in()
+            ),
+        }
+    }
+
+    // =========================================================================
+    // Tests for probe_execution_price
+    // =========================================================================
+
+    #[test]
+    fn test_first_nonzero_output_exponent_matches_the_rate() {
+        // 1e9 wei of an 18-decimal token at 3000 buys 3 raw units of a 6-decimal token.
+        assert_eq!(first_nonzero_output_exponent(3000.0, 18, 6), 9);
+        assert_eq!(first_nonzero_output_exponent(1.0 / 3000.0, 6, 18), 0);
+        assert_eq!(first_nonzero_output_exponent(1.0, 18, 18), 0);
+        // A rate the pool cannot report starts the probing at one wei.
+        assert_eq!(first_nonzero_output_exponent(0.0, 18, 6), 0);
+        assert_eq!(first_nonzero_output_exponent(f64::NAN, 18, 6), 0);
+    }
+
+    /// The 18→6 decimal pair makes dust outputs floor hard (1e9 wei prices at half the true
+    /// rate), so the first probes measurably undershoot and the smallest clearing amount is > 1.
+    #[test]
+    fn test_probe_execution_price_returns_the_smallest_clearing_amount() {
+        let state = UniswapV2State::new(
+            U256::from(2_000_000u64) * U256::from(10u64).pow(U256::from(6u64)),
+            U256::from(1000u64) * U256::from(10u64).pow(U256::from(18u64)),
+        );
+        let token_in = create_token("0x0000000000000000000000000000000000000001", "DAI", 18);
+        let token_out = create_token("0x0000000000000000000000000000000000000000", "USDC", 6);
+
+        let spot = state
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        let target = spot * 0.9;
+        let (max_in, _) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+
+        let mut price_points = Vec::new();
+        let (amount, result, price) = probe_execution_price(
+            &state,
+            spot,
+            target,
+            &token_in,
+            &token_out,
+            &max_in,
+            &mut price_points,
+        )
+        .unwrap()
+        .expect("a pool priced 10% above the target must clear it at some probe amount");
+
+        assert!(
+            price >= target,
+            "returned amount {amount} prices at {price}, below target {target}"
+        );
+        assert!(result.amount > BigUint::zero(), "the clearing amount must move output");
+        assert_eq!(
+            price_points.last().unwrap().amount_in,
+            amount,
+            "the returned amount should be the last one measured"
+        );
+
+        let previous_amount = &amount / 10u32;
+        assert!(
+            previous_amount > BigUint::zero(),
+            "fixture must not clear at the first probe or the smallest-amount check is vacuous"
+        );
+        let previous = state
+            .get_amount_out(previous_amount.clone(), &token_in, &token_out)
+            .unwrap();
+        let previous_price = calculate_trade_price(
+            previous_amount.to_f64().unwrap(),
+            previous.amount.to_f64().unwrap(),
+            token_in.decimals,
+            token_out.decimals,
+        );
+        assert!(
+            previous_price < target,
+            "amount {previous_amount} already clears the target at {previous_price}, so \
+             {amount} is not the smallest"
+        );
+    }
+
+    /// Liquidity thin at the current tick and enormous far below puts the answer more halvings
+    /// away from `max_in` than `MAX_ITERATIONS` covers when bisecting down from `[0, max_in]`.
+    #[test]
+    fn test_trade_limit_price_converges_across_a_bracket_wider_than_the_budget() {
+        let state = UniswapV3State::new(
+            1_000_000_000_000_000_000u128,
+            U256::from_str("79228162514264337593543950336").unwrap(),
+            FeeAmount::Low,
+            0,
+            vec![
+                TickInfo::new(-100_000, 625_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+                TickInfo::new(-60_000, 625_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+                TickInfo::new(-20_000, 1_250_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+                TickInfo::new(-6_000, 1_250_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+                TickInfo::new(-2_000, 2_500_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+                TickInfo::new(-800, 5_000_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+                TickInfo::new(-100, -10_000_000_000_000_000_000_000_000_000_000_000i128).unwrap(),
+            ],
+        )
+        .unwrap();
+        let token_in = token_0();
+        let token_out = token_1();
+
+        let spot = state
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        let limit_price_f64 = spot * 0.99;
+        let params = QueryPoolSwapParams::new(
+            token_in.clone(),
+            token_out.clone(),
+            SwapConstraint::TradeLimitPrice {
+                limit: to_price(limit_price_f64, &token_in, &token_out),
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+
+        let pool_swap = query_pool_swap(&state, &params).expect("search should converge");
+        let found = pool_swap.amount_in().clone();
+        assert!(found > BigUint::zero(), "the search must return a real trade");
+
+        let (max_in, _) = state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+        let halvings = (max_in.to_f64().unwrap() / found.to_f64().unwrap()).log2();
+        assert!(
+            halvings > MAX_ITERATIONS as f64,
+            "fixture must sit beyond the halving budget, sits at {halvings}"
+        );
+
+        let executed = calculate_trade_price(
+            found.to_f64().unwrap(),
+            pool_swap.amount_out().to_f64().unwrap(),
+            token_in.decimals,
+            token_out.decimals,
+        );
+        assert!(
+            executed >= limit_price_f64,
+            "returned trade executes at {executed}, below the limit {limit_price_f64}"
+        );
+
+        // The answer is the largest such trade, not merely a feasible one: twice as much must miss.
+        let doubled = &found * 2u32;
+        let at_doubled = state
+            .get_amount_out(doubled.clone(), &token_in, &token_out)
+            .unwrap();
+        let doubled_price = calculate_trade_price(
+            doubled.to_f64().unwrap(),
+            at_doubled.amount.to_f64().unwrap(),
+            token_in.decimals,
+            token_out.decimals,
+        );
+        assert!(
+            doubled_price < limit_price_f64,
+            "twice the returned amount still executes at {doubled_price}, at or above the limit \
+             {limit_price_f64}, so {found} is not the largest feasible trade"
+        );
     }
 
     #[test]
