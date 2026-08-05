@@ -1,0 +1,201 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "liquidityAddress_",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidDexV2D3D4Error",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dexId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "LogStopPerPoolAccounting",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dexId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "protocolCutFee",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogUpdateProtocolCutFee",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dexId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "protocolFee",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogUpdateProtocolFee",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "bool",
+        "name": "isWhitelisted",
+        "type": "bool"
+      }
+    ],
+    "name": "LogUpdateUserWhitelist",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "getDexTypeAndLiquidityAddr",
+    "outputs": [
+      { "internalType": "uint256", "name": "", "type": "uint256" },
+      { "internalType": "address", "name": "", "type": "address" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token0", "type": "address" },
+          { "internalType": "address", "name": "token1", "type": "address" },
+          { "internalType": "uint24", "name": "fee", "type": "uint24" },
+          { "internalType": "uint24", "name": "tickSpacing", "type": "uint24" },
+          { "internalType": "address", "name": "controller", "type": "address" }
+        ],
+        "internalType": "struct DexKey",
+        "name": "dexKey_",
+        "type": "tuple"
+      }
+    ],
+    "name": "stopPerPoolAccounting",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token0", "type": "address" },
+          { "internalType": "address", "name": "token1", "type": "address" },
+          { "internalType": "uint24", "name": "fee", "type": "uint24" },
+          { "internalType": "uint24", "name": "tickSpacing", "type": "uint24" },
+          { "internalType": "address", "name": "controller", "type": "address" }
+        ],
+        "internalType": "struct DexKey",
+        "name": "dexKey_",
+        "type": "tuple"
+      },
+      {
+        "internalType": "uint256",
+        "name": "protocolCutFee_",
+        "type": "uint256"
+      }
+    ],
+    "name": "updateProtocolCutFee",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token0", "type": "address" },
+          { "internalType": "address", "name": "token1", "type": "address" },
+          { "internalType": "uint24", "name": "fee", "type": "uint24" },
+          { "internalType": "uint24", "name": "tickSpacing", "type": "uint24" },
+          { "internalType": "address", "name": "controller", "type": "address" }
+        ],
+        "internalType": "struct DexKey",
+        "name": "dexKey_",
+        "type": "tuple"
+      },
+      { "internalType": "bool", "name": "swap0To1_", "type": "bool" },
+      { "internalType": "uint256", "name": "protocolFee_", "type": "uint256" }
+    ],
+    "name": "updateProtocolFee",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "user_", "type": "address" },
+      { "internalType": "bool", "name": "isWhitelisted_", "type": "bool" }
+    ],
+    "name": "updateUserWhitelist",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

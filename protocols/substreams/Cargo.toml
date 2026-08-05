@@ -23,6 +23,7 @@ members = [
     "ethereum-lido",
     "ethereum-balancer-v3",
     "ethereum-fluid",
+    "ethereum-fluid-v2",
     "base-aerodrome-v1",
     "base-aerodrome-slipstreams",
     "base-lunarbase",

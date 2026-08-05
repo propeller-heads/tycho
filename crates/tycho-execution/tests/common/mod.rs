@@ -37,6 +37,10 @@ pub fn eth_chain() -> Chain {
     Chain::Ethereum
 }
 
+pub fn polygon_chain() -> Chain {
+    Chain::Polygon
+}
+
 pub fn eth() -> Bytes {
     Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap()
 }
@@ -85,6 +89,19 @@ pub fn get_tycho_router_encoder(chain: Chain) -> Box<dyn TychoEncoder> {
         .unwrap();
     TychoRouterEncoderBuilder::new()
         .chain(chain)
+        .swap_encoder_registry(swap_encoder_registry)
+        .router_address(router_address())
+        .build()
+        .expect("Failed to build encoder")
+}
+
+pub fn get_polygon_tycho_router_encoder() -> Box<dyn TychoEncoder> {
+    let executors_addresses = fs::read_to_string("config/test_executor_addresses.json").unwrap();
+    let swap_encoder_registry = SwapEncoderRegistry::new(Chain::Polygon)
+        .add_default_encoders(Some(executors_addresses))
+        .unwrap();
+    TychoRouterEncoderBuilder::new()
+        .chain(Chain::Polygon)
         .swap_encoder_registry(swap_encoder_registry)
         .router_address(router_address())
         .build()

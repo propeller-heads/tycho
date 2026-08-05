@@ -22,6 +22,7 @@ import {
 } from "../src/executors/UniswapV3Executor.sol";
 import {UniswapV4Executor} from "../src/executors/UniswapV4Executor.sol";
 import {FluidV1Executor} from "../src/executors/FluidV1Executor.sol";
+import {FluidV2Executor} from "../src/executors/FluidV2Executor.sol";
 import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
 import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
 import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
@@ -116,6 +117,7 @@ contract TychoRouterTestSetup is
     BebopExecutor public bebopExecutor;
     HashflowExecutor public hashflowExecutor;
     FluidV1Executor public fluidV1Executor;
+    FluidV2Executor public fluidV2Executor;
     SlipstreamsExecutor public slipstreamsExecutor;
     RocketpoolExecutor public rocketpoolExecutor;
     ERC4626Executor public erc4626Executor;
@@ -246,13 +248,15 @@ contract TychoRouterTestSetup is
         );
         liquidityPartyExecutor = new LiquidityPartyExecutor();
         aerodromeV1Executor = new AerodromeV1Executor();
+        fluidV2Executor =
+            new FluidV2Executor(0x7822B3944B1a68B231a6e7F55B57967F28BB369e);
         fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
         metricExecutor = new MetricExecutor(METRIC_ORACLE);
         bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
         ringSwapV2Executor =
             new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
 
-        address[] memory executors = new address[](25);
+        address[] memory executors = new address[](26);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -274,10 +278,11 @@ contract TychoRouterTestSetup is
         executors[18] = address(liquoriceExecutor);
         executors[19] = address(liquidityPartyExecutor);
         executors[20] = address(aerodromeV1Executor);
-        executors[21] = address(fermiSwapExecutor);
-        executors[22] = address(metricExecutor);
-        executors[23] = address(bopAMMExecutor);
-        executors[24] = address(ringSwapV2Executor);
+        executors[21] = address(fluidV2Executor);
+        executors[22] = address(fermiSwapExecutor);
+        executors[23] = address(metricExecutor);
+        executors[24] = address(bopAMMExecutor);
+        executors[25] = address(ringSwapV2Executor);
         return executors;
     }
 

@@ -1,0 +1,35 @@
+[
+  {
+    "type": "event",
+    "name": "LogUpdateFetchDynamicFeeFlag",
+    "anonymous": false,
+    "inputs": [
+      { "name": "dexType", "type": "uint256", "indexed": true },
+      { "name": "dexId", "type": "bytes32", "indexed": true },
+      { "name": "flag", "type": "bool", "indexed": true }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "LogUpdateFeeVersion0",
+    "anonymous": false,
+    "inputs": [
+      { "name": "dexType", "type": "uint256", "indexed": true },
+      { "name": "dexId", "type": "bytes32", "indexed": true },
+      { "name": "lpFee", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "LogUpdateFeeVersion1",
+    "anonymous": false,
+    "inputs": [
+      { "name": "dexType", "type": "uint256", "indexed": true },
+      { "name": "dexId", "type": "bytes32", "indexed": true },
+      { "name": "maxDecayTime", "type": "uint256", "indexed": false },
+      { "name": "priceImpactToFeeDivisionFactor", "type": "uint256", "indexed": false },
+      { "name": "minFee", "type": "uint256", "indexed": false },
+      { "name": "maxFee", "type": "uint256", "indexed": false }
+    ]
+  }
+]

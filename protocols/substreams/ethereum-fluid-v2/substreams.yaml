@@ -1,0 +1,91 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_fluid_v2"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - fluid.proto
+  importPaths:
+    - ../../../proto
+    - ./proto/v1
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_fluid_v2.wasm
+
+network: polygon
+networks:
+  polygon:
+    initialBlock:
+      map_pools_created: 79801933
+      store_pools: 79801933
+      map_balance_changes: 79801933
+      store_pools_balances: 79801933
+      map_protocol_changes: 79801933
+    params:
+      map_pools_created: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+      map_balance_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+      map_protocol_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+
+params:
+  map_pools_created: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+  map_protocol_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+  map_balance_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+
+modules:
+  - name: map_pools_created
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: proto:fluid_v2.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: store_token_to_pools
+    kind: store
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_pools_created
+
+  - name: map_balance_changes
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_balance_changes
+      - store: store_token_to_pools
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

@@ -1,0 +1,734 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "nativeTokenMaxBorrowLimitCap_",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidLiquidityCalcsError",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidLiquidityError",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidSafeTransferError",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [],
+    "name": "BorrowRateMaxCap",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "newStatus",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogChangeStatus",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogCollectRevenue",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "supplyTokens",
+        "type": "address[]"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "borrowTokens",
+        "type": "address[]"
+      }
+    ],
+    "name": "LogPauseUser",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "supplyTokens",
+        "type": "address[]"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "borrowTokens",
+        "type": "address[]"
+      }
+    ],
+    "name": "LogUnpauseUser",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "addr", "type": "address" },
+          { "internalType": "bool", "name": "value", "type": "bool" }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.AddressBool[]",
+        "name": "authsStatus",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateAuths",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "supplyExchangePrice",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "borrowExchangePrice",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "borrowRate",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "utilization",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogUpdateExchangePrices",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "addr", "type": "address" },
+          { "internalType": "bool", "name": "value", "type": "bool" }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.AddressBool[]",
+        "name": "guardiansStatus",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateGuardians",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint256", "name": "kink", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationZero",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationKink",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationMax",
+            "type": "uint256"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.RateDataV1Params[]",
+        "name": "tokenRateDatas",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateRateDataV1s",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint256", "name": "kink1", "type": "uint256" },
+          { "internalType": "uint256", "name": "kink2", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationZero",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationKink1",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationKink2",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationMax",
+            "type": "uint256"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.RateDataV2Params[]",
+        "name": "tokenRateDatas",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateRateDataV2s",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "revenueCollector",
+        "type": "address"
+      }
+    ],
+    "name": "LogUpdateRevenueCollector",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint256", "name": "fee", "type": "uint256" },
+          { "internalType": "uint256", "name": "threshold", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "maxUtilization",
+            "type": "uint256"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.TokenConfig[]",
+        "name": "tokenConfigs",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateTokenConfigs",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "user", "type": "address" },
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint8", "name": "mode", "type": "uint8" },
+          {
+            "internalType": "uint256",
+            "name": "expandPercent",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "expandDuration",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "baseDebtCeiling",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "maxDebtCeiling",
+            "type": "uint256"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.UserBorrowConfig[]",
+        "name": "userBorrowConfigs",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateUserBorrowConfigs",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "addr", "type": "address" },
+          { "internalType": "uint256", "name": "value", "type": "uint256" }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.AddressUint256[]",
+        "name": "userClasses",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateUserClasses",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "user", "type": "address" },
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint8", "name": "mode", "type": "uint8" },
+          {
+            "internalType": "uint256",
+            "name": "expandPercent",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "expandDuration",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "baseWithdrawalLimit",
+            "type": "uint256"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct Structs.UserSupplyConfig[]",
+        "name": "userSupplyConfigs",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "LogUpdateUserSupplyConfigs",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newLimit",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogUpdateUserWithdrawalLimit",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "NATIVE_TOKEN_MAX_BORROW_LIMIT_CAP",
+    "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "newStatus_", "type": "uint256" }
+    ],
+    "name": "changeStatus",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address[]", "name": "tokens_", "type": "address[]" }
+    ],
+    "name": "collectRevenue",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "user_", "type": "address" },
+      {
+        "internalType": "address[]",
+        "name": "supplyTokens_",
+        "type": "address[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "borrowTokens_",
+        "type": "address[]"
+      }
+    ],
+    "name": "pauseUser",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "user_", "type": "address" },
+      {
+        "internalType": "address[]",
+        "name": "supplyTokens_",
+        "type": "address[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "borrowTokens_",
+        "type": "address[]"
+      }
+    ],
+    "name": "unpauseUser",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "addr", "type": "address" },
+          { "internalType": "bool", "name": "value", "type": "bool" }
+        ],
+        "internalType": "struct Structs.AddressBool[]",
+        "name": "authsStatus_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateAuths",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address[]", "name": "tokens_", "type": "address[]" }
+    ],
+    "name": "updateExchangePrices",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "supplyExchangePrices_",
+        "type": "uint256[]"
+      },
+      {
+        "internalType": "uint256[]",
+        "name": "borrowExchangePrices_",
+        "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "addr", "type": "address" },
+          { "internalType": "bool", "name": "value", "type": "bool" }
+        ],
+        "internalType": "struct Structs.AddressBool[]",
+        "name": "guardiansStatus_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateGuardians",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint256", "name": "kink", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationZero",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationKink",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationMax",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct Structs.RateDataV1Params[]",
+        "name": "tokensRateData_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateRateDataV1s",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint256", "name": "kink1", "type": "uint256" },
+          { "internalType": "uint256", "name": "kink2", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationZero",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationKink1",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationKink2",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rateAtUtilizationMax",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct Structs.RateDataV2Params[]",
+        "name": "tokensRateData_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateRateDataV2s",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "revenueCollector_",
+        "type": "address"
+      }
+    ],
+    "name": "updateRevenueCollector",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint256", "name": "fee", "type": "uint256" },
+          { "internalType": "uint256", "name": "threshold", "type": "uint256" },
+          {
+            "internalType": "uint256",
+            "name": "maxUtilization",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct Structs.TokenConfig[]",
+        "name": "tokenConfigs_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateTokenConfigs",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "user", "type": "address" },
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint8", "name": "mode", "type": "uint8" },
+          {
+            "internalType": "uint256",
+            "name": "expandPercent",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "expandDuration",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "baseDebtCeiling",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "maxDebtCeiling",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct Structs.UserBorrowConfig[]",
+        "name": "userBorrowConfigs_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateUserBorrowConfigs",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "addr", "type": "address" },
+          { "internalType": "uint256", "name": "value", "type": "uint256" }
+        ],
+        "internalType": "struct Structs.AddressUint256[]",
+        "name": "userClasses_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateUserClasses",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "user", "type": "address" },
+          { "internalType": "address", "name": "token", "type": "address" },
+          { "internalType": "uint8", "name": "mode", "type": "uint8" },
+          {
+            "internalType": "uint256",
+            "name": "expandPercent",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "expandDuration",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "baseWithdrawalLimit",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct Structs.UserSupplyConfig[]",
+        "name": "userSupplyConfigs_",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "updateUserSupplyConfigs",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "user_", "type": "address" },
+      { "internalType": "address", "name": "token_", "type": "address" },
+      { "internalType": "uint256", "name": "newLimit_", "type": "uint256" }
+    ],
+    "name": "updateUserWithdrawalLimit",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

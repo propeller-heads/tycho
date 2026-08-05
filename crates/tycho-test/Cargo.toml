@@ -14,8 +14,8 @@ alloy-rpc-types-trace = "1.0.38"
 async-trait = { workspace = true }
 colored = "3.0.0"
 hex = { workspace = true }
-miette = { version = "7.6.0" }
 num-bigint = { workspace = true }
+miette = { version = "7.6.0" }
 num-traits = { workspace = true }
 regex = "1.12.2"
 reqwest = { version = "0.13.2", features = ["json", "query"] }

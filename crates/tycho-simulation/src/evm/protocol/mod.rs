@@ -10,6 +10,7 @@ pub mod erc4626;
 pub mod etherfi;
 pub mod filters;
 pub mod fluid;
+pub mod fluid_v2;
 pub mod lunarbase;
 pub mod native_wrapper;
 pub mod pancakeswap_v2;

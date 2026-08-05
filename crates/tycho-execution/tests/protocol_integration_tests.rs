@@ -16,8 +16,9 @@ use tycho_execution::encoding::{
 };
 
 use crate::common::{
-    alice_address, dai, encoding::encode_tycho_router_call, eth, eth_chain, get_signer,
-    get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
+    alice_address, bob_address, dai, encoding::encode_tycho_router_call, eth, eth_chain,
+    get_polygon_tycho_router_encoder, get_signer, get_tycho_router_encoder, ondo, pepe,
+    polygon_chain, usdc, usdt, wbtc, weth,
 };
 
 #[test]
@@ -1319,6 +1320,123 @@ fn test_sequential_encoding_strategy_fluid() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_fluid_v1", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_fluid_v2_polygon_usdc_usdt0() {
+    let fluid_v2_pool = ProtocolComponent {
+        id: String::from("0x038d1b5f8da63fa29b191672231d3845740a11fcbef6c76e077cfffe56cc27c707"),
+        protocol_system: String::from("fluid_v2"),
+        static_attributes: HashMap::from([
+            ("dex_type".to_string(), Bytes::from("0x03")),
+            ("fee".to_string(), Bytes::from("0x64")),
+            ("tick_spacing".to_string(), Bytes::from("0x01")),
+            ("controller".to_string(), Bytes::from("0x0000000000000000000000000000000000000000")),
+        ]),
+        ..Default::default()
+    };
+    let token_in = Bytes::from("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359");
+    let token_out = Bytes::from("0xc2132D05D31c914a87C6611C10748AEb04B58e8F");
+    let swap = Swap::new(
+        fluid_v2_pool,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_polygon_tycho_router_encoder();
+
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000").unwrap(),
+        BigUint::from_str("900000").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        polygon_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_fluid_v2_polygon_usdc_usdt0",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_fluid_v2_polygon_usdc_eth() {
+    let fluid_v2_pool = ProtocolComponent {
+        id: String::from("0x03bc4435ed6fcf5fe373cdb243a3e5685f49dbde7d3d91bff4806cc064f9efd11e"),
+        protocol_system: String::from("fluid_v2"),
+        static_attributes: HashMap::from([
+            ("dex_type".to_string(), Bytes::from("0x03")),
+            ("fee".to_string(), Bytes::from("0x01f4")),
+            ("tick_spacing".to_string(), Bytes::from("0x0a")),
+            ("controller".to_string(), Bytes::from("0x0000000000000000000000000000000000000000")),
+        ]),
+        ..Default::default()
+    };
+    let token_in = Bytes::from("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359");
+    let token_out = eth();
+    let swap = Swap::new(
+        fluid_v2_pool,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_polygon_tycho_router_encoder();
+
+    let receiver = bob_address();
+    let solution = Solution::new(
+        receiver.clone(),
+        receiver,
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        polygon_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_fluid_v2_polygon_usdc_eth",
+        hex_calldata.as_str(),
+    );
 }
 
 #[test]

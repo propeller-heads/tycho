@@ -1,0 +1,395 @@
+[
+  {
+    "inputs": [
+      { "internalType": "address", "name": "liquidity_", "type": "address" }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidDexV2Error",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "errorId_", "type": "uint256" }
+    ],
+    "name": "FluidSafeTransferError",
+    "type": "error"
+  },
+  {
+    "inputs": [{ "internalType": "bytes", "name": "data_", "type": "bytes" }],
+    "name": "PendingTransfersNotCleared",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "amount",
+        "type": "int256"
+      }
+    ],
+    "name": "LogAddOrRemoveTokens",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "implementationId",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogOperate",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "implementationId",
+        "type": "uint256"
+      }
+    ],
+    "name": "LogOperateAdmin",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "supplyAmount",
+        "type": "int256"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "borrowAmount",
+        "type": "int256"
+      }
+    ],
+    "name": "LogRebalance",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "supplyAmount",
+        "type": "int256"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "borrowAmount",
+        "type": "int256"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "storeAmount",
+        "type": "int256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      }
+    ],
+    "name": "LogSettle",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "auth",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "bool",
+        "name": "isAuth",
+        "type": "bool"
+      }
+    ],
+    "name": "LogUpdateAuth",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "dexType",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "adminImplementationId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "adminImplementation",
+        "type": "address"
+      }
+    ],
+    "name": "LogUpdateDexTypeToAdminImplementation",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "implementation",
+        "type": "address"
+      }
+    ],
+    "name": "LogUpgraded",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "token_", "type": "address" },
+      { "internalType": "int256", "name": "amount_", "type": "int256" }
+    ],
+    "name": "addOrRemoveTokens",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "token_", "type": "address" },
+      { "internalType": "uint256", "name": "amount_", "type": "uint256" },
+      { "internalType": "bytes", "name": "data_", "type": "bytes" }
+    ],
+    "name": "liquidityCallback",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "dexType_", "type": "uint256" },
+      {
+        "internalType": "uint256",
+        "name": "implementationId_",
+        "type": "uint256"
+      },
+      { "internalType": "bytes", "name": "data_", "type": "bytes" }
+    ],
+    "name": "operate",
+    "outputs": [
+      { "internalType": "bytes", "name": "returnData_", "type": "bytes" }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "dexType_", "type": "uint256" },
+      {
+        "internalType": "uint256",
+        "name": "implementationId_",
+        "type": "uint256"
+      },
+      { "internalType": "bytes", "name": "data_", "type": "bytes" }
+    ],
+    "name": "operateAdmin",
+    "outputs": [
+      { "internalType": "bytes", "name": "returnData_", "type": "bytes" }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "proxiableUUID",
+    "outputs": [{ "internalType": "bytes32", "name": "", "type": "bytes32" }],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "bytes32", "name": "slot_", "type": "bytes32" }
+    ],
+    "name": "readFromStorage",
+    "outputs": [
+      { "internalType": "uint256", "name": "result_", "type": "uint256" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "bytes32", "name": "slot_", "type": "bytes32" }
+    ],
+    "name": "readFromTransientStorage",
+    "outputs": [
+      { "internalType": "uint256", "name": "result_", "type": "uint256" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "token_", "type": "address" }
+    ],
+    "name": "rebalance",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "token_", "type": "address" },
+      { "internalType": "int256", "name": "supplyAmount_", "type": "int256" },
+      { "internalType": "int256", "name": "borrowAmount_", "type": "int256" },
+      { "internalType": "int256", "name": "storeAmount_", "type": "int256" },
+      { "internalType": "address", "name": "to_", "type": "address" },
+      { "internalType": "bool", "name": "isCallback_", "type": "bool" }
+    ],
+    "name": "settle",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [{ "internalType": "bytes", "name": "data_", "type": "bytes" }],
+    "name": "startOperation",
+    "outputs": [
+      { "internalType": "bytes", "name": "result_", "type": "bytes" }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "auth_", "type": "address" },
+      { "internalType": "bool", "name": "isAuth_", "type": "bool" }
+    ],
+    "name": "updateAuth",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "dexType_", "type": "uint256" },
+      {
+        "internalType": "uint256",
+        "name": "adminImplementationId_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "adminImplementation_",
+        "type": "address"
+      }
+    ],
+    "name": "updateDexTypeToAdminImplementation",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newImplementation_",
+        "type": "address"
+      }
+    ],
+    "name": "upgradeTo",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newImplementation_",
+        "type": "address"
+      },
+      { "internalType": "bytes", "name": "data_", "type": "bytes" }
+    ],
+    "name": "upgradeToAndCall",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  { "stateMutability": "payable", "type": "receive" }
+]
