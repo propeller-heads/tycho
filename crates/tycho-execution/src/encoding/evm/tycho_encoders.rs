@@ -88,6 +88,15 @@ impl TychoRouterEncoder {
     /// original solution contains a swap between a chain's native token and
     /// its wrapped counterpart but doesn't include the corresponding
     /// wrapping or unwrapping swap.
+    ///
+    /// A bridge swap carries a 0% split, meaning "consume the entire remaining balance of
+    /// its input token", so one is only inserted when that balance is genuinely dangling.
+    /// If any swap in the solution consumes the token itself, the apparent gap between two
+    /// adjacent swaps is a split solution's parallel-branch boundary rather than a
+    /// sequential discontinuity: a bridge there would starve that swap and violate the
+    /// one-remainder-per-token split ordering. A mid-route bridge is also skipped when its
+    /// input is the solution's output token — that balance is the payout, and wrapping it
+    /// would re-route it through later swaps.
     fn add_native_wrap_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
         let swaps = solution.swaps();
         let mut new_swaps: Vec<Swap> = Vec::with_capacity(swaps.len());
@@ -107,7 +116,13 @@ impl TychoRouterEncoder {
                 let token_out = &swaps[i].token_out().address;
                 let token_in = &swaps[i + 1].token_in().address;
                 if let Some(s) = self._wrapping_bridge(token_out, token_in, chain) {
-                    new_swaps.push(s);
+                    let bridge_input = &s.token_in().address;
+                    let is_consumed = swaps
+                        .iter()
+                        .any(|swap| &swap.token_in().address == bridge_input);
+                    if !is_consumed && bridge_input != solution.token_out() {
+                        new_swaps.push(s);
+                    }
                 }
             }
         }
@@ -314,6 +329,7 @@ mod tests {
     use std::{collections::HashMap, fs, str::FromStr};
 
     use num_bigint::{BigInt, BigUint};
+    use rstest::rstest;
     use tycho_common::models::{protocol::ProtocolComponent, Chain};
 
     use super::*;
@@ -548,6 +564,106 @@ mod tests {
             assert_eq!(last_swap.token_in().address, eth());
             assert_eq!(last_swap.token_out().address, weth());
             assert_eq!(last_swap.component().protocol_system, "native_wrapper");
+        }
+
+        /// Builds a uniswap_v2 swap between two ERC-20 tokens with an optional split.
+        fn univ2_swap(token_in: &Bytes, token_out: &Bytes, split: f64) -> Swap {
+            let swap = Swap::new(
+                ProtocolComponent {
+                    id: "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11".to_string(),
+                    protocol_system: "uniswap_v2".to_string(),
+                    ..Default::default()
+                },
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            );
+            if split > 0.0 {
+                swap.with_split(split)
+            } else {
+                swap
+            }
+        }
+
+        /// A split solution containing a WETH/ETH-touching adjacency whose native balance is
+        /// not dangling: no wrap swap may be inserted. In `split_branch_boundary` the DAI→ETH
+        /// swap's output is consumed by the parallel ETH→USDC branch, not by the neighbouring
+        /// WETH→USDC swap. In `native_payout` the ETH produced by the DAI→ETH swap is the
+        /// solution's output, so nothing consumes it.
+        #[rstest]
+        //       ┌──[70%]── WETH ──┐
+        // DAI ──┤                 ├── USDC   (ETH is consumed by its own branch)
+        //       └──[rem]── ETH ───┘
+        #[case::split_branch_boundary(
+            vec![
+                univ2_swap(&dai(), &weth(), 0.7),
+                univ2_swap(&dai(), &eth(), 0.0),
+                univ2_swap(&weth(), &usdc(), 0.0),
+                univ2_swap(&eth(), &usdc(), 0.0),
+            ],
+            usdc()
+        )]
+        //       ┌──[60%]── WETH ── USDC ──┐
+        // DAI ──┤                         ├── ETH   (both branches deliver the payout)
+        //       └──[rem]──────────────────┘
+        #[case::native_payout(
+            vec![
+                univ2_swap(&dai(), &weth(), 0.6),
+                univ2_swap(&dai(), &eth(), 0.0),
+                univ2_swap(&weth(), &usdc(), 0.0),
+                univ2_swap(&usdc(), &eth(), 0.0),
+            ],
+            eth()
+        )]
+        fn test_no_wrap_swap_for_non_dangling_balance(
+            #[case] input_swaps: Vec<Swap>,
+            #[case] token_out: Bytes,
+        ) {
+            let encoder = get_tycho_router_encoder();
+            let solution = Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                dai(),
+                token_out,
+                BigUint::from_str("1000_000000000000000000").unwrap(),
+                BigUint::from_str("990_000000").unwrap(),
+                input_swaps.clone(),
+            );
+
+            let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
+            assert_eq!(solution.swaps(), input_swaps.as_slice());
+        }
+
+        /// End-to-end regression: the split solution below must encode as a split swap
+        /// instead of failing validation on an injected 0%-split wrap.
+        //
+        //       ┌──[70%]── WETH ──┐
+        // DAI ──┤                 ├── USDC
+        //       └──[rem]── ETH ───┘
+        #[test]
+        fn test_encode_split_solution_with_native_and_wrapped_branches() {
+            let encoder = get_tycho_router_encoder();
+            let solution = Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                dai(),
+                usdc(),
+                BigUint::from_str("1000_000000000000000000").unwrap(),
+                BigUint::from_str("990_000000").unwrap(),
+                vec![
+                    univ2_swap(&dai(), &weth(), 0.7),
+                    univ2_swap(&dai(), &eth(), 0.0),
+                    univ2_swap(&weth(), &usdc(), 0.0),
+                    univ2_swap(&eth(), &usdc(), 0.0),
+                ],
+            );
+
+            let encoded_solution = encoder
+                .encode_solution(&solution)
+                .unwrap();
+            assert!(encoded_solution
+                .function_signature()
+                .contains("splitSwap"));
         }
 
         #[test]
