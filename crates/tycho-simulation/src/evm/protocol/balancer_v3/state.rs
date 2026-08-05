@@ -28,7 +28,7 @@ use tycho_common::{
 use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
-        balancer_v3::vm::{self, BalancerPoolType},
+        balancer_v3::vm::{self, BalancerPoolType, PoolTypeAttribute},
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
@@ -45,14 +45,22 @@ const SPOT_PRICE_PROBE_DIVISOR: u64 = 1_000_000;
 const BLOCK_TIMESTAMP_ATTRIBUTE: &str = "block_timestamp";
 /// How many times [`ProtocolSim::get_limits`] halves its candidate before giving up.
 const LIMIT_PROBE_HALVINGS: u32 = 12;
+/// Percentage of the sell token's reserve offered as the input limit.
+///
+/// Matches `RESERVE_LIMIT_FACTOR` in `BalancerV3SwapAdapter`, which mirrors Balancer's own
+/// weighted-pool `MAX_IN_RATIO`. The maths keeps solving well past this point — it accepts the
+/// entire reserve of some pools — but the Vault does not, so reporting what the maths accepts
+/// would hand the router input sizes that revert on chain.
+const RESERVE_LIMIT_PERCENT: u64 = 30;
 
 /// A single Balancer V3 pool quoted through `balancer_maths_rust`.
 ///
 /// `tokens` follows the pool's own registration order, which is what the maths library indexes
-/// balances, rates and weights by. State is rebuilt from the VM on every
-/// [`ProtocolSim::delta_transition`] rather than patched from the delta, because the values the
-/// maths needs (live balances, token rates, amplification) are derived from storage that other
-/// contracts — rate providers above all — own.
+/// balances, rates and weights by. The storage-derived parts of the state are re-read from the VM
+/// on every [`ProtocolSim::delta_transition`] rather than patched from the delta, because the
+/// values the maths needs (live balances, token rates, amplification) are derived from storage
+/// that other contracts — rate providers above all — own. What registration fixed forever
+/// (tokens, scaling factors, weights, the hook check) is kept from decode time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BalancerV3State {
     /// Pool contract address (the Tycho component id).
@@ -61,6 +69,10 @@ pub struct BalancerV3State {
     vault: Bytes,
     /// Resolved pool family.
     pool_type: BalancerPoolType,
+    /// Factory generation this pool was created by, as labelled in the Substreams deployment
+    /// params. `None` for pools indexed before generations were labelled. Every generation of a
+    /// family shares the same maths, so this never affects quoting.
+    factory_version: Option<String>,
     /// Token addresses in pool registration order.
     tokens: Vec<Bytes>,
     /// Timestamp of the block this state was read at. reCLAMM quotes depend on it, so it is
@@ -71,22 +83,45 @@ pub struct BalancerV3State {
 }
 
 impl BalancerV3State {
-    /// Constructs a state from a resolved pool type and a state read out of the VM.
+    /// Constructs a state from a resolved `pool_type` attribute and a state read out of the VM.
     pub(super) fn new(
         pool_address: Bytes,
         vault: Bytes,
-        pool_type: BalancerPoolType,
+        factory: PoolTypeAttribute,
         tokens: Vec<Bytes>,
         block_timestamp: u64,
         state: PoolState,
     ) -> Self {
-        Self { pool_address, vault, pool_type, tokens, block_timestamp, state }
+        let PoolTypeAttribute { pool_type, version } = factory;
+        Self {
+            pool_address,
+            vault,
+            pool_type,
+            factory_version: version,
+            tokens,
+            block_timestamp,
+            state,
+        }
+    }
+
+    /// The factory generation this pool was created by, when the indexer labelled one.
+    pub fn factory_version(&self) -> Option<&str> {
+        self.factory_version.as_deref()
     }
 
     /// Token addresses in pool registration order.
     #[cfg(test)]
     pub(super) fn token_addresses(&self) -> &[Bytes] {
         &self.tokens
+    }
+
+    /// Reserves in each token's own units, in pool registration order.
+    #[cfg(test)]
+    pub(super) fn raw_balances(&self) -> Vec<U256> {
+        let base = self.state.base();
+        (0..base.balances_live_scaled_18.len())
+            .map(|index| raw_balance(base, index).expect("a live balance must rescale to raw"))
+            .collect()
     }
 
     /// Live scaled-18 balances in pool registration order.
@@ -301,11 +336,14 @@ impl ProtocolSim for BalancerV3State {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
 
-        // Start from the pool's own balance of the sell token, expressed raw, and halve until the
-        // maths accepts the size. Weighted pools reject anything above `MAX_IN_RATIO` (30% of the
-        // balance) outright, and stable pools stop solving once the input dwarfs the reserve, so
-        // the first accepted candidate is the usable soft limit.
-        let mut candidate = raw_balance(base, index_in)?;
+        // Start from the share of the reserve the Vault is willing to take, then halve until the
+        // maths also accepts the size. The cap is what keeps the figure honest — the maths alone
+        // solves far beyond what the Vault allows — while the halving covers pools that reject
+        // even the capped amount, reCLAMM above all: it concentrates liquidity into a narrow
+        // range that a swap of this size can leave.
+        let mut candidate = raw_balance(base, index_in)?
+            .saturating_mul(U256::from(RESERVE_LIMIT_PERCENT)) /
+            U256::from(100);
         for _ in 0..LIMIT_PROBE_HALVINGS {
             if candidate.is_zero() {
                 break;
@@ -340,9 +378,15 @@ impl ProtocolSim for BalancerV3State {
         let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
         let pool = AlloyAddress::from_slice(self.pool_address.as_ref());
         let vault = AlloyAddress::from_slice(self.vault.as_ref());
-        self.state =
-            vm::read_pool_state(&engine, &pool, &vault, self.pool_type, self.block_timestamp)
-                .map_err(TransitionError::SimulationError)?;
+        self.state = vm::refresh_pool_state(
+            &engine,
+            &pool,
+            &vault,
+            &self.state,
+            self.pool_type,
+            self.block_timestamp,
+        )
+        .map_err(TransitionError::SimulationError)?;
         Ok(())
     }
 

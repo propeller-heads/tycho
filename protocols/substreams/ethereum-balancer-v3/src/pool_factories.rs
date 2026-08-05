@@ -10,7 +10,7 @@ use abi::{
         events::PoolCreated as WeightedPoolCreated, functions::Create as WeightedPoolCreate,
     },
 };
-use substreams::scalar::BigInt;
+use substreams::{log, scalar::BigInt};
 use substreams_ethereum::{
     pb::eth::v2::{Call, Log},
     Event, Function,
@@ -22,6 +22,9 @@ use tycho_substreams::{
 
 // Token config: (token_address, rate, rate_provider_address, is_exempt_from_yield_fees)
 type TokenConfig = Vec<(Vec<u8>, substreams::scalar::BigInt, Vec<u8>, bool)>;
+
+/// Separates the factory family from its generation label in the `pool_type` static attribute.
+const POOL_TYPE_VERSION_SEPARATOR: char = '@';
 
 fn collect_rate_providers(tokens: &TokenConfig) -> Vec<Vec<u8>> {
     tokens
@@ -35,20 +38,60 @@ fn should_skip_rate_provider_pool(config: &DeploymentConfig, rate_providers: &[V
     config.skip_rate_provider_pools && !rate_providers.is_empty()
 }
 
+/// Whether the factory `create` call attached an external hooks contract.
+///
+/// Hooked pools are not indexed: hooks run arbitrary code on swaps, which the native maths in
+/// `tycho-simulation` does not model, so such pools could never be quoted. This also drops pools
+/// whose hook only intervenes in liquidity operations — telling those apart needs the hook
+/// contract's flags, which only exist on-chain. The reCLAMM factory takes no hooks parameter, so
+/// only the weighted and stable families are filtered.
+fn has_hooks(pool_hooks_contract: &[u8]) -> bool {
+    pool_hooks_contract
+        .iter()
+        .any(|byte| *byte != 0)
+}
+
+/// Reports a pool that is skipped because it was created with a hooks contract.
+fn log_hooked_pool(family: &str, pool: &[u8], hooks: &[u8]) {
+    log::info!(
+        "balancer_v3: skipping {} pool 0x{} created with hooks contract 0x{}",
+        family,
+        hex::encode(pool),
+        hex::encode(hooks)
+    );
+}
+
+/// Renders the `pool_type` static attribute: the factory family, then the configured generation.
+///
+/// `tycho-simulation`'s balancer_v3 decoder splits this on the first
+/// [`POOL_TYPE_VERSION_SEPARATOR`] — the family selects the maths, the version names the
+/// generation. Keep the two sides in step when changing the separator.
+fn pool_type_attribute(family: &str, version: &str) -> String {
+    format!("{family}{POOL_TYPE_VERSION_SEPARATOR}{version}")
+}
+
 pub fn address_map(
     pool_factory_address: &[u8],
     log: &Log,
     call: &Call,
     config: &DeploymentConfig,
 ) -> Option<ProtocolComponent> {
-    if pool_factory_address == config.weighted_factory.as_slice() {
+    if let Some(version) = config
+        .weighted_factories
+        .version_of(pool_factory_address)
+    {
+        let WeightedPoolCreated { pool } = WeightedPoolCreated::match_and_decode(log)?;
         let WeightedPoolCreate {
             tokens: token_config,
             normalized_weights,
             swap_fee_percentage,
+            pool_hooks_contract,
             ..
         } = WeightedPoolCreate::match_and_decode(call)?;
-        let WeightedPoolCreated { pool } = WeightedPoolCreated::match_and_decode(log)?;
+        if has_hooks(&pool_hooks_contract) {
+            log_hooked_pool("weighted", &pool, &pool_hooks_contract);
+            return None;
+        }
         let rate_providers = collect_rate_providers(&token_config);
         if should_skip_rate_provider_pool(config, &rate_providers) {
             return None;
@@ -67,8 +110,10 @@ pub fn address_map(
         let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
+        let pool_type = pool_type_attribute("WeightedPoolFactory", version);
+
         let mut attributes = vec![
-            ("pool_type", "WeightedPoolFactory".as_bytes()),
+            ("pool_type", pool_type.as_bytes()),
             ("normalized_weights", &normalized_weights_bytes),
             ("fee", &fee_bytes),
         ];
@@ -80,10 +125,18 @@ pub fn address_map(
         return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
     }
 
-    if pool_factory_address == config.stable_factory.as_slice() {
-        let StablePoolCreate { tokens: token_config, swap_fee_percentage, .. } =
-            StablePoolCreate::match_and_decode(call)?;
+    if let Some(version) = config
+        .stable_factories
+        .version_of(pool_factory_address)
+    {
         let StablePoolCreated { pool } = StablePoolCreated::match_and_decode(log)?;
+        let StablePoolCreate {
+            tokens: token_config, swap_fee_percentage, pool_hooks_contract, ..
+        } = StablePoolCreate::match_and_decode(call)?;
+        if has_hooks(&pool_hooks_contract) {
+            log_hooked_pool("stable", &pool, &pool_hooks_contract);
+            return None;
+        }
         let rate_providers = collect_rate_providers(&token_config);
         if should_skip_rate_provider_pool(config, &rate_providers) {
             return None;
@@ -101,11 +154,10 @@ pub fn address_map(
         let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
-        let mut attributes = vec![
-            ("pool_type", "StablePoolFactory".as_bytes()),
-            ("bpt", &pool),
-            ("fee", &fee_bytes),
-        ];
+        let pool_type = pool_type_attribute("StablePoolFactory", version);
+
+        let mut attributes =
+            vec![("pool_type", pool_type.as_bytes()), ("bpt", &pool), ("fee", &fee_bytes)];
 
         if !rate_providers.is_empty() {
             attributes.push(("rate_providers", &rate_providers_bytes));
@@ -114,7 +166,11 @@ pub fn address_map(
         return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
     }
 
-    if pool_factory_address == config.reclamm_factory.as_slice() {
+    if let Some(version) = config
+        .reclamm_factories
+        .version_of(pool_factory_address)
+    {
+        let ReClammPoolCreated { pool } = ReClammPoolCreated::match_and_decode(log)?;
         let ReClammPoolCreate {
             tokens: token_config,
             swap_fee_percentage,
@@ -123,7 +179,6 @@ pub fn address_map(
             centeredness_margin,
             ..
         } = ReClammPoolCreate::match_and_decode(call)?;
-        let ReClammPoolCreated { pool } = ReClammPoolCreated::match_and_decode(log)?;
         let rate_providers = collect_rate_providers(&token_config);
         if should_skip_rate_provider_pool(config, &rate_providers) {
             return None;
@@ -144,8 +199,10 @@ pub fn address_map(
         let token_b_price_includes_rate_bytes = [price_params.4 as u8];
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
+        let pool_type = pool_type_attribute("ReClammPoolFactory", version);
+
         let mut attributes = vec![
-            ("pool_type", "ReClammPoolFactory".as_bytes()),
+            ("pool_type", pool_type.as_bytes()),
             ("fee", &fee_bytes),
             ("initial_min_price", &initial_min_price_bytes),
             ("initial_max_price", &initial_max_price_bytes),
@@ -172,10 +229,14 @@ fn create_pool_component(
     attributes: &[(&str, &[u8])],
     config: &DeploymentConfig,
 ) -> ProtocolComponent {
+    // Every component carries the Vault it is registered with, so consumers can resolve it
+    // without calling the pool contract.
+    let mut attributes = attributes.to_vec();
+    attributes.push(("vault", config.vault.as_slice()));
     ProtocolComponent::new(&address_id(pool))
         .with_contracts(&[pool.to_vec(), config.vault.clone()])
         .with_tokens(tokens)
-        .with_attributes(attributes)
+        .with_attributes(&attributes)
         .as_swap_type("balancer_v3_pool", ImplementationType::Vm)
 }
 
@@ -190,12 +251,55 @@ mod tests {
              &vault_extension=0e8b07657d719b86e06bf0806d6729e3d528c9a9\
              &batch_router=136f1efcc3f8f88516b9e94110d56fdbfb1778d1\
              &permit2=000000000022d473030f116ddee9f6b43ac78ba3\
-             &weighted_factory=201efd508c8dfe9de1a13c2452863a78cb2a86cc\
-             &stable_factory=b9d01ca61b9c181da1051bfdd28e1097e920ab14\
-             &reclamm_factory=3ccd78683effffddc1a16f5553c896ac6d3ab7ff\
+             &weighted_factories[v1]=201efd508c8dfe9de1a13c2452863a78cb2a86cc\
+             &stable_factories[v1]=b9d01ca61b9c181da1051bfdd28e1097e920ab14\
+             &reclamm_factories[v1]=3ccd78683effffddc1a16f5553c896ac6d3ab7ff\
              &skip_rate_provider_pools={skip_rate_provider_pools}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn pool_type_attribute_carries_the_generation() {
+        assert_eq!(pool_type_attribute("WeightedPoolFactory", "v1"), "WeightedPoolFactory@v1");
+        // Version labels are free-form; only the first separator delimits the family.
+        assert_eq!(
+            pool_type_attribute("ReClammPoolFactory", "20250101-v3-reclamm"),
+            "ReClammPoolFactory@20250101-v3-reclamm"
+        );
+    }
+
+    #[test]
+    fn zero_hooks_address_means_no_hooks() {
+        assert!(!has_hooks(&[0u8; 20]));
+        assert!(!has_hooks(&[]));
+        let mut hooked = [0u8; 20];
+        hooked[19] = 1;
+        assert!(has_hooks(&hooked));
+    }
+
+    #[test]
+    fn components_carry_the_vault_static_attribute() {
+        let config = sample_config(false);
+        let component = create_pool_component(
+            &[0xab; 20],
+            &[vec![0x01; 20], vec![0x02; 20]],
+            &[("pool_type", "WeightedPoolFactory@v1".as_bytes())],
+            &config,
+        );
+        let vault = component
+            .static_att
+            .iter()
+            .find(|attribute| attribute.name == "vault")
+            .expect("component must carry a `vault` static attribute");
+        assert_eq!(vault.value, config.vault);
+        assert!(
+            component
+                .static_att
+                .iter()
+                .any(|attribute| attribute.name == "pool_type"),
+            "factory-provided attributes must survive"
+        );
     }
 
     #[test]

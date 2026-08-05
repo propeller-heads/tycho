@@ -3,9 +3,6 @@ protocol_system: "vm:balancer_v3"
 module_name: "map_protocol_changes"
 protocol_type_names:
   - "balancer_v3_pool"
-adapter_contract: "BalancerV3SwapAdapter"
-adapter_build_signature: "constructor(address,address,address,address)"
-adapter_build_args: "0xbA1333333333a1BA1108E8412f11850A5C319bA9,0x85a80afee867aDf27B50BdB7b76DA70f1E853062,0x000000000022D473030F116dDEE9F6B43aC78BA3,0x4200000000000000000000000000000000000006"
 skip_balance_check: true # Skipped because this Balancer V3 uses a Vault, the current version of the testing module doesn't support this.
 
 initialized_accounts:
@@ -21,9 +18,10 @@ tests:
           - "0x74299A718b2c44483a27325d7725F0B2646DE3B1"
           - "0xC768c589647798a6EE01A91FdE98EF2ed046DBD6"
         static_attributes:
+          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           normalized_weights: "0x5b22307830623161326263326563353030303030222c22307830326336386166306262313430303030225d"
           fee: "0x0aa87bee538000"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279407631"
         skip_simulation: true # This test only covers component creation and static attributes.
         creation_tx: "0xe62361b12a708c5752c1f4c9aeae7bae4f884eb2a480d2ee9ccfc69adc659112"
 

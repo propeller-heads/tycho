@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.6.0
+
+- Index several factory generations per pool family. The `weighted_factory`,
+  `stable_factory`, and `reclamm_factory` deployment parameters are replaced by
+  `weighted_factories`, `stable_factories`, and `reclamm_factories`, each a map
+  from a version label to a factory address:
+
+  ```
+  weighted_factories[v1]=201efd…&weighted_factories[v2]=…
+  ```
+
+  Balancer keeps the `create` signature and the `PoolCreated` event stable
+  across generations, so one decoder serves every version of a family. The
+  version label is free-form and only names the generation in log output. A
+  family may be omitted entirely when it is not deployed on a chain.
+
+- Reject a factory address configured under two version labels, and reject an
+  address that is not 20 bytes, at parameter-parsing time.
+- Fail `map_components` when no factory of any family is configured, since that
+  module can only discover pools by matching factories.
+- Configure every deployed weighted and stable generation on all four chains,
+  verified against the
+  [Balancer deployments repo](https://github.com/balancer/balancer-deployments):
+  two weighted (`v1`, `v2`) and three stable (`v1`, `v2`, `v3`) per chain. The
+  previous configuration named one generation per family, and on Ethereum both
+  the weighted and the stable factory were the deprecated December 2024
+  deployments, so no pool created by a later factory was indexed.
+
+  `create` and `PoolCreated` are byte-identical across every generation of these
+  families, so one decoder covers them all.
+
+  reCLAMM stays pinned to the newest generation. `balancer-maths-rust` carries
+  the first reCLAMM generation as a separate implementation from the second, and
+  Balancer confirmed only that the second and third share their swap maths — so
+  an older reCLAMM pool cannot be priced through this decoder.
+
+  Note that the contract *names* `WeightedPoolFactory` and `StablePoolFactory`
+  are also used by Balancer V2 deployments, whose `create` signature differs.
+  Only tasks whose id contains `-v3-` belong here.
+
+- Carry the generation in the `pool_type` static attribute as
+  `<family>@<version>`, for example `WeightedPoolFactory@v1`. Consumers split on
+  the first `@`: the family selects the maths, the version names the generation.
+  A value without a separator still resolves to a family with no version, which
+  is what pools indexed before this release report.
+
+- Emit the configured Vault address as a `vault` static attribute on every
+  component, so consumers can resolve it without calling the pool contract.
+
+- Skip pools created with an external hooks contract. Hooks run arbitrary code
+  on swaps, which the native maths in `tycho-simulation` does not model, so
+  such pools could never be quoted. This also drops pools whose hook only
+  intervenes in liquidity operations, since the hook's flags — which would
+  tell the two apart — only exist on-chain. The reCLAMM factory takes no hooks
+  parameter, so only the weighted and stable families are filtered.
+
 ## v0.5.0
 
 - Add reCLAMM pool support via the `ReClammPoolFactory` (new `reclamm_factory`

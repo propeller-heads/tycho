@@ -27,7 +27,13 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::balancer_v3::{state::BalancerV3State, vm::BalancerPoolType};
+use crate::evm::protocol::{
+    balancer_v3::{
+        state::BalancerV3State,
+        vm::{BalancerPoolType, PoolTypeAttribute},
+    },
+    u256_num::u256_to_biguint,
+};
 
 const DATASET: &str = "tests/assets/balancer_v3/native_parity_dataset.json";
 /// Placeholder Vault address: these tests never touch the VM, so the value is only carried around.
@@ -174,11 +180,54 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
                 .expect("pool_address"),
         ),
         address(VAULT),
-        pool_type,
+        // The dataset records no factory generation, which is also what a pool indexed before
+        // generations were labelled reports.
+        PoolTypeAttribute { pool_type, version: None },
         tokens,
         timestamp,
         state,
     )
+}
+
+#[test]
+fn pool_type_attribute_splits_family_from_generation() {
+    assert_eq!(
+        PoolTypeAttribute::parse("WeightedPoolFactory@v1"),
+        Ok(PoolTypeAttribute {
+            pool_type: BalancerPoolType::Weighted,
+            version: Some("v1".to_string()),
+        })
+    );
+    // Only the first separator delimits the family, so labels may contain it themselves.
+    assert_eq!(
+        PoolTypeAttribute::parse("ReClammPoolFactory@2025-01-01@rc2"),
+        Ok(PoolTypeAttribute {
+            pool_type: BalancerPoolType::Reclamm,
+            version: Some("2025-01-01@rc2".to_string()),
+        })
+    );
+}
+
+#[test]
+fn pool_type_attribute_without_a_generation_still_resolves() {
+    assert_eq!(
+        PoolTypeAttribute::parse("StablePoolFactory"),
+        Ok(PoolTypeAttribute { pool_type: BalancerPoolType::Stable, version: None })
+    );
+}
+
+#[test]
+fn pool_type_attribute_rejects_unquotable_and_malformed_values() {
+    for marker in ["GyroECLPPoolFactory@v1", "QuantAMMWeightedPoolFactory", "@v1", ""] {
+        assert!(
+            PoolTypeAttribute::parse(marker).is_err(),
+            "`{marker}` must not resolve to a pool family"
+        );
+    }
+    // A separator with nothing after it is a packaging slip, not a versionless pool.
+    assert!(PoolTypeAttribute::parse("WeightedPoolFactory@")
+        .expect_err("empty version must be rejected")
+        .contains("empty factory version"));
 }
 
 #[test]
@@ -300,6 +349,33 @@ fn limits_bound_a_quotable_amount() {
             .get_amount_out(max_in.clone(), &token_at(&pool, 0), &token_at(&pool, 1))
             .expect("the reported limit must be quotable");
         assert_eq!(quoted.amount, max_out, "limit output must match a quote at the limit");
+    }
+}
+
+/// The reported input limit must stay inside the share of the reserve the Vault accepts.
+///
+/// The maths solves far beyond that — it took the entire reserve of a reCLAMM pool before this was
+/// capped — and a limit the Vault rejects turns into routes that revert on chain.
+#[test]
+fn limits_never_exceed_the_vault_s_share_of_the_reserve() {
+    let (timestamp, dataset) = load_dataset();
+    for entry in dataset {
+        let pool = build_state(&entry, timestamp);
+        let tokens = pool.token_addresses().to_vec();
+        let raw_reserves = pool.raw_balances();
+
+        for (index_in, index_out) in [(0usize, 1usize), (1, 0)] {
+            let (max_in, _) = pool
+                .get_limits(tokens[index_in].clone(), tokens[index_out].clone())
+                .expect("limits resolve");
+            let cap = u256_to_biguint(raw_reserves[index_in]) * BigUint::from(30u32) /
+                BigUint::from(100u32);
+            assert!(
+                max_in <= cap,
+                "pool {:?} offers {max_in} of token {index_in}, above the {cap} the Vault takes",
+                entry["state"]["pool_address"].as_str()
+            );
+        }
     }
 }
 

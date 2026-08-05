@@ -6,7 +6,6 @@
 use std::{collections::HashMap, str::FromStr};
 
 use alloy::primitives::Address as AlloyAddress;
-use tracing::debug;
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
@@ -23,6 +22,9 @@ use crate::{
         models::{DecoderContext, TryFromWithBlock},
     },
 };
+
+/// `vault` static attribute emitted by the `ethereum-balancer-v3` Substreams package.
+const VAULT_ATTRIBUTE: &str = "vault";
 
 impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for BalancerV3State {
     type Error = InvalidSnapshotError;
@@ -45,6 +47,27 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             ))
         })?;
 
+        // Checked before any engine work: components indexed without the attribute can only fail,
+        // so they must not cost stateless-contract fetches or getter probing first.
+        let vault_bytes = value
+            .component
+            .static_attributes
+            .get(VAULT_ATTRIBUTE)
+            .ok_or_else(|| {
+                InvalidSnapshotError::ValueError(format!(
+                    "balancer_v3 pool {pool_address} carries no `{VAULT_ATTRIBUTE}` static \
+                     attribute; it was indexed with an ethereum-balancer-v3 package older than \
+                     0.6.0"
+                ))
+            })?
+            .clone();
+        let vault = AlloyAddress::try_from(vault_bytes.as_ref()).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!(
+                "balancer_v3 pool {pool_address} carries an invalid `{VAULT_ATTRIBUTE}` static \
+                 attribute: {e}"
+            ))
+        })?;
+
         let engine = create_engine(
             SHARED_TYCHO_DB.clone(),
             decoder_context
@@ -61,11 +84,9 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
         let pool = AlloyAddress::from_slice(pool_address.as_ref());
-        let pool_type = vm::resolve_pool_type(&value.component.static_attributes, &engine, &pool)
+        let factory = vm::resolve_pool_type(&value.component.static_attributes, &engine, &pool)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
-        let vault = vm::read_vault(&engine, &pool)
-            .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
-        let state = vm::read_pool_state(&engine, &pool, &vault, pool_type, block.timestamp)
+        let state = vm::read_pool_state(&engine, &pool, &vault, factory.pool_type, block.timestamp)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
         let tokens = state
@@ -81,15 +102,6 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        debug!(pool = %pool_address, ?pool_type, "Decoded balancer_v3 pool natively");
-
-        Ok(BalancerV3State::new(
-            pool_address,
-            Bytes::from(vault.into_array().to_vec()),
-            pool_type,
-            tokens,
-            block.timestamp,
-            state,
-        ))
+        Ok(BalancerV3State::new(pool_address, vault_bytes, factory, tokens, block.timestamp, state))
     }
 }
