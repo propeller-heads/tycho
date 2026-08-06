@@ -117,6 +117,7 @@ pub fn get_default_url(chain: &Chain) -> Option<String> {
         Chain::Unichain => Some("tycho-unichain-beta.propellerheads.xyz".to_string()),
         Chain::Bsc => Some("tycho-bsc-beta.propellerheads.xyz".to_string()),
         Chain::Arbitrum => Some("tycho-arbitrum-beta.propellerheads.xyz".to_string()),
+        Chain::Robinhood => Some("tycho-robinhood-beta.propellerheads.xyz".to_string()),
         _ => None,
     }
 }

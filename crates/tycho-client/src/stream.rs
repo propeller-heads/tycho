@@ -135,8 +135,9 @@ impl TychoStreamBuilder {
             Chain::Base => (2, 12, 50),
             Chain::Bsc => (1, 12, 50),
             Chain::Unichain => (1, 10, 100),
-            Chain::Polygon => (2, 12, 50), // ~2s block time
-            Chain::Plasma => (1, 10, 100), // ~1s block time
+            Chain::Polygon => (2, 12, 50),   // ~2s block time
+            Chain::Plasma => (1, 10, 100),   // ~1s block time
+            Chain::Robinhood => (1, 2, 100), // ~1s block time, Arbitrum Orbit
             _ => {
                 let block_time = chain.block_time_secs();
                 (block_time, block_time * 3, 50)
