@@ -1601,11 +1601,11 @@ mod tests {
         )
         .expect("reinit failed");
 
-        let oldest = new_history.oldest().unwrap();
-        assert!(
-            oldest.number <= 324,
-            "reinit rooted the history at the advanced partial, ancestry lost: oldest = {oldest}"
-        );
+        let retained: Vec<u64> = new_history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![323, 324, 325, 326]);
     }
 
     /// Full prod sequence behind the Base outages: partial-advanced reinit, the stream proceeds
