@@ -165,15 +165,21 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             })
             .collect();
 
-        let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
-                .into_iter()
-                .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
-            _ => return Err(InvalidSnapshotError::MissingAttribute("tick_liquidities".to_string())),
-        };
+        // An empty tick list decodes to a state that quotes no liquidity; rejecting it would
+        // leave no state for later deltas to repopulate.
+        let mut ticks: Vec<_> = ticks?
+            .into_iter()
+            .filter(|tick| tick.net_liquidity != 0)
+            .collect();
 
         ticks.sort_by_key(|tick| tick.index);
+
+        if liquidity != 0 && ticks.is_empty() {
+            tracing::warn!(
+                pool_id = %snapshot.component.id,
+                "snapshot carries nonzero liquidity but no initialized ticks"
+            );
+        }
 
         let observations: Vec<Observation> = snapshot
             .state
@@ -307,6 +313,70 @@ mod tests {
         .expect("pools without a supported marker should remain decodable");
 
         assert_eq!(decoded, expected_state(DynamicFeeConfig::default()));
+    }
+
+    #[tokio::test]
+    async fn no_tick_attributes_decode_to_an_empty_tick_list() {
+        let mut snapshot = snapshot(None);
+        snapshot
+            .state
+            .attributes
+            .retain(|key, _| !key.starts_with("ticks/"));
+
+        let decoded = try_decode_snapshot_with_defaults::<AerodromeSlipstreamsState>(snapshot)
+            .await
+            .expect("a snapshot without tick attributes is a decodable, empty pool");
+
+        let expected = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            0,
+            100,
+            get_sqrt_ratio_at_tick(0).expect("tick zero should have a sqrt price"),
+            0,
+            1,
+            100,
+            1,
+            0,
+            vec![],
+            vec![Observation { initialized: true, index: 0, ..Default::default() }],
+            DynamicFeeConfig::default(),
+        )
+        .expect("an empty tick list is a valid pool state");
+        assert_eq!(decoded, expected);
+    }
+
+    #[tokio::test]
+    async fn all_zero_ticks_decode_to_an_empty_tick_list() {
+        let mut snapshot = snapshot(None);
+        snapshot
+            .state
+            .attributes
+            .insert("ticks/-1".to_string(), Bytes::from(0_i128.to_be_bytes()));
+        snapshot
+            .state
+            .attributes
+            .insert("ticks/1".to_string(), Bytes::from(0_i128.to_be_bytes()));
+
+        let decoded = try_decode_snapshot_with_defaults::<AerodromeSlipstreamsState>(snapshot)
+            .await
+            .expect("an all-zero tick set is a decodable, empty pool");
+
+        let expected = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            0,
+            100,
+            get_sqrt_ratio_at_tick(0).expect("tick zero should have a sqrt price"),
+            0,
+            1,
+            100,
+            1,
+            0,
+            vec![],
+            vec![Observation { initialized: true, index: 0, ..Default::default() }],
+            DynamicFeeConfig::default(),
+        )
+        .expect("an empty tick list is a valid pool state");
+        assert_eq!(decoded, expected);
     }
 
     #[rstest]
