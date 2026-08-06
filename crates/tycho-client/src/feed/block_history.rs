@@ -112,6 +112,15 @@ impl BlockHistory {
                 // block (via parent hash) -> we are dealing with a
                 // revert.
                 if block.revert {
+                    // A real hash match anywhere in history is always preferred: prefer walking
+                    // down to it over stopping early at a same-height partial. Height is only a
+                    // fallback for when the fork point is retained solely under an ephemeral
+                    // mid-block partial hash, so it genuinely cannot be found by hash — that is
+                    // the crash case this fallback exists for. Gating on unfindability also
+                    // avoids misreading a real hash mismatch against a stale sibling partial (a
+                    // losing branch retained at the same height by BlockHistory::new's
+                    // height-based stitching) as a match.
+                    let hash_findable = self.hash_in_history(&block.parent_hash);
                     // keep removing the head until the new block fits
                     loop {
                         let head = self
@@ -119,12 +128,10 @@ impl BlockHistory {
                             .back()
                             .ok_or(BlockHistoryError::RevertPositionNotFound)?;
 
-                        // The fork point may be retained as a mid-block partial whose ephemeral
-                        // hash the revert's sealed parent hash can never match. Same height
-                        // means same canonical block, so a partial directly below the
-                        // reverted-to block is the fork point.
                         if head.hash == block.parent_hash ||
-                            (head.is_partial() && head.number + 1 == block.number)
+                            (!hash_findable &&
+                                head.is_partial() &&
+                                head.number + 1 == block.number)
                         {
                             break;
                         } else {
@@ -138,11 +145,13 @@ impl BlockHistory {
                         }
                     }
                 }
-                // Final sanity check against things going awfully wrong. A partial fork point
-                // cannot hash-match (ephemeral hash), so it is accepted by height.
+                // Final sanity check against things going awfully wrong. Same rationale as the
+                // drain above: height is only accepted once a real hash match is ruled out.
                 if let Some(latest) = self.latest() {
                     let connects = latest.hash == block.parent_hash ||
-                        (latest.is_partial() && latest.number + 1 == block.number);
+                        (!self.hash_in_history(&block.parent_hash) &&
+                            latest.is_partial() &&
+                            latest.number + 1 == block.number);
                     if !connects {
                         return Err(BlockHistoryError::DetachedBlock);
                     }

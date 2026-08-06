@@ -1654,6 +1654,18 @@ mod tests {
         new_history
             .push(revert)
             .expect("1-block revert after partial-advanced reinit must resolve");
+
+        // The drain must stop exactly at the retained partial fork point (325), not overshoot
+        // it or stop early at some other same-height block.
+        let retained: Vec<u64> = new_history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![323, 324, 325, 326]);
+        let latest = new_history.latest().unwrap();
+        assert_eq!(latest.number, 326);
+        assert!(latest.revert);
+        assert!(!latest.is_partial());
     }
 
     #[test(tokio::test)]
