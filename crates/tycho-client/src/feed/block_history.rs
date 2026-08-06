@@ -257,6 +257,11 @@ impl BlockHistory {
                     // if this is not a revert it means this block is delayed.
                     BlockPosition::Delayed
                 }
+            } else if block.revert && self.partial_at_height(block.number) {
+                // A revert to a block retained only as a mid-block partial: the revert carries
+                // the sealed hash, which an ephemeral partial hash can never match. Same height
+                // means same canonical block, so this is the expected forward update.
+                BlockPosition::NextExpected
             } else if block.is_partial() && !block.revert {
                 // A non-revert partial block at or below the tip whose hash is not in history is a
                 // superseded/delayed partial. Partials share a block number but carry ephemeral
@@ -291,6 +296,12 @@ impl BlockHistory {
         self.history
             .iter()
             .any(|b| &b.hash == h)
+    }
+
+    fn partial_at_height(&self, number: u64) -> bool {
+        self.history
+            .iter()
+            .any(|b| b.number == number && b.is_partial())
     }
 
     pub fn latest(&self) -> Option<&BlockHeader> {
@@ -709,6 +720,31 @@ mod test {
                 .determine_block_position(&incoming)
                 .unwrap(),
             expected
+        );
+    }
+
+    #[test]
+    fn test_revert_to_block_retained_as_partial_is_next_expected() {
+        // History retains block 9 only as a mid-block partial (ephemeral hash). A revert to
+        // sealed 9 cannot be found by hash but is the same canonical block by height.
+        let mut blocks = generate_blocks(2, 7, None); // full blocks 7, 8
+        blocks.push(partial_block(9, 2, int_hash(8)));
+        blocks.push(partial_block(10, 0, int_hash(9)));
+        let history = BlockHistory::new(blocks, 15).unwrap();
+
+        let revert = BlockHeader {
+            number: 9,
+            hash: int_hash(9),
+            parent_hash: int_hash(8),
+            revert: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            history
+                .determine_block_position(&revert)
+                .expect("must classify, not error"),
+            BlockPosition::NextExpected
         );
     }
 
