@@ -494,6 +494,16 @@ impl ProtocolStreamBuilder {
         self
     }
 
+    /// Configures HTTP RPC requests to use HTTP/1 only instead of the default HTTP/2 mode.
+    ///
+    /// This setting does not affect the WebSocket connection.
+    pub fn http1_only(mut self, http1_only: bool) -> Self {
+        self.stream_builder = self
+            .stream_builder
+            .http1_only(http1_only);
+        self
+    }
+
     /// Enables partial block updates (flashblocks).
     pub fn enable_partial_blocks(mut self) -> Self {
         self.stream_builder = self
@@ -914,13 +924,78 @@ fn inject_native_wrapper(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, time::Duration};
 
     use futures::{stream, StreamExt};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::protocol::models::Update;
+    use crate::{evm::protocol::uniswap_v2::state::UniswapV2State, protocol::models::Update};
+
+    async fn start_http1_stream_server() -> (String, oneshot::Receiver<[u8; 24]>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stream test server");
+        let address = listener
+            .local_addr()
+            .expect("get stream test server address");
+        let (request_tx, request_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut request_tx = Some(request_tx);
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut method = [0_u8; 4];
+                while stream
+                    .peek(&mut method)
+                    .await
+                    .expect("peek stream request") <
+                    method.len()
+                {
+                    tokio::task::yield_now().await;
+                }
+
+                if &method == b"GET " {
+                    tokio::spawn(async move {
+                        let _connection = tokio_tungstenite::accept_async(stream)
+                            .await
+                            .expect("accept WebSocket connection");
+                        futures::future::pending::<()>().await;
+                    });
+                    continue;
+                }
+
+                let mut prefix = [0_u8; 24];
+                stream
+                    .read_exact(&mut prefix)
+                    .await
+                    .expect("read RPC request prefix");
+                let body =
+                    r#"{"protocol_systems":[],"pagination":{"page":0,"page_size":20,"total":0}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write RPC response");
+                request_tx
+                    .take()
+                    .expect("receive only one RPC request")
+                    .send(prefix)
+                    .expect("send RPC request prefix");
+                break;
+            }
+        });
+
+        (address.to_string(), request_rx)
+    }
 
     fn empty_update(block: u64) -> Update {
         Update::new(block, HashMap::new(), HashMap::new())
@@ -980,6 +1055,26 @@ mod tests {
         let (_builder, controller) = builder.with_step_controller();
         // The controller was successfully returned — verifying the public API is callable.
         drop(controller);
+    }
+
+    #[tokio::test]
+    async fn test_protocol_stream_builder_forwards_http1_only_rpc() {
+        let (address, request) = start_http1_stream_server().await;
+        let builder = ProtocolStreamBuilder::new(&address, Chain::Ethereum)
+            .http1_only(true)
+            .exchange::<UniswapV2State>("uniswap_v2", ComponentFilter::Ids(Vec::new()), None);
+        let build = builder.build();
+        tokio::pin!(build);
+
+        let prefix = tokio::select! {
+            request = request => request.expect("receive RPC request prefix"),
+            _ = &mut build => panic!("stream build ended before RPC request"),
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                panic!("timed out waiting for stream RPC request")
+            }
+        };
+
+        assert!(prefix.starts_with(b"POST "), "protocol stream RPC must use HTTP/1.1");
     }
 
     /// Connects to a live Tycho instance, verifies that the stream blocks until
