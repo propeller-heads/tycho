@@ -75,8 +75,12 @@ impl BlockHistory {
                 if block.number != current_number - 1 {
                     break;
                 }
-                // Check hash connection (preceeding block is parent of current block)
-                if block.hash == current_hash {
+                // Hash connection (preceding block is parent of current block). A partial at
+                // the parent height also connects: flashblock partials carry ephemeral hashes
+                // (only the last partial holds the sealed hash), so a child linking to the
+                // sealed hash can never hash-match a retained mid-block partial. Same height
+                // means same canonical block.
+                if block.hash == current_hash || block.is_partial() {
                     connected_chain.push(block.clone());
                     current_hash = block.parent_hash.clone();
                     current_number = block.number;
@@ -426,6 +430,24 @@ mod test {
         assert_eq!(history.history.len(), 4);
         assert_eq!(history.oldest().unwrap().number, 5);
         assert_eq!(history.latest().unwrap().number, 8);
+    }
+
+    #[test]
+    fn test_new_stitches_partial_parent_by_height() {
+        // Reinit merges retained history with stream headers. The child of a mid-block partial
+        // links to the sealed block hash, which the partial's ephemeral hash can never match —
+        // the chain must connect by height instead of dropping all ancestry.
+        let mut blocks = generate_blocks(2, 7, None); // full blocks 7, 8
+        blocks.push(partial_block(9, 2, int_hash(8))); // mid-block partial, ephemeral hash
+        blocks.push(partial_block(10, 0, int_hash(9))); // child linking to the sealed hash of 9
+
+        let history = BlockHistory::new(blocks, 15).expect("failed to create history");
+
+        let retained: Vec<u64> = history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![7, 8, 9, 10], "ancestry must survive the ephemeral-hash break");
     }
 
     #[test]
