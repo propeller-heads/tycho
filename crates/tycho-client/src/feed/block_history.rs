@@ -119,7 +119,13 @@ impl BlockHistory {
                             .back()
                             .ok_or(BlockHistoryError::RevertPositionNotFound)?;
 
-                        if head.hash == block.parent_hash {
+                        // The fork point may be retained as a mid-block partial whose ephemeral
+                        // hash the revert's sealed parent hash can never match. Same height
+                        // means same canonical block, so a partial directly below the
+                        // reverted-to block is the fork point.
+                        if head.hash == block.parent_hash ||
+                            (head.is_partial() && head.number + 1 == block.number)
+                        {
                             break;
                         } else {
                             let reverted_block = self
@@ -132,12 +138,14 @@ impl BlockHistory {
                         }
                     }
                 }
-                // Final sanity check against things going awfully wrong.
-                if let Some(true) = self
-                    .latest()
-                    .map(|b| b.hash != block.parent_hash)
-                {
-                    return Err(BlockHistoryError::DetachedBlock);
+                // Final sanity check against things going awfully wrong. A partial fork point
+                // cannot hash-match (ephemeral hash), so it is accepted by height.
+                if let Some(latest) = self.latest() {
+                    let connects = latest.hash == block.parent_hash ||
+                        (latest.is_partial() && latest.number + 1 == block.number);
+                    if !connects {
+                        return Err(BlockHistoryError::DetachedBlock);
+                    }
                 }
                 // Push new block to history, marking it as latest.
                 debug!(
@@ -894,5 +902,36 @@ mod test {
         assert!(history
             .reverts
             .contains(&partial_1.hash));
+    }
+
+    #[test]
+    fn test_revert_drain_stops_at_partial_fork_point() {
+        // The fork point (block 9) is retained as a mid-block partial. A revert to block 10
+        // must drain down to it and re-push the reverted-to block, not exhaust the history.
+        let mut blocks = generate_blocks(2, 7, None); // full blocks 7, 8
+        blocks.push(partial_block(9, 2, int_hash(8)));
+        blocks.push(partial_block(10, 0, int_hash(9)));
+        let mut history = BlockHistory::new(blocks, 15).unwrap();
+
+        let revert = BlockHeader {
+            number: 10,
+            hash: int_hash(10),
+            parent_hash: int_hash(9),
+            revert: true,
+            ..Default::default()
+        };
+
+        history
+            .push(revert)
+            .expect("revert with a partial fork point must resolve");
+
+        let retained: Vec<u64> = history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![7, 8, 9, 10]);
+        let latest = history.latest().unwrap();
+        assert!(latest.revert);
+        assert!(!latest.is_partial());
     }
 }
