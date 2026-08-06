@@ -222,6 +222,7 @@ impl ProtocolStreamProcessor {
                 "uniswap_v4".to_string(),
                 "pancakeswap_v2".to_string(),
                 "pancakeswap_v3".to_string(),
+                "ring_swap_v2".to_string(),
             ],
             Chain::Unichain => {
                 vec![

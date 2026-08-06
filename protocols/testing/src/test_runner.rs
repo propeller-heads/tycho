@@ -1637,17 +1637,18 @@ mod tests {
     #[test]
     fn bsc_ring_swap_v2_uses_shared_package_config() {
         let root_path = PathBuf::from("/tmp/tycho-protocol-sdk");
-        let runner = TestRunner::new(
-            TestType::Range(TestTypeRange { match_test: None }),
-            root_path.clone(),
-            Chain::Bsc,
-            "bsc-ring-swap-v2".to_string(),
-            String::new(),
-            "http://localhost:8545".to_string(),
-            4242,
-            false,
-            false,
-        )
+        let runner = TestRunner::new(RunnerConfig {
+            test_type: TestType::Range(TestTypeRange { match_test: None }),
+            root_path: root_path.clone(),
+            chain: Chain::Bsc,
+            protocol: "bsc-ring-swap-v2".to_string(),
+            db_url: String::new(),
+            rpc_url: "http://localhost:8545".to_string(),
+            tycho_server_port: 4242,
+            vm_simulation_traces: false,
+            reuse_last_sync: false,
+            prebuilt_wasm: false,
+        })
         .unwrap();
 
         let package_path = root_path.join("substreams/ethereum-ring-swap-v2");
