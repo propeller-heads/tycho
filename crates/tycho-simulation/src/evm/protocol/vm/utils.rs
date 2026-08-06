@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    env,
-    fmt::Debug,
-    str::FromStr,
-    sync::{Mutex, OnceLock, PoisonError},
-};
+use std::{collections::HashMap, env, fmt::Debug, str::FromStr};
 
 use alloy::{
     primitives::{Address, Bytes, Keccak256, U256},
@@ -209,24 +203,12 @@ fn get_solidity_panic_codes() -> HashMap<u64, String> {
     panic_codes
 }
 
-/// Process-wide cache of fetched contract code, keyed by RPC endpoint and address.
-///
-/// Stateless implementation contracts are shared by whole protocol families — every Balancer V3
-/// pool lists the same VaultExtension — so without this, every component decode re-fetched the
-/// same bytecode over RPC. Keying by endpoint keeps chains apart should one process ever talk to
-/// several. Entries never expire: a proxy upgrade surfaces as a new implementation *address* (the
-/// `call:` attribute is re-resolved per decode), and code changing under a fixed address is not a
-/// thing on post-Dencun chains.
-static CODE_CACHE: OnceLock<Mutex<HashMap<(String, Address), Bytecode>>> = OnceLock::new();
-
 /// Fetches the bytecode for a specified contract address, returning an error if the address is
 /// an Externally Owned Account (EOA) or if no code is associated with it.
 ///
 /// This function checks the specified address on the blockchain, attempting to retrieve any
 /// contract bytecode deployed at that address. If the address corresponds to an EOA or any
 /// other address without associated bytecode, an `RpcError::EmptyResponse` error is returned.
-/// Successful lookups are served from [`CODE_CACHE`] on repeat calls, so only the first fetch
-/// per (endpoint, address) pair pays the network round-trip.
 ///
 /// # Parameters
 /// - `address`: The address of the account or contract to query, as a string.
@@ -260,17 +242,6 @@ pub(crate) async fn get_code_for_contract(
 
     let addr = Address::from_str(address)
         .map_err(|_| SimulationError::FatalError(format!("Invalid address format: {address}")))?;
-
-    let cache = CODE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (connection_string.clone(), addr);
-    if let Some(code) = cache
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(code.clone());
-    }
-
     // Call eth_getCode to get the bytecode of the contract
     match sync_get_code(&connection_string, addr) {
         Ok(code) if code.is_empty() => {
@@ -278,10 +249,6 @@ pub(crate) async fn get_code_for_contract(
         }
         Ok(code) => {
             let bytecode = Bytecode::new_raw(Bytes::from(code.to_vec()));
-            cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(key, bytecode.clone());
             Ok(bytecode)
         }
         Err(e) => match e {
@@ -602,24 +569,6 @@ mod tests {
 
         let code = result.unwrap();
         assert!(!code.bytes().is_empty(), "Code should not be empty");
-    }
-
-    /// The unreachable endpoint proves the hit path: a cache miss would try to connect and fail.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cached_code_is_served_without_an_rpc_call() {
-        let address = "0x00000000000000000000000000000000000000aa";
-        let endpoint = "http://code-cache-test.invalid".to_string();
-        let code = Bytecode::new_raw(Bytes::from(vec![0x60u8, 0x00]));
-        CODE_CACHE
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert((endpoint.clone(), Address::from_str(address).unwrap()), code.clone());
-
-        let fetched = get_code_for_contract(address, Some(endpoint))
-            .await
-            .expect("must be served from the cache");
-        assert_eq!(fetched, code);
     }
 
     #[test]
