@@ -118,6 +118,7 @@ impl TychoRunner {
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let db_url = self.db_url.clone();
         let server_port = self.server_port.to_string();
+        let chain = self.chain.to_string();
 
         // Start the RPC server in a separate thread
         let thread_handle = thread::spawn(move || {
@@ -128,6 +129,8 @@ impl TychoRunner {
                     "--server-port",
                     server_port.as_str(),
                     "rpc",
+                    "--chain",
+                    chain.as_str(),
                 ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

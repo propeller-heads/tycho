@@ -6,7 +6,5 @@ pub const TWAMM_ADDRESS_V2: Address = address!("0xd47f1B1eDCfEaBb08F6eBd8FC337c2
 pub const MEV_CAPTURE_ADDRESS: Address = address!("0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be");
 pub const BOOSTED_FEES_CONCENTRATED_ADDRESS: Address =
     address!("0xd4b54d0ca6979da05f25895e6e269e678ba00f9e");
-// TODO: replace with the deployed SignedExclusiveSwap extension address once
-// EkuboProtocol/evm-contracts#319 lands.
 pub const SIGNED_EXCLUSIVE_SWAP_ADDRESS: Address =
-    address!("0x5519eD5e5e5E5E5e5E5E5e5e5e5E5e5e5e5E5E5E");
+    address!("0x55b703eED01b35641963da2FB2E14885993605A3");

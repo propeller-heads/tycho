@@ -9,7 +9,7 @@ use tycho_substreams::models::{
 };
 
 use crate::{
-    addresses::CORE_ADDRESS,
+    addresses::{CORE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS},
     pb::ekubo::{
         block_transaction_events::transaction_events::{pool_log::Event, PoolLog},
         BlockTransactionEvents,
@@ -106,6 +106,42 @@ fn maybe_create_component(
 
     let component_id = log.pool_id.to_hex();
 
+    let mut static_att = vec![
+        Attribute {
+            change: ChangeType::Creation.into(),
+            name: "token0".to_string(),
+            value: pi.token0.clone(),
+        },
+        Attribute {
+            change: ChangeType::Creation.into(),
+            name: "token1".to_string(),
+            value: pi.token1.clone(),
+        },
+        Attribute {
+            change: ChangeType::Creation.into(),
+            name: "extension".to_string(),
+            value: pool_config.extension.to_vec(),
+        },
+        Attribute {
+            change: ChangeType::Creation.into(),
+            name: "fee".to_string(),
+            value: pool_config.fee.to_be_bytes().to_vec(),
+        },
+        Attribute {
+            change: ChangeType::Creation.into(),
+            name: "pool_type_config".to_string(),
+            value: B32::from(pool_config.pool_type_config).to_vec(),
+        },
+    ];
+
+    if pool_config.extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+        static_att.push(Attribute {
+            change: ChangeType::Creation.into(),
+            name: "is_exclusive".to_string(),
+            value: vec![1u8],
+        });
+    }
+
     Some((
         ProtocolComponent {
             id: component_id.clone(),
@@ -118,33 +154,7 @@ fn maybe_create_component(
                 implementation_type: ImplementationType::Custom.into(),
                 attribute_schema: vec![],
             }),
-            static_att: vec![
-                Attribute {
-                    change: ChangeType::Creation.into(),
-                    name: "token0".to_string(),
-                    value: pi.token0.clone(),
-                },
-                Attribute {
-                    change: ChangeType::Creation.into(),
-                    name: "token1".to_string(),
-                    value: pi.token1.clone(),
-                },
-                Attribute {
-                    change: ChangeType::Creation.into(),
-                    name: "extension".to_string(),
-                    value: pool_config.extension.to_vec(),
-                },
-                Attribute {
-                    change: ChangeType::Creation.into(),
-                    name: "fee".to_string(),
-                    value: pool_config.fee.to_be_bytes().to_vec(),
-                },
-                Attribute {
-                    change: ChangeType::Creation.into(),
-                    name: "pool_type_config".to_string(),
-                    value: B32::from(pool_config.pool_type_config).to_vec(),
-                },
-            ],
+            static_att,
         },
         EntityChanges { component_id: component_id.clone(), attributes: entity_attributes },
         vec![

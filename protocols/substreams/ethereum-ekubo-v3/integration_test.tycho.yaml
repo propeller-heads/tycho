@@ -85,6 +85,23 @@ tests:
           pool_type_config: "0x0ee5a624"
         creation_tx: "0x25b334854a8a957468ab972f99ba3dd6777feac617150024753297b0e9967783"
 
+  - name: signed_exclusive_swap
+    start_block: 25689059
+    stop_block: 25689059
+    expected_components:
+      - id: "0x9efd723a29a4e7f40c955f7b968144a5e2a7261a4a0f1573fbb0e2653600e4a4"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          token0: "0x0000000000000000000000000000000000000000"
+          token1: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          extension: "0x55b703eed01b35641963da2fb2e14885993605a3"
+          fee: "0x0000000000000000"
+          pool_type_config: "0x80000400"
+          is_exclusive: "0x01"
+        creation_tx: "0x126c6382c3fe9507a4d7dd57fa008760fafc080907c3962dc8bd05205f330878"
+
   - name: concentrated_boosted_fees
     start_block: 24486278
     stop_block: 24486278

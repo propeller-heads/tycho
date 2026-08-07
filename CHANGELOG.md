@@ -1,3 +1,61 @@
+## [0.351.0](https://github.com/propeller-heads/tycho/compare/0.350.0...0.351.0) (2026-08-06)
+
+
+### Features
+
+* add RingSwap executor and enable integration tests ([4500e12](https://github.com/propeller-heads/tycho/commit/4500e12607803465ca82f513c804a3e06c07cb0f))
+* add RingSwap executor and enable integration tests ([#1265](https://github.com/propeller-heads/tycho/issues/1265)) ([5bf538d](https://github.com/propeller-heads/tycho/commit/5bf538dbbcbd0929e2995aa83e8a9d85431845df))
+
+## [0.350.0](https://github.com/propeller-heads/tycho/compare/0.349.1...0.350.0) (2026-08-06)
+
+
+### Features
+
+* LiquidityParty updated adapter ([#1005](https://github.com/propeller-heads/tycho/issues/1005)) ([bc5c886](https://github.com/propeller-heads/tycho/commit/bc5c88627ec1dc7e1b74afbf3129b5e17b593f06))
+
+## [0.349.1](https://github.com/propeller-heads/tycho/compare/0.349.0...0.349.1) (2026-08-06)
+
+
+### Bug Fixes
+
+* set real SignedExclusiveSwap extension address for Ekubo V3 ([fb557ae](https://github.com/propeller-heads/tycho/commit/fb557aeeb1f8f3017440492800867e0f0e4e3c23))
+* set real SignedExclusiveSwap extension address for Ekubo V3 ([#1284](https://github.com/propeller-heads/tycho/issues/1284)) ([fcc9232](https://github.com/propeller-heads/tycho/commit/fcc923230661fb133714c1fda06647b682b4f5f6))
+
+## [0.349.0](https://github.com/propeller-heads/tycho/compare/0.348.2...0.349.0) (2026-08-04)
+
+
+### Features
+
+* export EXCLUSIVE_EXTENSIONS marker list ([03d4a19](https://github.com/propeller-heads/tycho/commit/03d4a1980efc11096b8332ddeb84c10b0038a31a))
+* tag exclusive components with is_exclusive static attribute ([78a87f6](https://github.com/propeller-heads/tycho/commit/78a87f6fcea233248b29592b89be07940d3e7c7a))
+* tag exclusive components with is_exclusive static attribute ([#1254](https://github.com/propeller-heads/tycho/issues/1254)) ([6ca654d](https://github.com/propeller-heads/tycho/commit/6ca654d0dbe9e180d3728f990b25ac25dc35d41c))
+
+
+### Reverts
+
+* Revert "chore: add real address" ([363442d](https://github.com/propeller-heads/tycho/commit/363442dff9d3648c49e1b65c6c69d2bc79eb5d72))
+* Revert "Revert "refactor: move ekubo_v3 is_exclusive tagging into indexing"" ([1f798d5](https://github.com/propeller-heads/tycho/commit/1f798d5ba6f1ab1918211ad86e307209ef54ac17))
+* Revert "refactor: move ekubo_v3 is_exclusive tagging into indexing" ([ef47309](https://github.com/propeller-heads/tycho/commit/ef47309fbec1cb6921a76950b843db66dd069b5b))
+
+## [0.348.2](https://github.com/propeller-heads/tycho/compare/0.348.1...0.348.2) (2026-08-03)
+
+
+### Bug Fixes
+
+* **simulation:** charge forward overhead on signed exclusive Ekubo pools ([4d586c6](https://github.com/propeller-heads/tycho/commit/4d586c67de87745421ac34f5b5d09532aa87c750))
+* **simulation:** charge forward overhead on signed exclusive Ekubo pools ([#1257](https://github.com/propeller-heads/tycho/issues/1257)) ([38343c3](https://github.com/propeller-heads/tycho/commit/38343c38be308860f393102339c58538805c8dd2))
+
+## [0.348.1](https://github.com/propeller-heads/tycho/compare/0.348.0...0.348.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* **testing:** fail protocol tests on execution failures ([627ace1](https://github.com/propeller-heads/tycho/commit/627ace141413c084bad19212cbfe315b34ad3eed)), closes [#1083](https://github.com/propeller-heads/tycho/issues/1083)
+* **testing:** fail protocol tests when executions fail ([#1246](https://github.com/propeller-heads/tycho/issues/1246)) ([91af829](https://github.com/propeller-heads/tycho/commit/91af829bc5e40711177f946e6ccdb30955cd3a5b))
+* **testing:** fail zero-output and unevaluable executions ([ad3bf2f](https://github.com/propeller-heads/tycho/commit/ad3bf2fadabc7ae3b71042311a07f940e4e85f4c))
+* **testing:** stop logging unchecked executions as passed ([96b1ca6](https://github.com/propeller-heads/tycho/commit/96b1ca60fc4bfca96504aef74b4d56ae7d66cfdf))
+* **tycho-indexer:** support non-ethereum chains in rpc subcommand ([#1237](https://github.com/propeller-heads/tycho/issues/1237)) ([f2cf63a](https://github.com/propeller-heads/tycho/commit/f2cf63a49aa27c165e07e9c33c4106165b1b1641))
+
 ## [0.348.0](https://github.com/propeller-heads/tycho/compare/0.347.0...0.348.0) (2026-08-03)
 
 

@@ -21,7 +21,8 @@
     "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
     "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
     "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C",
-    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F"
+    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F",
+    "ring_swap_v2": "0x08BA9E85c8944098DEAacE0E164b7EC379A7e810"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",

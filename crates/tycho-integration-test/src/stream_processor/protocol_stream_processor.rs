@@ -23,12 +23,13 @@ use tycho_simulation::{
             erc4626::state::ERC4626State,
             filters::{
                 balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter, erc4626_filter,
-                fluid_v1_paused_pools_filter,
+                fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
             fluid::FluidV1,
             lunarbase::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
+            ring_swap_v2::state::RingSwapV2State,
             rocketpool::state::RocketpoolState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
@@ -203,6 +204,7 @@ impl ProtocolStreamProcessor {
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
                 "vm:bopamm".to_string(),
+                "ring_swap_v2".to_string(),
                 "vm:balancer_v3".to_string(),
             ],
             Chain::Base => vec![
@@ -360,7 +362,7 @@ impl ProtocolStreamProcessor {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:liquidityparty",
                     tvl_filter.clone(),
-                    None,
+                    Some(liquidityparty_killed_pools_filter),
                 );
             }
             "quickswap_v2" => {
@@ -387,6 +389,10 @@ impl ProtocolStreamProcessor {
             }
             "lunarbase" => {
                 stream = stream.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
+            }
+            "ring_swap_v2" => {
+                stream =
+                    stream.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None);
             }
             "vm:balancer_v3" => {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
