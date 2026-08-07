@@ -173,6 +173,11 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
         .iter()
         .map(|token| address(token))
         .collect();
+    // The dataset predates the min-balance check, so none of its pools register one.
+    let min_token_balances = entry["state"]["min_token_balances"]
+        .as_array()
+        .map(|_| uint_list(&entry["state"], "min_token_balances"))
+        .unwrap_or_default();
     BalancerV3State::new(
         address(
             entry["state"]["pool_address"]
@@ -184,6 +189,7 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
         // generations were labelled reports.
         PoolTypeAttribute { pool_type, version: None },
         tokens,
+        min_token_balances,
         timestamp,
         state,
     )
@@ -405,12 +411,281 @@ fn limits_stay_inside_what_the_vault_enforces() {
                         pool_id(entry)
                     );
                 }
-                // Stable pools: the input side is bounded by Vault storage, not the maths, and
-                // `limits_bound_a_quotable_amount` proves the reported limit still quotes.
+                "STABLE" => {
+                    let max_in_scaled_18 = pool
+                        .stable_max_swap_amount_in(index_in, index_out)
+                        .expect("stable limit resolves");
+                    assert!(
+                        pool.stable_swap_keeps_balance_valid(
+                            index_in,
+                            index_out,
+                            &max_in_scaled_18
+                        )
+                        .expect("predicate resolves"),
+                        "stable pool {} limit itself violates the 10000x imbalance bound \
+                         `StableMath.ensureBalancesWithinMaxImbalanceRange` enforces",
+                        pool_id(entry)
+                    );
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// The stable bisection in [`BalancerV3State::stable_max_swap_amount_in`] must find the exact
+/// boundary of `StableMath.ensureBalancesWithinMaxImbalanceRange`, not merely a safe amount inside
+/// it: one wei more must already fail the same check.
+#[test]
+fn stable_limit_sits_at_the_imbalance_boundary() {
+    let (timestamp, dataset) = load_dataset();
+    let stable_pools: Vec<_> = dataset
+        .iter()
+        .filter(|entry| entry["state"]["pool_type"] == "STABLE")
+        .collect();
+    assert!(!stable_pools.is_empty(), "dataset carries no stable pools");
+
+    for entry in stable_pools {
+        let pool = build_state(entry, timestamp);
+        let vault_headroom_cap = U256::from_limbs([u64::MAX, u64::MAX, 0, 0]);
+        for (index_in, index_out) in [(0usize, 1usize), (1, 0)] {
+            let max_in_scaled_18 = pool
+                .stable_max_swap_amount_in(index_in, index_out)
+                .expect("stable limit resolves");
+            if max_in_scaled_18 ==
+                vault_headroom_cap.saturating_sub(pool.state_balances()[index_in])
+            {
+                // The pool is so far from its imbalance bound that Vault storage headroom, not
+                // the imbalance check, is what capped the search; there is no boundary to probe.
+                continue;
+            }
+            assert!(
+                pool.stable_swap_keeps_balance_valid(index_in, index_out, &max_in_scaled_18)
+                    .expect("predicate resolves"),
+                "pool {} limit itself must satisfy the imbalance bound",
+                pool_id(entry)
+            );
+            assert!(
+                !pool
+                    .stable_swap_keeps_balance_valid(
+                        index_in,
+                        index_out,
+                        &(max_in_scaled_18 + U256::from(1u8))
+                    )
+                    .expect("predicate resolves"),
+                "pool {} limit is not tight: one more wei still satisfies the imbalance bound",
+                pool_id(entry)
+            );
+        }
+    }
+}
+
+/// Builds a synthetic 3-token stable pool, standing in for one whose third token has drained to
+/// zero balance without the pool itself being re-seeded.
+fn stable_pool_with_balances(balances: Vec<U256>) -> BalancerV3State {
+    let num_tokens = balances.len();
+    let tokens: Vec<String> = (0..num_tokens)
+        .map(|i| format!("0x{:040x}", i + 0xa))
+        .collect();
+    let base = BasePoolState {
+        pool_address: "0x0000000000000000000000000000000000000f".to_string(),
+        pool_type: "STABLE".to_string(),
+        tokens: tokens.clone(),
+        scaling_factors: vec![U256::from(1u8); num_tokens],
+        token_rates: vec![uint_wad(); num_tokens],
+        balances_live_scaled_18: balances,
+        swap_fee: U256::ZERO,
+        aggregate_swap_fee: U256::ZERO,
+        total_supply: uint_wad() * U256::from(1_000u32),
+        supports_unbalanced_liquidity: true,
+        hook_type: None,
+    };
+    BalancerV3State::new(
+        address("0x000000000000000000000000000000000000f0"),
+        address(VAULT),
+        PoolTypeAttribute { pool_type: BalancerPoolType::Stable, version: None },
+        tokens
+            .iter()
+            .map(|t| address(t))
+            .collect(),
+        Vec::new(),
+        0,
+        PoolState::Stable(StableState {
+            base,
+            mutable: StableMutable { amp: U256::from(100_000u32) },
+        }),
+    )
+}
+
+/// A stable pool's third token draining to zero balance must not crash a swap between the other
+/// two: `stable_math::compute_invariant` divides by every balance directly (not through a checked
+/// helper), and `get_limits` only screens the two tokens actually being swapped.
+#[test]
+fn stable_pool_zero_balance_on_untouched_token_does_not_divide_by_zero() {
+    let balances =
+        vec![uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32), U256::ZERO];
+    let pool = stable_pool_with_balances(balances);
+    let token0 = token_at(&pool, 0);
+    let token1 = token_at(&pool, 1);
+
+    let (max_in, max_out) = pool
+        .get_limits(token0.address, token1.address)
+        .expect("limits resolve, rather than panicking");
+    assert_eq!(
+        (max_in, max_out),
+        (BigUint::ZERO, BigUint::ZERO),
+        "a pool with a drained third token cannot be swapped through at all"
+    );
+}
+
+/// Builds a synthetic 50/50 weighted pool for exercising the v2 `MinTokenBalanceLib` cap, which
+/// the recorded parity dataset predates and so never carries.
+fn weighted_pool_with_min_balances(
+    balances: [U256; 2],
+    min_token_balances: Vec<U256>,
+) -> BalancerV3State {
+    let base = BasePoolState {
+        pool_address: "0x0000000000000000000000000000000000000f".to_string(),
+        pool_type: "WEIGHTED".to_string(),
+        tokens: vec![
+            "0x0000000000000000000000000000000000000a".to_string(),
+            "0x0000000000000000000000000000000000000b".to_string(),
+        ],
+        // Both tokens are already 18-decimal, so no decimal scaling is needed.
+        scaling_factors: vec![U256::from(1u8); 2],
+        token_rates: vec![uint_wad(), uint_wad()],
+        balances_live_scaled_18: balances.to_vec(),
+        swap_fee: U256::ZERO,
+        aggregate_swap_fee: U256::ZERO,
+        total_supply: uint_wad() * U256::from(1_000u32),
+        supports_unbalanced_liquidity: true,
+        hook_type: None,
+    };
+    let weights = vec![uint_wad() / U256::from(2u8), uint_wad() / U256::from(2u8)];
+    let tokens = base
+        .tokens
+        .iter()
+        .map(|token| address(token))
+        .collect();
+    BalancerV3State::new(
+        address("0x000000000000000000000000000000000000f0"),
+        address(VAULT),
+        PoolTypeAttribute {
+            pool_type: BalancerPoolType::Weighted,
+            version: Some("v2".to_string()),
+        },
+        tokens,
+        min_token_balances,
+        0,
+        PoolState::Weighted(WeightedState::new(base, weights)),
+    )
+}
+
+/// `1e18`, matching the `WAD` fixed-point scale everything here is expressed in.
+fn uint_wad() -> U256 {
+    U256::from(1_000_000_000_000_000_000u128)
+}
+
+/// A v2 weighted pool's per-token minimum balance can bind tighter than `MAX_IN_RATIO`: buying
+/// down to a high minimum on the output side cannot spend anywhere near 30% of the input reserve
+/// in a deep, evenly weighted pool.
+#[test]
+fn weighted_v2_min_balance_caps_input_tighter_than_ratio() {
+    let balances = [uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32)];
+    // Token 1 may not drop below 900 of the 1000 it holds; token 0 has no floor of its own.
+    let min_balances = vec![U256::ZERO, uint_wad() * U256::from(900u32)];
+    let pool = weighted_pool_with_min_balances(balances, min_balances);
+    let token0 = token("0x0000000000000000000000000000000000000a");
+    let token1 = token("0x0000000000000000000000000000000000000b");
+
+    let (max_in, max_out) = pool
+        .get_limits(token0.address.clone(), token1.address.clone())
+        .expect("limits resolve");
+
+    let ratio_cap = u256_to_biguint(uint_wad() * U256::from(300u32)); // 30% of 1000
+    assert!(
+        max_in < ratio_cap,
+        "min-balance cap should bind tighter than MAX_IN_RATIO: got {max_in}, ratio cap {ratio_cap}"
+    );
+    assert!(
+        max_out <= u256_to_biguint(uint_wad() * U256::from(100u32)),
+        "must not exceed headroom"
+    );
+
+    let quoted = pool
+        .get_amount_out(max_in, &token0, &token1)
+        .expect("the reported limit must be quotable");
+    let new_balance_out = quoted
+        .new_state
+        .as_any()
+        .downcast_ref::<BalancerV3State>()
+        .expect("new state is a BalancerV3State")
+        .state_balances()[1];
+    assert!(
+        new_balance_out >= uint_wad() * U256::from(900u32),
+        "swap at the reported limit must not push token 1 below its registered minimum, got \
+         {new_balance_out}"
+    );
+}
+
+/// A registered minimum of exactly zero (one token has no floor while its counterpart does) must
+/// not be treated as "sell it down to zero balance": that is a singular point on the weighted
+/// curve, and inverting `computeOutGivenExactIn` against it divides by zero.
+#[test]
+fn weighted_v2_zero_min_balance_on_output_token_does_not_divide_by_zero() {
+    let balances = [uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32)];
+    // Token 0 has no registered floor; token 1's floor is irrelevant to this direction.
+    let min_balances = vec![U256::ZERO, uint_wad() * U256::from(900u32)];
+    let pool = weighted_pool_with_min_balances(balances, min_balances);
+    let token0 = token("0x0000000000000000000000000000000000000a");
+    let token1 = token("0x0000000000000000000000000000000000000b");
+
+    // Selling token1 for token0: index_out is token0, whose own minimum is zero.
+    let (max_in, max_out) = pool
+        .get_limits(token1.address, token0.address)
+        .expect("limits resolve");
+
+    let ratio_cap = u256_to_biguint(uint_wad() * U256::from(300u32)); // 30% of 1000
+    assert_eq!(
+        max_in, ratio_cap,
+        "a zero minimum on the output token registers no constraint, so MAX_IN_RATIO alone caps \
+         it"
+    );
+    assert!(max_out > BigUint::ZERO);
+}
+
+/// A weighted v2 pool already sitting at (or a whisker above) a registered minimum has no
+/// quotable headroom left, so `get_limits` must report `(0, 0)` rather than a dust amount.
+#[test]
+fn weighted_v2_min_balance_dust_pool_returns_zero_limits() {
+    let balances = [uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32)];
+    // Token 1's balance already equals its own minimum: there is no headroom to sell into.
+    let min_balances = vec![U256::ZERO, uint_wad() * U256::from(1_000u32)];
+    let pool = weighted_pool_with_min_balances(balances, min_balances);
+    let token0 = token("0x0000000000000000000000000000000000000a");
+    let token1 = token("0x0000000000000000000000000000000000000b");
+
+    let (max_in, max_out) = pool
+        .get_limits(token0.address, token1.address)
+        .expect("limits resolve");
+    assert_eq!((max_in, max_out), (BigUint::ZERO, BigUint::ZERO));
+}
+
+/// A pool so thin that even its own largest allowed swap trades below the Vault's
+/// `MINIMUM_TRADE_AMOUNT` must report `(0, 0)`, not surface `TradeAmountTooSmall` as an error.
+#[test]
+fn dust_pool_below_minimum_trade_amount_returns_zero_limits() {
+    // 30% of a 1e6-scaled18 balance is 3e5, below the Vault's 1e6 floor.
+    let balances =
+        [uint_wad() / U256::from(1_000_000_000_000u64), uint_wad() * U256::from(1_000u32)];
+    let pool = weighted_pool_with_min_balances(balances, Vec::new());
+    let token0 = token("0x0000000000000000000000000000000000000a");
+    let token1 = token("0x0000000000000000000000000000000000000b");
+
+    let (max_in, max_out) = pool
+        .get_limits(token0.address, token1.address)
+        .expect("a dust pool must resolve limits, not error");
+    assert_eq!((max_in, max_out), (BigUint::ZERO, BigUint::ZERO));
 }
 
 #[test]

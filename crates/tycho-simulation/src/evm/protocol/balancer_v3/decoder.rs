@@ -88,6 +88,10 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
         let state = vm::read_pool_state(&engine, &pool, &vault, factory.pool_type, block.timestamp)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
+        let min_token_balances = match factory.pool_type {
+            vm::BalancerPoolType::Weighted => vm::read_weighted_min_token_balances(&engine, &pool),
+            vm::BalancerPoolType::Stable | vm::BalancerPoolType::Reclamm => Vec::new(),
+        };
 
         let tokens = state
             .base()
@@ -102,6 +106,14 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(BalancerV3State::new(pool_address, vault_bytes, factory, tokens, block.timestamp, state))
+        Ok(BalancerV3State::new(
+            pool_address,
+            vault_bytes,
+            factory,
+            tokens,
+            min_token_balances,
+            block.timestamp,
+            state,
+        ))
     }
 }

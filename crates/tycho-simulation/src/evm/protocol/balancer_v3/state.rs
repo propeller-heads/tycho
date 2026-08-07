@@ -5,20 +5,22 @@ use std::any::Any;
 use alloy::primitives::{Address as AlloyAddress, U256};
 use balancer_maths_rust::{
     common::{
-        maths::{mul_down_fixed, mul_up_fixed},
+        maths::{div_up_fixed, mul_down_fixed, mul_up_fixed, pow_up_fixed},
         pool_base::PoolBase,
         types::{PoolState, PoolStateOrBuffer, SwapInput, SwapKind, SwapParams},
         utils::{
             compute_and_charge_aggregate_swap_fees, to_raw_undo_rate_round_down,
             to_scaled_18_apply_rate_round_down,
         },
+        WAD as ONE_WAD_SCALED_18,
     },
     pools::{
         reclammv2::{compute_current_virtual_balances, compute_in_given_out, ReClammV2Pool},
-        stable::StablePool,
+        stable::{self, StablePool},
         weighted::{WeightedPool, MAX_IN_RATIO},
     },
-    vault::Vault,
+    vault::{swap::MINIMUM_TRADE_AMOUNT, Vault},
+    PoolError,
 };
 use num_bigint::{BigUint, ToBigUint};
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,11 @@ const MAX_VAULT_BALANCE: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0, 0]);
 /// Largest share of the output reserve a reCLAMM swap may buy (`0.99e18`), matching
 /// `_MAX_TOKEN_OUT_RATIO` in the reference implementation.
 const MAX_TOKEN_OUT_RATIO: U256 = U256::from_limbs([990_000_000_000_000_000, 0, 0, 0]);
+/// Largest ratio between any two live balances a stable-pool swap may leave behind, matching
+/// `StableMath.MAX_IMBALANCE_RATIO` (`10_000`). Added to the v3 factory generation's
+/// `StablePool.onSwap`; `balancer_maths_rust` still only models the December 2024 genesis
+/// contracts and has no such check.
+const STABLE_MAX_IMBALANCE_RATIO: U256 = U256::from_limbs([10_000, 0, 0, 0]);
 
 /// A single Balancer V3 pool quoted through `balancer_maths_rust`.
 ///
@@ -79,6 +86,12 @@ pub struct BalancerV3State {
     factory_version: Option<String>,
     /// Token addresses in pool registration order.
     tokens: Vec<Bytes>,
+    /// Per-token minimum live balance (scaled 18, pool registration order) a weighted pool's own
+    /// `MinTokenBalanceLib` check enforces. Empty for non-weighted pools and for weighted pools
+    /// from factory generations that predate the check (`getMinTokenBalances` reverts on them),
+    /// in which case no such floor applies. Fixed at registration, so it is read once at decode
+    /// time like the other immutable fields.
+    min_token_balances: Vec<U256>,
     /// Timestamp of the block this state was read at. reCLAMM quotes depend on it, so it is
     /// refreshed on every update; the other families ignore it.
     block_timestamp: u64,
@@ -88,11 +101,13 @@ pub struct BalancerV3State {
 
 impl BalancerV3State {
     /// Constructs a state from a resolved `pool_type` attribute and a state read out of the VM.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         pool_address: Bytes,
         vault: Bytes,
         factory: PoolTypeAttribute,
         tokens: Vec<Bytes>,
+        min_token_balances: Vec<U256>,
         block_timestamp: u64,
         state: PoolState,
     ) -> Self {
@@ -103,6 +118,7 @@ impl BalancerV3State {
             pool_type,
             factory_version: version,
             tokens,
+            min_token_balances,
             block_timestamp,
             state,
         }
@@ -174,6 +190,24 @@ impl BalancerV3State {
         }
     }
 
+    /// Swaps `amount_in` of `token_in` for `token_out`, returning the Vault's own [`PoolError`] on
+    /// failure so callers that care about a specific failure mode (see
+    /// [`ProtocolSim::get_limits`]) do not have to parse it back out of a formatted message.
+    fn vault_swap_exact_in(
+        &self,
+        amount_in: U256,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<U256, PoolError> {
+        let input = SwapInput {
+            amount_raw: amount_in,
+            swap_kind: SwapKind::GivenIn,
+            token_in: Self::token_key(token_in),
+            token_out: Self::token_key(token_out),
+        };
+        Vault::new().swap(&input, &PoolStateOrBuffer::Pool(Box::new(self.state.clone())), None)
+    }
+
     /// Swaps `amount_in` of `token_in` for `token_out`, returning the raw output amount.
     fn swap_exact_in(
         &self,
@@ -181,14 +215,7 @@ impl BalancerV3State {
         token_in: &Bytes,
         token_out: &Bytes,
     ) -> Result<U256, SimulationError> {
-        let input = SwapInput {
-            amount_raw: amount_in,
-            swap_kind: SwapKind::GivenIn,
-            token_in: Self::token_key(token_in),
-            token_out: Self::token_key(token_out),
-        };
-        Vault::new()
-            .swap(&input, &PoolStateOrBuffer::Pool(Box::new(self.state.clone())), None)
+        self.vault_swap_exact_in(amount_in, token_in, token_out)
             .map_err(|e| {
                 SimulationError::RecoverableError(format!(
                     "balancer_v3 swap failed for pool {}: {e:?}",
@@ -201,11 +228,12 @@ impl BalancerV3State {
     /// token's raw units.
     ///
     /// Mirrors the reference implementation's `getMaxSwapAmount` for exact-in swaps. Weighted
-    /// pools cap the input at [`MAX_IN_RATIO`] of the input reserve, which `WeightedMath`
-    /// enforces on chain. Stable maths accepts any input the Vault can still store, so the cap
-    /// is the balance headroom up to [`MAX_VAULT_BALANCE`]. reCLAMM pools are bounded by the
-    /// output side: the limit is the input that buys [`MAX_TOKEN_OUT_RATIO`] of the output
-    /// reserve at the current virtual balances.
+    /// pools cap the input at [`MAX_IN_RATIO`] of the input reserve (`WeightedMath`, enforced on
+    /// every generation) and, for pools that register one, a per-token minimum balance (see
+    /// [`Self::weighted_max_swap_amount_in`]). Stable pools are capped by
+    /// [`Self::stable_max_swap_amount_in`]. reCLAMM pools are bounded by the output side: the
+    /// limit is the input that buys [`MAX_TOKEN_OUT_RATIO`] of the output reserve at the current
+    /// virtual balances.
     fn max_swap_amount_in(
         &self,
         index_in: usize,
@@ -213,7 +241,7 @@ impl BalancerV3State {
     ) -> Result<U256, SimulationError> {
         let base = self.state.base();
         let balances = &base.balances_live_scaled_18;
-        let maths_error = |e: balancer_maths_rust::PoolError| {
+        let maths_error = |e: PoolError| {
             SimulationError::FatalError(format!(
                 "balancer_v3 swap limit failed for pool {}: {e:?}",
                 self.pool_address
@@ -221,10 +249,10 @@ impl BalancerV3State {
         };
 
         let max_in_scaled_18 = match &self.state {
-            PoolState::Weighted(_) => {
-                mul_down_fixed(&balances[index_in], &MAX_IN_RATIO).map_err(maths_error)?
+            PoolState::Weighted(state) => {
+                self.weighted_max_swap_amount_in(index_in, index_out, state.weights())?
             }
-            PoolState::Stable(_) => MAX_VAULT_BALANCE.saturating_sub(balances[index_in]),
+            PoolState::Stable(_) => self.stable_max_swap_amount_in(index_in, index_out)?,
             PoolState::ReClammV2(state) => {
                 let max_out_scaled_18 = mul_down_fixed(&MAX_TOKEN_OUT_RATIO, &balances[index_out])
                     .map_err(maths_error)?;
@@ -272,6 +300,175 @@ impl BalancerV3State {
             &base.token_rates[index_in],
         )
         .map_err(maths_error)
+    }
+
+    /// Caps a weighted-pool exact-in swap in scaled-18 terms, the way the Vault would reject it
+    /// on-chain.
+    ///
+    /// Every generation enforces [`MAX_IN_RATIO`] inside `WeightedMath.computeOutGivenExactIn`.
+    /// Pools registering a per-token minimum balance (`MinTokenBalanceLib`, added to the v2
+    /// factory generation and not modelled by `balancer_maths_rust`) additionally require that
+    /// neither token's balance fall below its own minimum after the swap; that bound is inverted
+    /// through [`weighted_in_given_exact_out_unguarded`]. Both caps apply, so the tighter one
+    /// wins.
+    fn weighted_max_swap_amount_in(
+        &self,
+        index_in: usize,
+        index_out: usize,
+        weights: &[U256],
+    ) -> Result<U256, SimulationError> {
+        let base = self.state.base();
+        let balances = &base.balances_live_scaled_18;
+        let maths_error = |e: PoolError| {
+            SimulationError::FatalError(format!(
+                "balancer_v3 swap limit failed for pool {}: {e:?}",
+                self.pool_address
+            ))
+        };
+
+        let ratio_cap = mul_down_fixed(&balances[index_in], &MAX_IN_RATIO).map_err(maths_error)?;
+        let (Some(&min_in), Some(&min_out)) =
+            (self.min_token_balances.get(index_in), self.min_token_balances.get(index_out))
+        else {
+            // No factory-registered minimum for this pool: nothing beyond MAX_IN_RATIO applies.
+            return Ok(ratio_cap);
+        };
+
+        // Mirrors `onSwap`'s check on the input side: it reads the current balance (offset by the
+        // Vault's rounding buffer of 1), not a post-swap one, so no amount can make this pass.
+        if balances[index_in] + U256::from(1) < min_in {
+            return Ok(U256::ZERO);
+        }
+        // A zero minimum registers no real floor for this token: skip the inversion below rather
+        // than feed it a target of the full balance, which is a singular point on the curve
+        // (`weighted_in_given_exact_out_unguarded` divides by `balance_out - target_out`).
+        if min_out.is_zero() {
+            return Ok(ratio_cap);
+        }
+        let Some(target_out) = balances[index_out].checked_sub(min_out) else {
+            return Ok(U256::ZERO);
+        };
+        if target_out.is_zero() {
+            return Ok(U256::ZERO);
+        }
+
+        let min_balance_cap = weighted_in_given_exact_out_unguarded(
+            &balances[index_in],
+            &weights[index_in],
+            &balances[index_out],
+            &weights[index_out],
+            &target_out,
+        )
+        .map_err(maths_error)?;
+        Ok(ratio_cap.min(min_balance_cap))
+    }
+
+    /// Largest exact-in input a stable-pool swap can take without the live balances drifting past
+    /// [`StableMath.ensureBalancesWithinMaxImbalanceRange`][`STABLE_MAX_IMBALANCE_RATIO`], found by
+    /// binary search since that check has no closed-form inverse over the stable invariant.
+    /// [`Self::stable_swap_keeps_balance_valid`] is monotonic in the input amount, so the search
+    /// converges to within a wei.
+    pub(super) fn stable_max_swap_amount_in(
+        &self,
+        index_in: usize,
+        index_out: usize,
+    ) -> Result<U256, SimulationError> {
+        let balances = &self
+            .state
+            .base()
+            .balances_live_scaled_18;
+        let mut low = U256::ZERO;
+        let mut high = MAX_VAULT_BALANCE.saturating_sub(balances[index_in]);
+        if self.stable_swap_keeps_balance_valid(index_in, index_out, &high)? {
+            return Ok(high);
+        }
+        while high - low > U256::from(1) {
+            let mid = low + ((high - low) >> 1);
+            if self.stable_swap_keeps_balance_valid(index_in, index_out, &mid)? {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        Ok(low)
+    }
+
+    /// Whether an exact-in swap of `amount_in_scaled_18` (pre-fee, matching the Vault's
+    /// `amountGivenScaled18` before the swap-fee deduction) leaves every live balance inside the
+    /// pool's maximum imbalance ratio. Mirrors the v3-generation `StablePool.onSwap`, which
+    /// `balancer_maths_rust` — modelling only the December 2024 genesis contracts — does not
+    /// check.
+    pub(super) fn stable_swap_keeps_balance_valid(
+        &self,
+        index_in: usize,
+        index_out: usize,
+        amount_in_scaled_18: &U256,
+    ) -> Result<bool, SimulationError> {
+        let base = self.state.base();
+        let PoolState::Stable(state) = &self.state else {
+            return Err(SimulationError::FatalError(format!(
+                "balancer_v3 pool {} is not a stable pool",
+                self.pool_address
+            )));
+        };
+        let balances = &base.balances_live_scaled_18;
+        let maths_error = |e: PoolError| {
+            SimulationError::FatalError(format!(
+                "balancer_v3 stable limit probe failed for pool {}: {e:?}",
+                self.pool_address
+            ))
+        };
+
+        // `stable_math::compute_invariant` divides by each balance directly (not through a
+        // checked helper), so a zero balance on a token this swap does not even touch — possible
+        // in a pool with more than two tokens, since `get_limits` only screens `index_in` and
+        // `index_out` — would panic rather than error. Such a pool cannot be swapped through at
+        // all until re-seeded.
+        if balances.iter().any(U256::is_zero) {
+            return Ok(false);
+        }
+
+        let fee_scaled = mul_up_fixed(amount_in_scaled_18, &base.swap_fee).map_err(maths_error)?;
+        let Some(amount_in_after_fee) = amount_in_scaled_18.checked_sub(fee_scaled) else {
+            return Ok(false);
+        };
+        if amount_in_after_fee < MINIMUM_TRADE_AMOUNT {
+            return Ok(false);
+        }
+
+        let amp = &state.mutable.amp;
+        let invariant = stable::compute_invariant(amp, balances).map_err(maths_error)?;
+        let Ok(amount_out_scaled) = stable::compute_out_given_exact_in(
+            amp,
+            balances,
+            index_in,
+            index_out,
+            &amount_in_after_fee,
+            &invariant,
+        ) else {
+            return Ok(false);
+        };
+        let Some(new_balance_out) = balances[index_out].checked_sub(amount_out_scaled) else {
+            return Ok(false);
+        };
+        let new_balance_in = balances[index_in] + amount_in_after_fee;
+
+        let min_balance = balances
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or_default()
+            .min(new_balance_out);
+        let max_balance = balances
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or_default()
+            .max(new_balance_in);
+        if min_balance.is_zero() {
+            return Ok(false);
+        }
+        Ok(max_balance < STABLE_MAX_IMBALANCE_RATIO * min_balance)
     }
 
     /// Applies a completed swap to the live balances, mirroring what the Vault does on-chain.
@@ -421,7 +618,18 @@ impl ProtocolSim for BalancerV3State {
         if max_in.is_zero() {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
-        let max_out = self.swap_exact_in(max_in, &sell_token, &buy_token)?;
+        // A pool so close to empty that even its own largest swap trades below the Vault's
+        // minimum is a dust pool with nothing to quote, not a fatal error.
+        let max_out = match self.vault_swap_exact_in(max_in, &sell_token, &buy_token) {
+            Ok(amount_out) => amount_out,
+            Err(PoolError::TradeAmountTooSmall) => return Ok((BigUint::ZERO, BigUint::ZERO)),
+            Err(e) => {
+                return Err(SimulationError::RecoverableError(format!(
+                    "balancer_v3 swap failed for pool {}: {e:?}",
+                    self.pool_address
+                )))
+            }
+        };
         Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
@@ -475,6 +683,27 @@ impl ProtocolSim for BalancerV3State {
             .downcast_ref::<Self>()
             .is_some_and(|other| self == other)
     }
+}
+
+/// `WeightedMath.computeInGivenExactOut` without its own `MAX_OUT_RATIO` guard.
+///
+/// That guard exists to bound real exact-out swaps; here the formula is only used to invert
+/// `computeOutGivenExactIn` and find the input a min-balance-derived output ceiling implies, a use
+/// the ratio was never meant to constrain — a heavily skewed weighted pool can legitimately move
+/// more than 30% of the output reserve on an exact-in swap that only spends a small share of the
+/// input reserve.
+fn weighted_in_given_exact_out_unguarded(
+    balance_in: &U256,
+    weight_in: &U256,
+    balance_out: &U256,
+    weight_out: &U256,
+    amount_out: &U256,
+) -> Result<U256, PoolError> {
+    let base = div_up_fixed(balance_out, &(balance_out - amount_out))?;
+    let exponent = div_up_fixed(weight_out, weight_in)?;
+    let power = pow_up_fixed(&base, &exponent)?;
+    let ratio = power - ONE_WAD_SCALED_18;
+    mul_up_fixed(balance_in, &ratio)
 }
 
 /// Converts a live scaled-18 balance back into the token's raw units.

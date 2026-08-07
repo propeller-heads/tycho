@@ -146,6 +146,7 @@ sol! {
     interface IBalancerV3Pool {
         function getWeightedPoolDynamicData() external view returns (WeightedPoolDynamicData memory);
         function getWeightedPoolImmutableData() external view returns (WeightedPoolImmutableData memory);
+        function getMinTokenBalances() external view returns (uint256[] memory);
         function getStablePoolDynamicData() external view returns (StablePoolDynamicData memory);
         function getStablePoolImmutableData() external view returns (StablePoolImmutableData memory);
         function getReClammPoolDynamicData() external view returns (ReClammPoolDynamicData memory);
@@ -447,6 +448,22 @@ where
             }))
         }
     }
+}
+
+/// Reads a weighted pool's per-token minimum live balance (`MinTokenBalanceLib`), fixed at
+/// registration like the rest of the immutable data [`read_pool_state`] collects.
+///
+/// The getter was added to the v2 factory generation; earlier weighted pools revert on it, which
+/// is read here as "this pool enforces no such minimum" rather than propagated as an error.
+pub(super) fn read_weighted_min_token_balances<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    pool: &AlloyAddress,
+) -> Vec<U256>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    call::<D, _, _>(engine, pool, IBalancerV3Pool::getMinTokenBalancesCall {}).unwrap_or_default()
 }
 
 /// Re-reads the storage-derived parts of a pool's state, keeping the immutable parts of
