@@ -776,6 +776,43 @@ mod tests {
         assert_eq!(limits, (BigUint::zero(), BigUint::zero()));
     }
 
+    // A created-but-uninitialized pool decodes now that empty tick lists are kept, and its zero
+    // sqrt price is not a price: reporting one would be zero in one direction, infinite in the
+    // other.
+    #[test]
+    fn test_spot_price_on_an_uninitialized_pool_errors() {
+        let pool = UniswapV3State::new(0, U256::ZERO, FeeAmount::Medium, 0, vec![])
+            .expect("an uninitialized pool is a valid state");
+        let wbtc = Token::new(
+            &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+
+        for (base, quote) in [(&wbtc, &weth), (&weth, &wbtc)] {
+            let price = pool.spot_price(base, quote);
+            assert!(
+                matches!(price, Err(SimulationError::RecoverableError(_))),
+                "{} -> {}: expected an uninitialized-pool error, got {price:?}",
+                base.symbol,
+                quote.symbol
+            );
+        }
+    }
+
     #[test]
     fn test_get_amount_out() {
         let wbtc = Token::new(
