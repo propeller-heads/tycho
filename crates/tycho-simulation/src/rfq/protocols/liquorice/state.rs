@@ -278,7 +278,7 @@ mod tests {
     fn empty_liquorice_client() -> LiquoriceClient {
         LiquoriceClient::new(
             Chain::Ethereum,
-            HashSet::new(),
+            HashMap::new(),
             0.0,
             HashSet::new(),
             "".to_string(),

@@ -17,28 +17,26 @@ use reqwest::Client;
 use tokio::time::{interval, timeout, Duration};
 use tracing::{error, info, warn};
 use tycho_common::{
-    models::{
-        protocol::{GetAmountOutParams, ProtocolComponent, ProtocolComponentState},
-        token::Token,
-        Chain,
-    },
-    simulation::indicatively_priced::SignedQuote,
+    models::{protocol::GetAmountOutParams, token::Token, Chain},
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
     Bytes,
 };
 
 use crate::{
     evm::protocol::u256_num::biguint_to_u256,
+    protocol::models::{ProtocolComponent, Update},
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
-        protocols::metric::models::{
-            MetricBidAskResponse, MetricMetadata, MetricOracleUpdatePolicy,
-            MetricSignedOracleUpdateResponse, MetricSignedOracleUpdateSlot,
-            ORACLE_UPDATE_POLICY_ATTR,
+        protocols::metric::{
+            models::{
+                MetricBidAskResponse, MetricMetadata, MetricOracleUpdatePolicy,
+                MetricSignedOracleUpdateResponse, MetricSignedOracleUpdateSlot,
+                ORACLE_UPDATE_POLICY_ATTR,
+            },
+            state::MetricState,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
 };
 
 static METRIC_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
@@ -124,13 +122,16 @@ impl MetricClient {
         &METRIC_HTTP_CLIENT
     }
 
-    pub fn create_component_with_state(
+    /// Builds the simulation component and state for one streamed pool. The state embeds a
+    /// clone of this client, so binding quotes carry this client's full configuration.
+    fn build_pair(
         &self,
-        component_id: String,
+        component_id: &str,
+        base_token: Token,
+        quote_token: Token,
         metadata: &MetricMetadata,
         bid_ask: &MetricBidAskResponse,
-        tvl: f64,
-    ) -> ComponentWithState {
+    ) -> (ProtocolComponent, MetricState) {
         let mut static_attributes = HashMap::new();
         static_attributes.insert(
             ORACLE_UPDATE_POLICY_ATTR.to_string(),
@@ -138,56 +139,25 @@ impl MetricClient {
                 .as_attribute_value(),
         );
 
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "metric_pool".to_string(),
-            chain: self.chain,
-            tokens: vec![metadata.token0.clone(), metadata.token1.clone()],
-            contract_addresses: Vec::new(),
+        let component = ProtocolComponent::new(
+            Bytes::from(component_id),
+            Self::PROTOCOL_SYSTEM.to_string(),
+            "metric_pool".to_string(),
+            self.chain,
+            vec![base_token.clone(), quote_token.clone()],
+            vec![], // no contracts for RFQ
             static_attributes,
-            ..Default::default()
-        };
-
-        let mut attributes = HashMap::new();
-
-        let entries: [(&str, Vec<u8>); 6] = [
-            ("bid_adj", bid_ask.bid_adj.as_bytes().to_vec()),
-            ("ask_adj", bid_ask.ask_adj.as_bytes().to_vec()),
-            (
-                "total_token0_available",
-                bid_ask
-                    .total_token0_available
-                    .as_bytes()
-                    .to_vec(),
-            ),
-            (
-                "total_token1_available",
-                bid_ask
-                    .total_token1_available
-                    .as_bytes()
-                    .to_vec(),
-            ),
-            (
-                "latest_block",
-                bid_ask
-                    .latest_block
-                    .to_string()
-                    .into_bytes(),
-            ),
-            ("depth", serde_json::to_vec(&bid_ask.depth).unwrap_or_default()),
-        ];
-
-        for (key, bytes) in entries {
-            attributes.insert(key.to_string(), bytes.into());
-        }
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }
+            Default::default(),
+            Default::default(),
+        );
+        let state = MetricState::new(
+            base_token,
+            quote_token,
+            metadata.clone(),
+            bid_ask.clone(),
+            self.clone(),
+        );
+        (component, state)
     }
 
     fn normalize_tvl(
@@ -380,13 +350,11 @@ impl MetricClient {
 
 #[async_trait]
 impl RFQClient for MetricClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
+    fn stream(&self) -> BoxStream<'static, Result<Update, RFQError>> {
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_components: HashMap<String, ProtocolComponent> = HashMap::new();
             let mut ticker = interval(client.poll_time);
 
             info!("Starting Metric polling every {} seconds", client.poll_time.as_secs());
@@ -423,7 +391,8 @@ impl RFQClient for MetricClient {
                     pool_quotes.push((pool.clone(), bid_ask));
                 }
 
-                let mut new_components = HashMap::new();
+                let mut new_pairs = HashMap::new();
+                let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
                 for (pool, bid_ask) in &pool_quotes {
                     if !client.tokens.is_empty() &&
                         (!client.tokens.contains(&pool.token0) ||
@@ -431,6 +400,17 @@ impl RFQClient for MetricClient {
                     {
                         continue;
                     }
+
+                    let (Some(base_token), Some(quote_token)) = (
+                        client.token_metadata.get(&pool.token0),
+                        client.token_metadata.get(&pool.token1),
+                    ) else {
+                        warn!(
+                            pool = ?pool.pool_address,
+                            "Missing token metadata for Metric pool, skipping"
+                        );
+                        continue;
+                    };
 
                     let tvl = client
                         .normalize_tvl(pool, bid_ask, &pool_quotes)
@@ -440,30 +420,31 @@ impl RFQClient for MetricClient {
                     }
 
                     let component_id = pool.pool_address.to_string();
-                    new_components.insert(
-                        component_id.clone(),
-                        client.create_component_with_state(component_id, pool, bid_ask, tvl),
+                    let (component, state) = client.build_pair(
+                        &component_id,
+                        base_token.clone(),
+                        quote_token.clone(),
+                        pool,
+                        bid_ask,
                     );
+                    new_pairs.insert(component_id.clone(), component);
+                    states.insert(component_id, Box::new(state) as Box<dyn ProtocolSim>);
                 }
 
-                let removed_components: HashMap<String, ProtocolComponent> = current_components
+                let removed_pairs: HashMap<String, ProtocolComponent> = current_components
                     .iter()
-                    .filter(|(id, _)| !new_components.contains_key(*id))
-                    .map(|(id, component)| (id.clone(), component.component.clone()))
+                    .filter(|(id, _)| !new_pairs.contains_key(*id))
+                    .map(|(id, component)| (id.clone(), component.clone()))
                     .collect();
 
-                current_components = new_components.clone();
+                current_components = new_pairs.clone();
                 let timestamp = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH".to_string()))?
                     .as_secs();
 
-                yield Ok(("metric".to_string(), StateSyncMessage {
-                    header: TimestampHeader { timestamp },
-                    snapshots: Snapshot { states: new_components, vm_storage: HashMap::new() },
-                    deltas: None,
-                    removed_components,
-                }));
+                yield Ok(Update::new(timestamp, states, new_pairs)
+                    .set_removed_pairs(removed_pairs));
             }
         })
     }
@@ -797,33 +778,35 @@ mod tests {
     }
 
     #[test]
-    fn test_component_attributes_round_trip_values() {
+    fn test_build_pair_component_and_state() {
         let metadata = metadata();
-        let component = client().create_component_with_state(
-            metadata.pool_address.to_string(),
+        let base = Token::new(&metadata.token0, "WETH", 18, 0, &[], Chain::Ethereum, 100);
+        let quote = Token::new(&metadata.token1, "USDC", 6, 0, &[], Chain::Ethereum, 100);
+        let (component, state) = client().build_pair(
+            &metadata.pool_address.to_string(),
+            base.clone(),
+            quote.clone(),
             &metadata,
             &bid_ask(),
-            3000.0,
         );
 
-        assert_eq!(component.component.protocol_system, MetricClient::PROTOCOL_SYSTEM);
+        assert_eq!(component.protocol_system, MetricClient::PROTOCOL_SYSTEM);
+        assert_eq!(component.tokens, vec![base, quote]);
         assert_eq!(
-            component.component.tokens,
-            vec![metadata.token0.clone(), metadata.token1.clone()]
-        );
-        assert_eq!(
-            component.component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
+            component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
             MetricOracleUpdatePolicy::RetryOnRevert.as_attribute_value()
         );
-        assert_eq!(component.component.id, metadata.pool_address.to_string());
-        assert!(component
-            .component
-            .contract_addresses
-            .is_empty());
         assert_eq!(
-            String::from_utf8(component.state.attributes["bid_adj"].to_vec()).unwrap(),
-            "55340232221128654848000"
+            component.id,
+            Bytes::from(
+                metadata
+                    .pool_address
+                    .to_string()
+                    .as_str()
+            )
         );
+        assert!(component.contract_ids.is_empty());
+        assert_eq!(state.bid_ask.bid_adj, "55340232221128654848000");
     }
 
     #[test]
@@ -833,15 +816,14 @@ mod tests {
             .build()
             .unwrap();
 
-        let component = client.create_component_with_state(
-            "metric_ethusdc".to_string(),
-            &metadata(),
-            &bid_ask(),
-            3000.0,
-        );
+        let meta = metadata();
+        let base = Token::new(&meta.token0, "WETH", 18, 0, &[], Chain::Ethereum, 100);
+        let quote = Token::new(&meta.token1, "USDC", 6, 0, &[], Chain::Ethereum, 100);
+        let (component, _state) =
+            client.build_pair(&meta.pool_address.to_string(), base, quote, &meta, &bid_ask());
 
         assert_eq!(
-            component.component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
+            component.static_attributes[ORACLE_UPDATE_POLICY_ATTR],
             MetricOracleUpdatePolicy::RetryOnRevert.as_attribute_value()
         );
     }

@@ -19,22 +19,21 @@ use tokio_tungstenite::{
 };
 use tracing::{error, info, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
+    models::{protocol::GetAmountOutParams, token::Token, Chain},
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
     Bytes,
 };
 
 use crate::{
+    protocol::models::{ProtocolComponent, Update},
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
-        protocols::bebop::models::{
-            BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
+        protocols::bebop::{
+            models::{BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse},
+            state::BebopState,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
 fn bytes_to_address(address: &Bytes) -> Result<Address, RFQError> {
@@ -61,8 +60,8 @@ pub struct BebopClient {
     chain: Chain,
     price_ws: String,
     quote_endpoint: String,
-    // Tokens that we want prices for
-    tokens: HashSet<Bytes>,
+    // Tokens that we want prices for, with their metadata
+    tokens: HashMap<Bytes, Token>,
     // Min tvl value in the quote token.
     tvl: f64,
     // key header for authentication
@@ -87,7 +86,7 @@ impl BebopClient {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
-        tokens: HashSet<Bytes>,
+        tokens: HashMap<Bytes, Token>,
         tvl: f64,
         ws_key: String,
         quote_tokens: HashSet<Bytes>,
@@ -112,60 +111,28 @@ impl BebopClient {
         })
     }
 
-    fn create_component_with_state(
+    /// Builds the simulation component and state for one streamed pair. The state embeds a
+    /// clone of this client, so binding quotes carry this client's full configuration.
+    fn build_pair(
         &self,
-        component_id: String,
-        tokens: Vec<tycho_common::Bytes>,
+        component_id: &str,
+        base_token: Token,
+        quote_token: Token,
         price_data: &BebopPriceData,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "bebop_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![], // empty for RFQ
-            static_attributes: Default::default(),
-            change: Default::default(),
-            creation_tx: Default::default(),
-            created_at: Default::default(),
-        };
-
-        let mut attributes = HashMap::new();
-
-        // Store all bids and asks as JSON strings, since we cannot store arrays
-        // Convert flat arrays [price1, size1, price2, size2, ...] to pairs [(price1, size1),
-        // (price2, size2), ...]
-        if !price_data.bids.is_empty() {
-            let bids_pairs: Vec<(f32, f32)> = price_data
-                .bids
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| (chunk[0], chunk[1]))
-                .collect();
-            let bids_json = serde_json::to_string(&bids_pairs).unwrap_or_default();
-            attributes.insert("bids".to_string(), bids_json.as_bytes().to_vec().into());
-        }
-        if !price_data.asks.is_empty() {
-            let asks_pairs: Vec<(f32, f32)> = price_data
-                .asks
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| (chunk[0], chunk[1]))
-                .collect();
-            let asks_json = serde_json::to_string(&asks_pairs).unwrap_or_default();
-            attributes.insert("asks".to_string(), asks_json.as_bytes().to_vec().into());
-        }
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }
+    ) -> (ProtocolComponent, BebopState) {
+        let component = ProtocolComponent::new(
+            Bytes::from(component_id),
+            Self::PROTOCOL_SYSTEM.to_string(),
+            "bebop_pool".to_string(),
+            self.chain,
+            vec![base_token.clone(), quote_token.clone()],
+            vec![], // no contracts for RFQ
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        let state = BebopState::new(base_token, quote_token, price_data.clone(), self.clone());
+        (component, state)
     }
 
     fn process_quote_response(
@@ -269,9 +236,7 @@ impl BebopClient {
 
 #[async_trait]
 impl RFQClient for BebopClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
+    fn stream(&self) -> BoxStream<'static, Result<Update, RFQError>> {
         let tokens = self.tokens.clone();
         let url = self.price_ws.clone();
         let tvl_threshold = self.tvl;
@@ -279,7 +244,7 @@ impl RFQClient for BebopClient {
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_components: HashMap<String, ProtocolComponent> = HashMap::new();
             let mut reconnect_attempts = 0;
             const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
@@ -327,17 +292,16 @@ impl RFQClient for BebopClient {
                         Ok(Message::Binary(data)) => {
                             match BebopPricingUpdate::decode(&data[..]) {
                                 Ok(protobuf_update) => {
-                                    let mut new_components = HashMap::new();
+                                    let mut new_pairs = HashMap::new();
+                                    let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
 
                                     // Process all pairs directly from protobuf
                                     for price_data in &protobuf_update.pairs {
                                         let base_bytes = Bytes::from(price_data.base.clone());
                                         let quote_bytes = Bytes::from(price_data.quote.clone());
-                                        if tokens.contains(&base_bytes) && tokens.contains(&quote_bytes) {
-                                            let pair_tokens = vec![
-                                                base_bytes.clone(), quote_bytes.clone()
-                                            ];
-
+                                        if let (Some(base_token), Some(quote_token)) =
+                                            (tokens.get(&base_bytes), tokens.get(&quote_bytes))
+                                        {
                                             let mut quote_price_data: Option<&BebopPriceData> = None;
                                             // The quote token is not one of the approved quote tokens
                                             // Get the price, so we can normalize our TVL calculation
@@ -370,47 +334,39 @@ impl RFQClient for BebopClient {
 
                                             let pair_str = format!("bebop_{}/{}", hex::encode(&base_bytes), hex::encode(&quote_bytes));
                                             let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-                                            let component_with_state = client.create_component_with_state(
-                                                component_id.clone(),
-                                                pair_tokens,
+                                            let (component, state) = client.build_pair(
+                                                &component_id,
+                                                base_token.clone(),
+                                                quote_token.clone(),
                                                 price_data,
-                                                tvl
                                             );
-                                            new_components.insert(component_id, component_with_state);
+                                            new_pairs.insert(component_id.clone(), component);
+                                            states.insert(component_id, Box::new(state) as Box<dyn ProtocolSim>);
                                         }
                                     }
 
                                     // Find components that were removed (existed before but not in this update)
                                     // This includes components with no bids or asks, since they are filtered
                                     // out by the tvl threshold.
-                                    let removed_components: HashMap<String, ProtocolComponent> = current_components
+                                    let removed_pairs: HashMap<String, ProtocolComponent> = current_components
                                         .iter()
-                                        .filter(|&(id, _)| !new_components.contains_key(id))
-                                        .map(|(k, v)| (k.clone(), v.component.clone()))
+                                        .filter(|&(id, _)| !new_pairs.contains_key(id))
+                                        .map(|(k, v)| (k.clone(), v.clone()))
                                         .collect();
 
                                     // Update our current state
-                                    current_components = new_components.clone();
+                                    current_components = new_pairs.clone();
 
-                                    let snapshot = Snapshot {
-                                        states: new_components,
-                                        vm_storage: HashMap::new(),
-                                    };
                                     let timestamp = SystemTime::now().duration_since(
                                         SystemTime::UNIX_EPOCH
                                     ).map_err(
                                         |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
                                     )?.as_secs();
 
-                                    let msg = StateSyncMessage::<TimestampHeader> {
-                                        header: TimestampHeader { timestamp },
-                                        snapshots: snapshot,
-                                        deltas: None, // Deltas are always None - all the changes are absolute
-                                        removed_components,
-                                    };
-
-                                    // Yield one message containing all updated pairs
-                                    yield Ok(("bebop".to_string(), msg));
+                                    // Yield one update containing all streamed pairs; states are
+                                    // absolute, pairs missing from the message were removed.
+                                    yield Ok(Update::new(timestamp, states, new_pairs)
+                                        .set_removed_pairs(removed_pairs));
                                 },
                                 Err(e) => {
                                     error!("Failed to parse protobuf message: {}", e);
@@ -579,7 +535,7 @@ mod tests {
     use tokio_tungstenite::accept_async;
 
     use super::*;
-    use crate::rfq::constants::get_bebop_auth;
+    use crate::rfq::{constants::get_bebop_auth, protocols::utils::test_token_map};
 
     /// BebopSettlement.swapSingle
     const SWAP_SINGLE_SELECTOR: [u8; 4] = [0x4d, 0xce, 0xbc, 0xba];
@@ -607,7 +563,7 @@ mod tests {
 
         let client = BebopClient::new(
             Chain::Ethereum,
-            HashSet::from_iter(vec![weth.clone(), wbtc.clone()]),
+            test_token_map(&[(&weth, "WETH", 18), (&wbtc, "WBTC", 8)]),
             10.0, // $10 minimum TVL
             auth.key,
             quote_tokens,
@@ -630,47 +586,30 @@ mod tests {
 
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((component_id, msg)) => {
-                        println!("Received message with ID: {component_id}");
+                    Ok(update) => {
+                        assert!(update.block_number_or_timestamp > 0);
+                        assert!(!update.new_pairs.is_empty());
 
-                        assert!(!component_id.is_empty());
-                        assert_eq!(component_id, "bebop");
-                        assert!(msg.header.timestamp > 0);
-                        assert!(!msg.snapshots.states.is_empty());
+                        println!("Received {} components in this update", update.new_pairs.len());
+                        for (id, component) in &update.new_pairs {
+                            assert_eq!(component.protocol_system, "rfq:bebop");
+                            assert_eq!(component.protocol_type_name, "bebop_pool");
+                            assert_eq!(component.chain, Chain::Ethereum);
 
-                        let snapshot = &msg.snapshots;
-
-                        // We got at least one component
-                        assert!(!snapshot.states.is_empty());
-
-                        println!("Received {} components in this message", snapshot.states.len());
-                        for (id, component_with_state) in &snapshot.states {
-                            assert_eq!(
-                                component_with_state
-                                    .component
-                                    .protocol_system,
-                                "rfq:bebop"
+                            let state = update
+                                .states
+                                .get(id)
+                                .expect("state missing for streamed component");
+                            let bebop_state = state
+                                .as_any()
+                                .downcast_ref::<BebopState>()
+                                .expect("state is not a BebopState");
+                            // The streamed state has price levels and this client's config
+                            assert!(
+                                !bebop_state.price_data.bids.is_empty() ||
+                                    !bebop_state.price_data.asks.is_empty()
                             );
-                            assert_eq!(
-                                component_with_state
-                                    .component
-                                    .protocol_type_name,
-                                "bebop_pool"
-                            );
-                            assert_eq!(component_with_state.component.chain, Chain::Ethereum);
-
-                            let attributes = &component_with_state.state.attributes;
-
-                            // Check that bids and asks exist and have non-empty byte strings
-                            assert!(attributes.contains_key("bids"));
-                            assert!(attributes.contains_key("asks"));
-                            assert!(!attributes["bids"].is_empty());
-                            assert!(!attributes["asks"].is_empty());
-
-                            if let Some(tvl) = component_with_state.component_tvl {
-                                assert!(tvl >= 0.0);
-                                println!("Component {id} TVL: ${tvl:.2}");
-                            }
+                            assert_eq!(bebop_state.client.chain, Chain::Ethereum);
                         }
 
                         message_count += 1;
@@ -767,16 +706,14 @@ mod tests {
         test_quote_tokens
             .insert(Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap());
 
-        let tokens_formatted = vec![
-            Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-            Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-        ];
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
 
         // Bypass the new() constructor to mock the URL to point to our mock server.
         let client = BebopClient {
             chain: Chain::Ethereum,
             price_ws: format!("ws://127.0.0.1:{}", addr.port()),
-            tokens: tokens_formatted.into_iter().collect(),
+            tokens: test_token_map(&[(&weth, "WETH", 18), (&usdc, "USDC", 6)]),
             tvl: 1000.0,
             ws_key: "test_key".to_string(),
             quote_tokens: test_quote_tokens,
@@ -802,7 +739,7 @@ mod tests {
         while start_time.elapsed() < Duration::from_secs(5) && successful_messages < 2 {
             match timeout(Duration::from_millis(1000), client.stream().next()).await {
                 Ok(Some(result)) => match result {
-                    Ok((_component_id, _message)) => {
+                    Ok(_update) => {
                         successful_messages += 1;
                         println!("Received successful message {successful_messages}");
 
@@ -853,7 +790,7 @@ mod tests {
 
         let client = BebopClient::new(
             Chain::Ethereum,
-            HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
+            test_token_map(&[(&token_in, "TOKEN_IN", 18), (&token_out, "TOKEN_OUT", 18)]),
             10.0, // $10 minimum TVL
             auth.key,
             HashSet::new(),
@@ -920,7 +857,7 @@ mod tests {
 
         let client = BebopClient::new(
             Chain::Ethereum,
-            HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
+            test_token_map(&[(&token_in, "TOKEN_IN", 18), (&token_out, "TOKEN_OUT", 18)]),
             10.0, // $10 minimum TVL
             auth.key,
             HashSet::new(),
@@ -1130,7 +1067,7 @@ mod tests {
             chain: Chain::Ethereum,
             price_ws: "ws://example.com".to_string(),
             quote_endpoint,
-            tokens: HashSet::from([token_in, token_out]),
+            tokens: test_token_map(&[(&token_in, "WETH", 18), (&token_out, "WBTC", 8)]),
             tvl: 10.0,
             ws_key: "test_key".to_string(),
             quote_tokens: HashSet::new(),
@@ -1294,7 +1231,7 @@ mod tests {
             chain: Chain::Ethereum,
             price_ws: "wss://api.bebop.xyz/pricing".to_string(),
             quote_endpoint: "https://api.bebop.xyz/quote".to_string(),
-            tokens: HashSet::from([token_in.clone(), token_out.clone()]),
+            tokens: test_token_map(&[(&token_in, "WETH", 18), (&token_out, "WBTC", 8)]),
             tvl: 50.5,
             ws_key: "secret_key".to_string(),
             quote_tokens: HashSet::from([quote_token.clone()]),
@@ -1336,7 +1273,7 @@ mod tests {
             "chain": "ethereum",
             "price_ws": "wss://api.bebop.xyz/pricing",
             "quote_endpoint": "https://api.bebop.xyz/quote",
-            "tokens": [],
+            "tokens": {},
             "tvl": 10.0,
             "ws_key": "provided_key",
             "quote_tokens": [],

@@ -12,24 +12,25 @@ use reqwest::Client;
 use tokio::time::{interval, timeout, Duration};
 use tracing::{debug, error, info, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
+    models::{protocol::GetAmountOutParams, token::Token, Chain},
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
     Bytes,
 };
 
 use crate::{
     evm::protocol::u256_num::biguint_to_u256,
+    protocol::models::{ProtocolComponent, Update},
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
-        protocols::liquorice::models::{
-            LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
-            LiquoriceTokenPairPrice,
+        protocols::liquorice::{
+            models::{
+                LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
+                LiquoriceTokenPairPrice,
+            },
+            state::LiquoriceState,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -37,8 +38,8 @@ pub struct LiquoriceClient {
     chain: Chain,
     price_levels_endpoint: String,
     quote_endpoint: String,
-    // Tokens that we want prices for
-    tokens: HashSet<Bytes>,
+    // Tokens that we want prices for, with their metadata
+    tokens: HashMap<Bytes, Token>,
     // Min tvl value in the quote token.
     tvl: f64,
     // solver header for authentication
@@ -59,7 +60,7 @@ impl LiquoriceClient {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
-        tokens: HashSet<Bytes>,
+        tokens: HashMap<Bytes, Token>,
         tvl: f64,
         quote_tokens: HashSet<Bytes>,
         auth_solver: String,
@@ -110,34 +111,28 @@ impl LiquoriceClient {
         Ok(0.0)
     }
 
-    fn create_component_with_state(
+    /// Builds the simulation component and state for one streamed pair. The state embeds a
+    /// clone of this client, so binding quotes carry this client's full configuration.
+    fn build_pair(
         &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
-        prices_by_mm: &HashMap<String, LiquoriceTokenPairPrice>,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "liquorice_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![],
-            ..Default::default()
-        };
-
-        let mut attributes = HashMap::new();
-
-        let prices_json = serde_json::to_string(&prices_by_mm).unwrap_or_default();
-        attributes.insert("prices".to_string(), prices_json.as_bytes().to_vec().into());
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }
+        component_id: &str,
+        base_token: Token,
+        quote_token: Token,
+        prices_by_mm: HashMap<String, LiquoriceTokenPairPrice>,
+    ) -> (ProtocolComponent, LiquoriceState) {
+        let component = ProtocolComponent::new(
+            Bytes::from(component_id),
+            Self::PROTOCOL_SYSTEM.to_string(),
+            "liquorice_pool".to_string(),
+            self.chain,
+            vec![base_token.clone(), quote_token.clone()],
+            vec![], // no contracts for RFQ
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        let state = LiquoriceState::new(base_token, quote_token, prices_by_mm, self.clone());
+        (component, state)
     }
 
     fn process_quote_response(
@@ -287,13 +282,11 @@ impl LiquoriceClient {
 
 #[async_trait]
 impl RFQClient for LiquoriceClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
+    fn stream(&self) -> BoxStream<'static, Result<Update, RFQError>> {
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_components: HashMap<String, ProtocolComponent> = HashMap::new();
             let mut ticker = interval(client.poll_time);
 
             info!("Starting Liquorice price levels polling every {} seconds", client.poll_time.as_secs());
@@ -304,7 +297,8 @@ impl RFQClient for LiquoriceClient {
 
                 match client.fetch_price_levels().await {
                     Ok(prices_by_mm) => {
-                        let mut new_components = HashMap::new();
+                        let mut new_pairs = HashMap::new();
+                        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
 
                         // Group qualifying MMs by token pair
                         struct PricesWithTvl {
@@ -321,7 +315,7 @@ impl RFQClient for LiquoriceClient {
                                 let base_token = &token_pair_price.base_token;
                                 let quote_token = &token_pair_price.quote_token;
 
-                                if !client.tokens.contains(base_token) || !client.tokens.contains(quote_token) {
+                                if !client.tokens.contains_key(base_token) || !client.tokens.contains_key(quote_token) {
                                     continue;
                                 }
 
@@ -347,47 +341,41 @@ impl RFQClient for LiquoriceClient {
                             }
                         }
 
-                        for ((base_token, quote_token), PricesWithTvl { mm_prices, tvl: component_tvl }) in pair_mm_prices {
-                            let pair_str = format!("liquorice_{}/{}", hex::encode(&base_token), hex::encode(&quote_token));
+                        for ((base_bytes, quote_bytes), PricesWithTvl { mm_prices, tvl: _ }) in pair_mm_prices {
+                            let (Some(base_token), Some(quote_token)) =
+                                (client.tokens.get(&base_bytes), client.tokens.get(&quote_bytes))
+                            else {
+                                continue;
+                            };
+                            let pair_str = format!("liquorice_{}/{}", hex::encode(&base_bytes), hex::encode(&quote_bytes));
                             let component_id = format!("{}", keccak256(pair_str.as_bytes()));
 
-                            let tokens = vec![base_token, quote_token];
-
-                            let component_with_state = client.create_component_with_state(
-                                component_id.clone(),
-                                tokens,
-                                &mm_prices,
-                                component_tvl,
+                            let (component, state) = client.build_pair(
+                                &component_id,
+                                base_token.clone(),
+                                quote_token.clone(),
+                                mm_prices,
                             );
-                            new_components.insert(component_id, component_with_state);
+                            new_pairs.insert(component_id.clone(), component);
+                            states.insert(component_id, Box::new(state) as Box<dyn ProtocolSim>);
                         }
 
-                        let removed_components: HashMap<String, ProtocolComponent> = current_components
+                        let removed_pairs: HashMap<String, ProtocolComponent> = current_components
                             .iter()
-                            .filter(|&(id, _)| !new_components.contains_key(id))
-                            .map(|(k, v)| (k.clone(), v.component.clone()))
+                            .filter(|&(id, _)| !new_pairs.contains_key(id))
+                            .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
 
-                        current_components = new_components.clone();
+                        current_components = new_pairs.clone();
 
-                        let snapshot = Snapshot {
-                            states: new_components,
-                            vm_storage: HashMap::new(),
-                        };
                         let timestamp = SystemTime::now().duration_since(
                             SystemTime::UNIX_EPOCH
                         ).map_err(
                             |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
                         )?.as_secs();
 
-                        let msg = StateSyncMessage::<TimestampHeader> {
-                            header: TimestampHeader { timestamp },
-                            snapshots: snapshot,
-                            deltas: None,
-                            removed_components,
-                        };
-
-                        yield Ok(("liquorice".to_string(), msg));
+                        yield Ok(Update::new(timestamp, states, new_pairs)
+                            .set_removed_pairs(removed_pairs));
                     },
                     Err(e) => {
                         error!("Failed to fetch price levels from Liquorice API: {}", e);
@@ -554,7 +542,10 @@ mod tests {
     use std::{str::FromStr, time::Duration};
 
     use super::*;
-    use crate::rfq::protocols::liquorice::models::{LiquoricePriceLevel, LiquoriceTokenPairPrice};
+    use crate::rfq::protocols::{
+        liquorice::models::{LiquoricePriceLevel, LiquoriceTokenPairPrice},
+        utils::test_token_map,
+    };
 
     #[test]
     fn test_normalize_tvl_same_quote_token() {
@@ -612,7 +603,7 @@ mod tests {
 
         LiquoriceClient::new(
             Chain::Ethereum,
-            HashSet::new(),
+            HashMap::new(),
             1.0,
             quote_tokens,
             "test_solver".to_string(),
@@ -668,7 +659,7 @@ mod tests {
             chain: Chain::Ethereum,
             price_levels_endpoint: "http://unused/price-levels".to_string(),
             quote_endpoint,
-            tokens: HashSet::from([token_in, token_out]),
+            tokens: test_token_map(&[(&token_in, "WETH", 18), (&token_out, "WBTC", 8)]),
             tvl: 10.0,
             auth_solver: "test_solver".to_string(),
             auth_key: "test_key".to_string(),
