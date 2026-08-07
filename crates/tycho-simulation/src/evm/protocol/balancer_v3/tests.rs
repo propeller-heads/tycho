@@ -352,29 +352,63 @@ fn limits_bound_a_quotable_amount() {
     }
 }
 
-/// The reported input limit must stay inside the share of the reserve the Vault accepts.
+/// The reported limits must stay inside what the Vault enforces for each pool family.
 ///
-/// The maths solves far beyond that — it took the entire reserve of a reCLAMM pool before this was
-/// capped — and a limit the Vault rejects turns into routes that revert on chain.
+/// Weighted maths rejects inputs above 30% of the input reserve. Stable maths accepts any input
+/// the Vault can still store, so only the output side bounds it. reCLAMM caps a swap's output at
+/// 99% of the reserve. And no family can pay out a full reserve — a limit beyond these turns
+/// into routes that revert on chain.
 #[test]
-fn limits_never_exceed_the_vault_s_share_of_the_reserve() {
+fn limits_stay_inside_what_the_vault_enforces() {
     let (timestamp, dataset) = load_dataset();
-    for entry in dataset {
-        let pool = build_state(&entry, timestamp);
+    for entry in &dataset {
+        let pool = build_state(entry, timestamp);
+        let kind = entry["state"]["pool_type"]
+            .as_str()
+            .expect("pool_type");
         let tokens = pool.token_addresses().to_vec();
         let raw_reserves = pool.raw_balances();
 
         for (index_in, index_out) in [(0usize, 1usize), (1, 0)] {
-            let (max_in, _) = pool
+            let (max_in, max_out) = pool
                 .get_limits(tokens[index_in].clone(), tokens[index_out].clone())
                 .expect("limits resolve");
-            let cap = u256_to_biguint(raw_reserves[index_in]) * BigUint::from(30u32) /
-                BigUint::from(100u32);
+            // Equality happens: a stable pool's asymptotic output rounds to the whole raw
+            // reserve even though it stays below the scaled-18 balance.
+            let reserve_out = u256_to_biguint(raw_reserves[index_out]);
             assert!(
-                max_in <= cap,
-                "pool {:?} offers {max_in} of token {index_in}, above the {cap} the Vault takes",
-                entry["state"]["pool_address"].as_str()
+                max_out <= reserve_out,
+                "pool {} promises {max_out} of token {index_out}, above its reserve \
+                 {reserve_out}",
+                pool_id(entry)
             );
+            match kind {
+                "WEIGHTED" => {
+                    let cap = u256_to_biguint(raw_reserves[index_in]) * BigUint::from(30u32) /
+                        BigUint::from(100u32);
+                    assert!(
+                        max_in <= cap,
+                        "weighted pool {} offers {max_in} of token {index_in}, above the {cap} \
+                         its maths accepts",
+                        pool_id(entry)
+                    );
+                }
+                "RECLAMM" => {
+                    // A unit of slack absorbs the scaled-18 -> raw conversions on either side.
+                    let cap = u256_to_biguint(raw_reserves[index_out]) * BigUint::from(99u32) /
+                        BigUint::from(100u32) +
+                        BigUint::from(1u32);
+                    assert!(
+                        max_out <= cap,
+                        "reCLAMM pool {} pays out {max_out} of token {index_out}, above the \
+                         {cap} its maths accepts",
+                        pool_id(entry)
+                    );
+                }
+                // Stable pools: the input side is bounded by Vault storage, not the maths, and
+                // `limits_bound_a_quotable_amount` proves the reported limit still quotes.
+                _ => {}
+            }
         }
     }
 }

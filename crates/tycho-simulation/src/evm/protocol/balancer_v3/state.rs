@@ -5,12 +5,19 @@ use std::any::Any;
 use alloy::primitives::{Address as AlloyAddress, U256};
 use balancer_maths_rust::{
     common::{
-        maths::mul_up_fixed,
+        maths::{mul_down_fixed, mul_up_fixed},
         pool_base::PoolBase,
         types::{PoolState, PoolStateOrBuffer, SwapInput, SwapKind, SwapParams},
-        utils::{compute_and_charge_aggregate_swap_fees, to_scaled_18_apply_rate_round_down},
+        utils::{
+            compute_and_charge_aggregate_swap_fees, to_raw_undo_rate_round_down,
+            to_scaled_18_apply_rate_round_down,
+        },
     },
-    pools::{reclammv2::ReClammV2Pool, stable::StablePool, weighted::WeightedPool},
+    pools::{
+        reclammv2::{compute_current_virtual_balances, compute_in_given_out, ReClammV2Pool},
+        stable::StablePool,
+        weighted::{WeightedPool, MAX_IN_RATIO},
+    },
     vault::Vault,
 };
 use num_bigint::{BigUint, ToBigUint};
@@ -43,15 +50,12 @@ const SWAP_GAS: u64 = 210_000;
 const SPOT_PRICE_PROBE_DIVISOR: u64 = 1_000_000;
 /// Attribute the stream decoder attaches to every delta, carrying the block's timestamp.
 const BLOCK_TIMESTAMP_ATTRIBUTE: &str = "block_timestamp";
-/// How many times [`ProtocolSim::get_limits`] halves its candidate before giving up.
-const LIMIT_PROBE_HALVINGS: u32 = 12;
-/// Percentage of the sell token's reserve offered as the input limit.
-///
-/// Matches `RESERVE_LIMIT_FACTOR` in `BalancerV3SwapAdapter`, which mirrors Balancer's own
-/// weighted-pool `MAX_IN_RATIO`. The maths keeps solving well past this point — it accepts the
-/// entire reserve of some pools — but the Vault does not, so reporting what the maths accepts
-/// would hand the router input sizes that revert on chain.
-const RESERVE_LIMIT_PERCENT: u64 = 30;
+/// Hard cap the Vault stores any balance under (`2^128 - 1`), which is what bounds a stable
+/// pool's input: `StableMath` itself has no input limit.
+const MAX_VAULT_BALANCE: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0, 0]);
+/// Largest share of the output reserve a reCLAMM swap may buy (`0.99e18`), matching
+/// `_MAX_TOKEN_OUT_RATIO` in the reference implementation.
+const MAX_TOKEN_OUT_RATIO: U256 = U256::from_limbs([990_000_000_000_000_000, 0, 0, 0]);
 
 /// A single Balancer V3 pool quoted through `balancer_maths_rust`.
 ///
@@ -191,6 +195,83 @@ impl BalancerV3State {
                     self.pool_address
                 ))
             })
+    }
+
+    /// Largest input the Vault accepts for a swap from `index_in` to `index_out`, in the input
+    /// token's raw units.
+    ///
+    /// Mirrors the reference implementation's `getMaxSwapAmount` for exact-in swaps. Weighted
+    /// pools cap the input at [`MAX_IN_RATIO`] of the input reserve, which `WeightedMath`
+    /// enforces on chain. Stable maths accepts any input the Vault can still store, so the cap
+    /// is the balance headroom up to [`MAX_VAULT_BALANCE`]. reCLAMM pools are bounded by the
+    /// output side: the limit is the input that buys [`MAX_TOKEN_OUT_RATIO`] of the output
+    /// reserve at the current virtual balances.
+    fn max_swap_amount_in(
+        &self,
+        index_in: usize,
+        index_out: usize,
+    ) -> Result<U256, SimulationError> {
+        let base = self.state.base();
+        let balances = &base.balances_live_scaled_18;
+        let maths_error = |e: balancer_maths_rust::PoolError| {
+            SimulationError::FatalError(format!(
+                "balancer_v3 swap limit failed for pool {}: {e:?}",
+                self.pool_address
+            ))
+        };
+
+        let max_in_scaled_18 = match &self.state {
+            PoolState::Weighted(_) => {
+                mul_down_fixed(&balances[index_in], &MAX_IN_RATIO).map_err(maths_error)?
+            }
+            PoolState::Stable(_) => MAX_VAULT_BALANCE.saturating_sub(balances[index_in]),
+            PoolState::ReClammV2(state) => {
+                let max_out_scaled_18 = mul_down_fixed(&MAX_TOKEN_OUT_RATIO, &balances[index_out])
+                    .map_err(maths_error)?;
+                let mutable = &state.mutable;
+                let (virtual_balance_a, virtual_balance_b, _) = compute_current_virtual_balances(
+                    &mutable.current_timestamp,
+                    balances,
+                    &mutable.last_virtual_balances[0],
+                    &mutable.last_virtual_balances[1],
+                    &mutable.daily_price_shift_base,
+                    &mutable.last_timestamp,
+                    &mutable.centeredness_margin,
+                    &mutable.start_fourth_root_price_ratio,
+                    &mutable.end_fourth_root_price_ratio,
+                    &mutable.price_ratio_update_start_time,
+                    &mutable.price_ratio_update_end_time,
+                );
+                compute_in_given_out(
+                    balances,
+                    &virtual_balance_a,
+                    &virtual_balance_b,
+                    index_in,
+                    index_out,
+                    &max_out_scaled_18,
+                )
+                .map_err(|e| {
+                    SimulationError::FatalError(format!(
+                        "balancer_v3 swap limit failed for pool {}: {e}",
+                        self.pool_address
+                    ))
+                })?
+            }
+            other => {
+                return Err(SimulationError::FatalError(format!(
+                    "balancer_v3 pool {} holds unsupported state `{}`",
+                    self.pool_address,
+                    other.pool_type()
+                )))
+            }
+        };
+
+        to_raw_undo_rate_round_down(
+            &max_in_scaled_18,
+            &base.scaling_factors[index_in],
+            &base.token_rates[index_in],
+        )
+        .map_err(maths_error)
     }
 
     /// Applies a completed swap to the live balances, mirroring what the Vault does on-chain.
@@ -336,26 +417,12 @@ impl ProtocolSim for BalancerV3State {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
 
-        // Start from the share of the reserve the Vault is willing to take, then halve until the
-        // maths also accepts the size. The cap is what keeps the figure honest — the maths alone
-        // solves far beyond what the Vault allows — while the halving covers pools that reject
-        // even the capped amount, reCLAMM above all: it concentrates liquidity into a narrow
-        // range that a swap of this size can leave.
-        let mut candidate = raw_balance(base, index_in)?
-            .saturating_mul(U256::from(RESERVE_LIMIT_PERCENT)) /
-            U256::from(100);
-        for _ in 0..LIMIT_PROBE_HALVINGS {
-            if candidate.is_zero() {
-                break;
-            }
-            if let Ok(amount_out) = self.swap_exact_in(candidate, &sell_token, &buy_token) {
-                if !amount_out.is_zero() {
-                    return Ok((u256_to_biguint(candidate), u256_to_biguint(amount_out)));
-                }
-            }
-            candidate /= U256::from(2);
+        let max_in = self.max_swap_amount_in(index_in, index_out)?;
+        if max_in.is_zero() {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
         }
-        Ok((BigUint::ZERO, BigUint::ZERO))
+        let max_out = self.swap_exact_in(max_in, &sell_token, &buy_token)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -411,11 +478,12 @@ impl ProtocolSim for BalancerV3State {
 }
 
 /// Converts a live scaled-18 balance back into the token's raw units.
+#[cfg(test)]
 fn raw_balance(
     base: &balancer_maths_rust::common::types::BasePoolState,
     index: usize,
 ) -> Result<U256, SimulationError> {
-    balancer_maths_rust::common::utils::to_raw_undo_rate_round_down(
+    to_raw_undo_rate_round_down(
         &base.balances_live_scaled_18[index],
         &base.scaling_factors[index],
         &base.token_rates[index],
