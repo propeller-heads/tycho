@@ -1,3 +1,103 @@
+## [0.354.0](https://github.com/propeller-heads/tycho/compare/0.353.0...0.354.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* Extend router v3 fees (#1288)
+
+### Features
+
+* add assert for fees and slippage length ([fa43890](https://github.com/propeller-heads/tycho/commit/fa43890312e13eeb097b1a866da7c656154ee8ad))
+* add MAX_BPS_SQUARED constant to mirror Solidity FeeCalculator ([7dbad6c](https://github.com/propeller-heads/tycho/commit/7dbad6cf265c1922607d3576a97840196a4d8231))
+* add Robinhood Chain as a first-class chain ([0c9c3a8](https://github.com/propeller-heads/tycho/commit/0c9c3a88e7ac347879033efbd14cc60610d2ab4d))
+* add Solution::min_amount_out derived from slippage ([bbbb0ab](https://github.com/propeller-heads/tycho/commit/bbbb0abcc5a01be0ce7d83a7d26225d54d5228a8))
+* add test for correct client removal from a fee set ([63a2898](https://github.com/propeller-heads/tycho/commit/63a289897a9748af0d6a7c861768b6829a27d5c2))
+* add test to verify no surplus is taken on negative and zero slippage ([6ad3d73](https://github.com/propeller-heads/tycho/commit/6ad3d73251e191208215be2e7de66c461c392e6e))
+* add tokens to fee taking signature ([2c8394f](https://github.com/propeller-heads/tycho/commit/2c8394f7c09470214ccd5df3664928c0757957e4))
+* bound minAmountOut to at most 20% below expectedAmountOut ([1f80270](https://github.com/propeller-heads/tycho/commit/1f80270a6de255eb65123fe8c4562d58f98d90b4))
+* drop Solution builders for constructor-required fields ([f976370](https://github.com/propeller-heads/tycho/commit/f976370dd95a3ced93fcdb16b26cbfc75614da15))
+* **execution:** accept ERC-1271 client fee signatures ([f020348](https://github.com/propeller-heads/tycho/commit/f02034818ee0104d2df873804ab62258403af2b3))
+* **execution:** accept ERC-1271 client fee signatures ([#1250](https://github.com/propeller-heads/tycho/issues/1250)) ([d63e49f](https://github.com/propeller-heads/tycho/commit/d63e49fddf1abe20c38134716de45b3b2a61b5e1))
+* **execution:** add Robinhood Chain deploy config ([9e2ce9c](https://github.com/propeller-heads/tycho/commit/9e2ce9cf6bf2120e9d2eb8a6cd562678ce791cf4))
+* **execution:** configure Robinhood Chain executors ([70697d8](https://github.com/propeller-heads/tycho/commit/70697d8c0dd800f13223bbd86747c170dddd34d0))
+* **execution:** update TychoRouterV3 addresses on all chains ([91b7f15](https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea5808f9e82a9078583fd839c9))
+* extend FeeCalculator to split positive slippage surplus between the router and a client ([1b0eeab](https://github.com/propeller-heads/tycho/commit/1b0eeab1c61b8285022a34390ace09fe26c8cb20))
+* Extend router v3 fees ([#1288](https://github.com/propeller-heads/tycho/issues/1288)) ([030195d](https://github.com/propeller-heads/tycho/commit/030195db6f070073169585d1662886870b8fefbd))
+* pass amountIn, tokenIn, tokenOut to _takeFees ([cb9b3cc](https://github.com/propeller-heads/tycho/commit/cb9b3cc72bddc45095bee15f8d7159b11928a4e2))
+* reject zero amount_out in solution validation in encoder ([80cad63](https://github.com/propeller-heads/tycho/commit/80cad6301eb07304ca66e38ba25f8e6f1fd8b62c))
+* replace minAmountOut with amountOut + maxSlippageBps in TychoRouter ([a292aee](https://github.com/propeller-heads/tycho/commit/a292aee208a7984a7bd97dc98f4e6d99990d7096))
+* replace Solution slippage with min_amount_out ([336feab](https://github.com/propeller-heads/tycho/commit/336feab06be3d4c7f9ad5140d7732f5539d4c29b))
+* return router output fee in full precision units and remove legacy helper ([c9e20d7](https://github.com/propeller-heads/tycho/commit/c9e20d78b365804bb2eed152895a252376dddf13))
+* revert if FeeCalculator returns fees exceeding output ([08bcfec](https://github.com/propeller-heads/tycho/commit/08bcfecea76bd31015035dc7fbe659bd80c91937))
+* revert TychoRouter__SlippageExceeded to TychoRouter__NegativeSlippage ([e446a45](https://github.com/propeller-heads/tycho/commit/e446a455d1351eb8285a30cabade780f0ecebe3b))
+* TychoRouterV3 deployment ([#1262](https://github.com/propeller-heads/tycho/issues/1262)) ([d3eb128](https://github.com/propeller-heads/tycho/commit/d3eb12872a6525d8cafca0d21918a8782f70f791))
+* update maximodel ([adeb9d8](https://github.com/propeller-heads/tycho/commit/adeb9d87c58c5cc81a512990157b3ea64bfbb5a2))
+* update Rust encoding layer for amountOut + maxSlippageBps params ([283f27c](https://github.com/propeller-heads/tycho/commit/283f27cce57ced41b2ad9d1488e3ce307f9b6af0))
+
+
+### Bug Fixes
+
+* add buffer to fix CI ([2c4267a](https://github.com/propeller-heads/tycho/commit/2c4267a4da52153b66e8eff6af37944e9890c35b))
+* assign positive slippage cuts to named returns ([0ef3d3f](https://github.com/propeller-heads/tycho/commit/0ef3d3f599096c001bcd554ceea4df861b8fe432))
+* calculate fees on real output instead of expected amount ([cdacddd](https://github.com/propeller-heads/tycho/commit/cdacddd132d1512dad7e7f10859f6490d57053b1))
+* check all custom fee flags before removing client from fee set ([9cdc50e](https://github.com/propeller-heads/tycho/commit/9cdc50e38d4b1f970ad80514fb095622f20b412c))
+* correct slippage docstring to reflect exclusive upper bound ([8c3360b](https://github.com/propeller-heads/tycho/commit/8c3360b1bed04cca457f0b5259f42e3c6e1598ab))
+* **execution:** inline the client signature check and refresh fixtures ([5e04477](https://github.com/propeller-heads/tycho/commit/5e04477a7afd16d89c378a3ec8fdb6e05900b263))
+* **execution:** keep the test helper's EIP-712 domain name ([027e3c9](https://github.com/propeller-heads/tycho/commit/027e3c9b39e5b9da96cb55858c06d268cf579f29))
+* guard etherfi funding amount including rounding buffer ([e2136b3](https://github.com/propeller-heads/tycho/commit/e2136b38b4981d331375e685469ca1bbfb138814))
+* initialize totalFees explicitly in _takeFees ([9b20037](https://github.com/propeller-heads/tycho/commit/9b20037a163d986001948a369694d5f49e8b6f73))
+* migrate clientFeeBps to 8-decimal scale throughout ([7453db0](https://github.com/propeller-heads/tycho/commit/7453db0369fec4cf9be027a415ec7b10fb9b6fa4))
+* move _finalize_balances call to replicate solidity behaviour ([4969c66](https://github.com/propeller-heads/tycho/commit/4969c66d71878d1029b6b03ead563c4b8cd79524))
+* move fee bps from uint16 to uint32 ([e1c607b](https://github.com/propeller-heads/tycho/commit/e1c607b565f35df8e84c361aec26747f7d08eb37))
+* pass simulated amount out to encode_swap and simplify quickstart slippage ([226f746](https://github.com/propeller-heads/tycho/commit/226f7463af589f2beaa013e7c9f1e57cc98aed26))
+* reject 0 bps in setCustomClientSlippageShare ([7dc89df](https://github.com/propeller-heads/tycho/commit/7dc89df2df07451e746ada0056bf4aa2c69e8505))
+* reject 100% max slippage to prevent zero amount out ([422ce49](https://github.com/propeller-heads/tycho/commit/422ce49202982a2c2c78d80f0e555139c4bc30c7))
+* remove const if used only once ([223f003](https://github.com/propeller-heads/tycho/commit/223f0034d5526b12bb6b17ffd32bfbf1bfed535d))
+* remove passthrough function ([a4af1f8](https://github.com/propeller-heads/tycho/commit/a4af1f8051baa4300028c2415663da2b6488ab02))
+* remove unneeded check ([55049cd](https://github.com/propeller-heads/tycho/commit/55049cd91380bfd1189610706f5f7ec756074631))
+* rename and reuse the constant ([4b7730e](https://github.com/propeller-heads/tycho/commit/4b7730eb066f026bb8821eafd40c0e3868252935))
+* suppress slither false positives on transient storage equality checks ([db372cb](https://github.com/propeller-heads/tycho/commit/db372cbc91f5e6b3a47345a977e89c0e1cf575fc))
+* update calldata ([27a20a0](https://github.com/propeller-heads/tycho/commit/27a20a0aee2a69e8d50bf2555962570a861a1dcd))
+* update caller site ([8275a4b](https://github.com/propeller-heads/tycho/commit/8275a4be0a3e9f8dde81a2758604b79a596067d3))
+* update docstrings for clarity ([88fc3de](https://github.com/propeller-heads/tycho/commit/88fc3decdfbcb9a5de0d48fcaccc7a0c3ff57e58))
+* update FeeCalculator test assertions to use real amount out ([3b7d161](https://github.com/propeller-heads/tycho/commit/3b7d16189c3602135504ee80a71ecedae57f3366))
+* updates to reflect solidity code ([b76ccad](https://github.com/propeller-heads/tycho/commit/b76ccad24f6b5b50380fb00bd744978123782d4c))
+* use checked_subtract for split route remaining amounts ([e61c219](https://github.com/propeller-heads/tycho/commit/e61c219f4637b7d09ab534dcf7a9ded276e20131))
+* use FeeInput struct to resolve stack too deep in _singleSwap ([cfb7074](https://github.com/propeller-heads/tycho/commit/cfb707407df3284ad5f708b1ed55460ab9e91a08))
+* widen fee model intermediates to i128 to prevent overflow ([a7ea3e5](https://github.com/propeller-heads/tycho/commit/a7ea3e5b2ffa86ae2c50d0f2032e01718ca01241))
+
+## [0.353.0](https://github.com/propeller-heads/tycho/compare/0.352.0...0.353.0) (2026-08-07)
+
+
+### Features
+
+* **testing:** build the Substreams WASM before packing ([29ef619](https://github.com/propeller-heads/tycho/commit/29ef6191b28a7e0cbf116fdb9750c93f0d130d06))
+* **testing:** build the Substreams WASM before packing ([#1267](https://github.com/propeller-heads/tycho/issues/1267)) ([aa90cdd](https://github.com/propeller-heads/tycho/commit/aa90cdd49dcc935b5228813e1a1f432a42a246fc))
+
+
+### Bug Fixes
+
+* **testing:** ignore a redirected cargo target directory ([9f32691](https://github.com/propeller-heads/tycho/commit/9f3269106943793cefd902f975eb578c30f6d756))
+* **testing:** stop when substreams pack fails ([48213f6](https://github.com/propeller-heads/tycho/commit/48213f618c632f2f124317b6917cd7b1e3452079))
+
+## [0.352.0](https://github.com/propeller-heads/tycho/compare/0.351.0...0.352.0) (2026-08-07)
+
+
+### Features
+
+* **protocol-testing:** derive the start block from network blocks too ([256e82c](https://github.com/propeller-heads/tycho/commit/256e82c530b2666a2581cd9b69d7d93c826a8d1c))
+
+
+### Bug Fixes
+
+* **protocol-testing:** apply the start block override to network blocks ([18b7094](https://github.com/propeller-heads/tycho/commit/18b709430b49c87d0e38f5a74eaca1d6f9a10a36))
+* **protocol-testing:** fail when substreams pack fails ([cb5d097](https://github.com/propeller-heads/tycho/commit/cb5d09704ca4d1fcc05e534992ec2793bbc5cc90))
+* **protocol-testing:** only override initialBlock when requested ([818aecc](https://github.com/propeller-heads/tycho/commit/818aecceb73629ac895ba316aaf3fdc0b7a68131))
+* **protocol-testing:** only rewrite modules declaring an initialBlock ([d985ab8](https://github.com/propeller-heads/tycho/commit/d985ab80f983ee348aef6610489a02e601c188b2))
+* **protocol-testing:** read initialBlock from anchored substreams manifests ([#1268](https://github.com/propeller-heads/tycho/issues/1268)) ([d8109ae](https://github.com/propeller-heads/tycho/commit/d8109ae7d0673b40c2b29b069f3ec2425194f831))
+* **protocol-testing:** read initialBlock from anchored substreams YAML ([099d0f2](https://github.com/propeller-heads/tycho/commit/099d0f2e8af3dbed5eec23a3cab2dd9b7b106655))
+* **rfq:** send Bebop origin fields and accept router-mode quotes ([#1280](https://github.com/propeller-heads/tycho/issues/1280)) ([8438298](https://github.com/propeller-heads/tycho/commit/84382983b467eabb799c74956708cb408c1b2872))
+
 ## [0.351.0](https://github.com/propeller-heads/tycho/compare/0.350.0...0.351.0) (2026-08-06)
 
 

@@ -25,7 +25,7 @@ error TransferManager__UnknownTransferType();
 /**
  * @title TransferManager
  * @dev Orchestrates all token transfers during swap execution. Inherits from Vault
- * (ERC6909) and sits between TychoRouter and Dispatcher in the inheritance chain.
+ * (ERC6909) and sits between TychoRouterV3 and Dispatcher in the inheritance chain.
  *
  * Responsibilities:
  * - Routes each transfer through one of 6 scenarios based on: TransferType returned
@@ -78,7 +78,7 @@ contract TransferManager is Vault {
 
     /**
      * @dev This function is used to store the transfer information in the
-     * contract's storage. This is done as the first step in the swap process in TychoRouter.
+     * contract's storage. This is done as the first step in the swap process in TychoRouterV3.
      */
     // slither-disable-next-line assembly
     function _tstoreTransferFromInfo(
@@ -263,7 +263,7 @@ contract TransferManager is Vault {
         uint256 balanceBefore = _balanceOf(token, receiver);
         // Perform the actual transfer
         if (isPermit2) {
-            // Permit2.permit is already called from the TychoRouter
+            // Permit2.permit is already called from the TychoRouterV3
             // slither-disable-next-line calls-loop
             permit2.transferFrom(sender, receiver, uint160(amount), token);
         } else {

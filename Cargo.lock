@@ -1759,15 +1759,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89cbf775b137e9b968e67227ef7f775587cde3fd31b0d8599dbd0f598a48340"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2616,12 +2607,6 @@ name = "bytecount"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
-
-[[package]]
-name = "bytemuck"
-version = "1.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
 name = "byteorder"
@@ -3935,19 +3920,6 @@ checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
 dependencies = [
  "rand_core 0.6.4",
  "subtle",
-]
-
-[[package]]
-name = "figment"
-version = "0.10.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cb01cd46b0cf372153850f4c6c272d9cbea2da513e07538405148f95bd789f3"
-dependencies = [
- "atomic",
- "serde",
- "serde_yaml",
- "uncased",
- "version_check",
 ]
 
 [[package]]
@@ -6654,13 +6626,12 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "alloy",
  "clap",
  "colored",
  "dotenv",
- "figment",
  "futures 0.3.31",
  "glob",
  "hex",
@@ -6670,7 +6641,6 @@ dependencies = [
  "num-rational",
  "num-traits",
  "postgres",
- "regex",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -9457,7 +9427,7 @@ dependencies = [
 
 [[package]]
 name = "tycho"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -9468,7 +9438,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "async-trait",
  "backoff",
@@ -9502,7 +9472,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -9536,7 +9506,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9560,7 +9530,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "alloy",
  "async-trait",
@@ -9584,7 +9554,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "actix",
  "actix-cors",
@@ -9653,7 +9623,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -9679,7 +9649,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-protobuf"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "chrono",
  "num-bigint",
@@ -9703,7 +9673,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -9762,7 +9732,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9786,7 +9756,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.351.0"
+version = "0.354.0"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -9882,15 +9852,6 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
-
-[[package]]
-name = "uncased"
-version = "0.9.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1b88fcfe09e89d3866a5c11019378088af2d24c3fbd4f0543f96b479ec90697"
-dependencies = [
- "version_check",
-]
 
 [[package]]
 name = "unicase"

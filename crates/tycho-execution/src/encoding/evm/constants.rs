@@ -30,7 +30,7 @@ pub fn get_router_address(chain: &Chain) -> Result<&'static Bytes, EncodingError
         })
 }
 
-/// The address used by the TychoRouter to represent native ETH.
+/// The address used by the TychoRouterV3 to represent native ETH.
 ///
 /// Callers must use this address (not `address(0)`) for the `tokenIn` / `tokenOut`
 /// parameters when ABI-encoding router function calls that involve native ETH.

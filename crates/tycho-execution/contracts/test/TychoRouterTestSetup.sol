@@ -38,10 +38,10 @@ import {ClientFeeTestHelper} from "./ClientFeeTestHelper.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 // Core contracts
-import "@src/TychoRouter.sol";
+import "@src/TychoRouterV3.sol";
 import "@src/FeeCalculator.sol";
 
-contract TychoRouterExposed is TychoRouter {
+contract TychoRouterExposed is TychoRouterV3 {
     constructor(
         address permit2_,
         address feeCalculator,
@@ -50,7 +50,7 @@ contract TychoRouterExposed is TychoRouter {
         address executorSetter,
         address routerFeeSetter
     )
-        TychoRouter(
+        TychoRouterV3(
             permit2_,
             feeCalculator,
             pauser,

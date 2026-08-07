@@ -8,7 +8,7 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {TransferManager} from "../TransferManager.sol";
-import {TychoRouter} from "../TychoRouter.sol";
+import {TychoRouterV3} from "../TychoRouterV3.sol";
 
 error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();

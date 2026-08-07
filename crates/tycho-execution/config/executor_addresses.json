@@ -75,5 +75,11 @@
     "fluid_v1": "0x5020a5012cDC3545d2E98B6fb3EA4b9dc90552a6",
     "vm:curve": "0xC015Bc2f482b6CF31D6C30e663a57417A6761949",
     "native_wrapper": "0x1D9220eA65cA79997C532ba8fbC79b1c463Bd505"
+  },
+  "robinhood": {
+    "uniswap_v2": "0x81aFB56E21AB0744330ACf400E2A65e6B64D495E",
+    "uniswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
+    "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
+    "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F"
   }
 }

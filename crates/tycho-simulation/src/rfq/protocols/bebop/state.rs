@@ -307,6 +307,9 @@ mod tests {
             "".to_string(),
             HashSet::new(),
             Duration::from_secs(30),
+            None,
+            None,
+            None,
         )
         .unwrap()
     }

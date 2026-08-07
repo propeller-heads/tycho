@@ -6,7 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract Permit2TestHelper is Constants {
     /**
-     * @dev Handles the Permit2 approval process for Alice, allowing the TychoRouter contract
+     * @dev Handles the Permit2 approval process for Alice, allowing the TychoRouterV3 contract
      *      to spend `amount_in` of `tokenIn` on her behalf.
      *
      * This function approves the Permit2 contract to transfer the specified token amount

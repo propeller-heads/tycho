@@ -1,4 +1,4 @@
-//! One-shot reader for the TychoRouter's on-chain router fee on output.
+//! One-shot reader for the TychoRouterV3's on-chain router fee on output.
 //!
 //! The integration test backs the router fee out of the simulated amount out before comparing it
 //! against the on-chain executed amount. Rather than hard-coding that fee, this module reads it

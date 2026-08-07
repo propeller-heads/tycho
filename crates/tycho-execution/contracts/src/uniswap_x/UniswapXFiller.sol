@@ -9,7 +9,7 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
-import {TychoRouter} from "../TychoRouter.sol";
+import {TychoRouterV3} from "../TychoRouterV3.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 error UniswapXFiller__AddressZero();
@@ -73,7 +73,7 @@ contract UniswapXFiller is AccessControl, IReactorCallback {
         bool tokenOutApprovalNeeded = bool(uint8(callbackData[1]) == 1);
         bytes calldata tychoCalldata = bytes(callbackData[2:]);
 
-        // The TychoRouter will take the input tokens from the filler
+        // The TychoRouterV3 will take the input tokens from the filler
         if (tokenInApprovalNeeded) {
             // Native ETH input is not supported by UniswapX
             IERC20(order.input.token)

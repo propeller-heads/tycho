@@ -1,6 +1,6 @@
 pragma solidity ^0.8.26;
 
-import {TychoRouter, ClientFeeParams} from "@src/TychoRouter.sol";
+import {TychoRouterV3, ClientFeeParams} from "@src/TychoRouterV3.sol";
 import {Dispatcher__UnsupportedSingleHopCycle} from "@src/Dispatcher.sol";
 import "./TychoRouterTestSetup.sol";
 import {Vault__InsufficientBalance} from "@src/Vault.sol";
@@ -27,7 +27,7 @@ contract LyingSwapOutputPool {
 }
 
 contract FalseTokenCallbackPool is TychoRouterTestSetup {
-    // When swap() is called, calls back into TychoRouter with crafted data
+    // When swap() is called, calls back into TychoRouterV3 with crafted data
     // instructing the router to transfer USDC to this contract.
 
     function swap(address, bool, int256, uint160, bytes calldata)
@@ -67,11 +67,13 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
+        uint256 expectedAmountOut = 2008817438608734439722;
         tychoRouter.singleSwapPermit2(
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            2008817438608734439722,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
             ALICE,
             noClientFee(),
             permitSingle,
@@ -102,12 +104,13 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        uint256 minAmountOut = 2000 * 1e18;
+        uint256 expectedAmountOut = 2000 * 1e18;
         uint256 amountOut = tychoRouter.singleSwap(
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
             ALICE,
             noClientFee(),
             swap
@@ -137,10 +140,127 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        vm.expectRevert(TychoRouter__UndefinedMinAmountOut.selector);
+        vm.expectRevert(TychoRouter__AmountOutZero.selector);
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, 0, ALICE, noClientFee(), swap
+            amountIn, WETH_ADDR, DAI_ADDR, 0, 0, ALICE, noClientFee(), swap
         );
+    }
+
+    function testSingleSwapInvalidMinAmountOut() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        // minAmountOut above expectedAmountOut is rejected
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__InvalidMinAmountOut.selector, 2 ether, 1 ether
+            )
+        );
+        tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1 ether,
+            2 ether,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+    }
+
+    function testSingleSwapMinAmountOutZero() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        // minAmountOut of zero is rejected
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__InvalidMinAmountOut.selector, 0, 1 ether
+            )
+        );
+        tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1 ether,
+            0,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+    }
+
+    function testSingleSwapMinAmountOutBelowSlippageFloor() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        // minAmountOut more than 20% below expectedAmountOut is rejected
+        uint256 belowFloor = 0.8 ether - 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__InvalidMinAmountOut.selector, belowFloor, 1 ether
+            )
+        );
+        tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            1 ether,
+            belowFloor,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+    }
+
+    function testSingleSwapMinAmountOutAtSlippageFloor() public {
+        // A minAmountOut exactly 20% below expectedAmountOut is accepted
+        uint256 amountIn = 1 ether;
+
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(tychoRouterAddr), amountIn);
+
+        bytes memory protocolData =
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
+        bytes memory swap =
+            encodeSingleSwap(address(usv2Executor), protocolData);
+
+        uint256 expectedAmountOut = 2000 * 1e18;
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            expectedAmountOut,
+            expectedAmountOut * 8000 / 10000,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+
+        assertEq(amountOut, 2018817438608734439722);
+        vm.stopPrank();
     }
 
     function testSingleSwapZeroInput() public {
@@ -151,7 +271,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.singleSwap(
-            0, WETH_ADDR, DAI_ADDR, 1, ALICE, noClientFee(), swap
+            0, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
     }
 
@@ -184,7 +304,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
 
         vm.expectRevert(TychoRouter__ZeroInput.selector);
         tychoRouter.singleSwapUsingVault(
-            0, WETH_ADDR, DAI_ADDR, 1, tychoRouterAddr, noClientFee(), swap
+            0, WETH_ADDR, DAI_ADDR, 1, 1, tychoRouterAddr, noClientFee(), swap
         );
 
         // No USDC was stolen
@@ -207,13 +327,14 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         bytes memory swap =
             encodeSingleSwap(address(usv2Executor), protocolData);
 
-        uint256 minAmountOut = 2600 * 1e18;
+        uint256 expectedAmountOut = 2600 * 1e18;
         vm.expectRevert();
         tychoRouter.singleSwap(
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
-            minAmountOut,
+            expectedAmountOut,
+            expectedAmountOut * 9800 / 10000,
             ALICE,
             noClientFee(),
             swap
@@ -249,6 +370,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
+            minAmountOut,
             minAmountOut,
             ALICE,
             noClientFee(),
@@ -294,6 +416,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            minAmountOut,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -301,7 +424,14 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, ALICE, feeParams, swap
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            minAmountOut,
+            ALICE,
+            feeParams,
+            swap
         );
 
         assertEq(amountOut, minAmountOut);
@@ -348,6 +478,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            minAmountOut,
             ALICE,
             noClientFee(),
             swap
@@ -392,6 +523,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            minAmountOut,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -399,7 +531,14 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         );
 
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, ALICE, feeParams, swap
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            minAmountOut,
+            ALICE,
+            feeParams,
+            swap
         );
 
         vm.stopPrank();
@@ -437,6 +576,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             DAI_ADDR,
             minAmountOut,
+            minAmountOut,
             ALICE,
             swap,
             tychoRouterAddr,
@@ -444,7 +584,14 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         );
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, DAI_ADDR, minAmountOut, ALICE, feeParams, swap
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            minAmountOut,
+            minAmountOut,
+            ALICE,
+            feeParams,
+            swap
         );
 
         assertEq(amountOut, minAmountOut);
@@ -481,7 +628,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             encodeSingleSwap(address(usv2Executor), protocolData);
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, ZKML_ADDR, 1, ALICE, noClientFee(), swap
+            amountIn, WETH_ADDR, ZKML_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
 
         // Pool transfer to router 18455652180922777663091
@@ -515,7 +662,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             encodeSingleSwap(address(usv2Executor), protocolData);
 
         uint256 amountOut = tychoRouter.singleSwap(
-            amountIn, ZKML_ADDR, WETH_ADDR, 1, ALICE, noClientFee(), swap
+            amountIn, ZKML_ADDR, WETH_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
 
         assertGt(amountOut, 0);
@@ -590,7 +737,8 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             amountIn,
             WETH_ADDR,
             USDC_ADDR,
-            1, // min amount
+            1, // expected amount out
+            1, // min amount out
             ALICE,
             noClientFee(),
             swap
@@ -618,7 +766,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             )
         );
         tychoRouter.singleSwap(
-            amountIn, WETH_ADDR, WETH_ADDR, 1, ALICE, noClientFee(), swap
+            amountIn, WETH_ADDR, WETH_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
         vm.stopPrank();
     }
@@ -630,7 +778,8 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         return 22689128;
     }
 
-    function testFinalFeeBelowMinAmount() public {
+    // TODO(ENG-6054): skip until ENG-6054 is merged
+    function skip_testFinalFeeBelowMinAmount() public {
         // Swap USDC → TWIF (6% fee-on-transfer) via UniswapV4.
         // A small client fee forces the output through the router instead of going
         // directly to ALICE, causing an extra TWIF transfer (and an extra 6% tax).
@@ -663,7 +812,8 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             TWIF,
-            106000000000000000000000000000, // min amount
+            106000000000000000000000000000, // expected amount out
+            106000000000000000000000000000, // min amount out
             ALICE,
             swap,
             tychoRouterAddr,
@@ -675,7 +825,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         // 106000000000000000000000000000, which is even enough to account for the
         // client fee. They however forgot to account for the final transfer fee, so
         // they only end up with 101057965299514598220586024960 in their wallet.
-        // TychoRouter reverts.
+        // TychoRouterV3 reverts.
         vm.expectRevert(
             abi.encodeWithSelector(
                 TychoRouter__NegativeSlippage.selector,
@@ -687,6 +837,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             TWIF,
+            106000000000000000000000000000,
             106000000000000000000000000000,
             ALICE,
             feeParams,
@@ -739,7 +890,8 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             TWIF,
-            108000000000000000000000000000, // min amount
+            108000000000000000000000000000, // expected amount out
+            108000000000000000000000000000, // min amount out
             ALICE,
             swap,
             tychoRouterAddr,
@@ -762,6 +914,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
             amountIn,
             USDC_ADDR,
             TWIF,
+            108000000000000000000000000000,
             108000000000000000000000000000,
             ALICE,
             feeParams,

@@ -6,9 +6,11 @@
   (`0xd47f1b1edcfeabb08f6ebd8fc337c27e636c75ba`), first used in block 24995117.
   Both deployments are now recognized as TWAMM emitters and as extensions
   carrying time-rate deltas.
-- Bump `Cargo.toml` from `0.1.3` to `0.2.2` so it matches the package version in
-  `substreams.yaml`, which had drifted ahead. Both are bumped together from here
-  on.
+
+## v0.2.1
+
+- Align the `Cargo.toml` package version with the `substreams.yaml` manifest
+  version, which has been `v0.2.1` since the CI fix. No behavior change.
 
 ## v0.1.3
 

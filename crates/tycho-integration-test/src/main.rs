@@ -1385,8 +1385,9 @@ async fn process_state(
         );
         metrics::record_get_amount_out_duration(&component.protocol_system, duration_seconds);
 
-        // Sometimes the expected amount out might be zero (e.g. pool is depleted in one direction)
-        // Then execution will fail with TychoRouter__UndefinedMinAmountOut
+        // Sometimes the expected amount out might be zero (e.g. pool is depleted in one direction).
+        // Skip: passing expectedAmountOut=0 means minAmountOut=0, which makes the slippage check
+        // trivial.
         if expected_amount_out == BigUint::ZERO {
             continue;
         }
@@ -1406,6 +1407,7 @@ async fn process_state(
             chain,
             None,
             amount_out_result.gas,
+            expected_amount_out.clone(),
         ) {
             Ok(res) => res,
             Err(e) => {

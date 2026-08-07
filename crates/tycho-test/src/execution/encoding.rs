@@ -68,6 +68,7 @@ pub fn encode_swap(
     chain: Chain,
     executors_json: Option<String>,
     gas_usage: BigUint,
+    expected_amount_out: BigUint,
 ) -> miette::Result<(Solution, Transaction)> {
     let solution = create_solution(
         component.clone(),
@@ -76,6 +77,7 @@ pub fn encode_swap(
         buy_token.clone(),
         amount_in.clone(),
         gas_usage.clone(),
+        expected_amount_out,
     )?;
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(executors_json)
@@ -108,6 +110,7 @@ pub fn create_solution(
     buy_token: Token,
     amount_in: BigUint,
     gas_usage: BigUint,
+    expected_amount_out: BigUint,
 ) -> miette::Result<Solution> {
     let user_address = Bytes::from_str(USER_ADDR).into_diagnostic()?;
 
@@ -122,15 +125,18 @@ pub fn create_solution(
         swap
     };
 
+    // The widest tolerance the router accepts (20% below the quote) — these tests care about
+    // whether the swap executes, not about a tight slippage bound.
+    let min_amount_out = &expected_amount_out * BigUint::from(8000u64) / BigUint::from(10_000u64);
+
     Ok(Solution::new(
         user_address.clone(),
         user_address,
         sell_token.address,
         buy_token.address,
         amount_in,
-        // We want to keep track of how bad the slippage really is and not just error at execution
-        // time. NEVER DO THIS IN PRODUCTION!
-        BigUint::from(1u64),
+        expected_amount_out,
+        min_amount_out,
         vec![simple_swap],
     ))
 }
@@ -141,6 +147,7 @@ fn encoded_transaction(
     native_address: Bytes,
 ) -> miette::Result<Transaction> {
     let amount_in = biguint_to_u256(solution.amount_in());
+    let amount_out = biguint_to_u256(solution.expected_amount_out());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
     let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
     let to_router_address = |raw: Address| {
@@ -160,6 +167,7 @@ fn encoded_transaction(
         amount_in,
         token_in,
         token_out,
+        amount_out,
         min_amount_out,
         receiver,
         client_fee_params,
@@ -418,7 +426,7 @@ pub fn calculate_executor_storage_slot(key: Address) -> FixedBytes<32> {
     let mut key_bytes = [0u8; 32];
     key_bytes[12..].copy_from_slice(key.as_slice());
 
-    // Storage layout (from `forge inspect TychoRouter storageLayout`):
+    // Storage layout (from `forge inspect TychoRouterV3 storageLayout`):
     //   slot 0: _roles             (AccessControl)
     //   slot 1: _balances          (ERC6909)
     //   slot 2: _operatorApprovals (ERC6909)
@@ -664,7 +672,7 @@ pub async fn setup_router_overwrites(
 
     // Router override: bytecode + executor approval slot + _feeCalculator slot
     let executor_storage_slot = calculate_executor_storage_slot(executor_address);
-    // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouter storageLayout`)
+    // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
     let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
     let fee_calculator_slot_value = {
         let mut v = [0u8; 32];

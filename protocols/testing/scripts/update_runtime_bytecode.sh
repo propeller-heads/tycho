@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Regenerates the TychoRouter and executor runtime bytecode fixtures used by
+# Regenerates the TychoRouterV3 and executor runtime bytecode fixtures used by
 # protocol integration testing from the current tycho-execution contracts.
 #
 # Each fixture is produced by deploying the contract against a mainnet fork
@@ -45,7 +45,7 @@ FIXTURES_DIR="$TESTING_DIR/fixtures"
 EXPORT_SCRIPT="$CONTRACTS_DIR/scripts/export-runtime-bytecode.js"
 DEPLOY_CONFIG="$CONTRACTS_DIR/../config/executor_deployments.json"
 
-# Pin the fork to a fixed block for reproducibility. TychoRouter (via EIP712)
+# Pin the fork to a fixed block for reproducibility. TychoRouterV3 (via EIP712)
 # and UniswapV4Executor bake address(this) into an immutable at deploy time, and
 # the export deploys via nonce-based CREATE — so the deployer's mainnet nonce
 # (which moves over time) would otherwise change the deploy address, and thus
@@ -58,7 +58,7 @@ ADMIN="0x0000000000000000000000000000000000000001"
 
 # fixture | contract | literal constructor args
 #
-# TychoRouter(permit2, feeCalculator, pauserAdmin, unpauserAdmin,
+# TychoRouterV3(permit2, feeCalculator, pauserAdmin, unpauserAdmin,
 #             executorSetterAdmin, routerFeeSetterAdmin):
 #   - permit2 is the only immutable, so it is the only arg baked into the
 #     bytecode; it must be the canonical Permit2.
@@ -66,7 +66,7 @@ ADMIN="0x0000000000000000000000000000000000000001"
 #     Permit2 is reused; the real one is set via storage at simulation time.
 #   - the four admins are role grants (storage), so any placeholder works.
 NON_EXECUTOR_FIXTURES=(
-    "TychoRouter|TychoRouter|$PERMIT2 $PERMIT2 $ADMIN $ADMIN $ADMIN $ADMIN"
+    "TychoRouterV3|TychoRouterV3|$PERMIT2 $PERMIT2 $ADMIN $ADMIN $ADMIN $ADMIN"
     "FeeCalculator|FeeCalculator|$ADMIN"
 )
 
