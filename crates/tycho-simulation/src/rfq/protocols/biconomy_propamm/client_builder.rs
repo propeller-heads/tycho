@@ -2,14 +2,14 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::PropAmmClient;
-use crate::rfq::{constants::get_propamm_config, errors::RFQError};
+use crate::rfq::{constants::get_biconomy_propamm_config, errors::RFQError};
 
 /// `PropAmmClientBuilder` is a builder pattern implementation for creating instances of
 /// `PropAmmClient`.
 ///
 /// # Example
 /// ```rust
-/// use tycho_simulation::rfq::protocols::propamm::client_builder::PropAmmClientBuilder;
+/// use tycho_simulation::rfq::protocols::biconomy_propamm::client_builder::PropAmmClientBuilder;
 /// use tycho_common::{models::Chain, Bytes};
 /// use std::str::FromStr;
 ///
@@ -27,17 +27,19 @@ pub struct PropAmmClientBuilder {
     base_url: String,
     poll_interval: Duration,
     quote_timeout: Duration,
+    api_key: Option<String>,
 }
 
 impl PropAmmClientBuilder {
     pub fn new(chain: Chain) -> Self {
-        let config = get_propamm_config();
+        let config = get_biconomy_propamm_config();
         Self {
             chain,
             pairs: Vec::new(),
             base_url: config.base_url,
             poll_interval: Duration::from_millis(1000), // Default 1s polling interval
             quote_timeout: Duration::from_secs(5),      // Default 5 second timeout
+            api_key: config.api_key,
         }
     }
 
@@ -56,7 +58,7 @@ impl PropAmmClientBuilder {
         self
     }
 
-    /// Override the PropAMM API base url (defaults to the PROPAMM_API_URL env var).
+    /// Override the PropAMM API base url (defaults to the BICONOMY_PROPAMM_API_URL env var).
     pub fn base_url(mut self, base_url: String) -> Self {
         self.base_url = base_url;
         self
@@ -74,6 +76,13 @@ impl PropAmmClientBuilder {
         self
     }
 
+    /// Set the hosted-API key (defaults to the BICONOMY_PROPAMM_API_KEY env var), sent as the
+    /// `x-api-key` header. The production API rejects unauthenticated requests.
+    pub fn api_key(mut self, api_key: String) -> Self {
+        self.api_key = Some(api_key);
+        self
+    }
+
     pub fn build(self) -> Result<PropAmmClient, RFQError> {
         PropAmmClient::new(
             self.chain,
@@ -81,6 +90,7 @@ impl PropAmmClientBuilder {
             self.base_url,
             self.poll_interval,
             self.quote_timeout,
+            self.api_key,
         )
     }
 }

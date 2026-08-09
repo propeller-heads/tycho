@@ -17,9 +17,9 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
-    protocols::propamm::{
+    protocols::biconomy_propamm::{
         client::PropAmmClient,
-        models::{parse_biguint, propamm_price_scale, PropAmmLevelsResponse, PropAmmMakerLevels},
+        models::{parse_biguint, biconomy_propamm_price_scale, PropAmmLevelsResponse, PropAmmMakerLevels},
     },
 };
 
@@ -131,7 +131,7 @@ fn sweep_amount_out(
     makers: &[PropAmmMakerLevels],
     amount_in: &BigUint,
 ) -> Result<SweepResult, SimulationError> {
-    let scale = propamm_price_scale();
+    let scale = biconomy_propamm_price_scale();
     let segments = expand_marginal_segments(makers)?;
 
     // (amount_in_maker, total_out) accumulators per maker
@@ -334,7 +334,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::propamm::{
+    use crate::rfq::protocols::biconomy_propamm::{
         client_builder::PropAmmClientBuilder, models::PropAmmLevel,
     };
 
@@ -399,7 +399,7 @@ mod tests {
     }
 
     fn fixture_state() -> PropAmmState {
-        let json = std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/levels.json")
+        let json = std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
             .unwrap();
         let levels: PropAmmLevelsResponse = serde_json::from_str(&json).unwrap();
         PropAmmState::new(weth(), usdc(), levels, empty_propamm_client())

@@ -21,7 +21,7 @@ use crate::{
         client::RFQClient,
         errors::RFQError,
         models::TimestampHeader,
-        protocols::propamm::models::{
+        protocols::biconomy_propamm::models::{
             parse_biguint, PropAmmFirmQuoteResponse, PropAmmLevelsResponse,
         },
     },
@@ -43,7 +43,7 @@ fn bytes_to_address_string(address: &Bytes) -> Result<String, RFQError> {
 /// testnet chain, so this integration is mainnet Base only.
 fn validate_chain(chain: Chain) -> Result<u64, RFQError> {
     match chain {
-        Chain::Base => Ok(chain.id()),
+        Chain::Base | Chain::Bsc => Ok(chain.id()),
         _ => Err(RFQError::FatalError(format!("Unsupported chain for PropAMM: {chain:?}"))),
     }
 }
@@ -64,10 +64,12 @@ pub struct PropAmmClient {
     pairs: Vec<(Bytes, Bytes)>,
     poll_interval: Duration,
     quote_timeout: Duration,
+    // Hosted-API key, sent as `x-api-key` on every request. Issued by the Biconomy team.
+    api_key: Option<String>,
 }
 
 impl PropAmmClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:propamm";
+    pub const PROTOCOL_SYSTEM: &'static str = "rfq:biconomy_propamm";
 
     pub fn new(
         chain: Chain,
@@ -75,6 +77,7 @@ impl PropAmmClient {
         base_url: String,
         poll_interval: Duration,
         quote_timeout: Duration,
+        api_key: Option<String>,
     ) -> Result<Self, RFQError> {
         let chain_id = validate_chain(chain)?;
         let base_url = base_url.trim_end_matches('/');
@@ -86,7 +89,15 @@ impl PropAmmClient {
             pairs,
             poll_interval,
             quote_timeout,
+            api_key,
         })
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_key {
+            Some(key) => request.header("x-api-key", key),
+            None => request,
+        }
     }
 
     pub fn chain_id(&self) -> u64 {
@@ -109,8 +120,7 @@ impl PropAmmClient {
         token_out: &Bytes,
     ) -> Result<PropAmmLevelsResponse, RFQError> {
         let response = self
-            .http_client()
-            .get(&self.levels_endpoint)
+            .apply_auth(self.http_client().get(&self.levels_endpoint))
             .query(&[
                 ("chainId", self.chain_id.to_string()),
                 ("tokenIn", bytes_to_address_string(token_in)?),
@@ -147,7 +157,7 @@ impl PropAmmClient {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "propamm_pool".to_string(),
+            protocol_type_name: "biconomy_propamm_pool".to_string(),
             chain: self.chain,
             tokens: vec![levels.token_in.clone(), levels.token_out.clone()],
             contract_addresses: vec![], // empty for RFQ
@@ -343,8 +353,7 @@ impl RFQClient for PropAmmClient {
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
         let request = self
-            .http_client()
-            .get(&self.firm_quote_endpoint)
+            .apply_auth(self.http_client().get(&self.firm_quote_endpoint))
             .query(&[
                 ("chainId", self.chain_id.to_string()),
                 ("tokenIn", bytes_to_address_string(&params.token_in)?),
@@ -397,7 +406,7 @@ mod tests {
     use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::*;
-    use crate::rfq::protocols::propamm::models::PropAmmCall;
+    use crate::rfq::protocols::biconomy_propamm::models::PropAmmCall;
 
     fn weth() -> Bytes {
         Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap()
@@ -418,12 +427,13 @@ mod tests {
             base_url.to_string(),
             Duration::from_millis(50),
             Duration::from_secs(5),
+            None,
         )
         .unwrap()
     }
 
     fn levels_fixture() -> PropAmmLevelsResponse {
-        let json = std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/levels.json")
+        let json = std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
             .unwrap();
         serde_json::from_str(&json).unwrap()
     }
@@ -475,6 +485,7 @@ mod tests {
             "http://localhost:8080".to_string(),
             Duration::from_secs(1),
             Duration::from_secs(5),
+            None,
         );
         assert!(result.is_err());
     }
@@ -488,8 +499,8 @@ mod tests {
         let component = client.create_component_with_state(component_id.clone(), &levels);
 
         assert_eq!(component.component.id, component_id);
-        assert_eq!(component.component.protocol_system, "rfq:propamm");
-        assert_eq!(component.component.protocol_type_name, "propamm_pool");
+        assert_eq!(component.component.protocol_system, "rfq:biconomy_propamm");
+        assert_eq!(component.component.protocol_type_name, "biconomy_propamm_pool");
         assert_eq!(component.component.chain, Chain::Base);
         assert_eq!(component.component.tokens, vec![weth(), usdc()]);
         assert!(component
@@ -500,10 +511,10 @@ mod tests {
 
         let attrs = &component.state.attributes;
         assert_eq!(String::from_utf8(attrs["as_of"].to_vec()).unwrap(), "1784889534");
-        let makers: Vec<crate::rfq::protocols::propamm::models::PropAmmMakerLevels> =
+        let makers: Vec<crate::rfq::protocols::biconomy_propamm::models::PropAmmMakerLevels> =
             serde_json::from_slice(&attrs["makers"]).unwrap();
         assert_eq!(makers, levels.makers);
-        let merged: Vec<crate::rfq::protocols::propamm::models::PropAmmMergedLevel> =
+        let merged: Vec<crate::rfq::protocols::biconomy_propamm::models::PropAmmMergedLevel> =
             serde_json::from_slice(&attrs["merged"]).unwrap();
         assert_eq!(merged, levels.merged);
     }
@@ -521,7 +532,7 @@ mod tests {
     #[test]
     fn test_process_firm_quote_response() {
         let json =
-            std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/firm_quote.json")
+            std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
                 .unwrap();
         let quote: PropAmmFirmQuoteResponse = serde_json::from_str(&json).unwrap();
         let params = quote_params();
@@ -552,7 +563,7 @@ mod tests {
     #[test]
     fn test_process_firm_quote_response_rejects_wrong_receiver() {
         let json =
-            std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/firm_quote.json")
+            std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
                 .unwrap();
         let quote: PropAmmFirmQuoteResponse = serde_json::from_str(&json).unwrap();
         let mut params = quote_params();
@@ -564,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_polling_stream_emits_snapshots() {
-        let addr = create_json_server("src/rfq/protocols/propamm/test_responses/levels.json").await;
+        let addr = create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/levels.json").await;
         let client = test_client(&format!("http://127.0.0.1:{}", addr.port()));
 
         let mut stream = client.stream();
@@ -578,7 +589,7 @@ mod tests {
 
         let component_id = PropAmmClient::component_id(&weth(), &usdc());
         let component = &msg.snapshots.states[&component_id];
-        assert_eq!(component.component.protocol_system, "rfq:propamm");
+        assert_eq!(component.component.protocol_system, "rfq:biconomy_propamm");
         assert!(component
             .state
             .attributes
@@ -593,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_binding_quote_over_http() {
         let addr =
-            create_json_server("src/rfq/protocols/propamm/test_responses/firm_quote.json").await;
+            create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json").await;
         let client = test_client(&format!("http://127.0.0.1:{}", addr.port()));
 
         let signed = client
@@ -622,5 +633,53 @@ mod tests {
         assert_eq!(deserialized.pairs, original.pairs);
         assert_eq!(deserialized.poll_interval, original.poll_interval);
         assert_eq!(deserialized.quote_timeout, original.quote_timeout);
+    }
+
+    /// Live integration against the production API. Ignored by default; run with:
+    ///   BICONOMY_PROPAMM_API_KEY=<key> cargo test -p tycho-simulation \
+    ///     biconomy_propamm::client::tests::live_levels_and_firm_quote -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_levels_and_firm_quote() {
+        let Ok(api_key) = std::env::var("BICONOMY_PROPAMM_API_KEY") else {
+            eprintln!("BICONOMY_PROPAMM_API_KEY not set - skipping live test");
+            return;
+        };
+        let client = PropAmmClient::new(
+            Chain::Base,
+            vec![(weth(), usdc())],
+            crate::rfq::constants::DEFAULT_BICONOMY_PROPAMM_API_URL.to_string(),
+            Duration::from_millis(1000),
+            Duration::from_secs(10),
+            Some(api_key),
+        )
+        .expect("client");
+
+        let levels = client
+            .fetch_levels(&weth(), &usdc())
+            .await
+            .expect("levels request failed");
+        assert!(!levels.makers.is_empty(), "no live makers for WETH/USDC");
+        eprintln!(
+            "levels OK: {} makers, first ladder {} levels",
+            levels.makers.len(),
+            levels.makers[0].levels.len()
+        );
+
+        let params = GetAmountOutParams {
+            amount_in: num_bigint::BigUint::from(100_000_000_000_000_000u128), // 0.1 WETH
+            token_in: weth(),
+            token_out: usdc(),
+            sender: router(),
+            receiver: router(),
+        };
+        let quote = client
+            .request_binding_quote(&params)
+            .await
+            .expect("firm quote failed");
+        assert!(quote
+            .quote_attributes
+            .contains_key("calls"));
+        eprintln!("firm quote OK: attributes {:?}", quote.quote_attributes.keys());
     }
 }

@@ -40,6 +40,10 @@ use tycho_simulation::{
     rfq::{
         protocols::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
+            biconomy_propamm::{
+                client_builder::PropAmmClientBuilder as BiconomyPropAmmClientBuilder,
+                state::PropAmmState as BiconomyPropAmmState,
+            },
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
             liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
             metric::{client_builder::MetricClientBuilder, state::MetricState},
@@ -130,9 +134,11 @@ async fn main() {
         (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
+    let biconomy_propamm_key = env::var("BICONOMY_PROPAMM_API_KEY").ok();
     if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
-        (liquorice_user.is_none() || liquorice_key.is_none())
+        (liquorice_user.is_none() || liquorice_key.is_none()) &&
+        biconomy_propamm_key.is_none()
     {
         if cli.run_pamm_protocols {
             println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
@@ -232,6 +238,20 @@ async fn main() {
             .expect("Failed to create Liquorice RFQ client");
         rfq_stream_builder =
             rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+    }
+    if let Some(key) = biconomy_propamm_key {
+        println!("Setting up Biconomy PropAMM RFQ client...\n");
+        // Ladders are one-directional, so poll both directions of the requested pair.
+        let biconomy_propamm_client = BiconomyPropAmmClientBuilder::new(chain)
+            .add_pair(sell_token_address.clone(), buy_token_address.clone())
+            .add_pair(buy_token_address.clone(), sell_token_address.clone())
+            .api_key(key)
+            .build()
+            .expect("Failed to create Biconomy PropAMM RFQ client");
+        rfq_stream_builder = rfq_stream_builder.add_client::<BiconomyPropAmmState>(
+            "biconomy_propamm",
+            Box::new(biconomy_propamm_client),
+        );
     }
     if cli.run_pamm_protocols {
         println!("Setting up Metric RFQ client...\n");

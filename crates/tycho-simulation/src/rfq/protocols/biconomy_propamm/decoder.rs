@@ -144,7 +144,7 @@ mod tests {
         tokens.insert(usdc_token.address.clone(), usdc_token.clone());
 
         let fixture: PropAmmLevelsResponse = serde_json::from_str(
-            &std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/levels.json")
+            &std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
                 .unwrap(),
         )
         .unwrap();
@@ -167,13 +167,13 @@ mod tests {
         let snapshot = ComponentWithState {
             state: ProtocolComponentState {
                 attributes: state_attributes,
-                component_id: "propamm_weth_usdc".to_string(),
+                component_id: "biconomy_propamm_weth_usdc".to_string(),
                 balances: HashMap::new(),
             },
             component: ProtocolComponent {
-                id: "propamm_weth_usdc".to_string(),
-                protocol_system: "rfq:propamm".to_string(),
-                protocol_type_name: "propamm_pool".to_string(),
+                id: "biconomy_propamm_weth_usdc".to_string(),
+                protocol_system: "rfq:biconomy_propamm".to_string(),
+                protocol_type_name: "biconomy_propamm_pool".to_string(),
                 chain: Chain::Base,
                 tokens: vec![weth_token.address.clone(), usdc_token.address.clone()],
                 contract_addresses: Vec::new(),

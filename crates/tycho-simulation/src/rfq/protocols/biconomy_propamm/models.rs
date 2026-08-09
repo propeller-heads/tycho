@@ -8,7 +8,7 @@ use crate::rfq::errors::RFQError;
 
 /// PropAMM level prices are fixed-point integers scaled by 1e18: tokenOut wei per tokenIn wei,
 /// multiplied by 10^18. All level sizes are denominated in tokenIn wei.
-pub fn propamm_price_scale() -> BigUint {
+pub fn biconomy_propamm_price_scale() -> BigUint {
     BigUint::from(10u32).pow(18)
 }
 
@@ -162,7 +162,7 @@ mod tests {
 
     fn firm_quote() -> PropAmmFirmQuoteResponse {
         let json =
-            std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/firm_quote.json")
+            std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
                 .unwrap();
         serde_json::from_str(&json).unwrap()
     }
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_levels_response() {
-        let json = std::fs::read_to_string("src/rfq/protocols/propamm/test_responses/levels.json")
+        let json = std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
             .unwrap();
         let levels: PropAmmLevelsResponse = serde_json::from_str(&json).unwrap();
 

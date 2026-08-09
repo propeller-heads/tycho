@@ -353,7 +353,7 @@ mod tests {
     fn propamm_swap(quote_data: HashMap<String, Bytes>, estimated_amount_in: BigUint) -> Swap {
         let component = ProtocolComponent {
             id: String::from("propamm-rfq"),
-            protocol_system: String::from("rfq:propamm"),
+            protocol_system: String::from("rfq:biconomy_propamm"),
             ..Default::default()
         };
         let state = MockRFQState {
