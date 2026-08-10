@@ -1219,6 +1219,7 @@ mod tests {
             TickInfo::new(25620, 1319490609195820).unwrap(),
             TickInfo::new(25630, 678916926147901).unwrap(),
             TickInfo::new(25640, 12208947683433103).unwrap(),
+            TickInfo::new(25650, 1177970713095301).unwrap(),
             TickInfo::new(25660, 8752304680520407).unwrap(),
             TickInfo::new(25680, 1486478248067104).unwrap(),
             TickInfo::new(25690, 1878744276123248).unwrap(),
@@ -1232,10 +1233,10 @@ mod tests {
         let test_cases = vec![
             (&wbtc, 129u64, 10u64, "0", "WBTC sell_price=129, buy_price=10"),
             (&wbtc, 130u64, 10u64, "0", "WBTC sell_price=130, buy_price=10"),
-            (&wbtc, 1305u64, 100u64, "163535995630461", "WBTC sell_price=1305, buy_price=100"),
+            (&wbtc, 13030u64, 1000u64, "176076986383331", "WBTC sell_price=13030, buy_price=1000"),
             (&weth, 99u64, 1300u64, "0", "WETH sell_price=99, buy_price=1300"),
-            (&weth, 100u64, 1300u64, "0", "WETH sell_price=100, buy_price=1300"),
-            (&weth, 101u64, 1299u64, "524227092059180", "WETH sell_price=101, buy_price=1299"),
+            (&weth, 100u64, 1305u64, "0", "WETH sell_price=100, buy_price=1305"),
+            (&weth, 1000u64, 12970u64, "1894842737645507", "WETH sell_price=1000, buy_price=12970"),
         ];
 
         for (sell_token, sell_price, buy_price, expected_str, test_id) in test_cases {
