@@ -203,6 +203,7 @@ sol! {
         function getPoolConfig(address pool) external view returns (PoolConfig memory);
         function getHooksConfig(address pool) external view returns (HooksConfig memory);
         function getPoolTokenRates(address pool) external view returns (uint256[] memory decimalScalingFactors, uint256[] memory tokenRates);
+        function getPoolPausedState(address pool) external view returns (bool, uint32, uint32, address);
     }
 }
 
@@ -396,6 +397,11 @@ where
             "balancer_v3 pool {pool} is not initialized"
         )));
     }
+    // A paused pool reverts every swap, so it must not be quoted. Both states are recoverable:
+    // governance can lift either, and the pause lapses on its own once its window elapses.
+    if is_paused(engine, vault, pool, &config)? {
+        return Err(SimulationError::RecoverableError(format!("balancer_v3 pool {pool} is paused")));
+    }
 
     // The factory a pool came from says nothing about its hooks: a StablePoolFactory pool can carry
     // a dynamic-fee hook, and quoting it as hookless yields amounts the Vault rejects.
@@ -422,7 +428,7 @@ where
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 dynamic.staticSwapFeePercentage,
-                config.aggregateSwapFeePercentage,
+                aggregate_swap_fee(&config),
                 dynamic.totalSupply,
                 &config.liquidityManagement,
             );
@@ -441,7 +447,7 @@ where
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 dynamic.staticSwapFeePercentage,
-                config.aggregateSwapFeePercentage,
+                aggregate_swap_fee(&config),
                 dynamic.totalSupply,
                 &config.liquidityManagement,
             );
@@ -470,7 +476,7 @@ where
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 config.staticSwapFeePercentage,
-                config.aggregateSwapFeePercentage,
+                aggregate_swap_fee(&config),
                 dynamic.totalSupply,
                 &config.liquidityManagement,
             );
@@ -493,7 +499,7 @@ where
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 dynamic.staticSwapFeePercentage,
-                config.aggregateSwapFeePercentage,
+                aggregate_swap_fee(&config),
                 dynamic.totalSupply,
                 &config.liquidityManagement,
             );
@@ -564,6 +570,11 @@ where
             "balancer_v3 pool {pool} is not initialized"
         )));
     }
+    // A paused pool reverts every swap, so it must not be quoted. Both states are recoverable:
+    // governance can lift either, and the pause lapses on its own once its window elapses.
+    if is_paused(engine, vault, pool, &config)? {
+        return Err(SimulationError::RecoverableError(format!("balancer_v3 pool {pool} is paused")));
+    }
 
     let mismatch = || {
         SimulationError::FatalError(format!(
@@ -582,7 +593,7 @@ where
                     dynamic.tokenRates,
                     dynamic.balancesLiveScaled18,
                     dynamic.staticSwapFeePercentage,
-                    config.aggregateSwapFeePercentage,
+                    aggregate_swap_fee(&config),
                     dynamic.totalSupply,
                 ),
                 prev.weights.clone(),
@@ -598,7 +609,7 @@ where
                     dynamic.tokenRates,
                     dynamic.balancesLiveScaled18,
                     dynamic.staticSwapFeePercentage,
-                    config.aggregateSwapFeePercentage,
+                    aggregate_swap_fee(&config),
                     dynamic.totalSupply,
                 ),
                 mutable: StableMutable { amp: dynamic.amplificationParameter },
@@ -615,7 +626,7 @@ where
                     dynamic.tokenRates,
                     dynamic.balancesLiveScaled18,
                     dynamic.staticSwapFeePercentage,
-                    config.aggregateSwapFeePercentage,
+                    aggregate_swap_fee(&config),
                     dynamic.totalSupply,
                 ),
                 mutable: ReClammV2Mutable {
@@ -644,7 +655,7 @@ where
                     dynamic.tokenRates,
                     dynamic.balancesLiveScaled18,
                     config.staticSwapFeePercentage,
-                    config.aggregateSwapFeePercentage,
+                    aggregate_swap_fee(&config),
                     dynamic.totalSupply,
                 ),
                 mutable,
@@ -652,6 +663,45 @@ where
             }))
         }
     }
+}
+
+/// The aggregate swap fee the Vault will actually take out of the pool.
+///
+/// A pool in recovery mode keeps the protocol's share of the swap fee — the Vault skips charging it
+/// — so quoting one with its configured percentage would under-report the balance a swap leaves
+/// behind. The swapper's `amountOut` is unaffected either way: recovery mode only changes how the
+/// fee already charged is split.
+fn aggregate_swap_fee(config: &PoolConfig) -> U256 {
+    if config.isPoolInRecoveryMode {
+        U256::ZERO
+    } else {
+        config.aggregateSwapFeePercentage
+    }
+}
+
+/// Whether the Vault would reject a swap on `pool` because it is paused.
+///
+/// `getPoolConfig` reports the stored pause bit, which the Vault stops honouring once the pool's
+/// pause window and the Vault's buffer period have both elapsed — after that a pool left flagged is
+/// permanently tradeable again. The effective state therefore comes from `getPoolPausedState`,
+/// which applies that deadline, and is only asked for when the stored bit is set: pools that were
+/// never paused are the overwhelming majority and cost no extra call.
+fn is_paused<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    vault: &AlloyAddress,
+    pool: &AlloyAddress,
+    config: &PoolConfig,
+) -> Result<bool, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    if !config.isPoolPaused {
+        return Ok(false);
+    }
+    let state: IBalancerV3Vault::getPoolPausedStateReturn =
+        call(engine, vault, IBalancerV3Vault::getPoolPausedStateCall { pool: *pool })?;
+    Ok(state._0)
 }
 
 /// Assembles the time-dependent half of a QuantAMM pool's state.
@@ -786,6 +836,38 @@ mod tests {
             POOL_TYPE_ATTRIBUTE.to_string(),
             Bytes::from(pool_type.as_bytes().to_vec()),
         )])
+    }
+
+    /// A pool config carrying only the fields [`aggregate_swap_fee`] reads.
+    fn config_with(aggregate_fee: u64, in_recovery_mode: bool) -> PoolConfig {
+        PoolConfig {
+            liquidityManagement: LiquidityManagement {
+                disableUnbalancedLiquidity: false,
+                enableAddLiquidityCustom: false,
+                enableRemoveLiquidityCustom: false,
+                enableDonation: false,
+            },
+            staticSwapFeePercentage: U256::ZERO,
+            aggregateSwapFeePercentage: U256::from(aggregate_fee),
+            aggregateYieldFeePercentage: U256::ZERO,
+            tokenDecimalDiffs: Default::default(),
+            pauseWindowEndTime: 0,
+            isPoolRegistered: true,
+            isPoolInitialized: true,
+            isPoolPaused: false,
+            isPoolInRecoveryMode: in_recovery_mode,
+        }
+    }
+
+    /// Recovery mode leaves the protocol's share of the swap fee in the pool, so quoting one must
+    /// not deduct it — the Vault does not charge it there.
+    #[test]
+    fn recovery_mode_waives_the_aggregate_swap_fee() {
+        let charged = config_with(250_000_000_000_000_000, false);
+        assert_eq!(aggregate_swap_fee(&charged), U256::from(250_000_000_000_000_000u64));
+
+        let waived = config_with(250_000_000_000_000_000, true);
+        assert_eq!(aggregate_swap_fee(&waived), U256::ZERO);
     }
 
     #[test]

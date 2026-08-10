@@ -7,7 +7,7 @@ use balancer_maths_rust::{
     common::{
         maths::{div_up_fixed, mul_down_fixed, mul_up_fixed, pow_up_fixed},
         pool_base::PoolBase,
-        types::{PoolState, PoolStateOrBuffer, SwapInput, SwapKind, SwapParams},
+        types::{PoolState, SwapInput, SwapKind, SwapParams},
         utils::{
             compute_and_charge_aggregate_swap_fees, to_raw_undo_rate_round_down,
             to_scaled_18_apply_rate_round_down,
@@ -20,8 +20,8 @@ use balancer_maths_rust::{
         stable::{self, StablePool},
         weighted::{WeightedPool, MAX_IN_RATIO},
     },
-    vault::{swap::MINIMUM_TRADE_AMOUNT, Vault},
-    PoolError,
+    vault::swap::{swap as vault_swap, MINIMUM_TRADE_AMOUNT},
+    DefaultHook, PoolError,
 };
 use num_bigint::{BigUint, ToBigUint};
 use serde::{Deserialize, Serialize};
@@ -174,30 +174,22 @@ impl BalancerV3State {
         format!("0x{}", hex::encode(token))
     }
 
-    /// Builds the pool implementation used for pre-fee probing.
+    /// Builds the pool implementation the maths dispatches a swap to.
     ///
-    /// The `Vault` builds this internally for swaps; [`Self::spot_price`] needs it directly because
-    /// only `on_swap` reports an amount before the swap fee is taken.
-    fn pool_impl(&self) -> Result<Box<dyn PoolBase>, SimulationError> {
+    /// This mirrors what `Vault::swap` does internally, and is built here so that swapping can go
+    /// through [`vault::swap::swap`] against a borrowed state. [`Self::spot_price`] needs it for a
+    /// second reason: only `on_swap` reports an amount before the swap fee is taken.
+    fn pool_impl(&self) -> Result<Box<dyn PoolBase>, PoolError> {
         match &self.state {
             PoolState::Weighted(state) => Ok(Box::new(WeightedPool::from(state.clone()))),
             PoolState::Stable(state) => Ok(Box::new(StablePool::new(state.mutable.clone()))),
             PoolState::ReClammV2(state) => Ok(Box::new(ReClammV2Pool::new(state.clone()))),
             // Unlike the other families, building this resolves the pool's time-interpolated
             // weights, which fails if the packed weight arrays are shorter than the token list.
-            PoolState::QuantAmm(state) => QuantAmmPool::new(state.clone())
-                .map(|pool| Box::new(pool) as Box<dyn PoolBase>)
-                .map_err(|e| {
-                    SimulationError::RecoverableError(format!(
-                        "balancer_v3 QuantAMM pool {} reports unusable weights: {e:?}",
-                        self.pool_address
-                    ))
-                }),
-            other => Err(SimulationError::FatalError(format!(
-                "balancer_v3 pool {} holds unsupported state `{}`",
-                self.pool_address,
-                other.pool_type()
-            ))),
+            PoolState::QuantAmm(state) => {
+                QuantAmmPool::new(state.clone()).map(|pool| Box::new(pool) as Box<dyn PoolBase>)
+            }
+            other => Err(PoolError::UnsupportedPoolType(other.pool_type().to_string())),
         }
     }
 
@@ -216,7 +208,12 @@ impl BalancerV3State {
             token_in: Self::token_key(token_in),
             token_out: Self::token_key(token_out),
         };
-        Vault::new().swap(&input, &PoolStateOrBuffer::Pool(Box::new(self.state.clone())), None)
+        // `Vault::swap` would take the state by `Box<PoolState>`, forcing a full clone of it on
+        // every call — which the limit searches make hundreds of. Its body only builds the pool
+        // implementation and the hook before delegating here, so both are supplied directly and
+        // the state is borrowed. Pools carrying a swap hook never reach this far: the decoder
+        // rejects them, leaving the maths library's own no-op hook as the faithful choice.
+        vault_swap(&input, &self.state, self.pool_impl()?.as_ref(), &DefaultHook::new(), None)
     }
 
     /// Swaps `amount_in` of `token_in` for `token_out`, returning the raw output amount.
@@ -626,8 +623,15 @@ impl ProtocolSim for BalancerV3State {
         // `on_swap` is called before the Vault takes the swap fee, so the ratio is pre-fee and the
         // house-wide fee markup can be applied on top.
         let probe = (balances[index_in] / U256::from(SPOT_PRICE_PROBE_DIVISOR)).max(U256::from(1));
+        let probe_failed = |e: PoolError| {
+            SimulationError::RecoverableError(format!(
+                "balancer_v3 spot price probe failed for pool {}: {e:?}",
+                self.pool_address
+            ))
+        };
         let out = self
-            .pool_impl()?
+            .pool_impl()
+            .map_err(probe_failed)?
             .on_swap(&SwapParams {
                 swap_kind: SwapKind::GivenIn,
                 token_in_index: index_in,
@@ -635,12 +639,7 @@ impl ProtocolSim for BalancerV3State {
                 amount_scaled_18: probe,
                 balances_live_scaled_18: balances.clone(),
             })
-            .map_err(|e| {
-                SimulationError::RecoverableError(format!(
-                    "balancer_v3 spot price probe failed for pool {}: {e:?}",
-                    self.pool_address
-                ))
-            })?;
+            .map_err(probe_failed)?;
 
         // Live balances are already normalized to 18 decimals, so the decimal correction cancels;
         // what remains is undoing the token rates that scaled them into underlying-value terms.
