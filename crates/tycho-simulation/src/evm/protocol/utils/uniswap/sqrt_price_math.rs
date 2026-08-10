@@ -222,6 +222,13 @@ pub(crate) fn get_sqrt_price_q96(price_0: U256, price_1: U256) -> Result<U256, S
 
 /// Converts a target price to sqrt_price_x96 format with fee adjustment
 ///
+/// `spot_price()` reports the pool's raw price marked up by `1/(1-fee)` (see `add_fee_markup`),
+/// so callers' `target_price` is expressed in that same marked-up convention. To land the swap's
+/// raw ending price such that `spot_price()` on the resulting state reports exactly
+/// `target_price`, the raw price fed to the swap must cancel that markup out by scaling down by
+/// `(1-fee)` first — the inverse of what `add_fee_markup` will apply when the result is read
+/// back.
+///
 /// # Arguments
 /// * `token_in` - The token being sold
 /// * `token_out` - The token being bought
@@ -237,27 +244,21 @@ pub(crate) fn get_sqrt_price_limit(
 ) -> Result<U256, SimulationError> {
     let zero_for_one = token_in < token_out;
 
-    // Convert target pool price (token_out/token_in) to swap price (token_in/token_out)
-    // by flipping numerator and denominator
-    let swap_price_numerator = biguint_to_u256(&target_price.denominator);
-    let swap_price_denominator = biguint_to_u256(&target_price.numerator);
+    let numerator = biguint_to_u256(&target_price.numerator);
+    let denominator = biguint_to_u256(&target_price.denominator);
 
-    // Apply fee to the sell price (numerator) using integer division to match APEX behavior
-    // For Uniswap V3: adjusted_price = price * (1 - fee)
+    // Scale the amount_out side down by (1 - fee), matching `add_fee_markup`'s inverse.
     let fee_precision = U256::from_limbs([1_000_000, 0, 0, 0]);
-    let sell_price_after_fee =
-        safe_div_u256(swap_price_numerator * (fee_precision - fee_tier), fee_precision)?;
-    let buy_price = swap_price_denominator;
+    let numerator_after_fee = safe_div_u256(numerator * (fee_precision - fee_tier), fee_precision)?;
 
-    // Determine which price goes to which parameter based on swap direction
-    // For Uniswap V3, sqrt_price_x96 = sqrt(token1/token0) * 2^96
+    // sqrt_price_x96 = sqrt(token1/token0) * 2^96. target_price is token_out/token_in, which
+    // equals token1/token0 directly when selling token0 (zero_for_one), or its inverse otherwise.
     let (price_0, price_1) = if zero_for_one {
-        (sell_price_after_fee, buy_price)
+        (denominator, numerator_after_fee)
     } else {
-        (buy_price, sell_price_after_fee)
+        (numerator_after_fee, denominator)
     };
 
-    // Convert to sqrt price: sqrt(price_1 / price_0) * 2^96
     get_sqrt_price_q96(price_1, price_0)
 }
 
@@ -495,5 +496,52 @@ mod tests {
             true,
         );
         assert!(matches!(result, Err(SimulationError::FatalError(_))));
+    }
+
+    /// `spot_price()` marks the pool's raw price up by `1/(1-fee)` (`add_fee_markup`). A caller's
+    /// `target_price` is expressed in that same marked-up convention, so `get_sqrt_price_limit`
+    /// must scale it down by `(1-fee)` first — otherwise reading the swap result back through
+    /// `spot_price()` marks it up a second time and the swap lands on `target/(1-fee)^2` instead
+    /// of `target`.
+    #[rstest]
+    #[case::sell_token0(true, 500u32)]
+    #[case::sell_token1(false, 500u32)]
+    #[case::higher_fee(true, 3000u32)]
+    fn test_get_sqrt_price_limit_reproduces_target_through_fee_markup(
+        #[case] zero_for_one: bool,
+        #[case] fee_pips: u32,
+    ) {
+        use num_bigint::BigUint;
+
+        use crate::evm::protocol::utils::add_fee_markup;
+
+        let (token_in, token_out) = if zero_for_one {
+            (Bytes::from([0u8; 20]), Bytes::from([1u8; 20]))
+        } else {
+            (Bytes::from([1u8; 20]), Bytes::from([0u8; 20]))
+        };
+
+        // target_price as token_out/token_in, decimal-free (this function never touches decimals).
+        // Scaled to a realistic magnitude (real `Price`s are ~1e18+) so the integer division in
+        // the fee adjustment doesn't itself introduce truncation error into the assertion.
+        let scale = BigUint::from(10u64).pow(15);
+        let target_price =
+            Price::new(BigUint::from(998u64) * &scale, BigUint::from(1000u64) * &scale);
+        let target_f64 = 998.0 / 1000.0;
+
+        let sqrt_price_limit =
+            get_sqrt_price_limit(&token_in, &token_out, &target_price, U256::from(fee_pips))
+                .expect("should compute a sqrt price limit");
+
+        // Mirror how spot_price() reads a raw sqrt price back into token_out/token_in terms.
+        let raw_price_token1_per_token0 = sqrt_price_q96_to_f64(sqrt_price_limit, 0, 0).unwrap();
+        let raw_price = if zero_for_one {
+            raw_price_token1_per_token0
+        } else {
+            1.0 / raw_price_token1_per_token0
+        };
+        let reported_spot_price = add_fee_markup(raw_price, fee_pips as f64 / 1_000_000.0);
+
+        assert_ulps_eq!(reported_spot_price, target_f64, epsilon = 1e-9);
     }
 }
