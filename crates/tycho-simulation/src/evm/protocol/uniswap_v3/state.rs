@@ -1310,30 +1310,46 @@ mod tests {
             100,
         );
 
-        // Test 1: Price just above spot price, too little to cover fees
+        // Test 1: Target just below spot (~one fee-width away, 0.05%). A CLMM has no inherent
+        // minimum tradeable price delta, so this is a small-but-valid trade, not an error: it
+        // should succeed and land the resulting spot price close to the target.
         let target_price =
             Price::new(1_999_750u64.to_biguint().unwrap(), 1_000_250u64.to_biguint().unwrap());
+        let target_price_f64 = 1_999_750f64 / 1_000_250f64;
 
-        let result = pool.query_pool_swap(&QueryPoolSwapParams::new(
-            token_x.clone(),
-            token_y.clone(),
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0f64,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        ));
-        assert!(result.is_err(), "Should return error when target price is unreachable");
+        let trade = pool
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                token_x.clone(),
+                token_y.clone(),
+                SwapConstraint::PoolTargetPrice {
+                    target: target_price,
+                    tolerance: 0f64,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .expect("swap_to_price failed for a target just below spot");
+        assert!(*trade.amount_out() > BigUint::ZERO, "Should produce a non-zero small trade");
+        let resulting_spot_price = trade
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("Failed to compute resulting spot price");
+        assert!(
+            (resulting_spot_price - target_price_f64).abs() < 1e-4,
+            "Resulting spot price {} should be close to target {}",
+            resulting_spot_price,
+            target_price_f64
+        );
 
         // Test 2: Price high enough to cover fees (0.1% higher)
         let target_price =
             Price::new(1_999_000u64.to_biguint().unwrap(), 1_001_000u64.to_biguint().unwrap());
+        let target_price_f64 = 1_999_000f64 / 1_001_000f64;
 
         let pool_swap = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_x,
-                token_y,
+                token_x.clone(),
+                token_y.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price,
                     tolerance: 0f64,
@@ -1344,11 +1360,24 @@ mod tests {
             .expect("swap_to_price failed");
 
         let expected_amount_out =
-            BigUint::from_str("7062236922008").expect("Failed to parse expected value");
+            BigUint::from_str("14135071621688").expect("Failed to parse expected value");
         assert_eq!(
             pool_swap.amount_out().clone(),
             expected_amount_out,
             "Expected amount out when price covers fees"
+        );
+
+        // Sanity check: the resulting spot price should land close to the requested target -
+        // this is the actual correctness property the fee-markup fix is about.
+        let resulting_spot_price = pool_swap
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("Failed to compute resulting spot price");
+        assert!(
+            (resulting_spot_price - target_price_f64).abs() < 1e-4,
+            "Resulting spot price {} should be close to target {}",
+            resulting_spot_price,
+            target_price_f64
         );
     }
 
