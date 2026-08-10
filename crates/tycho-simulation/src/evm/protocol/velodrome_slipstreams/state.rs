@@ -517,8 +517,11 @@ impl ProtocolSim for VelodromeSlipstreamsState {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use alloy::primitives::{Sign, I256, U256};
-    use tycho_common::simulation::errors::SimulationError;
+    use num_traits::ToPrimitive;
+    use tycho_common::{models::Chain, simulation::errors::SimulationError};
 
     use super::*;
     use crate::evm::protocol::utils::uniswap::{
@@ -528,6 +531,138 @@ mod tests {
             MIN_TICK,
         },
     };
+
+    // Real WBTC/WETH pool state, shared with the `uniswap_v3` agreement fixtures — same tick
+    // spacing (10) and fee (500 = 0.05%), since slipstreams' swap loop is a fork of v3's.
+    fn create_multi_tick_test_pool() -> VelodromeSlipstreamsState {
+        let sqrt_price = U256::from_str("28437325270877025820973479874632004").unwrap();
+        let ticks = vec![
+            TickInfo::new(255760, 1_759_015_528_199_933).unwrap(),
+            TickInfo::new(255770, 6_393_138_051_835_308).unwrap(),
+            TickInfo::new(255780, 228_206_673_808_681).unwrap(),
+            TickInfo::new(255820, 1_319_490_609_195_820).unwrap(),
+            TickInfo::new(255830, 678_916_926_147_901).unwrap(),
+            TickInfo::new(255840, 12_208_947_683_433_103).unwrap(),
+            TickInfo::new(255850, 1_177_970_713_095_301).unwrap(),
+            TickInfo::new(255860, 8_752_304_680_520_407).unwrap(),
+            TickInfo::new(255880, 1_486_478_248_067_104).unwrap(),
+            TickInfo::new(255890, 1_878_744_276_123_248).unwrap(),
+            TickInfo::new(255900, 77_340_284_046_725_227).unwrap(),
+        ];
+        VelodromeSlipstreamsState::new(
+            377_952_820_878_029_838u128,
+            sqrt_price,
+            500,
+            0,
+            10,
+            255830,
+            ticks,
+        )
+        .expect("Failed to create pool")
+    }
+
+    fn wbtc() -> Token {
+        Token::new(
+            &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn weth() -> Token {
+        Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    /// Converts an f64 price (token_out/token_in) into the `Price` fraction `query_pool_swap`
+    /// expects, matching `crate::evm::query_pool_swap`'s own decimal-adjustment convention.
+    fn to_price(
+        price_f64: f64,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> tycho_common::simulation::protocol_sim::Price {
+        let decimal_adj = 10_f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
+        let price_no_decimals = price_f64 / decimal_adj;
+        tycho_common::simulation::protocol_sim::Price::new(
+            BigUint::from((price_no_decimals * 1e18) as u128),
+            BigUint::from(10u128.pow(18)),
+        )
+    }
+
+    /// The closed form (`PoolTargetPrice` arm of `query_pool_swap`) and the generic Brent search
+    /// it replaced must agree: both solve "how much do I trade to reach this target price" for
+    /// the same pool. Grid of targets below spot, both swap directions, real multi-tick pool so
+    /// the swap actually crosses ticks.
+    #[test]
+    fn test_pool_target_price_closed_form_matches_generic_search() {
+        let pool = create_multi_tick_test_pool();
+        let tolerance = 0.0001; // 1 bps, a realistic caller tolerance
+
+        for (token_in, token_out) in [(wbtc(), weth()), (weth(), wbtc())] {
+            let spot = pool
+                .spot_price(&token_in, &token_out)
+                .expect("spot price should be computable");
+
+            for multiplier in [0.999, 0.99, 0.95, 0.90] {
+                let target_f64 = spot * multiplier;
+                let target = to_price(target_f64, &token_in, &token_out);
+
+                let params = QueryPoolSwapParams::new(
+                    token_in.clone(),
+                    token_out.clone(),
+                    SwapConstraint::PoolTargetPrice {
+                        target,
+                        tolerance,
+                        min_amount_in: None,
+                        max_amount_in: None,
+                    },
+                );
+
+                let closed_form = pool
+                    .query_pool_swap(&params)
+                    .expect("closed form should succeed");
+                let generic = crate::evm::query_pool_swap::query_pool_swap(&pool, &params)
+                    .expect("generic search should succeed");
+
+                let closed_form_in = closed_form
+                    .amount_in()
+                    .to_f64()
+                    .unwrap();
+                let generic_in = generic.amount_in().to_f64().unwrap();
+                let relative_diff = (closed_form_in - generic_in).abs() / closed_form_in.max(1.0);
+
+                assert!(
+                    relative_diff < 0.001,
+                    "direction {}->{}, multiplier {multiplier}: amount_in mismatch, \
+                     closed_form={closed_form_in}, generic={generic_in}, \
+                     relative_diff={relative_diff}",
+                    token_in.symbol,
+                    token_out.symbol,
+                );
+
+                let closed_form_spot = closed_form
+                    .new_state()
+                    .spot_price(&token_in, &token_out)
+                    .unwrap();
+                let error_bps = ((closed_form_spot - target_f64) / target_f64).abs() * 10_000.0;
+                assert!(
+                    error_bps < 1.0,
+                    "closed form should land almost exactly on target: got {error_bps}bps error"
+                );
+            }
+        }
+    }
 
     fn create_basic_test_pool() -> VelodromeSlipstreamsState {
         let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
