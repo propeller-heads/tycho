@@ -96,9 +96,18 @@ impl BlockHistory {
                     .iter()
                     .find(|b| b.hash == current_hash)
                     .or_else(|| {
-                        candidates
+                        let fallback = candidates
                             .iter()
-                            .find(|b| b.is_partial())
+                            .find(|b| b.is_partial());
+                        if let Some(b) = fallback {
+                            debug!(
+                                number = b.number,
+                                hash = ?b.hash,
+                                expected_parent = ?current_hash,
+                                "HistoryStitchHeightFallback"
+                            );
+                        }
+                        fallback
                     });
 
                 let Some(chosen) = chosen else { break };
@@ -149,21 +158,26 @@ impl BlockHistory {
                             .back()
                             .ok_or(BlockHistoryError::RevertPositionNotFound)?;
 
-                        if head.hash == block.parent_hash ||
-                            (!hash_findable &&
-                                head.is_partial() &&
-                                head.number + 1 == block.number)
-                        {
+                        if head.hash == block.parent_hash {
                             break;
-                        } else {
-                            let reverted_block = self
-                                .history
-                                .pop_back()
-                                .ok_or(BlockHistoryError::RevertPositionNotFound)?;
-                            // record reverted blocks in cache
-                            self.reverts
-                                .push(reverted_block.hash.clone(), reverted_block);
                         }
+                        if !hash_findable && head.is_partial() && head.number + 1 == block.number {
+                            debug!(
+                                revert_number = block.number,
+                                revert_parent = ?block.parent_hash,
+                                fork_number = head.number,
+                                fork_hash = ?head.hash,
+                                "RevertForkPointHeightFallback"
+                            );
+                            break;
+                        }
+                        let reverted_block = self
+                            .history
+                            .pop_back()
+                            .ok_or(BlockHistoryError::RevertPositionNotFound)?;
+                        // record reverted blocks in cache
+                        self.reverts
+                            .push(reverted_block.hash.clone(), reverted_block);
                     }
                 }
                 // This mirrors the drain loop's two exit conditions above, so it can never fail
@@ -302,6 +316,11 @@ impl BlockHistory {
                 // A revert to a block retained only as a mid-block partial: the revert carries
                 // the sealed hash, which an ephemeral partial hash can never match. Same height
                 // means same canonical block, so this is the expected forward update.
+                debug!(
+                    number = block.number,
+                    hash = ?block.hash,
+                    "RevertClassifiedByPartialHeight"
+                );
                 BlockPosition::NextExpected
             } else if block.is_partial() && !block.revert {
                 // A non-revert partial block at or below the tip whose hash is not in history is a
