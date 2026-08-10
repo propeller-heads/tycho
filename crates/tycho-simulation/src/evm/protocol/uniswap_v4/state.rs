@@ -2387,8 +2387,8 @@ mod tests {
 
         let pool_swap = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_x,
-                token_y,
+                token_x.clone(),
+                token_y.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price,
                     tolerance: 0f64,
@@ -2399,8 +2399,8 @@ mod tests {
             .expect("swap_to_price failed");
 
         // Should match V3's output exactly with same fees (0.3%)
-        let expected_amount_in = BigUint::from_str("246739021727519745").unwrap();
-        let expected_amount_out = BigUint::from_str("490291909043340795").unwrap();
+        let expected_amount_in = BigUint::from_str("460892043249408649").unwrap();
+        let expected_amount_out = BigUint::from_str("913085102028139287").unwrap();
 
         assert_eq!(
             *pool_swap.amount_in(),
@@ -2411,6 +2411,17 @@ mod tests {
             *pool_swap.amount_out(),
             expected_amount_out,
             "amount_out should match expected value"
+        );
+
+        // The whole point of the closed form: the resulting spot price should land exactly on
+        // target (2_000_000/1_010_000), not merely close to it.
+        let new_spot = pool_swap
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("spot price should be computable");
+        assert!(
+            (new_spot - 2_000_000f64 / 1_010_000f64).abs() < 1e-9,
+            "resulting spot price {new_spot} should land on target"
         );
     }
 
