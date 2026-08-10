@@ -10,12 +10,16 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
 
 use crate::evm::protocol::{
+    clmm::clmm_swap_to_price,
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::u256_to_biguint,
     utils::{
@@ -629,11 +633,38 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         }
     }
 
-    fn query_pool_swap(
-        &self,
-        params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
-    ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        match params.swap_constraint() {
+            // The target is a pool price, so it converts into a `sqrtPriceLimit` and one bounded
+            // swap answers it — the same closed form UniswapV3 uses, which this pool's swap loop
+            // is a fork of. The dynamic fee is sampled once here exactly as `swap` samples it, so
+            // both see the same fee for the whole trade.
+            SwapConstraint::PoolTargetPrice { target, .. } => {
+                let (amount_in, amount_out, swap_result) = clmm_swap_to_price(
+                    self.sqrt_price,
+                    &params.token_in().address,
+                    &params.token_out().address,
+                    target,
+                    self.get_fee()?,
+                    Sign::Positive,
+                    |zero_for_one, amount_specified, sqrt_price_limit| {
+                        self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))
+                    },
+                )?;
+
+                let mut new_state = self.clone();
+                new_state.liquidity = swap_result.liquidity;
+                new_state.tick = swap_result.tick;
+                new_state.sqrt_price = swap_result.sqrt_price;
+
+                Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
+            }
+            // An average execution price does not reduce to a price bound, so it keeps taking the
+            // generic search.
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+        }
     }
 }
 
