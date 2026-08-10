@@ -63,12 +63,25 @@ RECLAMM_IMMUTABLE = (
     "((address[],uint256[],bool,bool,uint256,uint256,uint256,uint256,uint256,uint256,uint256,"
     "uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))"
 )
+QUANTAMM_DYNAMIC = (
+    "getQuantAMMWeightedPoolDynamicData()"
+    "((uint256[],uint256[],uint256,bool,bool,bool,int256[],int256[],uint40,uint40))"
+)
+QUANTAMM_IMMUTABLE = (
+    "getQuantAMMWeightedPoolImmutableData()"
+    "((address[],uint256,uint256,int256[][],uint64[],uint64,uint64,uint64,uint256))"
+)
+# QuantAMM reports no decimal scaling factors of its own, so they come from the Vault.
+POOL_TOKEN_RATES = "getPoolTokenRates(address)(uint256[],uint256[])"
 
 # Swap sizes as basis points of the input token's raw balance: 0.01% up to half the pool.
 SWAP_SIZES_BPS = (1, 10, 100, 1000, 5000)
 # reCLAMM concentrates liquidity in a narrow range, so anything but a small swap leaves it and
 # reverts on chain. Probe finer sizes there instead.
 RECLAMM_SWAP_SIZES_BPS = (1, 2, 5, 10, 25, 50)
+# QuantAMM rejects any swap above its configured `maxTradeSizeRatio` of either reserve, which is
+# well under half the pool, so stay below the smallest ratio in use (10%).
+QUANTAMM_SWAP_SIZES_BPS = (1, 10, 100, 500, 900)
 
 WEIGHTED_POOLS = (
     "0x1846c6cbe0d433e152fa358e5ff27968e18bce7c",
@@ -100,6 +113,9 @@ STABLE_POOLS = (
     "0x89BB794097234E5E930446C0CeC0ea66b35D7570",
     "0x5Dd88b3AA3143173eb26552923922bDf33f50949",
 )
+# QuantAMM interpolates its weights from `lastUpdateTime` towards `lastInteropTime`, so like
+# reCLAMM its quotes are only reproducible together with the block's timestamp.
+QUANTAMM_POOLS = ("0x6b61d8680C4F9E560c8306807908553f95c749C5",)
 
 
 def call(rpc: str, block: str, *args: str, sender: str | None = None):
@@ -136,12 +152,20 @@ def dec(value) -> str:
 def fetch_pool(rpc: str, block: str, pool: str, kind: str):
     info = call(rpc, block, VAULT, POOL_TOKEN_INFO, pool)
     config = call(rpc, block, VAULT, POOL_CONFIG, pool)
+    rates = None
     if kind == "WEIGHTED":
         dynamic = call(rpc, block, pool, WEIGHTED_DYNAMIC)
         immutable = call(rpc, block, pool, WEIGHTED_IMMUTABLE)
     elif kind == "RECLAMM":
         dynamic = call(rpc, block, pool, RECLAMM_DYNAMIC)
         immutable = call(rpc, block, pool, RECLAMM_IMMUTABLE)
+    elif kind == "QUANT_AMM_WEIGHTED":
+        dynamic = call(rpc, block, pool, QUANTAMM_DYNAMIC)
+        immutable = call(rpc, block, pool, QUANTAMM_IMMUTABLE)
+        rates = call(rpc, block, VAULT, POOL_TOKEN_RATES, pool)
+        if not rates:
+            print(f"skipping {pool}: getPoolTokenRates reverted", file=sys.stderr)
+            return None
     else:
         dynamic = call(rpc, block, pool, STABLE_DYNAMIC)
         immutable = call(rpc, block, pool, STABLE_IMMUTABLE)
@@ -156,16 +180,27 @@ def fetch_pool(rpc: str, block: str, pool: str, kind: str):
         print(f"skipping {pool}: uninitialized (a balance is zero)", file=sys.stderr)
         return None
 
+    # QuantAMM's getters carry neither the scaling factors nor the swap fee: both come from the
+    # Vault instead, and its `totalSupply` sits one field earlier than in the other families.
+    if kind == "QUANT_AMM_WEIGHTED":
+        scaling_factors = rates[0]
+        swap_fee = config[1]
+        total_supply = dynamic[2]
+    else:
+        scaling_factors = immutable[1]
+        swap_fee = dynamic[2]
+        total_supply = dynamic[3]
+
     state = {
         "pool_address": pool.lower(),
         "pool_type": kind,
         "tokens": [token.lower() for token in tokens],
-        "scaling_factors": [dec(factor) for factor in immutable[1]],
+        "scaling_factors": [dec(factor) for factor in scaling_factors],
         "token_rates": [dec(rate) for rate in dynamic[1]],
         "balances_live_scaled_18": [dec(balance) for balance in dynamic[0]],
-        "swap_fee": dec(dynamic[2]),
+        "swap_fee": dec(swap_fee),
         "aggregate_swap_fee": dec(config[2]),
-        "total_supply": dec(dynamic[3]),
+        "total_supply": dec(total_supply),
         "supports_unbalanced_liquidity": not bool(config[0][0]),
         "hook_type": None,
     }
@@ -180,11 +215,24 @@ def fetch_pool(rpc: str, block: str, pool: str, kind: str):
         state["end_fourth_root_price_ratio"] = dec(dynamic[12])
         state["price_ratio_update_start_time"] = dec(dynamic[13])
         state["price_ratio_update_end_time"] = dec(dynamic[14])
+    elif kind == "QUANT_AMM_WEIGHTED":
+        # Both arrays hold four weights followed by four multipliers, padded with zeros; the maths
+        # slices them by token count, so they are recorded exactly as the getter reports them.
+        state["first_four_weights_and_multipliers"] = [dec(w) for w in dynamic[6]]
+        state["second_four_weights_and_multipliers"] = [dec(w) for w in dynamic[7]]
+        state["last_update_time"] = dec(dynamic[8])
+        state["last_interop_time"] = dec(dynamic[9])
+        state["max_trade_size_ratio"] = dec(immutable[8])
     else:
         state["amp"] = dec(dynamic[5])
 
     swaps = []
-    sizes = RECLAMM_SWAP_SIZES_BPS if kind == "RECLAMM" else SWAP_SIZES_BPS
+    if kind == "RECLAMM":
+        sizes = RECLAMM_SWAP_SIZES_BPS
+    elif kind == "QUANT_AMM_WEIGHTED":
+        sizes = QUANTAMM_SWAP_SIZES_BPS
+    else:
+        sizes = SWAP_SIZES_BPS
     for bps in sizes:
         for token_in_index, token_out_index in ((0, 1), (1, 0)):
             amount = balances_raw[token_in_index] * bps // 10_000
@@ -226,6 +274,7 @@ def main() -> int:
     pools = [(pool, "WEIGHTED") for pool in WEIGHTED_POOLS]
     pools += [(pool, "STABLE") for pool in STABLE_POOLS]
     pools += [(pool, "RECLAMM") for pool in RECLAMM_POOLS]
+    pools += [(pool, "QUANT_AMM_WEIGHTED") for pool in QUANTAMM_POOLS]
 
     entries = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool_executor:

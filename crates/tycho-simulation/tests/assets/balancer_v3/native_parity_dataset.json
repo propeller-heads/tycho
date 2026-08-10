@@ -1317,6 +1317,104 @@
           "token_out": "0x77146784315ba81904d654466968e3a7c196d1f3"
         }
       ]
+    },
+    {
+      "state": {
+        "aggregate_swap_fee": "250000000000000000",
+        "balances_live_scaled_18": [
+          "51491810000000000",
+          "10681463122801079617",
+          "2310623533000000000000"
+        ],
+        "first_four_weights_and_multipliers": [
+          "30037887000000000",
+          "932432790000000000",
+          "37526395000000000",
+          "872000000000",
+          "-1104000000000",
+          "231000000000",
+          "0",
+          "0"
+        ],
+        "hook_type": null,
+        "last_interop_time": "1786618858",
+        "last_update_time": "1785801623",
+        "max_trade_size_ratio": "100000000000000000",
+        "pool_address": "0x6b61d8680c4f9e560c8306807908553f95c749c5",
+        "pool_type": "QUANT_AMM_WEIGHTED",
+        "scaling_factors": [
+          "10000000000",
+          "1",
+          "1000000000000"
+        ],
+        "second_four_weights_and_multipliers": [
+          "0",
+          "0",
+          "0",
+          "0",
+          "0",
+          "0",
+          "0",
+          "0"
+        ],
+        "supports_unbalanced_liquidity": true,
+        "swap_fee": "3000000000000000",
+        "token_rates": [
+          "1000000000000000000",
+          "1000000000000000000",
+          "1000000000000000000"
+        ],
+        "tokens": [
+          "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "0x45804880de22913dafe09f4980848ece6ecbaf78",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ],
+        "total_supply": "3303805854317204646"
+      },
+      "swaps": [
+        {
+          "amount": "514",
+          "chain": "81335500382421",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x45804880de22913dafe09f4980848ece6ecbaf78"
+        },
+        {
+          "amount": "1068146312280107",
+          "chain": "6704",
+          "token_in": "0x45804880de22913dafe09f4980848ece6ecbaf78",
+          "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+        },
+        {
+          "amount": "5149",
+          "chain": "814385860902369",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x45804880de22913dafe09f4980848ece6ecbaf78"
+        },
+        {
+          "amount": "10681463122801079",
+          "chain": "66625",
+          "token_in": "0x45804880de22913dafe09f4980848ece6ecbaf78",
+          "token_out": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+        },
+        {
+          "amount": "51491",
+          "chain": "8104958762525482",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x45804880de22913dafe09f4980848ece6ecbaf78"
+        },
+        {
+          "amount": "257459",
+          "chain": "39685685121592592",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x45804880de22913dafe09f4980848ece6ecbaf78"
+        },
+        {
+          "amount": "463426",
+          "chain": "70000423591114070",
+          "token_in": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+          "token_out": "0x45804880de22913dafe09f4980848ece6ecbaf78"
+        }
+      ]
     }
   ]
 }

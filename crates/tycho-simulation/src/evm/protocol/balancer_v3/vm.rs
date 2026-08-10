@@ -17,6 +17,7 @@ use alloy::{
 use balancer_maths_rust::{
     common::types::{BasePoolState, PoolState},
     pools::{
+        quantamm::quantamm_data::{QuantAmmImmutable, QuantAmmMutable, QuantAmmState},
         reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
         stable::stable_data::{StableMutable, StableState},
         weighted::WeightedState,
@@ -143,6 +144,33 @@ sol! {
     }
 
     #[allow(missing_docs)]
+    struct QuantAmmPoolDynamicData {
+        uint256[] balancesLiveScaled18;
+        uint256[] tokenRates;
+        uint256 totalSupply;
+        bool isPoolInitialized;
+        bool isPoolPaused;
+        bool isPoolInRecoveryMode;
+        int256[] firstFourWeightsAndMultipliers;
+        int256[] secondFourWeightsAndMultipliers;
+        uint40 lastUpdateTime;
+        uint40 lastInteropTime;
+    }
+
+    #[allow(missing_docs)]
+    struct QuantAmmPoolImmutableData {
+        address[] tokens;
+        uint256 oracleStalenessThreshold;
+        uint256 poolRegistry;
+        int256[][] ruleParameters;
+        uint64[] lambda;
+        uint64 epsilonMax;
+        uint64 absoluteWeightGuardRail;
+        uint64 updateInterval;
+        uint256 maxTradeSizeRatio;
+    }
+
+    #[allow(missing_docs)]
     interface IBalancerV3Pool {
         function getWeightedPoolDynamicData() external view returns (WeightedPoolDynamicData memory);
         function getWeightedPoolImmutableData() external view returns (WeightedPoolImmutableData memory);
@@ -151,6 +179,8 @@ sol! {
         function getStablePoolImmutableData() external view returns (StablePoolImmutableData memory);
         function getReClammPoolDynamicData() external view returns (ReClammPoolDynamicData memory);
         function getReClammPoolImmutableData() external view returns (ReClammPoolImmutableData memory);
+        function getQuantAMMWeightedPoolDynamicData() external view returns (QuantAmmPoolDynamicData memory);
+        function getQuantAMMWeightedPoolImmutableData() external view returns (QuantAmmPoolImmutableData memory);
     }
 
     #[allow(missing_docs)]
@@ -172,6 +202,7 @@ sol! {
     interface IBalancerV3Vault {
         function getPoolConfig(address pool) external view returns (PoolConfig memory);
         function getHooksConfig(address pool) external view returns (HooksConfig memory);
+        function getPoolTokenRates(address pool) external view returns (uint256[] memory decimalScalingFactors, uint256[] memory tokenRates);
     }
 }
 
@@ -211,12 +242,14 @@ pub enum BalancerPoolType {
     Stable,
     /// AutoRange pools, whose price range shifts with time.
     Reclamm,
+    /// Weighted pools whose weights are interpolated over time by an off-chain rule engine.
+    QuantAmm,
 }
 
 impl BalancerPoolType {
     /// Every family this module handles. Kept next to [`Self::from_factory_marker`] so adding a
     /// variant means touching both.
-    const ALL: [Self; 3] = [Self::Weighted, Self::Stable, Self::Reclamm];
+    const ALL: [Self; 4] = [Self::Weighted, Self::Stable, Self::Reclamm, Self::QuantAmm];
 
     /// Resolves the `pool_type` attribute value the Substreams package writes into a family.
     fn from_factory_marker(marker: &str) -> Option<Self> {
@@ -231,6 +264,7 @@ impl BalancerPoolType {
             Self::Weighted => "WeightedPoolFactory",
             Self::Stable => "StablePoolFactory",
             Self::Reclamm => "ReClammPoolFactory",
+            Self::QuantAmm => "QuantAMMWeightedPoolFactory",
         }
     }
 
@@ -246,6 +280,7 @@ impl BalancerPoolType {
             Self::Weighted => "WEIGHTED",
             Self::Stable => "STABLE",
             Self::Reclamm => "RECLAMM_V2",
+            Self::QuantAmm => "QUANT_AMM_WEIGHTED",
         }
     }
 }
@@ -316,9 +351,18 @@ where
             .is_ok()
         {
             BalancerPoolType::Reclamm
+        } else if call::<D, _, _>(
+            engine,
+            pool,
+            IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {},
+        )
+        .is_ok()
+        {
+            BalancerPoolType::QuantAmm
         } else {
             return Err(SimulationError::FatalError(format!(
-                "balancer_v3 pool {pool} exposes none of the weighted, stable or reCLAMM getters"
+                "balancer_v3 pool {pool} exposes none of the weighted, stable, reCLAMM or \
+                 QuantAMM getters"
             )));
         };
     Ok(PoolTypeAttribute { pool_type: probed, version: None })
@@ -406,6 +450,34 @@ where
             Ok(PoolState::Stable(StableState {
                 base,
                 mutable: StableMutable { amp: dynamic.amplificationParameter },
+            }))
+        }
+        BalancerPoolType::QuantAmm => {
+            let dynamic: QuantAmmPoolDynamicData =
+                call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
+            let immutable: QuantAmmPoolImmutableData =
+                call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {})?;
+            // Unlike every other family, QuantAMM's own getters report no decimal scaling factors,
+            // so they have to come from the Vault.
+            let rates: IBalancerV3Vault::getPoolTokenRatesReturn =
+                call(engine, vault, IBalancerV3Vault::getPoolTokenRatesCall { pool: *pool })?;
+            let mutable = quantamm_mutable(pool, &dynamic, block_timestamp)?;
+            let base = base_state(
+                pool,
+                pool_type,
+                &immutable.tokens,
+                rates.decimalScalingFactors,
+                dynamic.tokenRates,
+                dynamic.balancesLiveScaled18,
+                config.staticSwapFeePercentage,
+                config.aggregateSwapFeePercentage,
+                dynamic.totalSupply,
+                &config.liquidityManagement,
+            );
+            Ok(PoolState::QuantAmm(QuantAmmState {
+                base,
+                mutable,
+                immutable: QuantAmmImmutable { max_trade_size_ratio: immutable.maxTradeSizeRatio },
             }))
         }
         BalancerPoolType::Reclamm => {
@@ -559,7 +631,64 @@ where
                 },
             }))
         }
+        BalancerPoolType::QuantAmm => {
+            let PoolState::QuantAmm(prev) = previous else { return Err(mismatch()) };
+            let dynamic: QuantAmmPoolDynamicData =
+                call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
+            // The weights and their interpolation window are re-read rather than kept: the pool's
+            // rule engine rewrites them whenever it pushes a weight update.
+            let mutable = quantamm_mutable(pool, &dynamic, block_timestamp)?;
+            Ok(PoolState::QuantAmm(QuantAmmState {
+                base: refreshed_base(
+                    &prev.base,
+                    dynamic.tokenRates,
+                    dynamic.balancesLiveScaled18,
+                    config.staticSwapFeePercentage,
+                    config.aggregateSwapFeePercentage,
+                    dynamic.totalSupply,
+                ),
+                mutable,
+                immutable: prev.immutable.clone(),
+            }))
+        }
     }
+}
+
+/// Assembles the time-dependent half of a QuantAMM pool's state.
+///
+/// The weights the maths uses are interpolated from `last_update_time` towards `last_interop_time`,
+/// so a quote depends on the block being quoted as well as on stored state. The library computes
+/// `min(current_timestamp, last_interop_time) - last_update_time` with unchecked arithmetic, so a
+/// block that predates the pool's last weight update is rejected here rather than left to
+/// underflow inside it.
+fn quantamm_mutable(
+    pool: &AlloyAddress,
+    dynamic: &QuantAmmPoolDynamicData,
+    block_timestamp: u64,
+) -> Result<QuantAmmMutable, SimulationError> {
+    let last_update_time = U256::from(dynamic.lastUpdateTime.to::<u64>());
+    let last_interop_time = U256::from(dynamic.lastInteropTime.to::<u64>());
+    let current_timestamp = U256::from(block_timestamp);
+
+    let interpolation_time = current_timestamp.min(last_interop_time);
+    if interpolation_time < last_update_time {
+        return Err(SimulationError::RecoverableError(format!(
+            "balancer_v3 QuantAMM pool {pool} was last updated at {last_update_time}, after the \
+             {interpolation_time} its weights would be interpolated at"
+        )));
+    }
+
+    Ok(QuantAmmMutable {
+        first_four_weights_and_multipliers: dynamic
+            .firstFourWeightsAndMultipliers
+            .clone(),
+        second_four_weights_and_multipliers: dynamic
+            .secondFourWeightsAndMultipliers
+            .clone(),
+        last_update_time,
+        last_interop_time,
+        current_timestamp,
+    })
 }
 
 /// Overwrites the storage-derived fields of `previous` with freshly read values.
@@ -664,9 +793,11 @@ mod tests {
         assert_eq!(BalancerPoolType::Weighted.factory_marker(), "WeightedPoolFactory");
         assert_eq!(BalancerPoolType::Stable.factory_marker(), "StablePoolFactory");
         assert_eq!(BalancerPoolType::Reclamm.factory_marker(), "ReClammPoolFactory");
+        assert_eq!(BalancerPoolType::QuantAmm.factory_marker(), "QuantAMMWeightedPoolFactory");
         assert_eq!(BalancerPoolType::Weighted.maths_marker(), "WEIGHTED");
         assert_eq!(BalancerPoolType::Stable.maths_marker(), "STABLE");
         assert_eq!(BalancerPoolType::Reclamm.maths_marker(), "RECLAMM_V2");
+        assert_eq!(BalancerPoolType::QuantAmm.maths_marker(), "QUANT_AMM_WEIGHTED");
     }
 
     #[test]
@@ -687,7 +818,7 @@ mod tests {
 
     #[test]
     fn rejects_families_the_maths_cannot_price() {
-        for marker in ["GyroECLPPoolFactory", "QuantAMMWeightedPoolFactory", "LBPoolFactory"] {
+        for marker in ["GyroECLPPoolFactory", "LBPoolFactory"] {
             assert_eq!(BalancerPoolType::from_factory_marker(marker), None);
         }
     }

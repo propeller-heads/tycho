@@ -10,10 +10,11 @@
 //! Regenerate the dataset with `tests/assets/balancer_v3/fetch_native_parity_dataset.py`.
 use std::{fs, path::PathBuf, str::FromStr};
 
-use alloy::primitives::U256;
+use alloy::primitives::{I256, U256};
 use balancer_maths_rust::{
     common::types::{BasePoolState, PoolState},
     pools::{
+        quantamm::quantamm_data::{QuantAmmImmutable, QuantAmmMutable, QuantAmmState},
         reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
         stable::stable_data::{StableMutable, StableState},
         weighted::WeightedState,
@@ -57,6 +58,21 @@ fn uint_list(value: &Value, field: &str) -> Vec<U256> {
                 .expect("decimal string")
                 .parse()
                 .expect("valid U256")
+        })
+        .collect()
+}
+
+/// Reads a list of signed decimal strings, as QuantAMM's weight multipliers can be negative.
+fn int_list(value: &Value, field: &str) -> Vec<I256> {
+    value[field]
+        .as_array()
+        .unwrap_or_else(|| panic!("`{field}` must be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .expect("decimal string")
+                .parse()
+                .expect("valid I256")
         })
         .collect()
 }
@@ -111,6 +127,28 @@ fn pool_state(state: &Value, timestamp: u64) -> (BalancerPoolType, PoolState) {
             PoolState::Stable(StableState {
                 base,
                 mutable: StableMutable { amp: uint(state, "amp") },
+            }),
+        ),
+        "QUANT_AMM_WEIGHTED" => (
+            BalancerPoolType::QuantAmm,
+            PoolState::QuantAmm(QuantAmmState {
+                base,
+                mutable: QuantAmmMutable {
+                    first_four_weights_and_multipliers: int_list(
+                        state,
+                        "first_four_weights_and_multipliers",
+                    ),
+                    second_four_weights_and_multipliers: int_list(
+                        state,
+                        "second_four_weights_and_multipliers",
+                    ),
+                    last_update_time: uint(state, "last_update_time"),
+                    last_interop_time: uint(state, "last_interop_time"),
+                    current_timestamp: U256::from(timestamp),
+                },
+                immutable: QuantAmmImmutable {
+                    max_trade_size_ratio: uint(state, "max_trade_size_ratio"),
+                },
             }),
         ),
         "RECLAMM" => (
@@ -224,7 +262,7 @@ fn pool_type_attribute_without_a_generation_still_resolves() {
 
 #[test]
 fn pool_type_attribute_rejects_unquotable_and_malformed_values() {
-    for marker in ["GyroECLPPoolFactory@v1", "QuantAMMWeightedPoolFactory", "@v1", ""] {
+    for marker in ["GyroECLPPoolFactory@v1", "LBPoolFactory", "@v1", ""] {
         assert!(
             PoolTypeAttribute::parse(marker).is_err(),
             "`{marker}` must not resolve to a pool family"
@@ -408,6 +446,27 @@ fn limits_stay_inside_what_the_vault_enforces() {
                         max_out <= cap,
                         "reCLAMM pool {} pays out {max_out} of token {index_out}, above the \
                          {cap} its maths accepts",
+                        pool_id(entry)
+                    );
+                }
+                "QUANT_AMM_WEIGHTED" => {
+                    // `onSwap` caps both sides of the trade at the pool's own ratio, so neither
+                    // the reported input nor the output it buys may cross it.
+                    let ratio = uint(&entry["state"], "max_trade_size_ratio");
+                    let cap = |reserve: U256| {
+                        u256_to_biguint(reserve) * u256_to_biguint(ratio) /
+                            u256_to_biguint(uint_wad())
+                    };
+                    assert!(
+                        max_in <= cap(raw_reserves[index_in]),
+                        "QuantAMM pool {} offers {max_in} of token {index_in}, above the share of \
+                         the reserve its maxTradeSizeRatio allows",
+                        pool_id(entry)
+                    );
+                    assert!(
+                        max_out <= cap(raw_reserves[index_out]),
+                        "QuantAMM pool {} pays out {max_out} of token {index_out}, above the \
+                         share of the reserve its maxTradeSizeRatio allows",
                         pool_id(entry)
                     );
                 }

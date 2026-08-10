@@ -15,6 +15,7 @@ use balancer_maths_rust::{
         WAD as ONE_WAD_SCALED_18,
     },
     pools::{
+        quantamm::QuantAmmPool,
         reclammv2::{compute_current_virtual_balances, compute_in_given_out, ReClammV2Pool},
         stable::{self, StablePool},
         weighted::{WeightedPool, MAX_IN_RATIO},
@@ -182,6 +183,16 @@ impl BalancerV3State {
             PoolState::Weighted(state) => Ok(Box::new(WeightedPool::from(state.clone()))),
             PoolState::Stable(state) => Ok(Box::new(StablePool::new(state.mutable.clone()))),
             PoolState::ReClammV2(state) => Ok(Box::new(ReClammV2Pool::new(state.clone()))),
+            // Unlike the other families, building this resolves the pool's time-interpolated
+            // weights, which fails if the packed weight arrays are shorter than the token list.
+            PoolState::QuantAmm(state) => QuantAmmPool::new(state.clone())
+                .map(|pool| Box::new(pool) as Box<dyn PoolBase>)
+                .map_err(|e| {
+                    SimulationError::RecoverableError(format!(
+                        "balancer_v3 QuantAMM pool {} reports unusable weights: {e:?}",
+                        self.pool_address
+                    ))
+                }),
             other => Err(SimulationError::FatalError(format!(
                 "balancer_v3 pool {} holds unsupported state `{}`",
                 self.pool_address,
@@ -253,6 +264,15 @@ impl BalancerV3State {
                 self.weighted_max_swap_amount_in(index_in, index_out, state.weights())?
             }
             PoolState::Stable(_) => self.stable_max_swap_amount_in(index_in, index_out)?,
+            // QuantAMM is bounded in raw units rather than scaled-18 ones, so it returns straight
+            // away instead of falling through to the conversion below.
+            PoolState::QuantAmm(state) => {
+                return self.quantamm_max_swap_amount_in(
+                    index_in,
+                    index_out,
+                    &state.immutable.max_trade_size_ratio,
+                )
+            }
             PoolState::ReClammV2(state) => {
                 let max_out_scaled_18 = mul_down_fixed(&MAX_TOKEN_OUT_RATIO, &balances[index_out])
                     .map_err(maths_error)?;
@@ -300,6 +320,62 @@ impl BalancerV3State {
             &base.token_rates[index_in],
         )
         .map_err(maths_error)
+    }
+
+    /// Largest raw input a QuantAMM pool accepts, found by binary search over the Vault path.
+    ///
+    /// `onSwap` applies `maxTradeSizeRatio` to *both* sides of the trade, so the input reserve's
+    /// share of it is only an upper bound — on a pool whose weights are far apart, a permitted
+    /// input can still buy more of the output reserve than the same ratio allows. Inverting the
+    /// output bound in closed form would mean recomputing the pool's time-interpolated weights
+    /// here, duplicating logic that lives in `balancer_maths_rust` and would silently drift from
+    /// the quotes it produces; probing the real swap instead keeps the limit consistent with
+    /// [`Self::get_amount_out`] by construction. The predicate is monotonic in the input, so the
+    /// search converges on the largest amount the Vault accepts, and reports zero when it accepts
+    /// none.
+    fn quantamm_max_swap_amount_in(
+        &self,
+        index_in: usize,
+        index_out: usize,
+        max_trade_size_ratio: &U256,
+    ) -> Result<U256, SimulationError> {
+        let base = self.state.base();
+        let maths_error = |e: PoolError| {
+            SimulationError::FatalError(format!(
+                "balancer_v3 swap limit failed for pool {}: {e:?}",
+                self.pool_address
+            ))
+        };
+
+        let input_cap_scaled_18 =
+            mul_down_fixed(&base.balances_live_scaled_18[index_in], max_trade_size_ratio)
+                .map_err(maths_error)?;
+        let mut high = to_raw_undo_rate_round_down(
+            &input_cap_scaled_18,
+            &base.scaling_factors[index_in],
+            &base.token_rates[index_in],
+        )
+        .map_err(maths_error)?;
+
+        let (token_in, token_out) = (&self.tokens[index_in], &self.tokens[index_out]);
+        let accepted = |amount: &U256| {
+            self.vault_swap_exact_in(*amount, token_in, token_out)
+                .is_ok()
+        };
+        if accepted(&high) {
+            return Ok(high);
+        }
+
+        let mut low = U256::ZERO;
+        while high - low > U256::from(1) {
+            let mid = low + ((high - low) >> 1);
+            if accepted(&mid) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        Ok(low)
     }
 
     /// Caps a weighted-pool exact-in swap in scaled-18 terms, the way the Vault would reject it
@@ -526,6 +602,7 @@ impl BalancerV3State {
             PoolState::Weighted(state) => state.base.balances_live_scaled_18 = balances,
             PoolState::Stable(state) => state.base.balances_live_scaled_18 = balances,
             PoolState::ReClammV2(state) => state.base.balances_live_scaled_18 = balances,
+            PoolState::QuantAmm(state) => state.base.balances_live_scaled_18 = balances,
             _ => {}
         }
     }

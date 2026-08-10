@@ -87,6 +87,11 @@ pub struct DeploymentConfig {
     pub stable_factories: FactoryVersions,
     #[serde(default)]
     pub reclamm_factories: FactoryVersions,
+    /// QuantAMM weighted pool factories, keyed by version label. Unlike the other families these
+    /// are matched against the `factory` field of the Vault's `PoolRegistered` event rather than
+    /// the log emitter, because the factory's `create` parameters are too deeply nested to decode.
+    #[serde(default)]
+    pub quantamm_factories: FactoryVersions,
     #[serde(default)]
     pub skip_rate_provider_pools: bool,
 }
@@ -101,7 +106,8 @@ impl DeploymentConfig {
     pub fn has_no_factories(&self) -> bool {
         self.weighted_factories.is_empty() &&
             self.stable_factories.is_empty() &&
-            self.reclamm_factories.is_empty()
+            self.reclamm_factories.is_empty() &&
+            self.quantamm_factories.is_empty()
     }
 }
 
@@ -269,6 +275,13 @@ mod tests {
                 // reCLAMM is pinned to one generation: `balancer-maths-rust` implements the first
                 // generation separately, so only the newest may share this decoder.
                 assert_eq!(config.reclamm_factories.len(), 1, "{chain} {module} reclamm");
+                // QuantAMM has only ever been deployed to mainnet.
+                let expected_quantamm = usize::from(chain == "mainnet");
+                assert_eq!(
+                    config.quantamm_factories.len(),
+                    expected_quantamm,
+                    "{chain} {module} quantamm"
+                );
             }
         }
     }

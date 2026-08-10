@@ -94,7 +94,6 @@ tests:
           token_a_price_includes_rate: "0x00"
           token_b_price_includes_rate: "0x00"
         skip_simulation: false
-        skip_execution: true
         creation_tx: "0xb5aa9e7019fa807d8e41b00634a18d02d38a185a40ba3d09dc28c771488163c6"
 
   # The three generations added alongside the original December 2024 factories. Their pools are
@@ -151,3 +150,40 @@ tests:
           rate_providers: "0x5b22307830653630313365623535343064626638316531396662373636373463656335396232613234326134222c22307830393432356137633364323561306537343366353234326632373639663737366435623730383439225d"
         skip_simulation: true
         creation_tx: "0x08b69b2409fa1d919c5c502f35eefeea7323d1e17ccc04dd7b350aa442b994a9"
+
+  # QuantAMM pools are matched on the Vault's `PoolRegistered` event rather than their factory's
+  # `PoolCreated`, so this also covers that dispatch path.
+  - name: test_quantamm_pool_creation
+    start_block: 22428328
+    stop_block: 22428338
+    expected_components:
+      - id: "0x6b61d8680C4F9E560c8306807908553f95c749C5"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          - "0x45804880de22913dafe09f4980848ece6ecbaf78"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
+          fee: "0x470de4df820000"
+          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279407631"
+        # The pool is funded in a later block, so there is nothing to quote in this range.
+        skip_simulation: true
+        creation_tx: "0x28fe2c31a2b97f60874dfc458af6242b371828a2c9fe2c2fe0f2c7c90117204c"
+
+  # The same pool carried past the block that funds it (22428606), so the native decoder, its
+  # quotes and a router execution are all exercised rather than only component detection.
+  - name: test_quantamm_swap_wbtc_paxg_usdc
+    start_block: 22428333
+    stop_block: 22428616
+    expected_components:
+      - id: "0x6b61d8680C4F9E560c8306807908553f95c749C5"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          - "0x45804880de22913dafe09f4980848ece6ecbaf78"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
+          fee: "0x470de4df820000"
+          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279407631"
+        skip_simulation: false
+        creation_tx: "0x28fe2c31a2b97f60874dfc458af6242b371828a2c9fe2c2fe0f2c7c90117204c"

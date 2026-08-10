@@ -88,9 +88,13 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
         let state = vm::read_pool_state(&engine, &pool, &vault, factory.pool_type, block.timestamp)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
+        // Only the weighted family registers per-token minimum balances. QuantAMM shares
+        // `WeightedMath`'s curve but not that check — it bounds swaps by its own trade-size ratio.
         let min_token_balances = match factory.pool_type {
             vm::BalancerPoolType::Weighted => vm::read_weighted_min_token_balances(&engine, &pool),
-            vm::BalancerPoolType::Stable | vm::BalancerPoolType::Reclamm => Vec::new(),
+            vm::BalancerPoolType::Stable |
+            vm::BalancerPoolType::Reclamm |
+            vm::BalancerPoolType::QuantAmm => Vec::new(),
         };
 
         let tokens = state
