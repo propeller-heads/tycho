@@ -1038,8 +1038,13 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    // The `committed_oldest_buffered_no` case pins current behavior: the oldest buffered block
+    // reports `Committed` although it is still only buffered (the oldest buffered block is
+    // `db_committed + 1`). `services::state::window::DeltaWindow::commit_status` documents this
+    // off-by-one and deliberately diverges from it.
     #[rstest]
     #[case::committed_no(BlockNumberOrTimestamp::Number(0), CommitStatus::Committed)]
+    #[case::committed_oldest_no(BlockNumberOrTimestamp::Number(1), CommitStatus::Committed)]
     #[case::committed_ts(
         BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap()),
         CommitStatus::Committed

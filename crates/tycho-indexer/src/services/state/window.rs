@@ -2,26 +2,24 @@
 //!
 //! The window retains roughly the last `W` blocks of [`BlockAggregatedChanges`] instead of
 //! dropping blocks as soon as the database commits them. Blocks leave the window only through
-//! [`DeltaWindow::insert`], which folds each evicted block into a [`FoldSink`] first — eviction
-//! and fold are a single operation, so no block's deltas can be lost between the window and the
-//! long-lived store behind the sink.
+//! [`DeltaWindow::insert`], which folds each evicted block into a [`FoldSink`] first — a block is
+//! removed only after its fold succeeded, so no block's deltas can be lost between the window and
+//! the long-lived store behind the sink.
 //!
 //! Retention rule: a block is evictable only when its number is at or below
-//! `min(finalized, db_committed, tip - W, lowest_active_pin)`.
+//! `min(finalized, db_committed, tip - W, lowest_active_pin - 1)`, all subtractions saturating.
 //!
 //! - `finalized`: folded data must never be affected by a reorg; reverts purge unfolded window
 //!   blocks only.
 //! - `db_committed`: readers of the pending-deltas facade assume every uncommitted block is
 //!   buffered; the database fallback path assumes every below-floor block is in the database.
-//! - `tip - W`: the serving depth. `W = max(finality_horizon, max_version_age × blocks_per_min) +
-//!   margin` (~128 on Ethereum).
-//! - pins: an in-flight database fill pins the floor so the blocks it needs for top-up cannot be
-//!   evicted underneath it (see [`FloorPin`]).
+//! - `tip - W`: the serving depth. `W = max(finality horizon, maximum version age served from
+//!   memory) + margin` (~128 on Ethereum).
+//! - pins: an in-flight database fill pins the floor so the pinned block and everything above it
+//!   cannot be evicted underneath the fill (see [`FloorPin`]).
 
-// Not yet constructed by production code; wired into `PendingDeltas` in a follow-up. The
-// `unused_variables` allow covers parameters of the not-yet-implemented method bodies.
+// Not yet constructed by production code; wired into `PendingDeltas` in a follow-up.
 #![allow(dead_code)]
-#![allow(unused_variables)]
 
 use std::{
     collections::HashMap,
@@ -40,21 +38,25 @@ use crate::extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, Reorg
 /// How long a floor pin protects the window before eviction may pass it.
 ///
 /// Expiry is lazy: it is checked when eviction computes its bound, not by a timer. A fill whose
-/// pin expired must discard its result (see [`FloorPin::is_valid`]).
+/// pin expired must discard its result (see [`DeltaWindow::publish_with_pin`]).
 const PIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Receives blocks evicted from a [`DeltaWindow`].
-///
-/// `apply_folded` is called while the caller holds the per-extractor window lock, before the
-/// block is removed from the window. A concurrent reader therefore never observes a block that is
-/// absent from both the window and the sink's store. Implementations must be fast: every facade
-/// read on this extractor waits while a fold runs.
 pub(crate) trait FoldSink: Send + Sync {
     /// Merges one finalized, database-committed block into the long-lived store.
     ///
     /// Blocks arrive in ascending order. Delta values are absolute, so applying the same block
-    /// twice must be a no-op for implementations that tag values with their block number.
-    fn apply_folded(&self, extractor: &str, block: &BlockAggregatedChanges);
+    /// twice must be a no-op for implementations that tag values with their block number —
+    /// callers rely on this to retry a block whose fold previously failed. Implementations must
+    /// be fast: folds run synchronously and delay state reads while they run.
+    ///
+    /// An error means the block was not (fully) applied; the caller keeps the block buffered and
+    /// propagates the error.
+    fn apply_folded(
+        &self,
+        extractor: &str,
+        block: &BlockAggregatedChanges,
+    ) -> Result<(), StorageError>;
 }
 
 /// Outcome of resolving a requested version against the window contents.
@@ -72,10 +74,16 @@ pub(crate) enum WindowResolution {
 ///
 /// Wraps the extractor's [`ReorgBuffer`] and owns the retention decision: today the buffer drains
 /// as soon as the database commits, here blocks are kept until they are finalized, committed,
-/// deeper than the configured depth, and not covered by a pin.
+/// deeper than the configured depth, and above every active pin.
 ///
-/// Not `Sync`: one instance lives behind the per-extractor `Arc<Mutex<..>>` owned by the
-/// pending-deltas facade, and all methods run under that lock.
+/// The type is `Sync` by composition but not internally synchronized: methods rely on the caller
+/// for exclusive access — one instance lives behind the per-extractor `Arc<Mutex<..>>` owned by
+/// the pending-deltas facade.
+///
+/// Because committed blocks are retained, window contents and database rows overlap by up to
+/// `depth` blocks. Readers that merge window deltas with database queries and assume the two are
+/// disjoint (e.g. the new-components listing, which concatenates and counts both sides) must
+/// bound window reads below by `db_committed + 1`, not by [`DeltaWindow::floor`].
 pub(crate) struct DeltaWindow {
     extractor: String,
     buffer: ReorgBuffer<BlockAggregatedChanges>,
@@ -89,11 +97,15 @@ pub(crate) struct DeltaWindow {
     /// Active floor pins. Shared with issued [`FloorPin`] handles so release-on-drop does not
     /// need the window lock.
     pins: Arc<Mutex<PinRegistry>>,
+    /// Pin expiry (see [`PIN_TIMEOUT`]). A field rather than the constant inline so tests can
+    /// exercise expiry without waiting out the real timeout.
     pin_timeout: Duration,
 }
 
 impl DeltaWindow {
+    /// Creates an empty window with the given target retention depth `W` (at least 1 block).
     pub(crate) fn new(extractor: String, depth: u64) -> Self {
+        assert!(depth >= 1, "DeltaWindow depth must be at least 1, got {depth}");
         Self {
             extractor,
             buffer: ReorgBuffer::new(),
@@ -108,7 +120,20 @@ impl DeltaWindow {
     /// Applies one full-block message to the window, folding-and-evicting as one operation.
     ///
     /// Evicted blocks are handed to `sink` before removal and never returned to the caller, so
-    /// the fold-before-evict invariant cannot be skipped.
+    /// the fold-before-evict invariant cannot be skipped. Folds run while the caller holds
+    /// exclusive access: every facade read on this extractor waits while a fold runs, which is
+    /// why fold duration is metered (step 3).
+    ///
+    /// The message must be a full-block message; the caller filters partial-block messages.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::Unexpected` when the message does not extend the buffered chain
+    ///   (parent-hash mismatch).
+    /// - `StorageError::NotFound` when a revert targets a hash that is not buffered.
+    /// - Any error returned by [`FoldSink::apply_folded`]; the failed block and everything above it
+    ///   stay buffered, and absolute delta values make the retry refold a no-op.
+    #[allow(unused_variables)]
     pub(crate) fn insert(
         &mut self,
         message: &BlockAggregatedChanges,
@@ -117,10 +142,13 @@ impl DeltaWindow {
         // Step 1 — revert message (`message.revert == true`):
         //
         // If the purge target would remove any block at or below
-        // `min(self.finalized, self.db_committed)`, the window would silently diverge from the
-        // database. Log at error level and `std::process::abort()` — an explicit abort, not a
-        // panic: the deltas pump unwraps inside a spawned task, and a panic there kills only the
-        // pump, leaving the server serving a frozen buffer.
+        // `min(self.finalized, self.db_committed)`, the database holds rows from the abandoned
+        // branch and persisted state is never rolled back, so there is no in-process recovery.
+        // Log at error level and `std::process::abort()`. Returning an error would also end the
+        // process (the pump unwraps, the join chain fails the server task, main exits), but only
+        // after a multi-hop supervision chain during which the server keeps serving from a
+        // buffer that diverged from the database. Abort stops serving immediately and does not
+        // depend on `panic = "unwind"` or the join wiring staying as it is.
         //
         // Otherwise `self.buffer.purge(message.block.hash)`. Purged blocks are unfolded by
         // construction (folds are gated on finality) and are discarded. Reverts carry
@@ -133,17 +161,27 @@ impl DeltaWindow {
         //
         // Step 3 — fold and evict:
         //
-        // Drain the buffer up to `self.eviction_bound()`; for every drained block in ascending
-        // order call `sink.apply_folded(&self.extractor, &block)`, timing each call into a
-        // `delta_window_fold_duration` histogram (label: extractor) and logging a warning above a
-        // slow-fold threshold. The fold runs under the caller's lock — that latency is visible to
-        // every reader of this extractor.
+        // Let `bound = self.eviction_bound()`. Skip this step when `bound` is `None` or below
+        // the oldest buffered block number — the steady state right after startup, where
+        // `ReorgBuffer::drain_blocks_until` would error because the target is not buffered.
+        //
+        // Fold before evicting: for each buffered block up to `bound` in ascending order call
+        // `sink.apply_folded(&self.extractor, &block)`, timing each call into a
+        // `delta_window_fold_duration` histogram (label: extractor) and logging a warning above
+        // a slow-fold threshold. On a fold error stop folding and evict only the successfully
+        // folded prefix before returning the error.
+        //
+        // Evict with `self.buffer.drain_blocks_until(h + 1)` where `h` is the highest folded
+        // block: the retention bound is inclusive while `drain_blocks_until` is exclusive, and
+        // parent-hash chaining keeps buffered numbers contiguous, so `h + 1` is buffered
+        // whenever `h < tip` (guaranteed by `bound <= tip - depth` with `depth >= 1`).
         todo!("fold-then-evict insert")
     }
 
     /// The oldest block number still held in the window, if any.
     pub(crate) fn floor(&self) -> Option<u64> {
-        // Needs a front accessor on `ReorgBuffer` (only `get_most_recent_block` exists today).
+        // Needs a front accessor on `ReorgBuffer` (`get_block_range(None, None)` can reach the
+        // front element, but a dedicated accessor avoids building an iterator for one block).
         todo!("expose the buffer's oldest block")
     }
 
@@ -154,15 +192,20 @@ impl DeltaWindow {
 
     /// Resolves a requested version to a servable window block.
     ///
-    /// The default request ("now", a timestamp newer than the tip) clamps to the tip. Versions
-    /// below the floor report [`WindowResolution::BelowFloor`] and are served by the database
-    /// fallback path; versions above the tip report [`WindowResolution::AboveTip`], which callers
-    /// map to the same not-found error produced today. No database lookup is involved.
+    /// The default request ("now", a timestamp newer than the tip) clamps to the tip. A
+    /// timestamp between two buffered blocks rounds up to the first block whose timestamp is not
+    /// older than the request, matching the buffer's range lookup today. Versions below the
+    /// floor report [`WindowResolution::BelowFloor`] and are served by the database fallback
+    /// path; versions above the tip report [`WindowResolution::AboveTip`]. No database lookup is
+    /// involved.
+    #[allow(unused_variables)]
     pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
         // 1. Empty window -> BelowFloor (fallback path).
         // 2. Timestamp newer than tip -> InWindow(tip)  [clamp preserves today's semantics].
-        // 3. Number/timestamp within [floor, tip] -> InWindow(matching block).
-        // 4. Number below floor -> BelowFloor; number above tip -> AboveTip.
+        // 3. Number/timestamp within [floor, tip] -> InWindow(matching block; timestamps round up).
+        // 4. Number below floor -> BelowFloor; number above tip -> AboveTip. BelowFloor is a
+        //    deliberate fix, not a preservation: today a below-floor end version falls through to
+        //    the front block of the buffer and serves deltas newer than requested.
         todo!("resolve against buffered blocks")
     }
 
@@ -172,6 +215,7 @@ impl DeltaWindow {
     /// the oldest buffered block as `Committed`, which is off by one today (the oldest buffered
     /// block is `db_committed + 1`) and would be off by the whole window depth once committed
     /// blocks are retained.
+    #[allow(unused_variables)]
     pub(crate) fn commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         // None while the window is empty (mirrors today's "no finality found" default).
         // - version <= self.db_committed            -> Committed
@@ -181,23 +225,53 @@ impl DeltaWindow {
         todo!("watermark-based commit status")
     }
 
-    /// Pins the current floor and returns the pinned height with a release-on-drop handle.
+    /// Pins the current floor and returns a release-on-drop handle.
     ///
-    /// While the pin is active (not dropped, not expired) eviction never passes the pinned
-    /// height, so window deltas above it stay available for a fill's top-up.
-    pub(crate) fn pin_floor(&mut self) -> (u64, FloorPin) {
-        // 1. Read the current floor (or the next insert height for an empty window).
-        // 2. Register (id, floor, Instant::now()) in `self.pins`.
-        // 3. Return the height and a `FloorPin { id, registry: Arc::downgrade(&self.pins) }`.
+    /// While the pin is active (not dropped, not expired) eviction never removes the pinned
+    /// block or anything above it, so window deltas from the pinned height upward stay available
+    /// for a fill's top-up. The pinned height is [`FloorPin::height`].
+    ///
+    /// On an empty window the pin registers at `db_committed + 1` (the next height that can
+    /// enter the window), or at 0 before any commit is observed — nothing is evictable in either
+    /// case, so every block inserted after the pin is protected.
+    pub(crate) fn pin_floor(&mut self) -> FloorPin {
+        // 1. Compute the pin height: current floor, else `db_committed + 1`, else 0.
+        // 2. Register (id, height, Instant::now()) in `self.pins`.
+        // 3. Return `FloorPin { id, height, registry: Arc::downgrade(&self.pins) }`.
         todo!("register pin")
+    }
+
+    /// Runs `publish` only if `pin` is still active, serialized against fold-and-evict.
+    ///
+    /// [`FloorPin::is_valid`] alone is advisory: expiry is checked lazily by eviction, so a pin
+    /// can be observed valid and then swept by an insert before the observer acts on the answer.
+    /// This method closes that race — it requires the same exclusive window access as
+    /// [`DeltaWindow::insert`], so no eviction can run between the validity check and `publish`.
+    /// Returns `None` without running `publish` when the pin is no longer registered; the caller
+    /// must then discard the work the pin was protecting.
+    #[allow(unused_variables)]
+    pub(crate) fn publish_with_pin<T>(
+        &mut self,
+        pin: &FloorPin,
+        publish: impl FnOnce() -> T,
+    ) -> Option<T> {
+        // 1. Look up `pin.id` in `self.pins`; absent (dropped or swept after expiry) -> None.
+        // 2. Present -> run `publish` and return `Some` of its result. Exclusive access is held for
+        //    the duration, so `publish` must be fast for the same reason folds must be.
+        todo!("validate pin and publish atomically")
     }
 
     /// Highest block number that may be folded-and-evicted, if any.
     fn eviction_bound(&self) -> Option<u64> {
-        // min(finalized, db_committed, tip - depth, lowest active pin), where:
+        // min(finalized, db_committed, tip - depth, lowest_active_pin - 1), where:
         // - `None` finalized/db_committed/tip means nothing is evictable yet;
-        // - pins past `self.pin_timeout` are lazily marked invalid here (with a warning log and a
-        //   counter) and excluded from the bound — see `PinRegistry::lowest_active`.
+        // - both subtractions saturate at 0: a chain shorter than `depth` evicts nothing through
+        //   the depth term, and a pin at height 0 blocks all eviction above genesis;
+        // - `db_committed <= finalized` holds by construction today (message aggregation rejects
+        //   the opposite), so the finalized term is belt-and-braces against a future change to the
+        //   commit trigger;
+        // - pins past `self.pin_timeout` are removed (with a warning log and a counter) and
+        //   excluded from the bound — see `PinRegistry::lowest_active`.
         todo!("compute eviction bound")
     }
 }
@@ -214,9 +288,9 @@ impl DeepSizeOf for DeltaWindow {
 
 /// Release-on-drop handle for a pinned window floor.
 ///
-/// Dropping the handle releases the pin. Expiry is lazy (checked by eviction), so holding an
-/// expired pin does not keep blocks alive — the owner must re-check [`FloorPin::is_valid`]
-/// immediately before using data the pin was meant to protect, and discard its work if invalid.
+/// Dropping the handle releases the pin. Expiry is lazy (an eviction sweep removes expired
+/// pins), so holding an expired pin does not keep blocks alive — the owner must publish through
+/// [`DeltaWindow::publish_with_pin`], which re-validates the pin atomically with eviction.
 pub(crate) struct FloorPin {
     id: u64,
     height: u64,
@@ -229,22 +303,29 @@ impl FloorPin {
         self.height
     }
 
-    /// Whether the pin still guarantees that window blocks above its height are retained.
+    /// Whether the pin still guarantees that the pinned height and above are retained.
     ///
-    /// Answered from the pin registry alone (own mutex, no window lock), so calling this at
-    /// publish time cannot deadlock against an in-progress insert. Returns `false` once eviction
-    /// has passed this pin after its timeout expired, or once the window is gone.
+    /// Advisory fast-path answered from the pin registry alone (own mutex, no window lock), so a
+    /// fill can abandon doomed work early without contending on the window. The answer can go
+    /// stale immediately after returning `true`; the authoritative check is
+    /// [`DeltaWindow::publish_with_pin`]. Returns `false` once an eviction sweep removed the pin
+    /// after its timeout expired, or once the window is gone.
     pub(crate) fn is_valid(&self) -> bool {
-        // Upgrade the registry weak ref; look up `self.id`; valid iff present and not marked
-        // invalidated by a lazy-expiry sweep.
+        // Upgrade the registry weak ref; the pin is valid iff `self.id` is still registered.
         todo!("registry lookup")
     }
 }
 
 impl Drop for FloorPin {
     fn drop(&mut self) {
-        // Remove `self.id` from the registry if it still exists. Infallible and lock-ordered:
-        // only the registry mutex is taken, never the window lock.
+        // Lock-ordered: only the registry mutex is taken, never the window lock, so a pin can be
+        // dropped while an insert runs without deadlock. A poisoned registry is skipped — the
+        // leaked entry only delays eviction until the expiry sweep collects it.
+        if let Some(registry) = self.registry.upgrade() {
+            if let Ok(mut registry) = registry.lock() {
+                registry.entries.remove(&self.id);
+            }
+        }
     }
 }
 
@@ -256,10 +337,16 @@ struct PinRegistry {
 }
 
 impl PinRegistry {
-    /// Lowest pinned height among valid pins, lazily invalidating expired ones.
+    /// Lowest pinned height among active pins, removing expired ones.
+    ///
+    /// Removal is the lazy-expiry sweep: a pin past `timeout` is dropped from the registry here
+    /// (with a warning log and a counter), which is what makes [`FloorPin::is_valid`] report
+    /// `false` afterwards. An expired pin on a window that never evicts keeps reporting valid
+    /// until a sweep runs — sound, because nothing has been evicted from under it.
+    #[allow(unused_variables)]
     fn lowest_active(&mut self, timeout: Duration) -> Option<u64> {
-        // For each entry: if `created_at.elapsed() > timeout`, set `invalidated`, warn, and skip.
-        // Return the minimum height of the remaining valid entries.
+        // Remove every entry with `created_at.elapsed() > timeout`; return the minimum height of
+        // the remaining entries.
         todo!("lazy expiry sweep")
     }
 }
@@ -267,7 +354,4 @@ impl PinRegistry {
 struct PinEntry {
     height: u64,
     created_at: Instant,
-    /// Set when an eviction sweep passed this pin after expiry; `FloorPin::is_valid` then
-    /// reports `false` so the pin's owner discards its in-flight work.
-    invalidated: bool,
 }
