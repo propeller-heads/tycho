@@ -11,7 +11,7 @@ use abi::{
         events::PoolCreated as WeightedPoolCreated, functions::Create as WeightedPoolCreate,
     },
 };
-use substreams::{log, scalar::BigInt};
+use substreams::scalar::BigInt;
 use substreams_ethereum::{
     pb::eth::v2::{Call, Log},
     Event, Function,
@@ -79,16 +79,6 @@ fn hooks_affect_swaps(hooks_config: &HooksConfigTuple) -> bool {
         *should_call_after_swap
 }
 
-/// Reports a pool that is skipped because it was created with a hooks contract.
-fn log_hooked_pool(family: &str, pool: &[u8], hooks: &[u8]) {
-    log::info!(
-        "balancer_v3: skipping {} pool 0x{} created with hooks contract 0x{}",
-        family,
-        hex::encode(pool),
-        hex::encode(hooks)
-    );
-}
-
 /// Renders the `pool_type` static attribute: the factory family, then the configured generation.
 ///
 /// `tycho-simulation`'s balancer_v3 decoder splits this on the first
@@ -125,7 +115,6 @@ pub fn address_map(
             ..
         } = WeightedPoolCreate::match_and_decode(call)?;
         if has_hooks(&pool_hooks_contract) {
-            log_hooked_pool("weighted", &pool, &pool_hooks_contract);
             return None;
         }
         let rate_providers = collect_rate_providers(&token_config);
@@ -170,7 +159,6 @@ pub fn address_map(
             tokens: token_config, swap_fee_percentage, pool_hooks_contract, ..
         } = StablePoolCreate::match_and_decode(call)?;
         if has_hooks(&pool_hooks_contract) {
-            log_hooked_pool("stable", &pool, &pool_hooks_contract);
             return None;
         }
         let rate_providers = collect_rate_providers(&token_config);
@@ -276,7 +264,6 @@ fn quantamm_component(log: &Log, config: &DeploymentConfig) -> Option<ProtocolCo
         .version_of(&factory)?;
 
     if hooks_affect_swaps(&hooks_config) {
-        log_hooked_pool("quantamm", &pool, &hooks_config.10);
         return None;
     }
     let rate_providers = collect_rate_providers(&token_config);

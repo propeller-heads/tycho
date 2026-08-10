@@ -275,8 +275,10 @@ mod tests {
                 // reCLAMM is pinned to one generation: `balancer-maths-rust` implements the first
                 // generation separately, so only the newest may share this decoder.
                 assert_eq!(config.reclamm_factories.len(), 1, "{chain} {module} reclamm");
-                // QuantAMM has only ever been deployed to mainnet.
-                let expected_quantamm = usize::from(chain == "mainnet");
+                // QuantAMM ships one generation, on every chain but Gnosis. Mainnet was deployed
+                // from a different task than Base and Arbitrum, so its factory sits at another
+                // address; the pools themselves are the same version.
+                let expected_quantamm = usize::from(chain != "gnosis");
                 assert_eq!(
                     config.quantamm_factories.len(),
                     expected_quantamm,
