@@ -23,8 +23,12 @@
 //! `W` is the total window depth measured from the tip — it includes the unfinalized and
 //! uncommitted blocks, it is not extra retention on top of them. When finality or the database
 //! commit lag more than `W` blocks behind the tip, the watermark terms of the `min` govern and
-//! the window grows beyond `W` (unfinalized and uncommitted blocks are never evicted); once they
-//! catch up, the `tip - W` term governs and the window holds `W` blocks.
+//! the window grows beyond `W` (unfinalized and uncommitted blocks are never evicted).
+//!
+//! Folding is batched: [`DeltaWindow::fold_and_evict`] is a no-op until at least
+//! `min_fold_batch` blocks are evictable, then folds all of them, so blocks are not folded one
+//! by one at the chain tip rate. At steady state the window size therefore oscillates between
+//! `W` and `W + min_fold_batch` blocks.
 //!
 //! - `finalized`: folded data must never be affected by a reorg; reverts purge unfolded window
 //!   blocks only.
@@ -104,13 +108,29 @@ pub(crate) struct DeltaWindow {
     db_committed: Option<u64>,
     /// Highest `finalized_block_height` seen on any inserted message.
     finalized: Option<u64>,
+    /// Minimum number of evictable blocks required before a fold runs. Amortizes folding: with
+    /// 1 every evictable block is folded as soon as possible; larger values trade `min_fold_batch`
+    /// extra buffered blocks for folds that run `min_fold_batch` times less often.
+    min_fold_batch: u64,
 }
 
 impl DeltaWindow {
-    /// Creates an empty window with the given target retention depth `W` (at least 1 block).
-    pub(crate) fn new(extractor: String, depth: u64) -> Self {
+    /// Creates an empty window with the given target retention depth `W` (at least 1 block) and
+    /// fold batch size (at least 1, see [`DeltaWindow::fold_and_evict`]).
+    pub(crate) fn new(extractor: String, depth: u64, min_fold_batch: u64) -> Self {
         assert!(depth >= 1, "DeltaWindow depth must be at least 1, got {depth}");
-        Self { extractor, buffer: ReorgBuffer::new(), depth, db_committed: None, finalized: None }
+        assert!(
+            min_fold_batch >= 1,
+            "DeltaWindow fold batch must be at least 1, got {min_fold_batch}"
+        );
+        Self {
+            extractor,
+            buffer: ReorgBuffer::new(),
+            depth,
+            db_committed: None,
+            finalized: None,
+            min_fold_batch,
+        }
     }
 
     /// Applies one full-block message to the window.
@@ -145,11 +165,12 @@ impl DeltaWindow {
 
     /// Folds every evictable block into `sink`, then removes it from the window.
     ///
-    /// Fold and eviction are a single operation per block: a block is removed only after its
-    /// fold succeeded, and evicted blocks are never returned to the caller, so no block's deltas
-    /// can be lost between the window and the store behind the sink. Folds run while the caller
-    /// holds exclusive access: every facade read on this extractor waits while a fold runs,
-    /// which is why fold duration is metered.
+    /// Folding is batched: when fewer than `min_fold_batch` blocks are evictable the call is a
+    /// no-op, otherwise the whole batch is folded. Fold and eviction are a single operation per
+    /// block: a block is removed only after its fold succeeded, and evicted blocks are never
+    /// returned to the caller, so no block's deltas can be lost between the window and the store
+    /// behind the sink. Folds run while the caller holds exclusive access: every facade read on
+    /// this extractor waits while a fold runs, which is why fold duration is metered.
     ///
     /// # Errors
     ///
@@ -158,8 +179,10 @@ impl DeltaWindow {
     /// understood (see the module doc).
     #[allow(unused_variables)]
     pub(crate) fn fold_and_evict(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
-        // Let `bound = self.eviction_bound()`. Return `Ok` when `bound` is `None` or below the
-        // oldest buffered block number — the steady state right after startup, where
+        // Let `bound = self.eviction_bound()` and count the evictable blocks:
+        // `self.buffer.count_blocks_before(bound + 1)`, 0 when `bound` is `None`. Return `Ok`
+        // when the count is below `self.min_fold_batch` — this also covers a bound below the
+        // oldest buffered block (count 0), the steady state right after startup, where
         // `ReorgBuffer::drain_blocks_until` would error because the target is not buffered.
         //
         // For each buffered block up to `bound` in ascending order call
