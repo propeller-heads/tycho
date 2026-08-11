@@ -22,19 +22,32 @@
 //!
 //! Locking: one mutex per entity, no whole-cache lock. The outer maps are only locked to look up
 //! or insert entry handles; folds and reads then lock the single entity they touch, so a fold on
-//! one account never blocks a read of another. Fill deduplication (single-flight) is keyed
-//! per entity: concurrent requesters of the same missing entity produce one database read.
+//! one account never blocks a read of another.
+//!
+//! Database fills are deliberately **not** deduplicated. Requests that miss the same entity
+//! concurrently may each query the database for it — accepted and measured rather than
+//! prevented, because three existing mechanisms already make duplicates rare and harmless:
+//!
+//! - set-if-newer publication makes concurrent fills of one entity converge, so a duplicate costs a
+//!   redundant indexed point-read, never a wrong value;
+//! - identical request bodies are collapsed upstream by the HTTP response cache's in-flight
+//!   deduplication, which covers reconnecting clients snapshotting the same block;
+//! - the fill path's semaphore bounds total concurrent fill queries regardless.
+//!
+//! What remains is overlapping-but-not-identical requests (adjacent blocks, different page
+//! slicing). Their rate is observable via [`EntityCache::record_fill_start`]; per-entity
+//! single-flight (a guard map with waiter wake-up) can be reintroduced behind the same call
+//! sites if that metric ever shows the redundancy matters.
 
 // Not yet constructed by production code; wired into the pending-deltas facade and the fill path
 // in follow-ups.
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, RwLock, Weak},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, RwLock},
 };
 
-use tokio::sync::Notify;
 use tycho_common::{
     models::{
         blockchain::BlockAggregatedChanges,
@@ -169,7 +182,7 @@ impl CachedComponentState {
     }
 }
 
-/// Identifies one cacheable entity, used to key single-flight fills.
+/// Identifies one cacheable entity; used to track in-flight fills for the duplicate metric.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EntityKey {
     Account(Address),
@@ -187,10 +200,9 @@ pub(crate) struct CacheLimits {
 pub(crate) struct EntityCache {
     accounts: EntryMap<Address, CachedAccount>,
     components: EntryMap<(String, ComponentId), CachedComponentState>,
-    /// In-flight database fills, one guard per entity (single-flight). Owners insert on claim
-    /// and remove-and-notify on release; waiters await the notify, then re-read the cache.
-    /// `Arc` so [`FillTicket`]s can release without borrowing the cache.
-    fills: Arc<Mutex<HashMap<EntityKey, Arc<Notify>>>>,
+    /// Keys with a database fill currently in flight. Observability only: fills are not
+    /// deduplicated (see the module doc), this set just counts concurrent duplicates.
+    in_flight_fills: Mutex<HashSet<EntityKey>>,
     limits: CacheLimits,
 }
 
@@ -199,7 +211,7 @@ impl EntityCache {
         Self {
             accounts: RwLock::new(HashMap::new()),
             components: RwLock::new(HashMap::new()),
-            fills: Arc::new(Mutex::new(HashMap::new())),
+            in_flight_fills: Mutex::new(HashSet::new()),
             limits,
         }
     }
@@ -245,17 +257,27 @@ impl EntityCache {
         todo!("publish component fill")
     }
 
-    /// Claims fill ownership for a set of missing entities.
+    /// Records the start of a database fill for `keys`, returning how many of them already have
+    /// a fill in flight from a concurrent caller.
     ///
-    /// Splits `misses` into keys this caller now owns (it must run the database fill and then
-    /// drop the ticket) and fills already in flight elsewhere (await them, then re-read the
-    /// cache). Guarantees at most one in-flight fill per entity regardless of request fan-in.
+    /// Observability only: nothing waits on this set and duplicate fills are allowed (see the
+    /// module doc). The return value feeds the `entity_cache_fill_duplicates` counter — the
+    /// signal that decides whether per-entity single-flight is ever worth reintroducing.
     #[allow(unused_variables)]
-    pub(crate) fn claim_fills(&self, misses: Vec<EntityKey>) -> FillClaims {
-        // Under the `fills` lock, partition: absent key -> insert a fresh `Notify`, caller owns
-        // it; present key -> clone the existing `Notify` for awaiting. Ownership is released by
-        // `FillTicket::drop`, which covers error and panic paths of the fill.
-        todo!("partition owned vs pending")
+    pub(crate) fn record_fill_start(&self, keys: &[EntityKey]) -> usize {
+        // Insert every key into `in_flight_fills`; count the ones that were already present.
+        todo!("track in-flight fill keys")
+    }
+
+    /// Records the end of a database fill for `keys` (success or failure).
+    ///
+    /// Callers release from a drop guard so error paths unwind the set too. Because the set is
+    /// a plain membership set, a key filled concurrently by two callers is released by the first
+    /// to finish — the tail of the second fill goes uncounted. A leaked or early-released key
+    /// only skews the duplicate metric; it can never block serving.
+    #[allow(unused_variables)]
+    pub(crate) fn record_fill_end(&self, keys: &[EntityKey]) {
+        todo!("release in-flight fill keys")
     }
 
     /// Evicts least-recently-used entities until the cache fits `limits.max_bytes`.
@@ -265,8 +287,8 @@ impl EntityCache {
         //   periodically against a full recomputation (the reporting task owns the cadence).
         // - Order: reads and fill publications count as use; folds do not — a folded-but-never-
         //   read entity is a fine eviction candidate.
-        // - Evict whole entities only, skip entities with an in-flight fill, count evictions for
-        //   the sustained-eviction alert.
+        // - Evict whole entities only; count evictions for the sustained-eviction alert. Evicting
+        //   an entity mid-fill is safe: the fill republishes a complete entry.
         todo!("lru eviction")
     }
 }
@@ -303,34 +325,5 @@ impl FoldSink for EntityCache {
         // malformed input (e.g. an id mismatch), so a re-fold of the same block converges via
         // the tag/height no-op rule.
         todo!("fold one block")
-    }
-}
-
-/// Release-on-drop ownership of in-flight fills (see [`EntityCache::claim_fills`]).
-pub(crate) struct FillClaims {
-    /// Keys this caller must fill.
-    pub(crate) owned: FillTicket,
-    /// Fills owned by other callers; await these, then re-read the cache.
-    pub(crate) pending: Vec<Arc<Notify>>,
-}
-
-/// Owned fill keys; dropping releases them and wakes all waiters.
-pub(crate) struct FillTicket {
-    keys: Vec<EntityKey>,
-    /// Weak so a ticket outliving the cache degrades to a no-op release.
-    fills: Weak<Mutex<HashMap<EntityKey, Arc<Notify>>>>,
-}
-
-impl FillTicket {
-    pub(crate) fn keys(&self) -> &[EntityKey] {
-        &self.keys
-    }
-}
-
-impl Drop for FillTicket {
-    fn drop(&mut self) {
-        // Remove each key from the fill map and `notify_waiters` on its guard. Runs on success,
-        // error, and panic paths alike; waiters re-read the cache and re-claim on a miss, so a
-        // failed fill degrades to a retry, never a hang.
     }
 }
