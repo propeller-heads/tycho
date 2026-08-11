@@ -37,6 +37,7 @@ sol! {
         function fee() external view returns (uint256);
         function initial_A() external view returns (uint256);
         function future_A() external view returns (uint256);
+        function future_A_gamma_time() external view returns (uint256);
         function offpeg_fee_multiplier() external view returns (uint256);
         function gamma() external view returns (uint256);
         function D() external view returns (uint256);
@@ -175,6 +176,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    ensure_no_active_a_gamma_ramp(engine, pool)?;
     let balances = read_balances(engine, pool, 2)?;
     let price_scale = call(engine, pool, ICurve::price_scaleCall {})?;
     let precisions = call_opt(engine, pool, ICurveTwo::precisionsCall {}).map(|p| p.to_vec());
@@ -212,6 +214,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    ensure_no_active_a_gamma_ramp(engine, pool)?;
     let balances = read_balances(engine, pool, 3)?;
     let ps0 = call(engine, pool, ICurveTri::price_scaleCall { i: U256::from(0) })?;
     let ps1 = call(engine, pool, ICurveTri::price_scaleCall { i: U256::from(1) })?;
@@ -230,6 +233,45 @@ where
         precisions,
         ..Default::default()
     })
+}
+
+/// Refuse to read a CryptoSwap pool while its A/gamma ramp is active.
+///
+/// While `future_A_gamma_time > block.timestamp` the pool contract stops using its stored `D`:
+/// `get_dy`/`exchange` recompute the invariant from live balances via `newton_D` on every call.
+/// `A()` and `gamma()` are computed getters that interpolate to the read block, but `D()` is a
+/// plain storage getter, so reading all three uniformly pairs a stale invariant with ramped
+/// coefficients — a state no real pool has, which misquotes without bound. Recomputing `D` in
+/// Rust (a `newton_D` next to `core::tricrypto_ng::newton_y_3`) is the eventual fix; until then
+/// decoding fails for the duration of the ramp. Pools without the getter predate A/gamma ramping
+/// and are read as before.
+fn ensure_no_active_a_gamma_ramp<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    pool: &AlloyAddress,
+) -> Result<(), SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let Some(future_a_gamma_time) = call_opt(engine, pool, ICurve::future_A_gamma_timeCall {})
+    else {
+        return Ok(());
+    };
+    let block = engine
+        .state
+        .get_current_block()
+        .ok_or_else(|| {
+            // Unreachable in practice: the getter call above only succeeds when the engine has a
+            // current block to simulate against.
+            SimulationError::FatalError("curve: current block not set in engine".to_string())
+        })?;
+    if future_a_gamma_time > U256::from(block.timestamp) {
+        return Err(SimulationError::RecoverableError(format!(
+            "curve pool {pool} is ramping A/gamma until timestamp {future_a_gamma_time}: its \
+             stored D is not used by the contract during the ramp, so quotes would be wrong"
+        )));
+    }
+    Ok(())
 }
 
 /// Read the amplification coefficient, preferring `initial_A` when the pool is not ramping
@@ -596,6 +638,7 @@ mod test {
 
     sol! {
         function get_dy_stable(int128 i, int128 j, uint256 dx) external view returns (uint256);
+        function get_dy(uint256 i, uint256 j, uint256 dx) external view returns (uint256);
         function coins(uint256 i) external view returns (address);
         function decimals() external view returns (uint8);
     }
@@ -805,6 +848,46 @@ mod test {
             .unwrap();
         assert!(correct_out > U256::from(10).pow(U256::from(17)), "correct ~0.6 ETH");
         assert!(wrong_out > correct_out * U256::from(100u64), "wrong decimals corrupt the quote");
+    }
+
+    /// While a CryptoSwap pool's A/gamma ramp is active the contract ignores its stored `D`
+    /// (it recomputes the invariant from balances on every call), so decoding must refuse the
+    /// pool; once the ramp is over the same pool must decode and match on-chain `get_dy`.
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn differential_tricrypto_active_a_gamma_ramp_is_refused() {
+        // TricryptoUSDT (USDT/WBTC/WETH), `future_A_gamma_time` = 1_786_178_519.
+        let pool = AlloyAddress::from_str("0xf5f5b97624542d72a9e06f04804bf81baa15e2b4").unwrap();
+        let decode_at = |number: u64, timestamp: u64| {
+            let header = BlockHeader { number, timestamp, ..Default::default() };
+            let mut db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
+            db.set_block(Some(header));
+            let engine = SimulationEngine::new(db, false);
+            let decimals = read_decimals(&engine, &pool, 3);
+            (decode_from_vm(&engine, &pool, CurveVariant::TriCryptoNG, &decimals), engine)
+        };
+
+        // Mid-ramp block (ts 1_786_171_667 < ramp end): decoding must fail naming the ramp.
+        let (ramping, _) = decode_at(25_708_548, 1_786_171_667);
+        let error = ramping.expect_err("decode must fail while the A/gamma ramp is active");
+        assert!(
+            error
+                .to_string()
+                .contains("ramping A/gamma"),
+            "unexpected error: {error}"
+        );
+
+        // Post-ramp block (ts 1_786_309_559 > ramp end): decode succeeds and matches `get_dy`.
+        let (decoded, engine) = decode_at(25_720_000, 1_786_309_559);
+        let decoded = decoded.expect("decode must succeed once the ramp is over");
+        let dx = U256::from(1_982_505u64); // 1.982505 USDT
+        let ours = decoded
+            .get_amount_out(0, 1, dx)
+            .expect("get_amount_out returned None");
+        let onchain: U256 =
+            call(&engine, &pool, get_dyCall { i: U256::ZERO, j: U256::from(1), dx })
+                .expect("on-chain get_dy failed");
+        assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy");
     }
 
     #[test]
