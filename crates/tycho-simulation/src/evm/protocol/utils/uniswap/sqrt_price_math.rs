@@ -227,12 +227,16 @@ pub(crate) fn get_sqrt_price_q96(price_0: U256, price_1: U256) -> Result<U256, S
 /// raw ending price such that `spot_price()` on the resulting state reports exactly
 /// `target_price`, the raw price fed to the swap must cancel that markup out by scaling down by
 /// `(1-fee)` first — the inverse of what `add_fee_markup` will apply when the result is read
-/// back.
+/// back. The fee division rounds down before combining with the denominator, so precision
+/// degrades as `target_price.numerator` gets smaller; at the atomic-token-amount scale real
+/// `Price` values carry (see [`Price`]'s own docs), the error is far below what a tick can
+/// resolve.
 ///
 /// # Arguments
 /// * `token_in` - The token being sold
 /// * `token_out` - The token being bought
 /// * `target_price` - The target price as token_out/token_in (tycho convention)
+/// * `fee_tier` - The pool fee, in pips (1/1_000_000)
 ///
 /// # Returns
 /// The sqrt price limit in Q96 format
@@ -244,12 +248,29 @@ pub(crate) fn get_sqrt_price_limit(
 ) -> Result<U256, SimulationError> {
     let zero_for_one = token_in < token_out;
 
+    let fee_precision = U256::from_limbs([1_000_000, 0, 0, 0]);
+    if fee_tier >= fee_precision {
+        return Err(SimulationError::InvalidInput(
+            format!("fee_tier {fee_tier} must be below {fee_precision}"),
+            None,
+        ));
+    }
+
     let numerator = biguint_to_u256(&target_price.numerator);
     let denominator = biguint_to_u256(&target_price.denominator);
 
     // Scale the amount_out side down by (1 - fee), matching `add_fee_markup`'s inverse.
-    let fee_precision = U256::from_limbs([1_000_000, 0, 0, 0]);
-    let numerator_after_fee = safe_div_u256(numerator * (fee_precision - fee_tier), fee_precision)?;
+    let numerator_after_fee = safe_div_u256(
+        safe_mul_u256(numerator, safe_sub_u256(fee_precision, fee_tier)?)?,
+        fee_precision,
+    )?;
+    if numerator_after_fee.is_zero() {
+        return Err(SimulationError::InvalidInput(
+            "Target price is unreachable (too close to spot to represent after fee adjustment)"
+                .to_string(),
+            None,
+        ));
+    }
 
     // sqrt_price_x96 = sqrt(token1/token0) * 2^96. target_price is token_out/token_in, which
     // equals token1/token0 directly when selling token0 (zero_for_one), or its inverse otherwise.
@@ -266,7 +287,8 @@ pub(crate) fn get_sqrt_price_limit(
 mod tests {
     use std::str::FromStr;
 
-    use approx::assert_ulps_eq;
+    use approx::{assert_relative_eq, assert_ulps_eq};
+    use num_bigint::BigUint;
     use rstest::rstest;
 
     use super::*;
@@ -507,12 +529,11 @@ mod tests {
     #[case::sell_token0(true, 500u32)]
     #[case::sell_token1(false, 500u32)]
     #[case::higher_fee(true, 3000u32)]
+    #[case::zero_fee(true, 0u32)]
     fn test_get_sqrt_price_limit_reproduces_target_through_fee_markup(
         #[case] zero_for_one: bool,
         #[case] fee_pips: u32,
     ) {
-        use num_bigint::BigUint;
-
         use crate::evm::protocol::utils::add_fee_markup;
 
         let (token_in, token_out) = if zero_for_one {
@@ -542,6 +563,30 @@ mod tests {
         };
         let reported_spot_price = add_fee_markup(raw_price, fee_pips as f64 / 1_000_000.0);
 
-        assert_ulps_eq!(reported_spot_price, target_f64, epsilon = 1e-9);
+        assert_relative_eq!(reported_spot_price, target_f64, max_relative = 1e-9);
+    }
+
+    #[test]
+    fn test_get_sqrt_price_limit_rejects_fee_at_or_above_precision() {
+        let target_price = Price::new(BigUint::from(998u64), BigUint::from(1000u64));
+        let result = get_sqrt_price_limit(
+            &Bytes::from([0u8; 20]),
+            &Bytes::from([1u8; 20]),
+            &target_price,
+            U256::from(1_000_000u32),
+        );
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+
+    #[test]
+    fn test_get_sqrt_price_limit_rejects_numerator_that_floors_to_zero_after_fee() {
+        let target_price = Price::new(BigUint::from(1u64), BigUint::from(1_000_000_000u64));
+        let result = get_sqrt_price_limit(
+            &Bytes::from([0u8; 20]),
+            &Bytes::from([1u8; 20]),
+            &target_price,
+            U256::from(500u32),
+        );
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 }

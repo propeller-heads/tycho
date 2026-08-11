@@ -1229,7 +1229,10 @@ mod tests {
         let pool = UniswapV3State::new(liquidity, sqrt_price, FeeAmount::Low, tick, ticks)
             .expect("Failed to create pool");
 
-        // Test cases: (sell_token, sell_price, buy_price, expected_supply, test_id)
+        // Test cases: (sell_token, sell_price, buy_price, expected_supply, test_id). The
+        // reachable prices moved closer to spot than before: reaching a given target now
+        // consumes more liquidity than it used to, so a couple of cases needed smaller price
+        // moves to stay within this fixture's tick range.
         let test_cases = vec![
             (&wbtc, 129u64, 10u64, "0", "WBTC sell_price=129, buy_price=10"),
             (&wbtc, 130u64, 10u64, "0", "WBTC sell_price=130, buy_price=10"),
@@ -1274,6 +1277,29 @@ mod tests {
                     ))
                     .unwrap_or_else(|e| panic!("{} - query_supply failed: {:?}", test_id, e));
                 assert_eq!(trade.amount_out().clone(), expected, "{}", test_id);
+
+                // QueryPoolSwapParams::new(token_in, token_out, ..) is called below as
+                // new(buy_token, sell_token, ..), so buy_token is token_in and sell_token is
+                // token_out here despite the names. Price::new(numerator, denominator) is a raw
+                // amount_out/amount_in ratio; spot_price() reports the decimal-adjusted human
+                // ratio, so scale by the token decimal difference the same way it does.
+                let decimal_adj =
+                    10f64.powi(buy_token.decimals as i32 - sell_token.decimals as i32);
+                let target_f64 = (buy_price as f64 / sell_price as f64) * decimal_adj;
+                let resulting_spot_price = trade
+                    .new_state()
+                    .spot_price(buy_token, sell_token)
+                    .unwrap_or_else(|e| panic!("{} - spot_price failed: {:?}", test_id, e));
+                // Loose tolerance: these targets use small integer Price values rather than
+                // atomic-token-amount scale, so get_sqrt_price_limit's fee rounding (see its doc
+                // comment) is a larger fraction of the total here than in realistic usage.
+                assert!(
+                    (resulting_spot_price - target_f64).abs() / target_f64 < 1e-3,
+                    "{}: resulting spot price {} should land on target {}",
+                    test_id,
+                    resulting_spot_price,
+                    target_f64
+                );
             }
         }
     }
@@ -1368,8 +1394,7 @@ mod tests {
             "Expected amount out when price covers fees"
         );
 
-        // Sanity check: the resulting spot price should land close to the requested target -
-        // this is the actual correctness property the fee-markup fix is about.
+        // The resulting spot price should land close to the requested target.
         let resulting_spot_price = pool_swap
             .new_state()
             .spot_price(&token_x, &token_y)
