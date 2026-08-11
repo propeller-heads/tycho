@@ -29,6 +29,10 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
+    protocol::{
+        u256_num::biguint_to_u256,
+        vm::utils::{json_deserialize_address_list, json_deserialize_be_bigint_list},
+    },
     simulation::{SimulationEngine, SimulationParameters},
 };
 
@@ -67,13 +71,6 @@ sol! {
     }
 
     #[allow(missing_docs)]
-    struct WeightedPoolImmutableData {
-        address[] tokens;
-        uint256[] decimalScalingFactors;
-        uint256[] normalizedWeights;
-    }
-
-    #[allow(missing_docs)]
     struct StablePoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -89,13 +86,6 @@ sol! {
         bool isPoolInitialized;
         bool isPoolPaused;
         bool isPoolInRecoveryMode;
-    }
-
-    #[allow(missing_docs)]
-    struct StablePoolImmutableData {
-        address[] tokens;
-        uint256[] decimalScalingFactors;
-        uint256 amplificationParameterPrecision;
     }
 
     #[allow(missing_docs)]
@@ -118,29 +108,6 @@ sol! {
         bool isPoolInitialized;
         bool isPoolPaused;
         bool isPoolInRecoveryMode;
-    }
-
-    #[allow(missing_docs)]
-    struct ReClammPoolImmutableData {
-        address[] tokens;
-        uint256[] decimalScalingFactors;
-        bool tokenAPriceIncludesRate;
-        bool tokenBPriceIncludesRate;
-        uint256 minSwapFeePercentage;
-        uint256 maxSwapFeePercentage;
-        uint256 initialMinPrice;
-        uint256 initialMaxPrice;
-        uint256 initialTargetPrice;
-        uint256 initialDailyPriceShiftExponent;
-        uint256 initialCenterednessMargin;
-        uint256 minPriceRatio;
-        uint256 maxPriceRatio;
-        uint256 maxCenterednessMargin;
-        uint256 maxDailyPriceShiftExponent;
-        uint256 maxDailyPriceRatioUpdateRate;
-        uint256 minPriceRatioUpdateDuration;
-        uint256 minPriceRatioDelta;
-        uint256 balanceRatioAndPriceTolerance;
     }
 
     #[allow(missing_docs)]
@@ -173,12 +140,9 @@ sol! {
     #[allow(missing_docs)]
     interface IBalancerV3Pool {
         function getWeightedPoolDynamicData() external view returns (WeightedPoolDynamicData memory);
-        function getWeightedPoolImmutableData() external view returns (WeightedPoolImmutableData memory);
         function getMinTokenBalances() external view returns (uint256[] memory);
         function getStablePoolDynamicData() external view returns (StablePoolDynamicData memory);
-        function getStablePoolImmutableData() external view returns (StablePoolImmutableData memory);
         function getReClammPoolDynamicData() external view returns (ReClammPoolDynamicData memory);
-        function getReClammPoolImmutableData() external view returns (ReClammPoolImmutableData memory);
         function getQuantAMMWeightedPoolDynamicData() external view returns (QuantAmmPoolDynamicData memory);
         function getQuantAMMWeightedPoolImmutableData() external view returns (QuantAmmPoolImmutableData memory);
     }
@@ -202,7 +166,6 @@ sol! {
     interface IBalancerV3Vault {
         function getPoolConfig(address pool) external view returns (PoolConfig memory);
         function getHooksConfig(address pool) external view returns (HooksConfig memory);
-        function getPoolTokenRates(address pool) external view returns (uint256[] memory decimalScalingFactors, uint256[] memory tokenRates);
         function getPoolPausedState(address pool) external view returns (bool, uint32, uint32, address);
     }
 }
@@ -220,6 +183,17 @@ impl HooksConfig {
             self.shouldCallAfterSwap
     }
 }
+
+/// Bits `registerPool` packs each token's `18 - decimals` into inside `tokenDecimalDiffs`
+/// (`PoolConfigConst.DECIMAL_DIFF_BITLENGTH`).
+const DECIMAL_DIFF_BITLENGTH: usize = 5;
+/// Mask for one [`DECIMAL_DIFF_BITLENGTH`]-wide field.
+const DECIMAL_DIFF_MASK: u64 = (1 << DECIMAL_DIFF_BITLENGTH) - 1;
+/// Static attribute carrying the pool's token registration order, which its balances, rates and
+/// weights are indexed by. The component's own token list is not in that order.
+const TOKEN_ORDER_ATTRIBUTE: &str = "token_order";
+/// Static attribute carrying a weighted pool's normalized weights, in registration order.
+const NORMALIZED_WEIGHTS_ATTRIBUTE: &str = "normalized_weights";
 
 /// `pool_type` static attribute emitted by the `ethereum-balancer-v3` Substreams package.
 const POOL_TYPE_ATTRIBUTE: &str = "pool_type";
@@ -339,33 +313,36 @@ where
         });
     }
 
-    let probed =
-        if call::<D, _, _>(engine, pool, IBalancerV3Pool::getWeightedPoolImmutableDataCall {})
-            .is_ok()
-        {
-            BalancerPoolType::Weighted
-        } else if call::<D, _, _>(engine, pool, IBalancerV3Pool::getStablePoolImmutableDataCall {})
-            .is_ok()
-        {
-            BalancerPoolType::Stable
-        } else if call::<D, _, _>(engine, pool, IBalancerV3Pool::getReClammPoolImmutableDataCall {})
-            .is_ok()
-        {
-            BalancerPoolType::Reclamm
-        } else if call::<D, _, _>(
-            engine,
-            pool,
-            IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {},
-        )
+    let probed = if call::<D, _, _>(
+        engine,
+        pool,
+        IBalancerV3Pool::getWeightedPoolDynamicDataCall {},
+    )
+    .is_ok()
+    {
+        BalancerPoolType::Weighted
+    } else if call::<D, _, _>(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})
         .is_ok()
-        {
-            BalancerPoolType::QuantAmm
-        } else {
-            return Err(SimulationError::FatalError(format!(
-                "balancer_v3 pool {pool} exposes none of the weighted, stable, reCLAMM or \
+    {
+        BalancerPoolType::Stable
+    } else if call::<D, _, _>(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})
+        .is_ok()
+    {
+        BalancerPoolType::Reclamm
+    } else if call::<D, _, _>(
+        engine,
+        pool,
+        IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {},
+    )
+    .is_ok()
+    {
+        BalancerPoolType::QuantAmm
+    } else {
+        return Err(SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} exposes none of the weighted, stable, reCLAMM or \
                  QuantAMM getters"
-            )));
-        };
+        )));
+    };
     Ok(PoolTypeAttribute { pool_type: probed, version: None })
 }
 
@@ -382,6 +359,7 @@ pub(super) fn read_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &AlloyAddress,
     vault: &AlloyAddress,
     pool_type: BalancerPoolType,
+    static_attributes: &HashMap<String, Bytes>,
     block_timestamp: u64,
 ) -> Result<PoolState, SimulationError>
 where
@@ -414,17 +392,24 @@ where
         )));
     }
 
+    // Registration fixes the token order and each token's decimals, so both come from what the
+    // indexer recorded and from the config already read, rather than from a further getter call.
+    let tokens = address_list_attribute(static_attributes, TOKEN_ORDER_ATTRIBUTE, pool)?;
+    let scaling_factors = scaling_factors(&config, tokens.len());
+
     match pool_type {
         BalancerPoolType::Weighted => {
             let dynamic: WeightedPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getWeightedPoolDynamicDataCall {})?;
-            let immutable: WeightedPoolImmutableData =
-                call(engine, pool, IBalancerV3Pool::getWeightedPoolImmutableDataCall {})?;
+            // Weights are fixed in the pool's constructor and recorded at creation, so they come
+            // from the component rather than from the immutable-data getter.
+            let weights =
+                bigint_list_attribute(static_attributes, NORMALIZED_WEIGHTS_ATTRIBUTE, pool)?;
             let base = base_state(
                 pool,
                 pool_type,
-                &immutable.tokens,
-                immutable.decimalScalingFactors,
+                tokens,
+                scaling_factors,
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 dynamic.staticSwapFeePercentage,
@@ -432,18 +417,16 @@ where
                 dynamic.totalSupply,
                 &config.liquidityManagement,
             );
-            Ok(PoolState::Weighted(WeightedState::new(base, immutable.normalizedWeights)))
+            Ok(PoolState::Weighted(WeightedState::new(base, weights)))
         }
         BalancerPoolType::Stable => {
             let dynamic: StablePoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
-            let immutable: StablePoolImmutableData =
-                call(engine, pool, IBalancerV3Pool::getStablePoolImmutableDataCall {})?;
             let base = base_state(
                 pool,
                 pool_type,
-                &immutable.tokens,
-                immutable.decimalScalingFactors,
+                tokens,
+                scaling_factors,
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 dynamic.staticSwapFeePercentage,
@@ -461,18 +444,17 @@ where
         BalancerPoolType::QuantAmm => {
             let dynamic: QuantAmmPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
+            // The trade-size ratio is the one immutable this family cannot recover from the
+            // component: it is nested too deeply in the factory's creation parameters for the
+            // Substreams package to decode, so its getter stays.
             let immutable: QuantAmmPoolImmutableData =
                 call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {})?;
-            // Unlike every other family, QuantAMM's own getters report no decimal scaling factors,
-            // so they have to come from the Vault.
-            let rates: IBalancerV3Vault::getPoolTokenRatesReturn =
-                call(engine, vault, IBalancerV3Vault::getPoolTokenRatesCall { pool: *pool })?;
             let mutable = quantamm_mutable(pool, &dynamic, block_timestamp)?;
             let base = base_state(
                 pool,
                 pool_type,
-                &immutable.tokens,
-                rates.decimalScalingFactors,
+                tokens,
+                scaling_factors,
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 config.staticSwapFeePercentage,
@@ -489,13 +471,11 @@ where
         BalancerPoolType::Reclamm => {
             let dynamic: ReClammPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
-            let immutable: ReClammPoolImmutableData =
-                call(engine, pool, IBalancerV3Pool::getReClammPoolImmutableDataCall {})?;
             let base = base_state(
                 pool,
                 pool_type,
-                &immutable.tokens,
-                immutable.decimalScalingFactors,
+                tokens,
+                scaling_factors,
                 dynamic.tokenRates,
                 dynamic.balancesLiveScaled18,
                 dynamic.staticSwapFeePercentage,
@@ -665,6 +645,82 @@ where
     }
 }
 
+/// The decimal scaling factors the Vault applies to a pool's raw balances.
+///
+/// `registerPool` stores `18 - decimals` per token, packed into `tokenDecimalDiffs` at
+/// [`DECIMAL_DIFF_BITLENGTH`] bits each, and `PoolConfigLib.getDecimalScalingFactors` expands that
+/// back to `10 ** diff`. Both are fixed at registration, so unpacking the config the Vault already
+/// reported here saves asking each pool's own immutable-data getter for the same numbers.
+fn scaling_factors(config: &PoolConfig, token_count: usize) -> Vec<U256> {
+    let packed = config.tokenDecimalDiffs.to::<u64>();
+    (0..token_count)
+        .map(|index| {
+            let diff = (packed >> (index * DECIMAL_DIFF_BITLENGTH)) & DECIMAL_DIFF_MASK;
+            U256::from(10u64).pow(U256::from(diff))
+        })
+        .collect()
+}
+
+/// Reads a static attribute holding a JSON list of addresses, in the order the Substreams package
+/// wrote them.
+fn address_list_attribute(
+    static_attributes: &HashMap<String, Bytes>,
+    name: &str,
+    pool: &AlloyAddress,
+) -> Result<Vec<String>, SimulationError> {
+    let raw = static_attributes
+        .get(name)
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} carries no `{name}` static attribute; it was indexed with an \
+             ethereum-balancer-v3 package that predates it"
+        ))
+        })?;
+    let addresses = json_deserialize_address_list(raw).map_err(|e| {
+        SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} has a malformed `{name}`: {e}"
+        ))
+    })?;
+    Ok(addresses
+        .iter()
+        .map(|address| format!("0x{}", hex::encode(address)))
+        .collect())
+}
+
+/// Reads a static attribute holding a JSON list of big-endian integers.
+fn bigint_list_attribute(
+    static_attributes: &HashMap<String, Bytes>,
+    name: &str,
+    pool: &AlloyAddress,
+) -> Result<Vec<U256>, SimulationError> {
+    let raw = static_attributes
+        .get(name)
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} carries no `{name}` static attribute; it was indexed with an \
+             ethereum-balancer-v3 package that predates it"
+        ))
+        })?;
+    let values = json_deserialize_be_bigint_list(raw).map_err(|e| {
+        SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} has a malformed `{name}`: {e}"
+        ))
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .to_biguint()
+                .map(|value| biguint_to_u256(&value))
+                .ok_or_else(|| {
+                    SimulationError::FatalError(format!(
+                        "balancer_v3 pool {pool} reports a negative `{name}` entry: {value}"
+                    ))
+                })
+        })
+        .collect()
+}
+
 /// The aggregate swap fee the Vault will actually take out of the pool.
 ///
 /// A pool in recovery mode keeps the protocol's share of the swap fee — the Vault skips charging it
@@ -681,11 +737,11 @@ fn aggregate_swap_fee(config: &PoolConfig) -> U256 {
 
 /// Whether the Vault would reject a swap on `pool` because it is paused.
 ///
-/// `getPoolConfig` reports the stored pause bit, which the Vault stops honouring once the pool's
-/// pause window and the Vault's buffer period have both elapsed — after that a pool left flagged is
-/// permanently tradeable again. The effective state therefore comes from `getPoolPausedState`,
-/// which applies that deadline, and is only asked for when the stored bit is set: pools that were
-/// never paused are the overwhelming majority and cost no extra call.
+/// The stored pause bit outlives its effect: `_getPoolPausedState` honours it only while
+/// `block.timestamp <= pauseWindowEndTime + _vaultBufferPeriodDuration`, after which a pool left
+/// flagged trades again. That buffer is chosen per Vault deployment and no pool getter reports it,
+/// so the deadline cannot be applied here and the resolved state is read from the Vault instead —
+/// only when the stored bit is set, which for almost every pool it never is.
 fn is_paused<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
     vault: &AlloyAddress,
@@ -767,7 +823,7 @@ fn refreshed_base(
 fn base_state(
     pool: &AlloyAddress,
     pool_type: BalancerPoolType,
-    tokens: &[AlloyAddress],
+    tokens: Vec<String>,
     scaling_factors: Vec<U256>,
     token_rates: Vec<U256>,
     balances_live_scaled_18: Vec<U256>,
@@ -779,10 +835,7 @@ fn base_state(
     BasePoolState {
         pool_address: format!("{pool:?}"),
         pool_type: pool_type.maths_marker().to_string(),
-        tokens: tokens
-            .iter()
-            .map(|token| format!("{token:?}"))
-            .collect(),
+        tokens,
         scaling_factors,
         token_rates,
         balances_live_scaled_18,
@@ -857,6 +910,30 @@ mod tests {
             isPoolPaused: false,
             isPoolInRecoveryMode: in_recovery_mode,
         }
+    }
+
+    /// `registerPool` packs `18 - decimals` per token, least significant field first. Reproduces
+    /// what the Vault would report for a USDC/WETH/WBTC pool registered in that order.
+    #[test]
+    fn scaling_factors_unpack_the_registered_token_decimals() {
+        let mut config = config_with(0, false);
+        let diffs = [12u64, 0, 10]; // 6, 18 and 8 decimals
+        let packed = diffs
+            .iter()
+            .enumerate()
+            .fold(0u64, |packed, (index, diff)| {
+                packed | (diff << (index * DECIMAL_DIFF_BITLENGTH))
+            });
+        config.tokenDecimalDiffs = packed
+            .try_into()
+            .expect("three diffs fit a uint40");
+
+        assert_eq!(
+            scaling_factors(&config, 3),
+            vec![U256::from(1_000_000_000_000u64), U256::from(1u64), U256::from(10_000_000_000u64)]
+        );
+        // A pool with fewer tokens must not read its neighbours' fields.
+        assert_eq!(scaling_factors(&config, 1), vec![U256::from(1_000_000_000_000u64)]);
     }
 
     /// Recovery mode leaves the protocol's share of the swap fee in the pool, so quoting one must

@@ -273,6 +273,12 @@ fn create_pool_component(
     let mut attributes = attributes.to_vec();
     attributes.push(("vault", config.vault.as_slice()));
 
+    // `tokens` is the pool's registration order, which is what its balances, rates and weights are
+    // all indexed by — and which the component's own token list does not preserve. Recording it
+    // lets consumers rebuild the pool's state without asking the chain for the token list.
+    let token_order = json_serialize_address_list(tokens);
+    attributes.push(("token_order", &token_order));
+
     ProtocolComponent::new(&address_id(pool))
         .with_contracts(&[pool.to_vec(), config.vault.clone()])
         .with_tokens(tokens)
