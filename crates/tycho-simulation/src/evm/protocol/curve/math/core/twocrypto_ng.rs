@@ -136,17 +136,15 @@ fn unsafe_div_u(a: U256, b: U256) -> U256 {
 pub fn newton_d_2_ng(ann: U256, gamma: U256, x_unsorted: [U256; 2]) -> Option<U256> {
     let p = |exp: u32| -> U256 { U256::from(10u64).pow(U256::from(exp)) };
     let n = U256::from(2u64);
-    // assert ANN > MIN_A - 1 and ANN < MAX_A + 1; assert gamma in [MIN_GAMMA, MAX_GAMMA]
+    // assert ANN > MIN_A - 1 and ANN < MAX_A + 1; assert gamma in [MIN_GAMMA, MAX_GAMMA].
+    // MAX_GAMMA is v2.1.0's 199 * 10**15 (v2.0.0 caps at 2 * 10**15, but a v2.0.0 pool can
+    // never carry a larger gamma on-chain, so the union bound is exact for both versions).
     let (min_a, max_a) = (U256::from(4_000u64), U256::from(40_000_000u64));
-    let (min_gamma, max_gamma) = (p(10), U256::from(2u64) * p(15));
+    let (min_gamma, max_gamma) = (p(10), U256::from(199u64) * p(15));
     if ann < min_a || ann > max_a || gamma < min_gamma || gamma > max_gamma {
         return None;
     }
-    let x = if x_unsorted[0] < x_unsorted[1] {
-        [x_unsorted[1], x_unsorted[0]]
-    } else {
-        x_unsorted
-    };
+    let x = if x_unsorted[0] < x_unsorted[1] { [x_unsorted[1], x_unsorted[0]] } else { x_unsorted };
     // assert x[0] > 10**9 - 1 and x[0] < 10**15 * 10**18 + 1  # dev: unsafe values x[0]
     if x[0] < p(9) || x[0] > p(15) * WAD {
         return None;
@@ -165,31 +163,40 @@ pub fn newton_d_2_ng(ann: U256, gamma: U256, x_unsorted: [U256; 2]) -> Option<U2
         }
         // K0 = (10**18 * N**2) * x[0] / D * x[1] / D
         let k0 = unsafe_div_u(
-            unsafe_div_u(p(18).checked_mul(U256::from(4u64))?.checked_mul(x[0])?, d)
-                .checked_mul(x[1])?,
+            unsafe_div_u(
+                p(18)
+                    .checked_mul(U256::from(4u64))?
+                    .checked_mul(x[0])?,
+                d,
+            )
+            .checked_mul(x[1])?,
             d,
         );
         let _g1k0 = {
             let g = gamma + WAD;
             if g > k0 {
-                g.wrapping_sub(k0).wrapping_add(U256::from(1))
+                g.wrapping_sub(k0)
+                    .wrapping_add(U256::from(1))
             } else {
-                k0.wrapping_sub(g).wrapping_add(U256::from(1))
+                k0.wrapping_sub(g)
+                    .wrapping_add(U256::from(1))
             }
         };
         // mul1 = 10**18 * D / gamma * _g1k0 / gamma * _g1k0 * A_MULTIPLIER / ANN
         // (multiplications checked, divisions unsafe in the deployed source)
         let mul1 = unsafe_div_u(
-            unsafe_div_u(
-                unsafe_div_u(WAD.checked_mul(d)?, gamma).checked_mul(_g1k0)?,
-                gamma,
-            )
-            .checked_mul(_g1k0)?
-            .checked_mul(A_MULTIPLIER)?,
+            unsafe_div_u(unsafe_div_u(WAD.checked_mul(d)?, gamma).checked_mul(_g1k0)?, gamma)
+                .checked_mul(_g1k0)?
+                .checked_mul(A_MULTIPLIER)?,
             ann,
         );
         // mul2 = ((2 * 10**18) * N_COINS) * K0 / _g1k0
-        let mul2 = unsafe_div_u(p(18).checked_mul(U256::from(4u64))?.checked_mul(k0)?, _g1k0);
+        let mul2 = unsafe_div_u(
+            p(18)
+                .checked_mul(U256::from(4u64))?
+                .checked_mul(k0)?,
+            _g1k0,
+        );
         // neg_fprime = (S + S * mul2 / 10**18) + mul1 * N_COINS / K0 - mul2 * D / 10**18
         // (`mul1 * N_COINS / K0` is checked division: K0 == 0 reverts on-chain)
         let neg_fprime = s
@@ -563,7 +570,9 @@ mod tests {
         assert!(newton_d_2_ng(ann, U256::from(10u64).pow(U256::from(9u64)), x).is_none());
         // x[0] below 10**9 and balance ratio below 10**14 / 10**18.
         assert!(newton_d_2_ng(ann, gamma, [U256::from(10u64), U256::from(10u64)]).is_none());
-        assert!(newton_d_2_ng(ann, gamma, [x[0], U256::from(10u64).pow(U256::from(9u64))]).is_none());
+        assert!(
+            newton_d_2_ng(ann, gamma, [x[0], U256::from(10u64).pow(U256::from(9u64))]).is_none()
+        );
     }
 
     #[test]

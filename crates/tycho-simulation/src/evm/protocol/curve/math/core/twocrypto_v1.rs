@@ -121,11 +121,7 @@ pub fn newton_d_2_v1(ann: U256, gamma: U256, x_unsorted: [U256; 2]) -> Option<U2
     if ann < min_a || ann > max_a || gamma < min_gamma || gamma > max_gamma {
         return None;
     }
-    let x = if x_unsorted[0] < x_unsorted[1] {
-        [x_unsorted[1], x_unsorted[0]]
-    } else {
-        x_unsorted
-    };
+    let x = if x_unsorted[0] < x_unsorted[1] { [x_unsorted[1], x_unsorted[0]] } else { x_unsorted };
     // assert x[0] > 10**9 - 1 and x[0] < 10**15 * 10**18 + 1  # dev: unsafe values x[0]
     if x[0] < p(9) || x[0] > p(15) * WAD {
         return None;
@@ -176,7 +172,9 @@ pub fn newton_d_2_v1(ann: U256, gamma: U256, x_unsorted: [U256; 2]) -> Option<U2
         let d_plus = d
             .checked_mul(neg_fprime.checked_add(s)?)?
             .checked_div(neg_fprime)?;
-        let mut d_minus = d.checked_mul(d)?.checked_div(neg_fprime)?;
+        let mut d_minus = d
+            .checked_mul(d)?
+            .checked_div(neg_fprime)?;
         let adj = d
             .checked_mul(mul1.checked_div(neg_fprime)?)?
             .checked_div(WAD)?
@@ -270,7 +268,9 @@ mod tests {
         assert!(newton_d_2_v1(ann, U256::from(10u64).pow(U256::from(9u64)), x).is_none());
         // x[0] below 10**9 and balance ratio below 10**14 / 10**18.
         assert!(newton_d_2_v1(ann, gamma, [U256::from(10u64), U256::from(10u64)]).is_none());
-        assert!(newton_d_2_v1(ann, gamma, [x[0], U256::from(10u64).pow(U256::from(9u64))]).is_none());
+        assert!(
+            newton_d_2_v1(ann, gamma, [x[0], U256::from(10u64).pow(U256::from(9u64))]).is_none()
+        );
     }
 
     #[test]

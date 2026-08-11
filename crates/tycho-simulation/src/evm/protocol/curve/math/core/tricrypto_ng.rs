@@ -174,7 +174,9 @@ pub fn newton_d_3(ann: U256, gamma: U256, x_unsorted: [U256; 3]) -> Option<U256>
     if x[0].is_zero() {
         return None;
     }
-    let s = x[0].wrapping_add(x[1]).wrapping_add(x[2]);
+    let s = x[0]
+        .wrapping_add(x[1])
+        .wrapping_add(x[2]);
     let mut d = n.wrapping_mul(geometric_mean_3(x)?);
     for _ in 0..MAX_ITERATIONS {
         let d_prev = d;
@@ -193,9 +195,11 @@ pub fn newton_d_3(ann: U256, gamma: U256, x_unsorted: [U256; 3]) -> Option<U256>
         let _g1k0 = {
             let g = gamma.wrapping_add(WAD);
             if g > k0 {
-                g.wrapping_sub(k0).wrapping_add(U256::from(1))
+                g.wrapping_sub(k0)
+                    .wrapping_add(U256::from(1))
             } else {
-                k0.wrapping_sub(g).wrapping_add(U256::from(1))
+                k0.wrapping_sub(g)
+                    .wrapping_add(U256::from(1))
             }
         };
         // mul1 = 10**18 * D / gamma * _g1k0 / gamma * _g1k0 * A_MULTIPLIER / ANN

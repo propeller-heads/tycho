@@ -51,7 +51,9 @@ pub fn recompute_d(
         balances[0].checked_mul(precisions[0])?,
         balances[1].checked_mul(price_scale_local)? / wad,
     ];
-    if xp[0].is_zero() || xp[1].is_zero() || xp[0].max(xp[1]) / xp[0].min(xp[1]) >= U256::from(10_000u64)
+    if xp[0].is_zero() ||
+        xp[1].is_zero() ||
+        xp[0].max(xp[1]) / xp[0].min(xp[1]) >= U256::from(10_000u64)
     {
         return None;
     }

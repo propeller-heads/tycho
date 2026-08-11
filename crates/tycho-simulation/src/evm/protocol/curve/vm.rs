@@ -172,12 +172,12 @@ where
 /// active, matching the deployed CryptoSwap contracts, which stop reading the stored `D` then:
 ///
 /// - NG-family pools (`TriCryptoNG`, `TwoCryptoNG`, `TwoCryptoStable`) recompute D from live
-///   balances on every call while `future_A_gamma_time > block.timestamp` (pool `_exchange`
-///   and the views contracts' `get_dy` alike).
-/// - Legacy `TwoCryptoV1` `get_dy` recomputes whenever `future_A_gamma_time > 0` — a finished
-///   ramp leaves the sentinel value 1 behind until the next admin-fee claim resets it to 0.
-/// - Legacy `TriCryptoV1` is intentionally excluded: its deployed views contract always reads
-///   the stored `D()`, even during a ramp.
+///   balances on every call while `future_A_gamma_time > block.timestamp` (pool `_exchange` and the
+///   views contracts' `get_dy` alike).
+/// - Legacy `TwoCryptoV1` `get_dy` recomputes whenever `future_A_gamma_time > 0` — a finished ramp
+///   leaves the sentinel value 1 behind until the next admin-fee claim resets it to 0.
+/// - Legacy `TriCryptoV1` is intentionally excluded: its deployed views contract always reads the
+///   stored `D()`, even during a ramp.
 ///
 /// Without this, quotes read the pre-ramp `D` from storage and drift as A/gamma interpolate
 /// (the `D()` getter is plain storage, unlike the interpolating `A()`/`gamma()` getters).
@@ -208,9 +208,12 @@ where
     let ramp_active = if variant == CurveVariant::TwoCryptoV1 {
         !future_time.is_zero()
     } else {
-        let block = engine.state.get_current_block().ok_or_else(|| {
-            SimulationError::FatalError("curve ramp check: engine has no current block".into())
-        })?;
+        let block = engine
+            .state
+            .get_current_block()
+            .ok_or_else(|| {
+                SimulationError::FatalError("curve ramp check: engine has no current block".into())
+            })?;
         future_time > U256::from(block.timestamp)
     };
     if !ramp_active {
@@ -662,6 +665,8 @@ mod test {
         function get_dy(uint256 i, uint256 j, uint256 dx) external view returns (uint256);
         function coins(uint256 i) external view returns (address);
         function decimals() external view returns (uint8);
+        function newton_D(uint256 ANN, uint256 gamma, uint256[2] x_unsorted, uint256 K0_prev) external view returns (uint256);
+        function newton_D(uint256 ANN, uint256 gamma, uint256[3] x_unsorted, uint256 K0_prev) external view returns (uint256);
     }
 
     const ETH_PLACEHOLDER: AlloyAddress =
@@ -713,9 +718,8 @@ mod test {
             .get_amount_out(i, j, dx)
             .expect("get_amount_out returned None");
 
-        let onchain: U256 =
-            call(&engine, &pool, get_dy_0Call { i: i as i128, j: j as i128, dx })
-                .expect("on-chain get_dy failed");
+        let onchain: U256 = call(&engine, &pool, get_dy_0Call { i: i as i128, j: j as i128, dx })
+            .expect("on-chain get_dy failed");
 
         assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy");
     }
@@ -893,14 +897,280 @@ mod test {
             let ours = decoded
                 .get_amount_out(i, j, dx)
                 .expect("get_amount_out returned None");
-            let onchain: U256 = call(
-                &engine,
-                &pool,
-                get_dy_1Call { i: U256::from(i), j: U256::from(j), dx },
-            )
-            .expect("on-chain get_dy failed");
+            let onchain: U256 =
+                call(&engine, &pool, get_dy_1Call { i: U256::from(i), j: U256::from(j), dx })
+                    .expect("on-chain get_dy failed");
             assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy ({i}->{j})");
         }
+    }
+
+    /// Differential sweep: decode each pool at each pinned block and compare every coin pair's
+    /// `get_amount_out(i, j, balances[i] / 1000)` against on-chain `get_dy`. Prints one row per
+    /// comparison and fails if any row mismatches. Blocks are chosen to cover A/gamma ramps
+    /// (active, just-finished-with-legacy-sentinel, and cleared) plus non-ramping controls.
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn differential_cryptoswap_ramp_sweep() {
+        struct Case {
+            pool: &'static str,
+            variant: CurveVariant,
+            n_coins: usize,
+            blocks: &'static [(u64, u64, &'static str)],
+        }
+        let cases = [
+            Case {
+                // TricryptoUSDT — A/gamma ramp 1785577403 -> 1786178519.
+                pool: "0xf5f5b97624542d72a9e06f04804bf81baa15e2b4",
+                variant: CurveVariant::TriCryptoNG,
+                n_coins: 3,
+                blocks: &[
+                    (25_660_000, 1_785_587_015, "ramp early"),
+                    (25_680_000, 1_785_827_855, "ramp mid"),
+                    (25_700_000, 1_786_068_491, "ramp late"),
+                    (25_708_548, 1_786_171_667, "ramp last hours"),
+                    (25_720_000, 1_786_309_559, "ramp finished"),
+                ],
+            },
+            Case {
+                // TricryptoUSDC — never ramped (future_A_gamma_time = 0).
+                pool: "0x7f86bf177dd4f3494b841a37e810a34dd56c829b",
+                variant: CurveVariant::TriCryptoNG,
+                n_coins: 3,
+                blocks: &[
+                    (25_700_000, 1_786_068_491, "no ramp"),
+                    (25_720_000, 1_786_309_559, "no ramp"),
+                ],
+            },
+            Case {
+                // TricryptoLLAMA — historical ramp 1705051559 -> 1705537322 (Jan 2024).
+                pool: "0x2889302a794da87fbf1d6db415c1492194663d13",
+                variant: CurveVariant::TriCryptoNG,
+                n_coins: 3,
+                blocks: &[
+                    (19_010_000, 1_705_294_151, "ramp mid"),
+                    (19_020_000, 1_705_414_727, "ramp late"),
+                    (25_720_000, 1_786_309_559, "ramp long finished"),
+                ],
+            },
+            Case {
+                // tricrypto2 (legacy TriCryptoV1) — mid its Oct 2021 ramp. Its views contract
+                // always uses the stored D, so quotes must match WITHOUT any recompute.
+                pool: "0xd51a44d3fae010294c616388b506acda1bfaae46",
+                variant: CurveVariant::TriCryptoV1,
+                n_coins: 3,
+                blocks: &[
+                    (13_378_096, 1_633_694_791, "ramp active (stored D)"),
+                    (25_720_000, 1_786_309_559, "no ramp"),
+                ],
+            },
+            Case {
+                // cbETH/ETH (legacy TwoCryptoV1) — Jan 2023 ramp. Legacy get_dy recomputes D
+                // whenever future_A_gamma_time > 0, including after the ramp ends until an
+                // exchange/fee-claim clears the flag.
+                pool: "0x5fae7e604fc3e24fd43a72867cebac94c65b404a",
+                variant: CurveVariant::TwoCryptoV1,
+                n_coins: 2,
+                blocks: &[
+                    (16_408_000, 1_673_734_931, "ramp active"),
+                    (16_434_000, 1_674_048_623, "ramp over, flag still set"),
+                    (16_434_400, 1_674_053_459, "flag cleared"),
+                ],
+            },
+            Case {
+                // TwoCryptoNG with MATH v2.0.0 — non-ramping control. (Dust pools with
+                // D < 10**17 are excluded: the deployed get_y's `unsafe D values` assert makes
+                // their on-chain get_dy revert, a pre-existing divergence unrelated to ramps.)
+                pool: "0xca546ae6c3b2bb9fba2b6e5eeb0881097cece5b0",
+                variant: CurveVariant::TwoCryptoNG,
+                n_coins: 2,
+                blocks: &[(25_720_000, 1_786_309_559, "no ramp")],
+            },
+            Case {
+                // TwoCryptoNG with MATH v2.1.0 — non-ramping control.
+                pool: "0x8e001d4bac0eae1eea348dfc22f9b8bda67dd211",
+                variant: CurveVariant::TwoCryptoNG,
+                n_coins: 2,
+                blocks: &[(25_720_000, 1_786_309_559, "no ramp")],
+            },
+            Case {
+                // TwoCryptoStable with MATH v0.1.0 — non-ramping control.
+                pool: "0x516076cfa1daca43974ea2f8ba2976d7a234fd93",
+                variant: CurveVariant::TwoCryptoStable,
+                n_coins: 2,
+                blocks: &[(25_720_000, 1_786_309_559, "no ramp")],
+            },
+            Case {
+                // TwoCryptoStable with MATH v0.1.1 — non-ramping control.
+                pool: "0x4fdccb810f22578ad6700fc10a8c9b6c1df61852",
+                variant: CurveVariant::TwoCryptoStable,
+                n_coins: 2,
+                blocks: &[(25_720_000, 1_786_309_559, "no ramp")],
+            },
+        ];
+
+        let mut comparisons = 0usize;
+        let mut mismatches = Vec::new();
+        for case in &cases {
+            for &(block_number, timestamp, phase) in case.blocks {
+                let header = BlockHeader { number: block_number, timestamp, ..Default::default() };
+                let mut db =
+                    SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
+                db.set_block(Some(header));
+                let engine = SimulationEngine::new(db, false);
+                let pool = AlloyAddress::from_str(case.pool).unwrap();
+                let decimals = read_decimals(&engine, &pool, case.n_coins);
+                let decoded =
+                    decode_from_vm(&engine, &pool, case.variant, &decimals).expect("decode failed");
+                let balances = decoded.balances().to_vec();
+                for (i, balance_in) in balances.iter().enumerate() {
+                    for j in 0..case.n_coins {
+                        if i == j {
+                            continue;
+                        }
+                        let dx = *balance_in / U256::from(1000u64);
+                        if dx.is_zero() {
+                            continue;
+                        }
+                        let ours = decoded.get_amount_out(i, j, dx);
+                        let onchain: Result<U256, _> = call(
+                            &engine,
+                            &pool,
+                            get_dy_1Call { i: U256::from(i), j: U256::from(j), dx },
+                        );
+                        comparisons += 1;
+                        let ok = matches!((&ours, &onchain), (Some(a), Ok(b)) if a == b);
+                        eprintln!(
+                            "{} {:>13} @{} ({phase}) {i}->{j} dx={dx} ours={ours:?} onchain={onchain:?} {}",
+                            case.variant,
+                            &case.pool[..10],
+                            block_number,
+                            if ok { "OK" } else { "MISMATCH" },
+                        );
+                        if !ok {
+                            mismatches.push(format!(
+                                "{} {} @{} {i}->{j}: ours={ours:?} onchain={onchain:?}",
+                                case.variant, case.pool, block_number
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("sweep: {comparisons} comparisons, {} mismatches", mismatches.len());
+        assert!(mismatches.is_empty(), "differential mismatches:\n{}", mismatches.join("\n"));
+    }
+
+    /// Isolated `newton_D` differential: for each NG pool at each pinned block, build `xp`
+    /// from the decoded pool state and compare `Pool::recompute_d()` against the pool's own
+    /// deployed MATH contract via `newton_D(A, gamma, xp, 0)`. Wei-exact equality required.
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn differential_newton_d_vs_deployed_math() {
+        type NewtonDCase = (&'static str, CurveVariant, usize, &'static [(u64, u64)]);
+        let cases: &[NewtonDCase] = &[
+            (
+                "0xf5f5b97624542d72a9e06f04804bf81baa15e2b4",
+                CurveVariant::TriCryptoNG,
+                3,
+                &[
+                    (25_660_000, 1_785_587_015),
+                    (25_680_000, 1_785_827_855),
+                    (25_708_548, 1_786_171_667),
+                    (25_720_000, 1_786_309_559),
+                ],
+            ),
+            (
+                "0x7f86bf177dd4f3494b841a37e810a34dd56c829b",
+                CurveVariant::TriCryptoNG,
+                3,
+                &[(25_700_000, 1_786_068_491), (25_720_000, 1_786_309_559)],
+            ),
+            (
+                "0x2889302a794da87fbf1d6db415c1492194663d13",
+                CurveVariant::TriCryptoNG,
+                3,
+                &[(19_010_000, 1_705_294_151), (25_720_000, 1_786_309_559)],
+            ),
+            (
+                "0x004c167d27ada24305b76d80762997fa6eb8d9b2",
+                CurveVariant::TwoCryptoNG,
+                2,
+                &[(25_700_000, 1_786_068_491), (25_720_000, 1_786_309_559)],
+            ),
+            (
+                "0x8e001d4bac0eae1eea348dfc22f9b8bda67dd211",
+                CurveVariant::TwoCryptoNG,
+                2,
+                &[(25_700_000, 1_786_068_491), (25_720_000, 1_786_309_559)],
+            ),
+            (
+                "0x516076cfa1daca43974ea2f8ba2976d7a234fd93",
+                CurveVariant::TwoCryptoStable,
+                2,
+                &[(25_720_000, 1_786_309_559)],
+            ),
+            (
+                "0x4fdccb810f22578ad6700fc10a8c9b6c1df61852",
+                CurveVariant::TwoCryptoStable,
+                2,
+                &[(25_720_000, 1_786_309_559)],
+            ),
+        ];
+        let wad = U256::from(10u64).pow(U256::from(18u64));
+        let mut comparisons = 0usize;
+        let mut mismatches = Vec::new();
+        for &(pool_str, variant, n_coins, blocks) in cases {
+            for &(block_number, timestamp) in blocks {
+                let header = BlockHeader { number: block_number, timestamp, ..Default::default() };
+                let mut db =
+                    SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
+                db.set_block(Some(header));
+                let engine = SimulationEngine::new(db, false);
+                let pool = AlloyAddress::from_str(pool_str).unwrap();
+                let math = read_math_address(&engine, &pool).expect("pool has MATH()");
+                let decimals = read_decimals(&engine, &pool, n_coins);
+                let decoded =
+                    decode_from_vm(&engine, &pool, variant, &decimals).expect("decode failed");
+                let b = decoded.balances();
+                let p = decoded
+                    .precisions()
+                    .expect("crypto pool");
+                let ps = decoded
+                    .price_scale()
+                    .expect("crypto pool");
+                let (ann, gamma) = (decoded.amp(), decoded.gamma().unwrap_or_default());
+                let ours = decoded.recompute_d();
+                let onchain: Result<U256, _> = if n_coins == 3 {
+                    let xp = [b[0] * p[0], b[1] * ps[0] * p[1] / wad, b[2] * ps[1] * p[2] / wad];
+                    call(
+                        &engine,
+                        &math,
+                        newton_D_1Call { ANN: ann, gamma, x_unsorted: xp, K0_prev: U256::ZERO },
+                    )
+                } else {
+                    let xp = [b[0] * p[0], b[1] * ps[0] * p[1] / wad];
+                    call(
+                        &engine,
+                        &math,
+                        newton_D_0Call { ANN: ann, gamma, x_unsorted: xp, K0_prev: U256::ZERO },
+                    )
+                };
+                comparisons += 1;
+                let ok = matches!((&ours, &onchain), (Some(a), Ok(b)) if a == b);
+                eprintln!(
+                    "{variant} {} @{block_number} ours={ours:?} onchain={onchain:?} {}",
+                    &pool_str[..10],
+                    if ok { "OK" } else { "MISMATCH" },
+                );
+                if !ok {
+                    mismatches.push(format!(
+                        "{variant} {pool_str} @{block_number}: ours={ours:?} onchain={onchain:?}"
+                    ));
+                }
+            }
+        }
+        eprintln!("newton_D sweep: {comparisons} comparisons, {} mismatches", mismatches.len());
+        assert!(mismatches.is_empty(), "newton_D mismatches:\n{}", mismatches.join("\n"));
     }
 
     /// TricryptoUSDT (`0xf5f5b976…`) mid A/gamma ramp (`future_A_gamma_time` = 1786178519 >
@@ -914,10 +1184,10 @@ mod test {
             CurveVariant::TriCryptoNG,
             3,
             &[
-                (0, 1, U256::from(1_000_000_000u64)),                // 1000 USDT -> WBTC
-                (0, 2, U256::from(1_000_000_000u64)),                // 1000 USDT -> WETH
-                (1, 0, U256::from(10_000_000u64)),                   // 0.1 WBTC -> USDT
-                (2, 0, U256::from(1_000_000_000_000_000_000u128)),   // 1 WETH -> USDT
+                (0, 1, U256::from(1_000_000_000u64)), // 1000 USDT -> WBTC
+                (0, 2, U256::from(1_000_000_000u64)), // 1000 USDT -> WETH
+                (1, 0, U256::from(10_000_000u64)),    // 0.1 WBTC -> USDT
+                (2, 0, U256::from(1_000_000_000_000_000_000u128)), // 1 WETH -> USDT
             ],
             (25_708_548, 1_786_171_667),
         );
