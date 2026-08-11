@@ -730,6 +730,69 @@ fn weighted_v2_min_balance_dust_pool_returns_zero_limits() {
     assert_eq!((max_in, max_out), (BigUint::ZERO, BigUint::ZERO));
 }
 
+/// The protocol's share of the swap fee leaves the pool, so a quote's reported state must have it
+/// deducted in the same units the balances are held in. Only a token whose raw amount differs from
+/// its scaled-18 one can tell the two apart, so this uses a 6-decimal input token — with 18-decimal
+/// tokens at a rate of one the two are identical and any mix-up stays hidden.
+///
+/// The expectation follows the Vault: the fee is truncated to whole input-token units before being
+/// charged, so it is `toScaled18(toRaw(totalFee) * aggregatePercentage)`.
+#[test]
+fn protocol_fee_leaves_the_pool_in_the_balances_own_units() {
+    let scaling_factor = U256::from(1_000_000_000_000u64); // a 6-decimal input token
+    let base = BasePoolState {
+        pool_address: "0x00000000000000000000000000000000000000f0".to_string(),
+        pool_type: "WEIGHTED".to_string(),
+        tokens: vec![
+            "0x000000000000000000000000000000000000000a".to_string(),
+            "0x000000000000000000000000000000000000000b".to_string(),
+        ],
+        scaling_factors: vec![scaling_factor, U256::from(1u8)],
+        token_rates: vec![uint_wad(), uint_wad()],
+        balances_live_scaled_18: vec![uint_wad() * U256::from(1_000u32); 2],
+        swap_fee: uint_wad() / U256::from(100u8), // 1%
+        aggregate_swap_fee: uint_wad() / U256::from(4u8), // a quarter of it goes to the protocol
+        total_supply: uint_wad() * U256::from(1_000u32),
+        supports_unbalanced_liquidity: true,
+        hook_type: None,
+    };
+    let weights = vec![uint_wad() / U256::from(2u8); 2];
+    let pool = BalancerV3State::new(
+        address("0x00000000000000000000000000000000000000f0"),
+        address(VAULT),
+        PoolTypeAttribute { pool_type: BalancerPoolType::Weighted, version: None },
+        base.tokens
+            .iter()
+            .map(|t| address(t))
+            .collect(),
+        Vec::new(),
+        0,
+        PoolState::Weighted(WeightedState::new(base, weights)),
+    );
+
+    let amount_in_raw = U256::from(100_000_000u64); // 100 whole units of the 6-decimal token
+    let before = pool.state_balances()[0];
+    let quoted = pool
+        .get_amount_out(u256_to_biguint(amount_in_raw), &token_at(&pool, 0), &token_at(&pool, 1))
+        .expect("quote succeeds");
+    let after = quoted
+        .new_state
+        .as_any()
+        .downcast_ref::<BalancerV3State>()
+        .expect("new state is a BalancerV3State")
+        .state_balances()[0];
+
+    let amount_in_scaled = amount_in_raw * scaling_factor;
+    let total_fee_scaled = amount_in_scaled / U256::from(100u8);
+    let protocol_fee_raw = (total_fee_scaled / scaling_factor) / U256::from(4u8);
+    let protocol_fee_scaled = protocol_fee_raw * scaling_factor;
+    assert_eq!(
+        after - before,
+        amount_in_scaled - protocol_fee_scaled,
+        "the protocol fee must be deducted in scaled-18 units, not the input token's raw ones"
+    );
+}
+
 /// A pool so thin that even its own largest allowed swap trades below the Vault's
 /// `MINIMUM_TRADE_AMOUNT` must report `(0, 0)`, not surface `TradeAmountTooSmall` as an error.
 #[test]

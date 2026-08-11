@@ -576,12 +576,24 @@ impl BalancerV3State {
         .map_err(maths_error)?;
         let total_fee_scaled =
             mul_up_fixed(&amount_in_scaled, &base.swap_fee).map_err(maths_error)?;
-        let protocol_fee_scaled = compute_and_charge_aggregate_swap_fees(
+        // The Vault charges the protocol's share in the input token's own units, truncating the
+        // fee to whole ones before deducting it from the raw balance. That is what this returns —
+        // despite the scaled-18 name the maths library gives it — so it has to be scaled back up
+        // before meeting balances that are held scaled to 18 decimals. Skipping that step leaves
+        // the deduction short by the token's scaling factor, which is invisible for 18-decimal
+        // tokens at a rate of one and a factor of 10^12 for something like USDC.
+        let protocol_fee_raw = compute_and_charge_aggregate_swap_fees(
             &total_fee_scaled,
             &base.aggregate_swap_fee,
             &base.scaling_factors,
             &base.token_rates,
             index_in,
+        )
+        .map_err(maths_error)?;
+        let protocol_fee_scaled = to_scaled_18_apply_rate_round_down(
+            &protocol_fee_raw,
+            &base.scaling_factors[index_in],
+            &base.token_rates[index_in],
         )
         .map_err(maths_error)?;
 
