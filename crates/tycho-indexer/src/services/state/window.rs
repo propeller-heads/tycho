@@ -9,6 +9,23 @@
 //! Retention rule: a block is evictable only when its number is at or below
 //! `min(finalized, db_committed, tip - W)`, the subtraction saturating.
 //!
+//! ```text
+//!  ◄── evicted (folded into the sink, oldest first)
+//!    ┌──────────────────────┬─────────────────────┬────────────────┐
+//!    │ committed, finalized │ finalized, not yet  │  unfinalized   │
+//!    │  (kept for serving)  │     committed       │                │
+//!    └──────────────────────┴─────────────────────┴────────────────┘
+//!    ▲                      ▲                     ▲                ▲
+//!  floor               db_committed           finalized          tip
+//!    ◄───────────────────────── ≥ W blocks ───────────────────────►
+//! ```
+//!
+//! `W` is the total window depth measured from the tip — it includes the unfinalized and
+//! uncommitted blocks, it is not extra retention on top of them. When finality or the database
+//! commit lag more than `W` blocks behind the tip, the watermark terms of the `min` govern and
+//! the window grows beyond `W` (unfinalized and uncommitted blocks are never evicted); once they
+//! catch up, the `tip - W` term governs and the window holds `W` blocks.
+//!
 //! - `finalized`: folded data must never be affected by a reorg; reverts purge unfolded window
 //!   blocks only.
 //! - `db_committed`: readers of the pending-deltas facade assume every uncommitted block is
