@@ -16,28 +16,28 @@
 //! - **Entries exist only complete.** An entry is created by a database fill or by a `Creation`
 //!   delta (both carry the entity's whole tracked state) — never by a partial update. Presence in
 //!   the cache is therefore proof that a hit is servable.
-//! - **Fills publish value-by-value.** A fill is a snapshot of the database at a stamped block; it
-//!   is published with set-if-newer per value and never replaces a whole entry, so a fold that
-//!   landed while the fill was in flight cannot be overwritten with older data.
+//! - **Fills publish value-by-value, with honest provenance, only reorg-safe state.** A fill is a
+//!   database snapshot; each published value carries the block that actually wrote it (the row's
+//!   `valid_from` for account values, the owning extractor's snapshot commit height for components)
+//!   and is applied only where newer than what the entry holds. A blanket "database head" stamp is
+//!   unsound: the head is chain-global while commits are per-extractor, so it can overstate
+//!   provenance and mask a concurrently folded newer value. Window top-up beyond the database base
+//!   decorates the response only — it is never published, because unfinalized values in the cache
+//!   would survive a revert that only purges the window.
 //!
 //! Locking: one mutex per entity, no whole-cache lock. The outer maps are only locked to look up
 //! or insert entry handles; folds and reads then lock the single entity they touch, so a fold on
 //! one account never blocks a read of another.
 //!
-//! Database fills are deliberately **not** deduplicated. Requests that miss the same entity
-//! concurrently may each query the database for it — accepted and measured rather than
-//! prevented, because three existing mechanisms already make duplicates rare and harmless:
+//! Database fills are deliberately **not** deduplicated. The reasoning is simple:
 //!
-//! - set-if-newer publication makes concurrent fills of one entity converge, so a duplicate costs a
-//!   redundant indexed point-read, never a wrong value;
-//! - identical request bodies are collapsed upstream by the HTTP response cache's in-flight
-//!   deduplication, which covers reconnecting clients snapshotting the same block;
-//! - the fill path's semaphore bounds total concurrent fill queries regardless.
+//! - duplicates are safe: publication is tag-guarded, so concurrent fills of one entity converge;
+//! - duplicates are rare: identical requests are already collapsed by the HTTP response cache, and
+//!   the fill semaphore bounds total fill concurrency.
 //!
-//! What remains is overlapping-but-not-identical requests (adjacent blocks, different page
-//! slicing). Their rate is observable via [`EntityCache::record_fill_start`]; per-entity
-//! single-flight (a guard map with waiter wake-up) can be reintroduced behind the same call
-//! sites if that metric ever shows the redundancy matters.
+//! The expectation is still checked: [`EntityCache::record_fill_start`] feeds
+//! `entity_cache_fill_duplicates`, and per-entity single-flight can be reintroduced behind the
+//! same call sites if the metric ever proves it wrong.
 
 // Not yet constructed by production code; wired into the pending-deltas facade and the fill path
 // in follow-ups.
@@ -95,11 +95,15 @@ pub(crate) struct CachedAccount {
 }
 
 impl CachedAccount {
-    /// Builds a complete entry from a database fill stamped at block `stamp`.
+    /// Builds a complete entry from a database fill.
     #[allow(unused_variables)]
     fn from_fill(filled: &Account, stamp: u64) -> Self {
-        // Every value starts tagged with `stamp`: the fill is a snapshot of the database at that
-        // block, no per-value provenance exists or is needed.
+        // Tags must be per-value provenance: the block that actually wrote each value (the row's
+        // `valid_from`, plumbed through the stamped gateway read). A single snapshot-level stamp
+        // would overstate provenance for values written earlier and let this entry mask another
+        // extractor's concurrently folded newer write to a shared account (see the module doc);
+        // `stamp` is only the fallback tag for values whose provenance the gateway cannot supply,
+        // and must then be a per-writer commit height, never the chain-global head.
         todo!("build entry from filled account")
     }
 
@@ -125,9 +129,9 @@ impl CachedAccount {
     /// Publishes a database fill stamped at block `stamp`, value by value.
     #[allow(unused_variables)]
     fn set_if_newer(&mut self, filled: &Account, stamp: u64) {
-        // Per slot / field: write only when `stamp` is greater than the stored tag. Never clear
-        // values absent from the fill — an absent slot means "not tracked by this query", not
-        // "deleted".
+        // Per slot / field: write only when the incoming value's own provenance tag (its row's
+        // `valid_from`) is greater than the stored tag. Never clear values absent from the fill —
+        // an absent slot means "not tracked by this query", not "deleted".
         todo!("tag-compared publication")
     }
 
@@ -171,7 +175,9 @@ impl CachedComponentState {
     #[allow(unused_variables)]
     fn set_if_newer(&mut self, filled: &ProtocolComponentState, stamp: u64) {
         // Single-height entries publish atomically: apply the whole fill iff
-        // `stamp > self.height`.
+        // `stamp > self.height`, where `stamp` is the owning extractor's committed height read in
+        // the same database snapshot as the fill (not the chain-global head — see the module
+        // doc). Only the reorg-safe base is ever published; window top-up stays response-local.
         todo!("height-compared publication")
     }
 
