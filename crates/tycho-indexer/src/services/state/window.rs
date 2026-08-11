@@ -115,22 +115,35 @@ pub(crate) struct DeltaWindow {
 }
 
 impl DeltaWindow {
-    /// Creates an empty window with the given target retention depth `W` (at least 1 block) and
-    /// fold batch size (at least 1, see [`DeltaWindow::fold_and_evict`]).
-    pub(crate) fn new(extractor: String, depth: u64, min_fold_batch: u64) -> Self {
-        assert!(depth >= 1, "DeltaWindow depth must be at least 1, got {depth}");
-        assert!(
-            min_fold_batch >= 1,
-            "DeltaWindow fold batch must be at least 1, got {min_fold_batch}"
-        );
-        Self {
+    /// Creates an empty window with the given target retention depth `W` and fold batch size
+    /// (see [`DeltaWindow::fold_and_evict`]).
+    ///
+    /// # Errors
+    ///
+    /// `StorageError::Unexpected` when `depth` or `min_fold_batch` is 0; both must be at least 1.
+    pub(crate) fn new(
+        extractor: String,
+        depth: u64,
+        min_fold_batch: u64,
+    ) -> Result<Self, StorageError> {
+        if depth < 1 {
+            return Err(StorageError::Unexpected(format!(
+                "DeltaWindow depth must be at least 1, got {depth}"
+            )));
+        }
+        if min_fold_batch < 1 {
+            return Err(StorageError::Unexpected(format!(
+                "DeltaWindow fold batch must be at least 1, got {min_fold_batch}"
+            )));
+        }
+        Ok(Self {
             extractor,
             buffer: ReorgBuffer::new(),
             depth,
             db_committed: None,
             finalized: None,
             min_fold_batch,
-        }
+        })
     }
 
     /// Applies one full-block message to the window.
