@@ -121,6 +121,18 @@ mod tests {
         assert!(diff <= U256::from(1));
     }
 
+    /// Wei-exact against the deployed StableswapMath contracts
+    /// (`newton_D(350000, gamma, xp, 0)` via `eth_call`): v0.1.0 `0x79839c2D…` and
+    /// v0.1.1 `0xBfDdF58C…` both return this value, so the ramp-time D recompute can
+    /// reuse `get_d` for either MATH version.
+    #[test]
+    fn get_d_matches_deployed_stableswap_math() {
+        let u = |s: &str| s.parse::<U256>().unwrap();
+        let xp = [u("250289528581622891700521"), u("249710772232236449374974")];
+        let d = get_d(&xp, U256::from(350_000u64));
+        assert_eq!(d, Some(u("500000291509438763728778")));
+    }
+
     #[test]
     fn get_y_roundtrip() {
         let wad = U256::from(1_000_000_000_000_000_000u128);

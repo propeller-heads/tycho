@@ -37,6 +37,7 @@ sol! {
         function fee() external view returns (uint256);
         function initial_A() external view returns (uint256);
         function future_A() external view returns (uint256);
+        function future_A_gamma_time() external view returns (uint256);
         function offpeg_fee_multiplier() external view returns (uint256);
         function gamma() external view returns (uint256);
         function D() external view returns (uint256);
@@ -161,8 +162,67 @@ where
         }
     };
 
-    build_pool(&state)
-        .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))
+    let mut built = build_pool(&state)
+        .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))?;
+    recompute_ramping_d(engine, pool, variant, &mut built)?;
+    Ok(built)
+}
+
+/// Replace the stored invariant `D` with a freshly computed one while an A/gamma ramp is
+/// active, matching the deployed CryptoSwap contracts, which stop reading the stored `D` then:
+///
+/// - NG-family pools (`TriCryptoNG`, `TwoCryptoNG`, `TwoCryptoStable`) recompute D from live
+///   balances on every call while `future_A_gamma_time > block.timestamp` (pool `_exchange`
+///   and the views contracts' `get_dy` alike).
+/// - Legacy `TwoCryptoV1` `get_dy` recomputes whenever `future_A_gamma_time > 0` — a finished
+///   ramp leaves the sentinel value 1 behind until the next admin-fee claim resets it to 0.
+/// - Legacy `TriCryptoV1` is intentionally excluded: its deployed views contract always reads
+///   the stored `D()`, even during a ramp.
+///
+/// Without this, quotes read the pre-ramp `D` from storage and drift as A/gamma interpolate
+/// (the `D()` getter is plain storage, unlike the interpolating `A()`/`gamma()` getters).
+/// Outside a ramp the stored `D` is used unchanged.
+fn recompute_ramping_d<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    pool_address: &AlloyAddress,
+    variant: CurveVariant,
+    pool: &mut Pool,
+) -> Result<(), SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    if !matches!(
+        variant,
+        CurveVariant::TwoCryptoV1 |
+            CurveVariant::TwoCryptoNG |
+            CurveVariant::TwoCryptoStable |
+            CurveVariant::TriCryptoNG
+    ) {
+        return Ok(());
+    }
+    let Some(future_time) = call_opt(engine, pool_address, ICurve::future_A_gamma_timeCall {})
+    else {
+        return Ok(());
+    };
+    let ramp_active = if variant == CurveVariant::TwoCryptoV1 {
+        !future_time.is_zero()
+    } else {
+        let block = engine.state.get_current_block().ok_or_else(|| {
+            SimulationError::FatalError("curve ramp check: engine has no current block".into())
+        })?;
+        future_time > U256::from(block.timestamp)
+    };
+    if !ramp_active {
+        return Ok(());
+    }
+    let recomputed = pool.recompute_d().ok_or_else(|| {
+        SimulationError::RecoverableError(format!(
+            "curve: newton_D failed for ramping pool {pool_address}"
+        ))
+    })?;
+    pool.set_d(recomputed)
+        .map_err(|e| SimulationError::FatalError(format!("curve set_d failed: {e}")))
 }
 
 fn read_twocrypto<D: EngineDatabaseInterface + Clone + Debug>(
@@ -594,8 +654,12 @@ mod test {
         simulation::SimulationEngine,
     };
 
+    // `sol!` derives selectors from the declared name, so the on-chain `get_dy` overloads must
+    // be declared under their real name: `get_dy_0Call` is the StableSwap `int128` signature,
+    // `get_dy_1Call` the CryptoSwap `uint256` signature.
     sol! {
-        function get_dy_stable(int128 i, int128 j, uint256 dx) external view returns (uint256);
+        function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
+        function get_dy(uint256 i, uint256 j, uint256 dx) external view returns (uint256);
         function coins(uint256 i) external view returns (address);
         function decimals() external view returns (uint8);
     }
@@ -650,7 +714,7 @@ mod test {
             .expect("get_amount_out returned None");
 
         let onchain: U256 =
-            call(&engine, &pool, get_dy_stableCall { i: i as i128, j: j as i128, dx })
+            call(&engine, &pool, get_dy_0Call { i: i as i128, j: j as i128, dx })
                 .expect("on-chain get_dy failed");
 
         assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy");
@@ -805,6 +869,77 @@ mod test {
             .unwrap();
         assert!(correct_out > U256::from(10).pow(U256::from(17)), "correct ~0.6 ETH");
         assert!(wrong_out > correct_out * U256::from(100u64), "wrong decimals corrupt the quote");
+    }
+
+    /// Decode a CryptoSwap pool from the VM and assert our `get_amount_out` matches on-chain
+    /// `get_dy` (`uint256` signature) at the same block for every listed swap.
+    fn assert_crypto_matches_onchain(
+        pool: &str,
+        variant: CurveVariant,
+        n_coins: usize,
+        swaps: &[(usize, usize, U256)],
+        block: (u64, u64),
+    ) {
+        let (block_number, timestamp) = block;
+        let header = BlockHeader { number: block_number, timestamp, ..Default::default() };
+        let mut db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
+        db.set_block(Some(header));
+        let engine = SimulationEngine::new(db, false);
+        let pool = AlloyAddress::from_str(pool).unwrap();
+        let decimals = read_decimals(&engine, &pool, n_coins);
+
+        let decoded = decode_from_vm(&engine, &pool, variant, &decimals).expect("decode failed");
+        for &(i, j, dx) in swaps {
+            let ours = decoded
+                .get_amount_out(i, j, dx)
+                .expect("get_amount_out returned None");
+            let onchain: U256 = call(
+                &engine,
+                &pool,
+                get_dy_1Call { i: U256::from(i), j: U256::from(j), dx },
+            )
+            .expect("on-chain get_dy failed");
+            assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy ({i}->{j})");
+        }
+    }
+
+    /// TricryptoUSDT (`0xf5f5b976…`) mid A/gamma ramp (`future_A_gamma_time` = 1786178519 >
+    /// block timestamp): on-chain `get_dy` recomputes D via `newton_D` instead of reading the
+    /// stored (stale) `D()`. Fails without the ramp-time recompute in `decode_from_vm`.
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn differential_tricrypto_ng_ramp_active() {
+        assert_crypto_matches_onchain(
+            "0xf5f5b97624542d72a9e06f04804bf81baa15e2b4",
+            CurveVariant::TriCryptoNG,
+            3,
+            &[
+                (0, 1, U256::from(1_000_000_000u64)),                // 1000 USDT -> WBTC
+                (0, 2, U256::from(1_000_000_000u64)),                // 1000 USDT -> WETH
+                (1, 0, U256::from(10_000_000u64)),                   // 0.1 WBTC -> USDT
+                (2, 0, U256::from(1_000_000_000_000_000_000u128)),   // 1 WETH -> USDT
+            ],
+            (25_708_548, 1_786_171_667),
+        );
+    }
+
+    /// Control: the same pool after the ramp finished (`future_A_gamma_time` < block
+    /// timestamp) must keep using the stored `D()` exactly as before the fix.
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn differential_tricrypto_ng_ramp_finished_control() {
+        assert_crypto_matches_onchain(
+            "0xf5f5b97624542d72a9e06f04804bf81baa15e2b4",
+            CurveVariant::TriCryptoNG,
+            3,
+            &[
+                (0, 1, U256::from(1_000_000_000u64)),
+                (0, 2, U256::from(1_000_000_000u64)),
+                (1, 0, U256::from(10_000_000u64)),
+                (2, 0, U256::from(1_000_000_000_000_000_000u128)),
+            ],
+            (25_720_000, 1_786_309_559),
+        );
     }
 
     #[test]

@@ -2,7 +2,29 @@
 
 use alloy_primitives::U256;
 
-use crate::evm::protocol::curve::math::core::twocrypto_ng::{get_y_2_ng, FEE_DENOMINATOR, WAD};
+use crate::evm::protocol::curve::math::core::twocrypto_ng::{
+    get_y_2_ng, newton_d_2_ng, FEE_DENOMINATOR, WAD,
+};
+
+/// Recompute the invariant D from the current balances, as the deployed views contract does
+/// while an A/gamma ramp is active (`CurveCryptoViews2Optimized._prep_calc`):
+/// `xp` is built exactly like [`get_amount_out`]'s (without any swap input), then
+/// `newton_D(A, gamma, xp, 0)`.
+pub fn recompute_d(
+    balances: &[U256; 2],
+    precisions: &[U256; 2],
+    price_scale: U256,
+    ann: U256,
+    gamma: U256,
+) -> Option<U256> {
+    let wad = U256::from(WAD);
+    let price_scale_local = price_scale.checked_mul(precisions[1])?;
+    let xp: [U256; 2] = [
+        balances[0].checked_mul(precisions[0])?,
+        balances[1].checked_mul(price_scale_local)? / wad,
+    ];
+    newton_d_2_ng(ann, gamma, xp)
+}
 
 fn crypto_fee(xp: &[U256], mid_fee: U256, out_fee: U256, fee_gamma: U256) -> Option<U256> {
     let wad = U256::from(WAD);

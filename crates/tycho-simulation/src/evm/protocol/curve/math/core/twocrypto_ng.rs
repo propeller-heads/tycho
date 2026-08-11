@@ -114,6 +114,125 @@ pub fn cbrt(x: U256) -> U256 {
     }
 }
 
+/// EVM `unsafe_div` semantics: division by zero yields zero instead of reverting.
+fn unsafe_div_u(a: U256, b: U256) -> U256 {
+    if b.is_zero() {
+        U256::ZERO
+    } else {
+        a / b
+    }
+}
+
+/// Invariant solver ported from the deployed TwoCrypto-NG MATH contract
+/// (`CurveTwocryptoMathOptimized.vy` v2.0.0, mainnet `0x2005995a71243be9FB995DaB4742327dc76564Df`),
+/// `newton_D` with `K0_prev = 0` (the only form the pool and views contracts use for
+/// ramp-time D recomputation).
+///
+/// Wei-exact transcription: Vyper `unsafe_*` operations map to wrapping arithmetic (with
+/// division-by-zero yielding zero) and checked Vyper operations map to `checked_*` returning
+/// `None` where the contract would revert. The final domain guard uses the v2.0.0 bounds
+/// (`frac >= 10**16 - 1 and frac < 10**20 + 1`); v2.1.0 loosens them by `N_COINS`, so for
+/// v2.1.0 pools this port fails closed on extreme (>~200:1) imbalance instead of quoting.
+pub fn newton_d_2_ng(ann: U256, gamma: U256, x_unsorted: [U256; 2]) -> Option<U256> {
+    let p = |exp: u32| -> U256 { U256::from(10u64).pow(U256::from(exp)) };
+    let n = U256::from(2u64);
+    // assert ANN > MIN_A - 1 and ANN < MAX_A + 1; assert gamma in [MIN_GAMMA, MAX_GAMMA]
+    let (min_a, max_a) = (U256::from(4_000u64), U256::from(40_000_000u64));
+    let (min_gamma, max_gamma) = (p(10), U256::from(2u64) * p(15));
+    if ann < min_a || ann > max_a || gamma < min_gamma || gamma > max_gamma {
+        return None;
+    }
+    let x = if x_unsorted[0] < x_unsorted[1] {
+        [x_unsorted[1], x_unsorted[0]]
+    } else {
+        x_unsorted
+    };
+    // assert x[0] > 10**9 - 1 and x[0] < 10**15 * 10**18 + 1  # dev: unsafe values x[0]
+    if x[0] < p(9) || x[0] > p(15) * WAD {
+        return None;
+    }
+    // assert unsafe_div(x[1] * 10**18, x[0]) > 10**14 - 1  # dev: unsafe values x[i] (input)
+    if unsafe_div_u(x[1].checked_mul(WAD)?, x[0]) < p(14) {
+        return None;
+    }
+    let s = x[0].wrapping_add(x[1]);
+    let mut d = n * isqrt(x[0].wrapping_mul(x[1]));
+    for _ in 0..MAX_ITERATIONS {
+        let d_prev = d;
+        // assert D > 0 (checked in Vyper; guards the unsafe divisions below)
+        if d.is_zero() {
+            return None;
+        }
+        // K0 = (10**18 * N**2) * x[0] / D * x[1] / D
+        let k0 = unsafe_div_u(
+            unsafe_div_u(p(18).checked_mul(U256::from(4u64))?.checked_mul(x[0])?, d)
+                .checked_mul(x[1])?,
+            d,
+        );
+        let _g1k0 = {
+            let g = gamma + WAD;
+            if g > k0 {
+                g.wrapping_sub(k0).wrapping_add(U256::from(1))
+            } else {
+                k0.wrapping_sub(g).wrapping_add(U256::from(1))
+            }
+        };
+        // mul1 = 10**18 * D / gamma * _g1k0 / gamma * _g1k0 * A_MULTIPLIER / ANN
+        // (multiplications checked, divisions unsafe in the deployed source)
+        let mul1 = unsafe_div_u(
+            unsafe_div_u(
+                unsafe_div_u(WAD.checked_mul(d)?, gamma).checked_mul(_g1k0)?,
+                gamma,
+            )
+            .checked_mul(_g1k0)?
+            .checked_mul(A_MULTIPLIER)?,
+            ann,
+        );
+        // mul2 = ((2 * 10**18) * N_COINS) * K0 / _g1k0
+        let mul2 = unsafe_div_u(p(18).checked_mul(U256::from(4u64))?.checked_mul(k0)?, _g1k0);
+        // neg_fprime = (S + S * mul2 / 10**18) + mul1 * N_COINS / K0 - mul2 * D / 10**18
+        // (`mul1 * N_COINS / K0` is checked division: K0 == 0 reverts on-chain)
+        let neg_fprime = s
+            .checked_add(unsafe_div_u(s.checked_mul(mul2)?, WAD))?
+            .checked_add(mul1.checked_mul(n)?.checked_div(k0)?)?
+            .checked_sub(unsafe_div_u(mul2.checked_mul(d)?, WAD))?;
+        // D_plus = D * (neg_fprime + S) / neg_fprime (fully checked)
+        let d_plus = d
+            .checked_mul(neg_fprime.checked_add(s)?)?
+            .checked_div(neg_fprime)?;
+        // D_minus = D * D / neg_fprime
+        let mut d_minus = unsafe_div_u(d.checked_mul(d)?, neg_fprime);
+        let adj = unsafe_div_u(
+            d.checked_mul(unsafe_div_u(mul1, neg_fprime))?
+                .wrapping_div(WAD)
+                .checked_mul(if WAD > k0 { WAD - k0 } else { k0 - WAD })?,
+            k0,
+        );
+        if WAD > k0 {
+            d_minus = d_minus.checked_add(adj)?;
+        } else {
+            d_minus = d_minus.checked_sub(adj)?;
+        }
+        d = if d_plus > d_minus {
+            d_plus.wrapping_sub(d_minus)
+        } else {
+            d_minus.wrapping_sub(d_plus) / n
+        };
+        let diff = if d > d_prev { d - d_prev } else { d_prev - d };
+        if diff.checked_mul(p(14))? < d.max(p(16)) {
+            // Final domain guard mirrors `assert frac >= 10**16 - 1 and frac < 10**20 + 1`.
+            for x_i in x {
+                let frac = x_i.checked_mul(WAD)?.checked_div(d)?;
+                if frac < p(16) - U256::from(1) || frac >= p(20) + U256::from(1) {
+                    return None;
+                }
+            }
+            return Some(d);
+        }
+    }
+    None
+}
+
 pub fn newton_y_2_ng(
     ann: U256,
     gamma: U256,
@@ -409,6 +528,42 @@ mod tests {
         let lim_mul = U256::from(100u64) * wad;
         assert!(get_y_2_ng(ann, gamma, x, d, 2).is_none());
         assert!(newton_y_2_ng(ann, gamma, x, d, 2, lim_mul).is_none());
+    }
+
+    /// Wei-exact against the deployed v2.0.0 MATH contract
+    /// (`0x2005995a71243be9FB995DaB4742327dc76564Df.newton_D(A, gamma, xp, 0)` via `eth_call`;
+    /// v2.1.0 `0x1Fd8Af16…` returns the same values for these inputs). First case is the
+    /// live xp of factory pool `0x004C167d…` (WETH/RSUP), second is a balanced pool.
+    #[test]
+    fn newton_d_2_ng_matches_deployed_math() {
+        let u = |s: &str| s.parse::<U256>().unwrap();
+        let d = newton_d_2_ng(
+            U256::from(400_000u64),
+            U256::from(145_000_000_000_000u64),
+            [u("39563021814614801"), u("61870325522626009")],
+        );
+        assert_eq!(d, Some(u("99079673513184348")));
+        let d = newton_d_2_ng(
+            U256::from(400_000u64),
+            U256::from(145_000_000_000_000u64),
+            [u("5000000000000000000000"), u("5000000000000000000000")],
+        );
+        assert_eq!(d, Some(u("10000000000000000000000")));
+    }
+
+    #[test]
+    fn newton_d_2_ng_rejects_out_of_domain_inputs() {
+        let wad = WAD;
+        let x = [U256::from(5000u64) * wad, U256::from(5000u64) * wad];
+        let gamma = U256::from(145_000_000_000_000u64);
+        let ann = U256::from(400_000u64);
+        // ANN and gamma outside the deployed contract's asserted bounds.
+        assert!(newton_d_2_ng(U256::from(3_999u64), gamma, x).is_none());
+        assert!(newton_d_2_ng(U256::from(40_000_001u64), gamma, x).is_none());
+        assert!(newton_d_2_ng(ann, U256::from(10u64).pow(U256::from(9u64)), x).is_none());
+        // x[0] below 10**9 and balance ratio below 10**14 / 10**18.
+        assert!(newton_d_2_ng(ann, gamma, [U256::from(10u64), U256::from(10u64)]).is_none());
+        assert!(newton_d_2_ng(ann, gamma, [x[0], U256::from(10u64).pow(U256::from(9u64))]).is_none());
     }
 
     #[test]
