@@ -336,10 +336,11 @@ fn cap_to_depth(aggregate: BigUint, bins: &[MetricDepthBin]) -> BigUint {
 /// Walks the depth bins and computes the output bought by `amount_in`, entirely in raw integer
 /// units using Metric's own per-bin accounting.
 ///
-/// Full bins cost exactly their `cumulativeInputVolume` difference. Partial fills are priced
-/// pro-rata within the bin — live data shows a bin's full input over its full volume equals the
-/// bin's boundary price (one price per bin), so pro-rata is exact at bin boundaries — and the
-/// division rounds down so the quote never overstates the output.
+/// Full bins cost exactly their `cumulativeInputVolume` difference — Metric's authoritative,
+/// fee-adjusted accounting. Partial fills are priced pro-rata at the bin's average cost: under
+/// the documented linear intra-bin model this is exact at bin boundaries and conservative inside
+/// the bin (off by at most half the bin's price width, understating the output; the division
+/// also rounds down).
 fn depth_output_for_input(
     bins: &[MetricDepthBin],
     amount_in: &BigUint,
