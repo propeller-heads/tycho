@@ -2159,11 +2159,8 @@ mod tests {
         );
 
         // Comparing raw amount_out (Y) against raw amount_in (X) across directions isn't
-        // dimensionally meaningful here (X and Y are different tokens at a 2:1 price), so it
-        // can't be used to show that the lower-fee backward swap needed more volume. Instead,
-        // verify the real correctness property the fee-markup fix establishes: each swap's
-        // resulting spot_price() lands on the target that was requested for its own direction,
-        // regardless of that direction's fee.
+        // dimensionally meaningful (different tokens at a 2:1 price). Instead, each swap's
+        // resulting spot_price() should land on its own direction's target, regardless of fee.
         let forward_target = 2_000_000f64 / 1_010_000f64;
         let forward_result_price = pool_swap_forward
             .new_state()
@@ -2354,8 +2351,7 @@ mod tests {
             "V4 should match V3 output with same fees (0.05%)"
         );
 
-        // Sanity check: the resulting spot price should land close to the requested target -
-        // this is the actual correctness property the fee-markup fix is about.
+        // The resulting spot price should land close to the requested target.
         let resulting_spot_price = pool_swap
             .new_state()
             .spot_price(&token_x, &token_y)
