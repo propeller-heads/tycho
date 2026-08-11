@@ -1,27 +1,27 @@
 use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
-use super::client::PropAmmClient;
+use super::client::BiconomyClient;
 use crate::rfq::{constants::get_biconomy_propamm_config, errors::RFQError};
 
-/// `PropAmmClientBuilder` is a builder pattern implementation for creating instances of
-/// `PropAmmClient`.
+/// `BiconomyClientBuilder` is a builder pattern implementation for creating instances of
+/// `BiconomyClient`.
 ///
 /// # Example
 /// ```rust
-/// use tycho_simulation::rfq::protocols::biconomy_propamm::client_builder::PropAmmClientBuilder;
+/// use tycho_simulation::rfq::protocols::biconomy_propamm::client_builder::BiconomyClientBuilder;
 /// use tycho_common::{models::Chain, Bytes};
 /// use std::str::FromStr;
 ///
 /// let weth = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
 /// let usdc = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
 ///
-/// let client = PropAmmClientBuilder::new(Chain::Base)
+/// let client = BiconomyClientBuilder::new(Chain::Base)
 ///     .add_pair(weth, usdc)
 ///     .build()
 ///     .unwrap();
 /// ```
-pub struct PropAmmClientBuilder {
+pub struct BiconomyClientBuilder {
     chain: Chain,
     pairs: Vec<(Bytes, Bytes)>,
     base_url: String,
@@ -30,7 +30,7 @@ pub struct PropAmmClientBuilder {
     api_key: Option<String>,
 }
 
-impl PropAmmClientBuilder {
+impl BiconomyClientBuilder {
     pub fn new(chain: Chain) -> Self {
         let config = get_biconomy_propamm_config();
         Self {
@@ -83,8 +83,8 @@ impl PropAmmClientBuilder {
         self
     }
 
-    pub fn build(self) -> Result<PropAmmClient, RFQError> {
-        PropAmmClient::new(
+    pub fn build(self) -> Result<BiconomyClient, RFQError> {
+        BiconomyClient::new(
             self.chain,
             self.pairs,
             self.base_url,

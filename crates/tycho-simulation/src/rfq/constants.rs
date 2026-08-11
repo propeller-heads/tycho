@@ -99,7 +99,7 @@ pub fn get_bebop_origins() -> Result<BebopOrigins, RFQError> {
 }
 
 /// Biconomy PropAMM API configuration
-pub struct PropAmmConfig {
+pub struct BiconomyConfig {
     pub base_url: String,
     pub api_key: Option<String>,
 }
@@ -108,7 +108,7 @@ pub struct PropAmmConfig {
 /// BICONOMY_PROPAMM_API_URL defaults to the production endpoint;
 /// BICONOMY_PROPAMM_API_KEY is required by the hosted API (issued by the Biconomy team) and
 /// sent as the `x-api-key` header when present.
-pub fn get_biconomy_propamm_config() -> PropAmmConfig {
+pub fn get_biconomy_propamm_config() -> BiconomyConfig {
     let base_url = env::var("BICONOMY_PROPAMM_API_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
@@ -117,7 +117,7 @@ pub fn get_biconomy_propamm_config() -> PropAmmConfig {
         .ok()
         .filter(|key| !key.trim().is_empty());
 
-    PropAmmConfig { base_url, api_key }
+    BiconomyConfig { base_url, api_key }
 }
 
 /// Read Metric API configuration from environment variables.

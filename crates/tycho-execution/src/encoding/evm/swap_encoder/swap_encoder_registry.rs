@@ -8,17 +8,17 @@ use crate::encoding::{
         constants::{DEFAULT_EXECUTORS_JSON, PROTOCOL_SPECIFIC_CONFIG},
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
-            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
+            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
+            biconomy_propamm::BiconomySwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
             metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder,
-            biconomy_propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
-            rocketpool::RocketpoolSwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -152,7 +152,7 @@ impl SwapEncoderRegistry {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "rfq:biconomy_propamm" => {
-                Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
+                Ok(Box::new(BiconomySwapEncoder::new(executor_address, self.chain, config)?))
             }
             "fluid_v1" => {
                 Ok(Box::new(FluidV1SwapEncoder::new(executor_address, self.chain, config)?))

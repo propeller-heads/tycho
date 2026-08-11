@@ -18,8 +18,11 @@ use tycho_common::{
 use crate::rfq::{
     client::RFQClient,
     protocols::biconomy_propamm::{
-        client::PropAmmClient,
-        models::{parse_biguint, biconomy_propamm_price_scale, PropAmmLevelsResponse, PropAmmMakerLevels},
+        client::BiconomyClient,
+        models::{
+            biconomy_propamm_price_scale, parse_biguint, BiconomyLevelsResponse,
+            BiconomyMakerLevels,
+        },
     },
 };
 
@@ -28,16 +31,16 @@ use crate::rfq::{
 /// `base_token` is the pair's tokenIn and `quote_token` its tokenOut. The levels feed is
 /// one-directional: simulating the reverse direction requires the reverse pair's own component.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct PropAmmState {
+pub struct BiconomyState {
     pub base_token: Token,
     pub quote_token: Token,
-    pub levels: PropAmmLevelsResponse,
-    pub client: PropAmmClient,
+    pub levels: BiconomyLevelsResponse,
+    pub client: BiconomyClient,
 }
 
-impl fmt::Debug for PropAmmState {
+impl fmt::Debug for BiconomyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PropAmmState")
+        f.debug_struct("BiconomyState")
             .field("base_token", &self.base_token)
             .field("quote_token", &self.quote_token)
             .field("as_of", &self.levels.as_of)
@@ -45,12 +48,12 @@ impl fmt::Debug for PropAmmState {
     }
 }
 
-impl PropAmmState {
+impl BiconomyState {
     pub fn new(
         base_token: Token,
         quote_token: Token,
-        levels: PropAmmLevelsResponse,
-        client: PropAmmClient,
+        levels: BiconomyLevelsResponse,
+        client: BiconomyClient,
     ) -> Self {
         Self { base_token, quote_token, levels, client }
     }
@@ -85,7 +88,7 @@ struct MarginalSegment {
 /// Levels with non-increasing cumulative sizes are skipped defensively. Ties in price keep the
 /// makers' original order (stable sort), so consumption is deterministic.
 fn expand_marginal_segments(
-    makers: &[PropAmmMakerLevels],
+    makers: &[BiconomyMakerLevels],
 ) -> Result<Vec<MarginalSegment>, SimulationError> {
     let mut segments = Vec::new();
     for (maker_idx, maker) in makers.iter().enumerate() {
@@ -128,7 +131,7 @@ struct SweepResult {
 /// which can deliver up to a wei less than `total_out`. Simulating the same chain keeps
 /// `get_amount_out` consistent with on-chain settlement to the wei.
 fn sweep_amount_out(
-    makers: &[PropAmmMakerLevels],
+    makers: &[BiconomyMakerLevels],
     amount_in: &BigUint,
 ) -> Result<SweepResult, SimulationError> {
     let scale = biconomy_propamm_price_scale();
@@ -165,14 +168,14 @@ fn sweep_amount_out(
 }
 
 /// Total depth in tokenIn wei across all makers' ladders.
-fn total_depth(makers: &[PropAmmMakerLevels]) -> Result<BigUint, SimulationError> {
+fn total_depth(makers: &[BiconomyMakerLevels]) -> Result<BigUint, SimulationError> {
     Ok(expand_marginal_segments(makers)?
         .iter()
         .fold(BigUint::zero(), |acc, segment| acc + &segment.size))
 }
 
 /// Best (highest) marginal price across all makers, 1e18-scaled.
-fn best_price(makers: &[PropAmmMakerLevels]) -> Result<Option<BigUint>, SimulationError> {
+fn best_price(makers: &[BiconomyMakerLevels]) -> Result<Option<BigUint>, SimulationError> {
     Ok(expand_marginal_segments(makers)?
         .into_iter()
         .map(|segment| segment.price)
@@ -180,7 +183,7 @@ fn best_price(makers: &[PropAmmMakerLevels]) -> Result<Option<BigUint>, Simulati
 }
 
 #[typetag::serde]
-impl ProtocolSim for PropAmmState {
+impl ProtocolSim for BiconomyState {
     fn fee(&self) -> f64 {
         0.0
     }
@@ -193,14 +196,14 @@ impl ProtocolSim for PropAmmState {
             SimulationError::RecoverableError("Can't convert best price to f64".into())
         })?;
         // Levels prices are 1e18-scaled tokenOut-wei per tokenIn-wei; convert to a human price.
-        let price = best *
-            10f64
+        let price = best
+            * 10f64
                 .powi(self.base_token.decimals as i32 - self.quote_token.decimals as i32 - 18i32);
 
         if base.address == self.base_token.address && quote.address == self.quote_token.address {
             Ok(price)
-        } else if base.address == self.quote_token.address &&
-            quote.address == self.base_token.address
+        } else if base.address == self.quote_token.address
+            && quote.address == self.base_token.address
         {
             Ok(1.0 / price)
         } else {
@@ -295,11 +298,11 @@ impl ProtocolSim for PropAmmState {
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         if let Some(other_state) = other
             .as_any()
-            .downcast_ref::<PropAmmState>()
+            .downcast_ref::<BiconomyState>()
         {
-            self.base_token == other_state.base_token &&
-                self.quote_token == other_state.quote_token &&
-                self.levels == other_state.levels
+            self.base_token == other_state.base_token
+                && self.quote_token == other_state.quote_token
+                && self.levels == other_state.levels
         } else {
             false
         }
@@ -311,7 +314,7 @@ impl ProtocolSim for PropAmmState {
 }
 
 #[async_trait]
-impl IndicativelyPriced for PropAmmState {
+impl IndicativelyPriced for BiconomyState {
     /// Requests a binding firm quote for this pair.
     ///
     /// IMPORTANT PropAMM rule: the firm quote expires hard at its `valid_until`. Consumers must
@@ -335,7 +338,7 @@ mod tests {
 
     use super::*;
     use crate::rfq::protocols::biconomy_propamm::{
-        client_builder::PropAmmClientBuilder, models::PropAmmLevel,
+        client_builder::BiconomyClientBuilder, models::BiconomyLevel,
     };
 
     fn weth() -> Token {
@@ -362,32 +365,31 @@ mod tests {
         )
     }
 
-    fn empty_propamm_client() -> PropAmmClient {
-        PropAmmClientBuilder::new(Chain::Base)
+    fn empty_propamm_client() -> BiconomyClient {
+        BiconomyClientBuilder::new(Chain::Base)
             .build()
             .unwrap()
     }
 
-    fn maker(seed: u8, levels: &[(&str, &str)]) -> PropAmmMakerLevels {
-        PropAmmMakerLevels {
+    fn maker(seed: u8, levels: &[(&str, &str)]) -> BiconomyMakerLevels {
+        BiconomyMakerLevels {
             mm: Bytes::from(vec![seed; 20]),
             inventory_contract: Bytes::from(vec![seed.wrapping_add(100); 20]),
             levels: levels
                 .iter()
-                .map(|(size, price)| PropAmmLevel {
+                .map(|(size, price)| BiconomyLevel {
                     size: size.to_string(),
                     price: price.to_string(),
                 })
                 .collect(),
             nonce: "1".to_string(),
-            expires_at: 1784889564,
         }
     }
 
-    fn state_with_makers(makers: Vec<PropAmmMakerLevels>) -> PropAmmState {
+    fn state_with_makers(makers: Vec<BiconomyMakerLevels>) -> BiconomyState {
         let base = weth();
         let quote = usdc();
-        let levels = PropAmmLevelsResponse {
+        let levels = BiconomyLevelsResponse {
             chain_id: 8453,
             token_in: base.address.clone(),
             token_out: quote.address.clone(),
@@ -395,14 +397,16 @@ mod tests {
             makers,
             as_of: 1784889534,
         };
-        PropAmmState::new(base, quote, levels, empty_propamm_client())
+        BiconomyState::new(base, quote, levels, empty_propamm_client())
     }
 
-    fn fixture_state() -> PropAmmState {
-        let json = std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
-            .unwrap();
-        let levels: PropAmmLevelsResponse = serde_json::from_str(&json).unwrap();
-        PropAmmState::new(weth(), usdc(), levels, empty_propamm_client())
+    fn fixture_state() -> BiconomyState {
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/biconomy_propamm/test_responses/levels.json",
+        )
+        .unwrap();
+        let levels: BiconomyLevelsResponse = serde_json::from_str(&json).unwrap();
+        BiconomyState::new(weth(), usdc(), levels, empty_propamm_client())
     }
 
     #[test]

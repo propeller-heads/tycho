@@ -22,7 +22,7 @@ use crate::{
         errors::RFQError,
         models::TimestampHeader,
         protocols::biconomy_propamm::models::{
-            parse_biguint, PropAmmFirmQuoteResponse, PropAmmLevelsResponse,
+            parse_biguint, BiconomyFirmQuoteResponse, BiconomyLevelsResponse,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -39,8 +39,8 @@ fn bytes_to_address_string(address: &Bytes) -> Result<String, RFQError> {
 
 /// Validates that PropAMM supports the chain and returns its numeric chain id.
 ///
-/// The PropAMM API also serves Base Sepolia (chain id 84532), but tycho-common has no built-in
-/// testnet chain, so this integration is mainnet Base only.
+/// Base and BSC mainnet. The PropAMM API also serves Base Sepolia (chain id 84532), but
+/// tycho-common has no built-in testnet chain, so testnets are not wired up.
 fn validate_chain(chain: Chain) -> Result<u64, RFQError> {
     match chain {
         Chain::Base | Chain::Bsc => Ok(chain.id()),
@@ -54,7 +54,7 @@ fn validate_chain(chain: Chain) -> Result<u64, RFQError> {
 /// `stream()` polls `/v1/levels` for each configured pair at a fixed interval and converts every
 /// poll into the same absolute `StateSyncMessage` snapshot shape Bebop emits from its WS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PropAmmClient {
+pub struct BiconomyClient {
     chain: Chain,
     chain_id: u64,
     levels_endpoint: String,
@@ -65,10 +65,13 @@ pub struct PropAmmClient {
     poll_interval: Duration,
     quote_timeout: Duration,
     // Hosted-API key, sent as `x-api-key` on every request. Issued by the Biconomy team.
+    // Never serialized: a dumped client (logs, snapshots) must not leak the credential; a
+    // deserialized client re-reads it from configuration instead.
+    #[serde(skip_serializing, default)]
     api_key: Option<String>,
 }
 
-impl PropAmmClient {
+impl BiconomyClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:biconomy_propamm";
 
     pub fn new(
@@ -118,9 +121,12 @@ impl PropAmmClient {
         &self,
         token_in: &Bytes,
         token_out: &Bytes,
-    ) -> Result<PropAmmLevelsResponse, RFQError> {
+    ) -> Result<BiconomyLevelsResponse, RFQError> {
         let response = self
-            .apply_auth(self.http_client().get(&self.levels_endpoint))
+            .apply_auth(
+                self.http_client()
+                    .get(&self.levels_endpoint),
+            )
             .query(&[
                 ("chainId", self.chain_id.to_string()),
                 ("tokenIn", bytes_to_address_string(token_in)?),
@@ -152,7 +158,7 @@ impl PropAmmClient {
     pub fn create_component_with_state(
         &self,
         component_id: String,
-        levels: &PropAmmLevelsResponse,
+        levels: &BiconomyLevelsResponse,
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
@@ -202,7 +208,7 @@ impl PropAmmClient {
     }
 
     fn process_firm_quote_response(
-        quote: PropAmmFirmQuoteResponse,
+        quote: BiconomyFirmQuoteResponse,
         params: &GetAmountOutParams,
         expected_chain_id: u64,
     ) -> Result<SignedQuote, RFQError> {
@@ -249,7 +255,7 @@ impl PropAmmClient {
 }
 
 #[async_trait]
-impl RFQClient for PropAmmClient {
+impl RFQClient for BiconomyClient {
     fn stream(
         &self,
     ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
@@ -333,7 +339,7 @@ impl RFQClient for PropAmmClient {
                         .as_secs(),
                 };
 
-                yield Ok(("propamm".to_string(), StateSyncMessage {
+                yield Ok(("biconomy_propamm".to_string(), StateSyncMessage {
                     header: TimestampHeader { timestamp },
                     snapshots: Snapshot { states: new_components, vm_storage: HashMap::new() },
                     deltas: None, // Deltas are always None - all the changes are absolute
@@ -353,7 +359,10 @@ impl RFQClient for PropAmmClient {
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
         let request = self
-            .apply_auth(self.http_client().get(&self.firm_quote_endpoint))
+            .apply_auth(
+                self.http_client()
+                    .get(&self.firm_quote_endpoint),
+            )
             .query(&[
                 ("chainId", self.chain_id.to_string()),
                 ("tokenIn", bytes_to_address_string(&params.token_in)?),
@@ -387,7 +396,7 @@ impl RFQClient for PropAmmClient {
         }
 
         let quote = response
-            .json::<PropAmmFirmQuoteResponse>()
+            .json::<BiconomyFirmQuoteResponse>()
             .await
             .map_err(|e| {
                 RFQError::ParsingError(format!("Failed to parse PropAMM firm quote response: {e}"))
@@ -406,7 +415,7 @@ mod tests {
     use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::*;
-    use crate::rfq::protocols::biconomy_propamm::models::PropAmmCall;
+    use crate::rfq::protocols::biconomy_propamm::models::BiconomyCall;
 
     fn weth() -> Bytes {
         Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap()
@@ -420,8 +429,8 @@ mod tests {
         Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap()
     }
 
-    fn test_client(base_url: &str) -> PropAmmClient {
-        PropAmmClient::new(
+    fn test_client(base_url: &str) -> BiconomyClient {
+        BiconomyClient::new(
             Chain::Base,
             vec![(weth(), usdc())],
             base_url.to_string(),
@@ -432,9 +441,11 @@ mod tests {
         .unwrap()
     }
 
-    fn levels_fixture() -> PropAmmLevelsResponse {
-        let json = std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
-            .unwrap();
+    fn levels_fixture() -> BiconomyLevelsResponse {
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/biconomy_propamm/test_responses/levels.json",
+        )
+        .unwrap();
         serde_json::from_str(&json).unwrap()
     }
 
@@ -479,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_chain() {
-        let result = PropAmmClient::new(
+        let result = BiconomyClient::new(
             Chain::Ethereum,
             vec![],
             "http://localhost:8080".to_string(),
@@ -494,7 +505,7 @@ mod tests {
     fn test_create_component_with_state() {
         let client = test_client("http://localhost:8080");
         let levels = levels_fixture();
-        let component_id = PropAmmClient::component_id(&weth(), &usdc());
+        let component_id = BiconomyClient::component_id(&weth(), &usdc());
 
         let component = client.create_component_with_state(component_id.clone(), &levels);
 
@@ -511,19 +522,19 @@ mod tests {
 
         let attrs = &component.state.attributes;
         assert_eq!(String::from_utf8(attrs["as_of"].to_vec()).unwrap(), "1784889534");
-        let makers: Vec<crate::rfq::protocols::biconomy_propamm::models::PropAmmMakerLevels> =
+        let makers: Vec<crate::rfq::protocols::biconomy_propamm::models::BiconomyMakerLevels> =
             serde_json::from_slice(&attrs["makers"]).unwrap();
         assert_eq!(makers, levels.makers);
-        let merged: Vec<crate::rfq::protocols::biconomy_propamm::models::PropAmmMergedLevel> =
+        let merged: Vec<crate::rfq::protocols::biconomy_propamm::models::BiconomyMergedLevel> =
             serde_json::from_slice(&attrs["merged"]).unwrap();
         assert_eq!(merged, levels.merged);
     }
 
     #[test]
     fn test_component_id_is_deterministic() {
-        let id_a = PropAmmClient::component_id(&weth(), &usdc());
-        let id_b = PropAmmClient::component_id(&weth(), &usdc());
-        let id_reverse = PropAmmClient::component_id(&usdc(), &weth());
+        let id_a = BiconomyClient::component_id(&weth(), &usdc());
+        let id_b = BiconomyClient::component_id(&weth(), &usdc());
+        let id_reverse = BiconomyClient::component_id(&usdc(), &weth());
         assert_eq!(id_a, id_b);
         // Directions are separate components
         assert_ne!(id_a, id_reverse);
@@ -531,14 +542,15 @@ mod tests {
 
     #[test]
     fn test_process_firm_quote_response() {
-        let json =
-            std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
-                .unwrap();
-        let quote: PropAmmFirmQuoteResponse = serde_json::from_str(&json).unwrap();
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json",
+        )
+        .unwrap();
+        let quote: BiconomyFirmQuoteResponse = serde_json::from_str(&json).unwrap();
         let params = quote_params();
 
         let signed =
-            PropAmmClient::process_firm_quote_response(quote.clone(), &params, 8453).unwrap();
+            BiconomyClient::process_firm_quote_response(quote.clone(), &params, 8453).unwrap();
 
         assert_eq!(signed.base_token, params.token_in);
         assert_eq!(signed.quote_token, params.token_out);
@@ -555,39 +567,42 @@ mod tests {
         gas_estimate.copy_from_slice(signed.quote_attributes["gas_estimate"].as_ref());
         assert_eq!(u64::from_be_bytes(gas_estimate), 265000);
 
-        let calls: Vec<PropAmmCall> =
+        let calls: Vec<BiconomyCall> =
             serde_json::from_slice(&signed.quote_attributes["calls"]).unwrap();
         assert_eq!(calls, quote.calls);
     }
 
     #[test]
     fn test_process_firm_quote_response_rejects_wrong_receiver() {
-        let json =
-            std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
-                .unwrap();
-        let quote: PropAmmFirmQuoteResponse = serde_json::from_str(&json).unwrap();
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json",
+        )
+        .unwrap();
+        let quote: BiconomyFirmQuoteResponse = serde_json::from_str(&json).unwrap();
         let mut params = quote_params();
         params.receiver = Bytes::from_str("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap();
 
-        let result = PropAmmClient::process_firm_quote_response(quote, &params, 8453);
+        let result = BiconomyClient::process_firm_quote_response(quote, &params, 8453);
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_polling_stream_emits_snapshots() {
-        let addr = create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/levels.json").await;
+        let addr =
+            create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
+                .await;
         let client = test_client(&format!("http://127.0.0.1:{}", addr.port()));
 
         let mut stream = client.stream();
 
         // First poll: the pair appears as a new component with the fixture's asOf timestamp.
         let (provider, msg) = stream.next().await.unwrap().unwrap();
-        assert_eq!(provider, "propamm");
+        assert_eq!(provider, "biconomy_propamm");
         assert_eq!(msg.header.timestamp, 1784889534);
         assert_eq!(msg.snapshots.states.len(), 1);
         assert!(msg.removed_components.is_empty());
 
-        let component_id = PropAmmClient::component_id(&weth(), &usdc());
+        let component_id = BiconomyClient::component_id(&weth(), &usdc());
         let component = &msg.snapshots.states[&component_id];
         assert_eq!(component.component.protocol_system, "rfq:biconomy_propamm");
         assert!(component
@@ -604,7 +619,8 @@ mod tests {
     #[tokio::test]
     async fn test_request_binding_quote_over_http() {
         let addr =
-            create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json").await;
+            create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
+                .await;
         let client = test_client(&format!("http://127.0.0.1:{}", addr.port()));
 
         let signed = client
@@ -624,7 +640,7 @@ mod tests {
         let original = test_client("http://localhost:8080");
 
         let serialized = serde_json::to_string(&original).unwrap();
-        let deserialized: PropAmmClient = serde_json::from_str(&serialized).unwrap();
+        let deserialized: BiconomyClient = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(deserialized.chain, original.chain);
         assert_eq!(deserialized.chain_id, original.chain_id);
@@ -645,7 +661,7 @@ mod tests {
             eprintln!("BICONOMY_PROPAMM_API_KEY not set - skipping live test");
             return;
         };
-        let client = PropAmmClient::new(
+        let client = BiconomyClient::new(
             Chain::Base,
             vec![(weth(), usdc())],
             crate::rfq::constants::DEFAULT_BICONOMY_PROPAMM_API_URL.to_string(),

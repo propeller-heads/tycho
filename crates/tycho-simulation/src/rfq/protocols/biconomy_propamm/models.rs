@@ -17,7 +17,7 @@ pub fn biconomy_propamm_price_scale() -> BigUint {
 /// Indicative price levels for selling `token_in` into `token_out`. The feed is one-directional:
 /// the reverse direction is a separate levels request (and a separate protocol component).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropAmmLevelsResponse {
+pub struct BiconomyLevelsResponse {
     #[serde(rename = "chainId")]
     pub chain_id: u64,
     #[serde(rename = "tokenIn")]
@@ -27,10 +27,10 @@ pub struct PropAmmLevelsResponse {
     /// Cross-maker merged ladder, sorted best-price-first, with per-segment maker attribution
     /// and running cumulative sizes. Kept for display/debugging; simulation uses `makers`.
     #[serde(default)]
-    pub merged: Vec<PropAmmMergedLevel>,
+    pub merged: Vec<BiconomyMergedLevel>,
     /// Per-maker cumulative ladders. This is the source of truth for the sweep math.
     #[serde(default)]
-    pub makers: Vec<PropAmmMakerLevels>,
+    pub makers: Vec<BiconomyMakerLevels>,
     /// Unix timestamp (seconds) at which this snapshot was assembled.
     #[serde(rename = "asOf")]
     pub as_of: u64,
@@ -38,7 +38,7 @@ pub struct PropAmmLevelsResponse {
 
 /// One marginal segment of the merged cross-maker ladder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropAmmMergedLevel {
+pub struct BiconomyMergedLevel {
     /// Maker that provides this segment.
     pub mm: Bytes,
     /// 1e18-scaled price (tokenOut wei per tokenIn wei).
@@ -52,7 +52,7 @@ pub struct PropAmmMergedLevel {
 
 /// A single maker's ladder for the pair.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropAmmMakerLevels {
+pub struct BiconomyMakerLevels {
     /// Maker address.
     pub mm: Bytes,
     /// Inventory contract the maker settles through.
@@ -60,17 +60,14 @@ pub struct PropAmmMakerLevels {
     pub inventory_contract: Bytes,
     /// Cumulative levels: each level's `size` is the total tokenIn wei tradable up to and
     /// including that level's `price`.
-    pub levels: Vec<PropAmmLevel>,
+    pub levels: Vec<BiconomyLevel>,
     /// Maker nonce as a decimal string.
     pub nonce: String,
-    /// Unix timestamp (seconds) after which this ladder is no longer valid.
-    #[serde(rename = "expiresAt")]
-    pub expires_at: u64,
 }
 
 /// One cumulative level of a maker's ladder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropAmmLevel {
+pub struct BiconomyLevel {
     /// Cumulative size in tokenIn wei up to and including this level.
     pub size: String,
     /// 1e18-scaled price (tokenOut wei per tokenIn wei) applied to this level's tranche.
@@ -83,7 +80,7 @@ pub struct PropAmmLevel {
 /// deadline enforced on-chain; consumers must refetch a firm quote immediately before broadcast
 /// and must never replay a stale response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropAmmFirmQuoteResponse {
+pub struct BiconomyFirmQuoteResponse {
     #[serde(rename = "quoteId")]
     pub quote_id: Bytes,
     /// Estimated execution gas as a decimal string.
@@ -99,7 +96,7 @@ pub struct PropAmmFirmQuoteResponse {
     pub amount_out: String,
     pub receiver: Bytes,
     /// Settlement calls to execute in order.
-    pub calls: Vec<PropAmmCall>,
+    pub calls: Vec<BiconomyCall>,
     /// Unix timestamp (seconds); hard on-chain expiry of this quote.
     #[serde(rename = "validUntil")]
     pub valid_until: u64,
@@ -107,13 +104,13 @@ pub struct PropAmmFirmQuoteResponse {
 
 /// One settlement call of a PropAMM firm quote.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropAmmCall {
+pub struct BiconomyCall {
     pub to: Bytes,
     pub value: String,
     pub data: Bytes,
 }
 
-impl PropAmmFirmQuoteResponse {
+impl BiconomyFirmQuoteResponse {
     /// Structural validation of a firm quote against the request parameters.
     ///
     /// Note: `valid_until` is deliberately not checked against a clock here. Freshness is the
@@ -160,10 +157,11 @@ pub fn parse_biguint(value: &str, field: &str) -> Result<BigUint, RFQError> {
 mod tests {
     use super::*;
 
-    fn firm_quote() -> PropAmmFirmQuoteResponse {
-        let json =
-            std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json")
-                .unwrap();
+    fn firm_quote() -> BiconomyFirmQuoteResponse {
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/biconomy_propamm/test_responses/firm_quote.json",
+        )
+        .unwrap();
         serde_json::from_str(&json).unwrap()
     }
 
@@ -179,9 +177,11 @@ mod tests {
 
     #[test]
     fn test_deserialize_levels_response() {
-        let json = std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
-            .unwrap();
-        let levels: PropAmmLevelsResponse = serde_json::from_str(&json).unwrap();
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/biconomy_propamm/test_responses/levels.json",
+        )
+        .unwrap();
+        let levels: BiconomyLevelsResponse = serde_json::from_str(&json).unwrap();
 
         assert_eq!(levels.chain_id, 8453);
         assert_eq!(levels.as_of, 1784889534);
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(levels.merged[0].cumulative_size, "10000000000000000000");
         // Round-trips through serde so state attributes can store the raw ladders as JSON.
         let reencoded = serde_json::to_string(&levels.makers).unwrap();
-        let decoded: Vec<PropAmmMakerLevels> = serde_json::from_str(&reencoded).unwrap();
+        let decoded: Vec<BiconomyMakerLevels> = serde_json::from_str(&reencoded).unwrap();
         assert_eq!(decoded, levels.makers);
     }
 

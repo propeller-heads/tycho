@@ -5,7 +5,7 @@ use std::{
 
 use alloy::{
     core::sol,
-    primitives::U256,
+    primitives::{Address, U256},
     sol_types::{SolCall, SolValue},
 };
 use serde::Deserialize;
@@ -25,8 +25,9 @@ use crate::encoding::{
 };
 
 sol! {
-    /// Structs mirror PropAMM's adapter (and the vendored copies in
-    /// PropAMMExecutor.sol) exactly; field order is load-bearing.
+    /// Structs mirror the deployed PropAMM contracts exactly (SwapTypes.sol in
+    /// propamm-protocol, and the vendored copies in BiconomyExecutor.sol);
+    /// field order is load-bearing for abi decoding.
     struct Level {
         uint256 size;
         uint256 price;
@@ -34,6 +35,7 @@ sol! {
 
     struct PriceLadder {
         address mm;
+        address provider;
         address tokenIn;
         address tokenOut;
         Level[] levels;
@@ -42,29 +44,55 @@ sol! {
     }
 
     struct FillLeg {
-        address provider;
         PriceLadder ladder;
         uint256 amountIn;
     }
 
-    /// Per-leg fill call of the PropAMM anchor executor, as returned in the
-    /// firm quote's raw call list. Only used for decoding.
-    function fillFromAnchor(
-        address provider,
-        PriceLadder ladder,
-        uint256 amountIn,
-        address receiver
-    );
+    struct SwapParams {
+        address tokenIn;
+        address tokenOut;
+        uint256 amountIn;
+        uint256 minAmountOut;
+        address receiver;
+    }
+
+    /// One step of the settlement call's execution sequence.
+    struct Step {
+        address to;
+        uint256 value;
+        bytes data;
+        bool isDelegatecall;
+    }
+
+    /// PropAMM settlement entrypoint - the single call a firm quote returns
+    /// (selector 0x1eada922). Only used for decoding.
+    function swap(SwapParams params, Step[] steps) returns (uint256 delivered);
+
+    /// Anchor-executor price commit step (selector 0x86e97b02). Recognized by
+    /// selector and passed through opaquely as the adapter's commitData.
+    function updatePrices(PriceLadder[] ladders, bytes[] sigs);
+
+    /// Anchor-executor fill step (selector 0x3290f81e). Decoded into the
+    /// adapter's typed FillLeg.
+    function fillFromAnchor(PriceLadder ladder, uint256 amountIn, address receiver);
+
+    /// ERC20 input-funding step (selector 0xa9059cbb). Skipped: on the Tycho
+    /// path the TransferManager approval plus the adapter's own pull replace it.
+    function transfer(address to, uint256 amount) returns (bool);
+
+    /// Settlement residue sweep step (selector 0x66cf5b60). Skipped: the
+    /// adapter reverts on leg-sum mismatch, so there is no residue to sweep.
+    function sweepBalance(address token, address receiver, uint256 minAmount);
 }
 
 /// One settlement call of a PropAMM firm quote, mirroring the JSON shape
 /// (`{to, value, data}`) that tycho-simulation's PropAMM client packs into the
 /// `calls` quote attribute.
 #[derive(Debug, Deserialize)]
-struct PropAmmCall {
-    /// Call target. Informational only: execution goes through the typed
-    /// adapter call in PropAMMExecutor instead of raw call forwarding.
-    #[allow(dead_code)]
+struct BiconomyCall {
+    /// Call target: the PropAMM settlement contract. Raw calldata is never
+    /// forwarded on-chain - execution goes through the typed adapter call in
+    /// BiconomyExecutor - but step targets are validated against it.
     to: Bytes,
     /// Native value as a decimal string; PropAMM settlement is ERC20-only.
     #[allow(dead_code)]
@@ -72,19 +100,17 @@ struct PropAmmCall {
     data: Bytes,
 }
 
-fn is_fill_call(data: &[u8]) -> bool {
-    data.len() >= 4 && data[..4] == fillFromAnchorCall::SELECTOR[..]
-}
-
 /// Encodes a swap on PropAMM (streaming-maker RFQ) through the given executor
 /// address.
 ///
-/// PropAMM firm quotes return a raw list of settlement calls (price commit,
-/// input transfer, one `fillFromAnchor` per maker leg). Raw calldata is never
-/// forwarded on-chain: this encoder re-derives a typed payload from the calls
-/// and the executor performs a single typed adapter call. The first call's
-/// data is passed through opaquely as `commitData`, each `fillFromAnchor`
-/// call is decoded into a `FillLeg`, and the result is abi encoded (not
+/// A PropAMM firm quote returns exactly one settlement `swap()` call whose
+/// step list carries the price commit, the input transfer and one
+/// `fillFromAnchor` per maker leg. Raw calldata is never forwarded on-chain:
+/// this encoder decodes the settlement call, re-derives a typed payload from
+/// its steps (commit data passed through opaquely, each fill decoded into a
+/// `FillLeg`, funding/sweep steps validated and skipped - the router's
+/// TransferManager and the adapter's own pull replace them), and the executor
+/// performs a single typed adapter call. The result is abi encoded (not
 /// packed) as `(tokenIn, tokenOut, commitData, legs)` to match the executor's
 /// typed `abi.decode`.
 ///
@@ -95,25 +121,25 @@ fn is_fill_call(data: &[u8]) -> bool {
 /// # Fields
 /// * `executor_address` - The address of the executor contract that will perform the swap.
 #[derive(Clone)]
-pub struct PropAMMSwapEncoder {
+pub struct BiconomySwapEncoder {
     executor_address: Bytes,
     runtime_handle: Handle,
     #[allow(dead_code)]
     runtime: SafeRuntime,
 }
 
-impl SwapEncoder for PropAMMSwapEncoder {
+impl SwapEncoder for BiconomySwapEncoder {
     fn new(
         executor_address: Bytes,
         chain: Chain,
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
-        // The PropAMM adapter also exists on Base Sepolia, but tycho-common
-        // has no built-in testnet chain, so this integration is Base only
-        // (mirroring the tycho-simulation PropAMM client).
-        if chain != Chain::Base {
+        // Base and BSC mainnet, mirroring the tycho-simulation client. The
+        // PropAMM adapter also exists on Base Sepolia, but tycho-common has no
+        // built-in testnet chain, so testnets are not wired up.
+        if chain != Chain::Base && chain != Chain::Bsc {
             return Err(EncodingError::FatalError(
-                "PropAMM swaps are only supported on Base".to_string(),
+                "PropAMM swaps are only supported on Base and BSC".to_string(),
             ));
         }
         let (runtime_handle, runtime) = create_encoding_runtime()?;
@@ -201,51 +227,139 @@ impl SwapEncoder for PropAMMSwapEncoder {
             .ok_or(EncodingError::FatalError(
                 "PropAMM quote must have a calls attribute".to_string(),
             ))?;
-        let calls: Vec<PropAmmCall> = serde_json::from_slice(calls_json).map_err(|e| {
+        let calls: Vec<BiconomyCall> = serde_json::from_slice(calls_json).map_err(|e| {
             EncodingError::FatalError(format!("Failed to parse PropAMM quote calls: {e}"))
         })?;
 
-        // The first call commits the maker-signed price ladders on the PropAMM
-        // anchor executor; its data is passed through opaquely as commitData
-        // (the adapter forwards it to the anchor executor itself).
-        let commit = calls
-            .first()
-            .ok_or(EncodingError::FatalError(
-                "PropAMM firm quote contains no calls".to_string(),
-            ))?;
-        if is_fill_call(&commit.data) {
+        // A firm quote is exactly one settlement `swap()` call. Anything else
+        // means the API changed shape - refuse to encode rather than guess.
+        if calls.len() != 1 {
+            return Err(EncodingError::FatalError(format!(
+                "PropAMM firm quote must contain exactly one settlement call, got {}",
+                calls.len()
+            )));
+        }
+        let settlement_call = &calls[0];
+        let call_data: &[u8] = settlement_call.data.as_ref();
+        if call_data.len() < 4 || call_data[..4] != swapCall::SELECTOR[..] {
             return Err(EncodingError::FatalError(
-                "The first PropAMM firm quote call must be the price commit, not a fill"
+                "PropAMM firm quote call is not settlement swap(); the API may have changed, \
+                 refusing to encode"
                     .to_string(),
             ));
         }
-        let commit_data = commit.data.to_vec();
+        let settlement = swapCall::abi_decode(call_data).map_err(|e| {
+            EncodingError::FatalError(format!("Failed to decode PropAMM settlement swap call: {e}"))
+        })?;
+        if settlement.params.tokenIn != token_in || settlement.params.tokenOut != token_out {
+            return Err(EncodingError::FatalError(format!(
+                "PropAMM settlement pair {}/{} does not match the swap {token_in}/{token_out}",
+                settlement.params.tokenIn, settlement.params.tokenOut
+            )));
+        }
 
-        // Re-derive the typed fill legs from the fillFromAnchor calls. The
-        // remaining calls (the ERC20 input transfer in particular) are covered
-        // by the router's TransferManager and the executor's approval, so they
-        // are skipped here.
+        // Walk the settlement steps STRICTLY: every step must be one of the
+        // four known shapes below or encoding fails - a lenient skip here
+        // would silently drop behavior the settlement call relies on.
+        let mut commit: Option<(Address, Vec<u8>)> = None;
         let mut legs: Vec<FillLeg> = Vec::new();
         let mut legs_total = U256::ZERO;
-        for call in &calls[1..] {
-            if !is_fill_call(&call.data) {
-                continue;
+        for step in &settlement.steps {
+            let step_data: &[u8] = step.data.as_ref();
+            if step_data.len() < 4 {
+                return Err(EncodingError::FatalError(
+                    "PropAMM settlement step with no selector".to_string(),
+                ));
             }
-            let fill = fillFromAnchorCall::abi_decode(&call.data).map_err(|e| {
-                EncodingError::FatalError(format!(
-                    "Failed to decode PropAMM fillFromAnchor call: {e}"
-                ))
-            })?;
-            legs_total = legs_total
-                .checked_add(fill.amountIn)
-                .ok_or(EncodingError::FatalError(
-                    "PropAMM fill leg amounts overflow".to_string(),
-                ))?;
-            legs.push(FillLeg { provider: fill.provider, ladder: fill.ladder, amountIn: fill.amountIn });
+            let selector: [u8; 4] = step_data[..4]
+                .try_into()
+                .expect("length checked above");
+            match selector {
+                s if s == updatePricesCall::SELECTOR => {
+                    if commit.is_some() {
+                        return Err(EncodingError::FatalError(
+                            "PropAMM settlement has more than one price commit step".to_string(),
+                        ));
+                    }
+                    commit = Some((step.to, step_data.to_vec()));
+                }
+                s if s == fillFromAnchorCall::SELECTOR => {
+                    // The commit binds every fill: its target is the anchor
+                    // executor, and each fill must run on that same contract.
+                    let Some((commit_to, _)) = &commit else {
+                        return Err(EncodingError::FatalError(
+                            "PropAMM fill step before the price commit".to_string(),
+                        ));
+                    };
+                    if step.to != *commit_to {
+                        return Err(EncodingError::FatalError(format!(
+                            "PropAMM fill step targets {} instead of the anchor executor {}",
+                            step.to, commit_to
+                        )));
+                    }
+                    let fill = fillFromAnchorCall::abi_decode(step_data).map_err(|e| {
+                        EncodingError::FatalError(format!(
+                            "Failed to decode PropAMM fillFromAnchor step: {e}"
+                        ))
+                    })?;
+                    // The adapter executes direct fills only; a route through a
+                    // pivot token cannot be re-derived into adapter legs.
+                    // Recoverable: routes are re-resolved per quote, so a fresh
+                    // fetch may pick a direct route.
+                    if fill.ladder.tokenIn != token_in || fill.ladder.tokenOut != token_out {
+                        return Err(EncodingError::RecoverableError(format!(
+                            "PropAMM quote routed through an intermediate pair ({}/{}); the \
+                             adapter executes direct fills only - refetch for a direct route",
+                            fill.ladder.tokenIn, fill.ladder.tokenOut
+                        )));
+                    }
+                    legs_total = legs_total
+                        .checked_add(fill.amountIn)
+                        .ok_or(EncodingError::FatalError(
+                            "PropAMM fill leg amounts overflow".to_string(),
+                        ))?;
+                    legs.push(FillLeg { ladder: fill.ladder, amountIn: fill.amountIn });
+                }
+                s if s == transferCall::SELECTOR => {
+                    // Input funding move (tokenIn -> anchor executor). The
+                    // Tycho path replaces it with the TransferManager approval
+                    // plus the adapter's own transferFrom, so validate + skip.
+                    if step.to != token_in {
+                        return Err(EncodingError::FatalError(format!(
+                            "PropAMM transfer step moves {} instead of the input token",
+                            step.to
+                        )));
+                    }
+                }
+                s if s == sweepBalanceCall::SELECTOR => {
+                    // Residue sweep on the settlement itself. The adapter
+                    // reverts on leg-sum mismatch instead, so validate + skip.
+                    let expected: Address = bytes_to_address(&settlement_call.to)?;
+                    if step.to != expected {
+                        return Err(EncodingError::FatalError(format!(
+                            "PropAMM sweep step targets {} instead of the settlement",
+                            step.to
+                        )));
+                    }
+                }
+                other => {
+                    return Err(EncodingError::FatalError(format!(
+                        "Unrecognized PropAMM settlement step selector 0x{}; the API may have \
+                         changed, refusing to encode",
+                        alloy::hex::encode(other)
+                    )));
+                }
+            }
         }
+
+        let Some((_, commit_data)) = commit else {
+            return Err(EncodingError::FatalError(
+                "PropAMM settlement has no price commit step".to_string(),
+            ));
+        };
         if legs.is_empty() {
             return Err(EncodingError::FatalError(
-                "PropAMM firm quote contains no fillFromAnchor calls".to_string(),
+                "PropAMM firm quote contains no fillFromAnchor steps".to_string(),
             ));
         }
         // The adapter pulls exactly amountIn and reverts unless the legs
@@ -276,36 +390,35 @@ impl SwapEncoder for PropAMMSwapEncoder {
 mod tests {
     use std::{str::FromStr, sync::Arc};
 
-    use alloy::hex::encode;
+    use alloy::{hex::encode, primitives::address};
     use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
     use crate::encoding::{evm::testing_utils::MockRFQState, models::default_token};
 
-    // 0x6af189df, cross-checked against
-    // `cast sig "fillFromAnchor(address,(address,address,address,(uint256,uint256)[],uint256,uint256),uint256,address)"`
-    const FILL_SELECTOR: [u8; 4] = [0x6a, 0xf1, 0x89, 0xdf];
+    // Selectors cross-checked against `cast sig` of the deployed contracts:
+    //   swap((address,address,uint256,uint256,address),(address,uint256,bytes,bool)[])
+    //   updatePrices((address,address,address,address,(uint256,uint256)[],uint256,uint256)[],bytes[])
+    //   fillFromAnchor((address,address,address,address,(uint256,uint256)[],uint256,uint256),uint256,address)
+    //   sweepBalance(address,address,uint256)
+    const SWAP_SELECTOR: [u8; 4] = [0x1e, 0xad, 0xa9, 0x22];
+    const UPDATE_PRICES_SELECTOR: [u8; 4] = [0x86, 0xe9, 0x7b, 0x02];
+    const FILL_SELECTOR: [u8; 4] = [0x32, 0x90, 0xf8, 0x1e];
+    const SWEEP_SELECTOR: [u8; 4] = [0x66, 0xcf, 0x5b, 0x60];
 
-    // Commit call data (anchor executor updatePrices); opaque to the encoder.
+    // Commit step data: real updatePrices selector, opaque body.
     const COMMIT_DATA: &str =
-        "0x1a2b3c4d000000000000000000000000000000000000000000000000000000000000002a";
-
-    // fillFromAnchor(0x1111..., (0x2222..., WETH, USDC,
-    // [(10e18, 1878000000), (20e18, 1877000000)], 7, 1751536030), 10e18,
-    // 0xfd0b...), generated with `cast calldata`.
-    const FILL_CALL_1: &str = "0x6af189df000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000fd0b31d2e955fa55e3fa641fe90e08b677188d3500000000000000000000000022222222222222222222222222222222222222220000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000000000000000000000000000000000006ff00180000000000000000000000000000000000000000000000001158e460913d00000000000000000000000000000000000000000000000000000000000006fe0bf40";
-
-    // fillFromAnchor(0x3333..., (0x4444..., WETH, USDC,
-    // [(5e18, 1876500000)], 9, 1751536030), 5e18, 0xfd0b...), generated with
-    // `cast calldata`.
-    const FILL_CALL_2: &str = "0x6af189df000000000000000000000000333333333333333333333333333333333333333300000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000fd0b31d2e955fa55e3fa641fe90e08b677188d3500000000000000000000000044444444444444444444444444444444444444440000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000000000000000000000000000000000006fd91e20";
+        "0x86e97b02000000000000000000000000000000000000000000000000000000000000002a";
 
     // abi.encode(WETH, USDC, COMMIT_DATA, [leg1, leg2]) generated with
     // `cast abi-encode
-    // "f(address,address,bytes,(address,(address,address,address,(uint256,uint256)[],uint256,uint256),uint256)[])"`
+    // "f(address,address,bytes,((address,address,address,address,(uint256,uint256)[],uint256,uint256),uint256)[])"`
     // to cross-check alloy's params encoding against Solidity's abi.encode.
-    const EXPECTED_ENCODED: &str = "0000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000241a2b3c4d000000000000000000000000000000000000000000000000000000000000002a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000200000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000008ac7230489e8000000000000000000000000000022222222222222222222222222222222222222220000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000000000000000000000000000000000006ff00180000000000000000000000000000000000000000000000001158e460913d00000000000000000000000000000000000000000000000000000000000006fe0bf40000000000000000000000000333333333333333333333333333333333333333300000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000004563918244f4000000000000000000000000000044444444444444444444444444444444444444440000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000000000000000000000000000000000006fd91e20";
+    const EXPECTED_ENCODED: &str = "0000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000002486e97b02000000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000222222222222222222222222222222222222222200000000000000000000000011111111111111111111111111111111111111110000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000000000000000000000000000000000006ff00180000000000000000000000000000000000000000000000001158e460913d00000000000000000000000000000000000000000000000000000000000006fe0bf4000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000444444444444444444444444444444444444444400000000000000000000000033333333333333333333333333333333333333330000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000000000000000000000000000000000006fd91e20";
+
+    const SETTLEMENT: Address = address!("aaaa00000000000000000000000000000000aaaa");
+    const ANCHOR_EXECUTOR: Address = address!("eeee00000000000000000000000000000000eeee");
 
     fn weth() -> Bytes {
         Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap()
@@ -319,28 +432,110 @@ mod tests {
         4102444800 // 2100-01-01
     }
 
+    fn ladder(mm: Address, provider: Address, levels: Vec<(u128, u64)>, nonce: u64) -> PriceLadder {
+        PriceLadder {
+            mm,
+            provider,
+            tokenIn: bytes_to_address(&weth()).unwrap(),
+            tokenOut: bytes_to_address(&usdc()).unwrap(),
+            levels: levels
+                .into_iter()
+                .map(|(size, price)| Level { size: U256::from(size), price: U256::from(price) })
+                .collect(),
+            nonce: U256::from(nonce),
+            expiresAt: U256::from(1751536030u64),
+        }
+    }
+
+    fn fill_step_data(l: PriceLadder, amount_in: u128) -> Vec<u8> {
+        fillFromAnchorCall {
+            ladder: l,
+            amountIn: U256::from(amount_in),
+            receiver: address!("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
+        }
+        .abi_encode()
+    }
+
+    fn step(to: Address, data: Vec<u8>) -> Step {
+        Step { to, value: U256::ZERO, data: data.into(), isDelegatecall: false }
+    }
+
+    fn fill_step_1() -> Step {
+        let l = ladder(
+            address!("2222222222222222222222222222222222222222"),
+            address!("1111111111111111111111111111111111111111"),
+            vec![
+                (10_000_000_000_000_000_000, 1_878_000_000),
+                (20_000_000_000_000_000_000, 1_877_000_000),
+            ],
+            7,
+        );
+        step(ANCHOR_EXECUTOR, fill_step_data(l, 10_000_000_000_000_000_000))
+    }
+
+    fn fill_step_2() -> Step {
+        let l = ladder(
+            address!("4444444444444444444444444444444444444444"),
+            address!("3333333333333333333333333333333333333333"),
+            vec![(5_000_000_000_000_000_000, 1_876_500_000)],
+            9,
+        );
+        step(ANCHOR_EXECUTOR, fill_step_data(l, 5_000_000_000_000_000_000))
+    }
+
+    fn commit_step() -> Step {
+        step(ANCHOR_EXECUTOR, alloy::hex::decode(COMMIT_DATA).unwrap())
+    }
+
+    fn transfer_step() -> Step {
+        let data = transferCall {
+            to: ANCHOR_EXECUTOR,
+            amount: U256::from(15_000_000_000_000_000_000u128),
+        }
+        .abi_encode();
+        step(bytes_to_address(&weth()).unwrap(), data)
+    }
+
+    fn sweep_step() -> Step {
+        let data = sweepBalanceCall {
+            token: bytes_to_address(&weth()).unwrap(),
+            receiver: address!("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
+            minAmount: U256::ZERO,
+        }
+        .abi_encode();
+        step(SETTLEMENT, data)
+    }
+
+    fn settlement_call_json(steps: Vec<Step>, amount_in: u128) -> Bytes {
+        let data = swapCall {
+            params: SwapParams {
+                tokenIn: bytes_to_address(&weth()).unwrap(),
+                tokenOut: bytes_to_address(&usdc()).unwrap(),
+                amountIn: U256::from(amount_in),
+                minAmountOut: U256::ZERO,
+                receiver: address!("fd0b31d2e955fa55e3fa641fe90e08b677188d35"),
+            },
+            steps,
+        }
+        .abi_encode();
+        calls_json(&[(&format!("{SETTLEMENT}"), &format!("0x{}", encode(&data)))])
+    }
+
     fn calls_json(calls: &[(&str, &str)]) -> Bytes {
         let calls: Vec<serde_json::Value> = calls
             .iter()
-            .map(|(to, data)| {
-                serde_json::json!({"to": to, "value": "0", "data": data})
-            })
+            .map(|(to, data)| serde_json::json!({"to": to, "value": "0", "data": data}))
             .collect();
-        serde_json::to_vec(&calls).unwrap().into()
+        serde_json::to_vec(&calls)
+            .unwrap()
+            .into()
     }
 
     fn default_calls() -> Bytes {
-        calls_json(&[
-            // Price commit on the PropAMM anchor executor
-            ("0xaaaa00000000000000000000000000000000aaaa", COMMIT_DATA),
-            // ERC20 input transfer, skipped by the encoder
-            (
-                "0x4200000000000000000000000000000000000006",
-                "0xa9059cbb0000000000000000000000001123da3cf775ee932a83f3d3b9edbe2e151f79b70000000000000000000000000000000000000000000000d02ab486cedc0000",
-            ),
-            ("0x1123da3cf775ee932a83f3d3b9edbe2e151f79b7", FILL_CALL_1),
-            ("0x1123da3cf775ee932a83f3d3b9edbe2e151f79b7", FILL_CALL_2),
-        ])
+        settlement_call_json(
+            vec![commit_step(), transfer_step(), fill_step_1(), fill_step_2(), sweep_step()],
+            15_000_000_000_000_000_000,
+        )
     }
 
     fn quote_attributes(calls: Bytes, valid_until: u64) -> HashMap<String, Bytes> {
@@ -373,8 +568,8 @@ mod tests {
         }
     }
 
-    fn encoder() -> PropAMMSwapEncoder {
-        PropAMMSwapEncoder::new(
+    fn encoder() -> BiconomySwapEncoder {
+        BiconomySwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Base,
             None,
@@ -383,9 +578,9 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_propamm_with_protocol_state() {
-        // 15 WETH -> USDC over two maker legs (10 + 5 WETH), using a mocked
-        // RFQ state to get the firm quote.
+    fn test_encode_with_protocol_state() {
+        // 15 WETH -> USDC over two maker legs (10 + 5 WETH) inside one
+        // settlement call, using a mocked RFQ state to get the firm quote.
         let swap = propamm_swap(
             quote_attributes(default_calls(), far_future()),
             BigUint::from_str("15000000000000000000").unwrap(),
@@ -401,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_propamm_expired_quote() {
+    fn test_encode_expired_quote() {
         let swap = propamm_swap(
             quote_attributes(default_calls(), 1751536030), // in the past
             BigUint::from_str("15000000000000000000").unwrap(),
@@ -411,11 +606,13 @@ mod tests {
             .encode_swap(&swap, &encoding_context())
             .unwrap_err();
 
-        assert!(matches!(error, EncodingError::RecoverableError(ref msg) if msg.contains("expired")));
+        assert!(
+            matches!(error, EncodingError::RecoverableError(ref msg) if msg.contains("expired"))
+        );
     }
 
     #[test]
-    fn test_encode_propamm_missing_calls_attribute() {
+    fn test_encode_missing_calls_attribute() {
         let swap = propamm_swap(
             HashMap::from([(
                 "valid_until".to_string(),
@@ -434,9 +631,54 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_propamm_no_fill_calls() {
+    fn test_encode_rejects_multiple_top_level_calls() {
+        let single =
+            settlement_call_json(vec![commit_step(), fill_step_1()], 10_000_000_000_000_000_000);
+        let calls: Vec<serde_json::Value> = [&single, &single]
+            .iter()
+            .map(|c| serde_json::from_slice::<serde_json::Value>(c.as_ref()).unwrap()[0].clone())
+            .collect();
+        let doubled: Bytes = serde_json::to_vec(&calls)
+            .unwrap()
+            .into();
+        let swap = propamm_swap(
+            quote_attributes(doubled, far_future()),
+            BigUint::from_str("10000000000000000000").unwrap(),
+        );
+
+        let error = encoder()
+            .encode_swap(&swap, &encoding_context())
+            .unwrap_err();
+
+        assert!(
+            matches!(error, EncodingError::FatalError(ref msg) if msg.contains("exactly one settlement call"))
+        );
+    }
+
+    #[test]
+    fn test_encode_rejects_non_swap_call() {
+        let calls = calls_json(&[(
+            "0xaaaa00000000000000000000000000000000aaaa",
+            COMMIT_DATA, // updatePrices selector at the top level, not swap()
+        )]);
+        let swap = propamm_swap(
+            quote_attributes(calls, far_future()),
+            BigUint::from_str("15000000000000000000").unwrap(),
+        );
+
+        let error = encoder()
+            .encode_swap(&swap, &encoding_context())
+            .unwrap_err();
+
+        assert!(
+            matches!(error, EncodingError::FatalError(ref msg) if msg.contains("not settlement swap"))
+        );
+    }
+
+    #[test]
+    fn test_encode_no_fill_steps() {
         let calls =
-            calls_json(&[("0xaaaa00000000000000000000000000000000aaaa", COMMIT_DATA)]);
+            settlement_call_json(vec![commit_step(), transfer_step()], 15_000_000_000_000_000_000);
         let swap = propamm_swap(
             quote_attributes(calls, far_future()),
             BigUint::from_str("15000000000000000000").unwrap(),
@@ -452,14 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_propamm_fill_call_first() {
-        let calls = calls_json(&[
-            ("0x1123da3cf775ee932a83f3d3b9edbe2e151f79b7", FILL_CALL_1),
-            ("0xaaaa00000000000000000000000000000000aaaa", COMMIT_DATA),
-        ]);
+    fn test_encode_fill_step_before_commit() {
+        let calls =
+            settlement_call_json(vec![fill_step_1(), commit_step()], 10_000_000_000_000_000_000);
         let swap = propamm_swap(
             quote_attributes(calls, far_future()),
-            BigUint::from_str("15000000000000000000").unwrap(),
+            BigUint::from_str("10000000000000000000").unwrap(),
         );
 
         let error = encoder()
@@ -467,12 +707,77 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(error, EncodingError::FatalError(ref msg) if msg.contains("price commit"))
+            matches!(error, EncodingError::FatalError(ref msg) if msg.contains("before the price commit"))
         );
     }
 
     #[test]
-    fn test_encode_propamm_leg_sum_mismatch() {
+    fn test_encode_fill_step_target_mismatch() {
+        let mut fill = fill_step_1();
+        fill.to = address!("dddd00000000000000000000000000000000dddd");
+        let calls = settlement_call_json(vec![commit_step(), fill], 10_000_000_000_000_000_000);
+        let swap = propamm_swap(
+            quote_attributes(calls, far_future()),
+            BigUint::from_str("10000000000000000000").unwrap(),
+        );
+
+        let error = encoder()
+            .encode_swap(&swap, &encoding_context())
+            .unwrap_err();
+
+        assert!(
+            matches!(error, EncodingError::FatalError(ref msg) if msg.contains("anchor executor"))
+        );
+    }
+
+    #[test]
+    fn test_encode_rejects_unknown_step() {
+        let calls = settlement_call_json(
+            vec![commit_step(), fill_step_1(), step(ANCHOR_EXECUTOR, vec![0xde, 0xad, 0xbe, 0xef])],
+            10_000_000_000_000_000_000,
+        );
+        let swap = propamm_swap(
+            quote_attributes(calls, far_future()),
+            BigUint::from_str("10000000000000000000").unwrap(),
+        );
+
+        let error = encoder()
+            .encode_swap(&swap, &encoding_context())
+            .unwrap_err();
+
+        assert!(
+            matches!(error, EncodingError::FatalError(ref msg) if msg.contains("Unrecognized"))
+        );
+    }
+
+    #[test]
+    fn test_encode_rejects_multihop_fill() {
+        let mut l = ladder(
+            address!("2222222222222222222222222222222222222222"),
+            address!("1111111111111111111111111111111111111111"),
+            vec![(10_000_000_000_000_000_000, 1_878_000_000)],
+            7,
+        );
+        // A leg on an intermediate pair: tokenOut is not the swap's tokenOut.
+        l.tokenOut = address!("cbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+        let fill = step(ANCHOR_EXECUTOR, fill_step_data(l, 10_000_000_000_000_000_000));
+        let calls = settlement_call_json(vec![commit_step(), fill], 10_000_000_000_000_000_000);
+        let swap = propamm_swap(
+            quote_attributes(calls, far_future()),
+            BigUint::from_str("10000000000000000000").unwrap(),
+        );
+
+        let error = encoder()
+            .encode_swap(&swap, &encoding_context())
+            .unwrap_err();
+
+        assert!(
+            matches!(error, EncodingError::RecoverableError(ref msg) if msg.contains("intermediate pair"))
+        );
+    }
+
+    #[test]
+    fn test_encode_leg_sum_mismatch() {
         // The mocked quote echoes the estimated amount in as the quoted
         // amount, so estimating 14 WETH conflicts with legs summing 15 WETH.
         let swap = propamm_swap(
@@ -490,13 +795,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_selector_matches_cast() {
+    fn test_selectors_match_cast() {
+        assert_eq!(swapCall::SELECTOR, SWAP_SELECTOR);
+        assert_eq!(updatePricesCall::SELECTOR, UPDATE_PRICES_SELECTOR);
         assert_eq!(fillFromAnchorCall::SELECTOR, FILL_SELECTOR);
+        assert_eq!(sweepBalanceCall::SELECTOR, SWEEP_SELECTOR);
     }
 
     #[test]
-    fn test_encoder_rejects_non_base_chain() {
-        let result = PropAMMSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None);
-        assert!(result.is_err());
+    fn test_encoder_chain_gate() {
+        assert!(BiconomySwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).is_err());
+        assert!(BiconomySwapEncoder::new(Bytes::zero(20), Chain::Bsc, None).is_ok());
     }
 }

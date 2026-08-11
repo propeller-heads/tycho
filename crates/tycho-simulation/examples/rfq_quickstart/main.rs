@@ -40,10 +40,7 @@ use tycho_simulation::{
     rfq::{
         protocols::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
-            biconomy_propamm::{
-                client_builder::PropAmmClientBuilder as BiconomyPropAmmClientBuilder,
-                state::PropAmmState as BiconomyPropAmmState,
-            },
+            biconomy_propamm::{client_builder::BiconomyClientBuilder, state::BiconomyState},
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
             liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
             metric::{client_builder::MetricClientBuilder, state::MetricState},
@@ -135,10 +132,10 @@ async fn main() {
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
     let biconomy_propamm_key = env::var("BICONOMY_PROPAMM_API_KEY").ok();
-    if bebop_key.is_none() &&
-        (hashflow_user.is_none() || hashflow_key.is_none()) &&
-        (liquorice_user.is_none() || liquorice_key.is_none()) &&
-        biconomy_propamm_key.is_none()
+    if bebop_key.is_none()
+        && (hashflow_user.is_none() || hashflow_key.is_none())
+        && (liquorice_user.is_none() || liquorice_key.is_none())
+        && biconomy_propamm_key.is_none()
     {
         if cli.run_pamm_protocols {
             println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
@@ -242,16 +239,14 @@ async fn main() {
     if let Some(key) = biconomy_propamm_key {
         println!("Setting up Biconomy PropAMM RFQ client...\n");
         // Ladders are one-directional, so poll both directions of the requested pair.
-        let biconomy_propamm_client = BiconomyPropAmmClientBuilder::new(chain)
+        let biconomy_propamm_client = BiconomyClientBuilder::new(chain)
             .add_pair(sell_token_address.clone(), buy_token_address.clone())
             .add_pair(buy_token_address.clone(), sell_token_address.clone())
             .api_key(key)
             .build()
             .expect("Failed to create Biconomy PropAMM RFQ client");
-        rfq_stream_builder = rfq_stream_builder.add_client::<BiconomyPropAmmState>(
-            "biconomy_propamm",
-            Box::new(biconomy_propamm_client),
-        );
+        rfq_stream_builder = rfq_stream_builder
+            .add_client::<BiconomyState>("biconomy_propamm", Box::new(biconomy_propamm_client));
     }
     if cli.run_pamm_protocols {
         println!("Setting up Metric RFQ client...\n");
@@ -923,9 +918,9 @@ pub fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
     // Remove extra prefix if present (32 bytes for dynamic data)
     // Alloy encoding is including a prefix for dynamic data indicating the offset or length
     // but at this point we don't want that
-    if encoded_args.len() > 32 &&
-        encoded_args[..32] ==
-            [0u8; 31]
+    if encoded_args.len() > 32
+        && encoded_args[..32]
+            == [0u8; 31]
                 .into_iter()
                 .chain([32].to_vec())
                 .collect::<Vec<u8>>()

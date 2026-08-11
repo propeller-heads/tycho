@@ -4,9 +4,9 @@ use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
-    client_builder::PropAmmClientBuilder,
-    models::{PropAmmLevelsResponse, PropAmmMakerLevels, PropAmmMergedLevel},
-    state::PropAmmState,
+    client_builder::BiconomyClientBuilder,
+    models::{BiconomyLevelsResponse, BiconomyMakerLevels, BiconomyMergedLevel},
+    state::BiconomyState,
 };
 use crate::{
     protocol::{
@@ -16,7 +16,7 @@ use crate::{
     rfq::models::TimestampHeader,
 };
 
-impl TryFromWithBlock<ComponentWithState, TimestampHeader> for PropAmmState {
+impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BiconomyState {
     type Error = InvalidSnapshotError;
 
     async fn try_from_with_header(
@@ -63,9 +63,9 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for PropAmmState {
             .get("merged")
             .unwrap_or(&empty_array_bytes);
 
-        let makers: Vec<PropAmmMakerLevels> = serde_json::from_slice(makers_json)
+        let makers: Vec<BiconomyMakerLevels> = serde_json::from_slice(makers_json)
             .map_err(|e| InvalidSnapshotError::ValueError(format!("Invalid makers JSON: {e}")))?;
-        let merged: Vec<PropAmmMergedLevel> = serde_json::from_slice(merged_json)
+        let merged: Vec<BiconomyMergedLevel> = serde_json::from_slice(merged_json)
             .map_err(|e| InvalidSnapshotError::ValueError(format!("Invalid merged JSON: {e}")))?;
 
         let as_of = match state_attrs.get("as_of") {
@@ -80,14 +80,14 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for PropAmmState {
             None => timestamp_header.timestamp,
         };
 
-        let client = PropAmmClientBuilder::new(snapshot.component.chain)
+        let client = BiconomyClientBuilder::new(snapshot.component.chain)
             .pairs(vec![(base_token_address.clone(), quote_token_address.clone())])
             .build()
             .map_err(|e| {
-                InvalidSnapshotError::ValueError(format!("Couldn't create PropAmmClient: {e}"))
+                InvalidSnapshotError::ValueError(format!("Couldn't create BiconomyClient: {e}"))
             })?;
 
-        let levels = PropAmmLevelsResponse {
+        let levels = BiconomyLevelsResponse {
             chain_id: client.chain_id(),
             token_in: base_token.address.clone(),
             token_out: quote_token.address.clone(),
@@ -96,7 +96,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for PropAmmState {
             as_of,
         };
 
-        Ok(PropAmmState { base_token, quote_token, levels, client })
+        Ok(BiconomyState { base_token, quote_token, levels, client })
     }
 }
 
@@ -143,9 +143,11 @@ mod tests {
         tokens.insert(weth_token.address.clone(), weth_token.clone());
         tokens.insert(usdc_token.address.clone(), usdc_token.clone());
 
-        let fixture: PropAmmLevelsResponse = serde_json::from_str(
-            &std::fs::read_to_string("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
-                .unwrap(),
+        let fixture: BiconomyLevelsResponse = serde_json::from_str(
+            &std::fs::read_to_string(
+                "src/rfq/protocols/biconomy_propamm/test_responses/levels.json",
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -193,7 +195,7 @@ mod tests {
     async fn test_try_from_with_header() {
         let (snapshot, tokens) = create_test_snapshot();
 
-        let result = PropAmmState::try_from_with_header(
+        let result = BiconomyState::try_from_with_header(
             snapshot,
             TimestampHeader { timestamp: 1784889534u64 },
             &HashMap::new(),
@@ -216,7 +218,7 @@ mod tests {
     async fn test_try_from_missing_token() {
         let (mut snapshot, tokens) = create_test_snapshot();
         snapshot.component.tokens.pop();
-        let result = PropAmmState::try_from_with_header(
+        let result = BiconomyState::try_from_with_header(
             snapshot,
             TimestampHeader::default(),
             &HashMap::new(),
@@ -234,7 +236,7 @@ mod tests {
             .state
             .attributes
             .remove("makers");
-        let result = PropAmmState::try_from_with_header(
+        let result = BiconomyState::try_from_with_header(
             snapshot,
             TimestampHeader::default(),
             &HashMap::new(),
@@ -253,7 +255,7 @@ mod tests {
             .state
             .attributes
             .remove("as_of");
-        let result = PropAmmState::try_from_with_header(
+        let result = BiconomyState::try_from_with_header(
             snapshot,
             TimestampHeader { timestamp: 42 },
             &HashMap::new(),
@@ -275,7 +277,7 @@ mod tests {
                 .to_vec()
                 .into(),
         );
-        let result = PropAmmState::try_from_with_header(
+        let result = BiconomyState::try_from_with_header(
             snapshot,
             TimestampHeader::default(),
             &HashMap::new(),

@@ -1,7 +1,7 @@
 pragma solidity ^0.8.26;
 
 import "../TestUtils.sol";
-import "@src/executors/PropAMMExecutor.sol";
+import "@src/executors/BiconomyExecutor.sol";
 import {Constants} from "../Constants.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {
@@ -10,8 +10,8 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 
-contract PropAMMExecutorExposed is PropAMMExecutor {
-    constructor(address _propammAdapter) PropAMMExecutor(_propammAdapter) {}
+contract BiconomyExecutorExposed is BiconomyExecutor {
+    constructor(address _biconomyAdapter) BiconomyExecutor(_biconomyAdapter) {}
 
     function decodeData(bytes calldata data)
         external
@@ -20,7 +20,7 @@ contract PropAMMExecutorExposed is PropAMMExecutor {
             address tokenIn,
             address tokenOut,
             bytes memory commitData,
-            IPropAMMAdapter.FillLeg[] memory legs
+            IBiconomyAdapter.FillLeg[] memory legs
         )
     {
         return _decodeData(data);
@@ -41,7 +41,7 @@ contract MintableERC20 is ERC20 {
 ///      Pulls exactly amountIn from the caller like the real adapter, records
 ///      every argument for assertions and mints amountOutToDeliver of
 ///      tokenOut to the receiver.
-contract MockPropAMMAdapter is IPropAMMAdapter {
+contract MockPropAMMAdapter is IBiconomyAdapter {
     using SafeERC20 for IERC20;
 
     uint256 public amountOutToDeliver;
@@ -83,8 +83,8 @@ contract MockPropAMMAdapter is IPropAMMAdapter {
     }
 }
 
-contract PropAMMExecutorTest is Constants, TestUtils {
-    PropAMMExecutorExposed propammExecutor;
+contract BiconomyExecutorTest is Constants, TestUtils {
+    BiconomyExecutorExposed propammExecutor;
     MockPropAMMAdapter mockAdapter;
     MintableERC20 tokenIn;
     MintableERC20 tokenOut;
@@ -98,7 +98,7 @@ contract PropAMMExecutorTest is Constants, TestUtils {
 
     function setUp() public {
         mockAdapter = new MockPropAMMAdapter(AMOUNT_OUT);
-        propammExecutor = new PropAMMExecutorExposed(address(mockAdapter));
+        propammExecutor = new BiconomyExecutorExposed(address(mockAdapter));
         tokenIn = new MintableERC20("Wrapped Ether", "WETH");
         tokenOut = new MintableERC20("USD Coin", "USDC");
     }
@@ -106,18 +106,18 @@ contract PropAMMExecutorTest is Constants, TestUtils {
     function _sampleLegs()
         internal
         view
-        returns (IPropAMMAdapter.FillLeg[] memory legs)
+        returns (IBiconomyAdapter.FillLeg[] memory legs)
     {
-        IPropAMMAdapter.Level[] memory levels = new IPropAMMAdapter.Level[](2);
+        IBiconomyAdapter.Level[] memory levels = new IBiconomyAdapter.Level[](2);
         // Cumulative sizes in tokenIn wei, 1e18-scaled prices
-        levels[0] = IPropAMMAdapter.Level({size: 10 ether, price: 1878e6});
-        levels[1] = IPropAMMAdapter.Level({size: 20 ether, price: 1877e6});
+        levels[0] = IBiconomyAdapter.Level({size: 10 ether, price: 1878e6});
+        levels[1] = IBiconomyAdapter.Level({size: 20 ether, price: 1877e6});
 
-        legs = new IPropAMMAdapter.FillLeg[](1);
-        legs[0] = IPropAMMAdapter.FillLeg({
-            provider: PROVIDER,
-            ladder: IPropAMMAdapter.PriceLadder({
+        legs = new IBiconomyAdapter.FillLeg[](1);
+        legs[0] = IBiconomyAdapter.FillLeg({
+            ladder: IBiconomyAdapter.PriceLadder({
                 mm: MAKER,
+                provider: PROVIDER,
                 tokenIn: address(tokenIn),
                 tokenOut: address(tokenOut),
                 levels: levels,
@@ -128,7 +128,7 @@ contract PropAMMExecutorTest is Constants, TestUtils {
         });
     }
 
-    function _encodeSwapData(IPropAMMAdapter.FillLeg[] memory legs)
+    function _encodeSwapData(IBiconomyAdapter.FillLeg[] memory legs)
         internal
         view
         returns (bytes memory)
@@ -140,7 +140,7 @@ contract PropAMMExecutorTest is Constants, TestUtils {
     }
 
     function testDecodeData() public view {
-        IPropAMMAdapter.FillLeg[] memory legs = _sampleLegs();
+        IBiconomyAdapter.FillLeg[] memory legs = _sampleLegs();
         bytes memory commitData =
             abi.encodeWithSignature("updatePrices(bytes)", hex"deadbeef");
         bytes memory data =
@@ -150,7 +150,7 @@ contract PropAMMExecutorTest is Constants, TestUtils {
             address decodedTokenIn,
             address decodedTokenOut,
             bytes memory decodedCommitData,
-            IPropAMMAdapter.FillLeg[] memory decodedLegs
+            IBiconomyAdapter.FillLeg[] memory decodedLegs
         ) = propammExecutor.decodeData(data);
 
         assertEq(decodedTokenIn, address(tokenIn), "tokenIn mismatch");
@@ -161,7 +161,11 @@ contract PropAMMExecutorTest is Constants, TestUtils {
             "commitData mismatch"
         );
         assertEq(decodedLegs.length, 1, "legs length mismatch");
-        assertEq(decodedLegs[0].provider, legs[0].provider, "provider mismatch");
+        assertEq(
+            decodedLegs[0].ladder.provider,
+            legs[0].ladder.provider,
+            "provider mismatch"
+        );
         assertEq(decodedLegs[0].amountIn, AMOUNT_IN, "leg amountIn mismatch");
         assertEq(decodedLegs[0].ladder.mm, legs[0].ladder.mm, "mm mismatch");
         assertEq(
@@ -208,7 +212,7 @@ contract PropAMMExecutorTest is Constants, TestUtils {
         // FillLeg[]) payload of 192 bytes
         bytes memory tooShort = new bytes(191);
         vm.expectRevert(
-            PropAMMExecutor.PropAMMExecutor__InvalidDataLength.selector
+            BiconomyExecutor.BiconomyExecutor__InvalidDataLength.selector
         );
         propammExecutor.decodeData(tooShort);
     }
@@ -238,19 +242,23 @@ contract PropAMMExecutorTest is Constants, TestUtils {
     function testGetTransferDataInvalidLength() public {
         bytes memory tooShort = new bytes(191);
         vm.expectRevert(
-            PropAMMExecutor.PropAMMExecutor__InvalidDataLength.selector
+            BiconomyExecutor.BiconomyExecutor__InvalidDataLength.selector
         );
         propammExecutor.getTransferData(tooShort);
     }
 
     function testSwap() public {
-        IPropAMMAdapter.FillLeg[] memory legs = _sampleLegs();
+        IBiconomyAdapter.FillLeg[] memory legs = _sampleLegs();
         bytes memory commitData =
             abi.encodeWithSignature("updatePrices(bytes)", hex"deadbeef");
         bytes memory data =
             abi.encode(address(tokenIn), address(tokenOut), commitData, legs);
 
         tokenIn.mint(address(propammExecutor), AMOUNT_IN);
+        // In production the router's TransferManager approves the adapter
+        // before the executor runs (ProtocolWillDebit); stand in for it here.
+        vm.prank(address(propammExecutor));
+        tokenIn.approve(address(mockAdapter), AMOUNT_IN);
 
         propammExecutor.swap(AMOUNT_IN, data, BOB);
 
@@ -265,7 +273,7 @@ contract PropAMMExecutorTest is Constants, TestUtils {
             AMOUNT_IN,
             "tokenIn should be at adapter"
         );
-        // The exact approval was fully consumed
+        // The TransferManager-style approval was fully consumed
         assertEq(
             tokenIn.allowance(address(propammExecutor), address(mockAdapter)),
             0,
@@ -298,14 +306,14 @@ contract PropAMMExecutorTest is Constants, TestUtils {
     function testSwapInvalidDataLength() public {
         bytes memory tooShort = new bytes(191);
         vm.expectRevert(
-            PropAMMExecutor.PropAMMExecutor__InvalidDataLength.selector
+            BiconomyExecutor.BiconomyExecutor__InvalidDataLength.selector
         );
         propammExecutor.swap(AMOUNT_IN, tooShort, BOB);
     }
 
     function testConstructorZeroAddress() public {
-        vm.expectRevert(PropAMMExecutor.PropAMMExecutor__ZeroAddress.selector);
-        new PropAMMExecutorExposed(address(0));
+        vm.expectRevert(BiconomyExecutor.BiconomyExecutor__ZeroAddress.selector);
+        new BiconomyExecutorExposed(address(0));
     }
 
     function testFundsExpectedAddress() public view {
