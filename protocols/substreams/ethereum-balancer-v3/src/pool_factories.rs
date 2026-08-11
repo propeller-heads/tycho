@@ -1,12 +1,17 @@
 use crate::{abi, params::DeploymentConfig, utils::address_id};
 use abi::{
+    quantamm_weighted_pool_factory_contract::{
+        events::PoolCreated as QuantAmmPoolCreated,
+        functions::{
+            Create as QuantAmmPoolCreate, CreateWithoutArgs as QuantAmmPoolCreateWithoutArgs,
+        },
+    },
     reclamm_pool_factory_contract::{
         events::PoolCreated as ReClammPoolCreated, functions::Create as ReClammPoolCreate,
     },
     stable_pool_factory_contract::{
         events::PoolCreated as StablePoolCreated, functions::Create as StablePoolCreate,
     },
-    vault_contract::events::PoolRegistered,
     weighted_pool_factory_contract::{
         events::PoolCreated as WeightedPoolCreated, functions::Create as WeightedPoolCreate,
     },
@@ -23,10 +28,6 @@ use tycho_substreams::{
 
 // Token config: (token_address, rate, rate_provider_address, is_exempt_from_yield_fees)
 type TokenConfig = Vec<(Vec<u8>, substreams::scalar::BigInt, Vec<u8>, bool)>;
-
-// Hook flags as `PoolRegistered` reports them: the ten `shouldCall`/`enable` booleans followed by
-// the hook contract address. See [`hooks_affect_swaps`] for the fields that matter here.
-type HooksConfigTuple = (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, Vec<u8>);
 
 /// Separates the factory family from its generation label in the `pool_type` static attribute.
 const POOL_TYPE_VERSION_SEPARATOR: char = '@';
@@ -56,29 +57,6 @@ fn has_hooks(pool_hooks_contract: &[u8]) -> bool {
         .any(|byte| *byte != 0)
 }
 
-/// Whether a registered pool's hooks take part in swapping.
-///
-/// `PoolRegistered` carries the resolved hook flags, so unlike [`has_hooks`] — which only sees the
-/// hook address in the factory's `create` parameters — this can tell a swap hook apart from one
-/// that only intervenes in liquidity operations, and keep the latter. The predicate mirrors
-/// `HooksConfig::affects_swaps` in `tycho-simulation`'s balancer_v3 decoder, so exactly the pools
-/// indexed here are the ones it can quote.
-fn hooks_affect_swaps(hooks_config: &HooksConfigTuple) -> bool {
-    let (
-        enable_hook_adjusted_amounts,
-        _should_call_before_initialize,
-        _should_call_after_initialize,
-        should_call_compute_dynamic_swap_fee,
-        should_call_before_swap,
-        should_call_after_swap,
-        ..,
-    ) = hooks_config;
-    *enable_hook_adjusted_amounts ||
-        *should_call_compute_dynamic_swap_fee ||
-        *should_call_before_swap ||
-        *should_call_after_swap
-}
-
 /// Renders the `pool_type` static attribute: the factory family, then the configured generation.
 ///
 /// `tycho-simulation`'s balancer_v3 decoder splits this on the first
@@ -94,14 +72,6 @@ pub fn address_map(
     call: &Call,
     config: &DeploymentConfig,
 ) -> Option<ProtocolComponent> {
-    // QuantAMM pools are matched on the Vault's `PoolRegistered` event rather than the factory's
-    // own `PoolCreated`: the factory's `create` takes a 17-field struct whose generated binding
-    // exceeds the tuple sizes Rust derives `Debug`/`PartialEq` for, and `PoolRegistered` carries
-    // everything a component needs anyway. `log.address` is the Vault here, not the factory.
-    if pool_factory_address == config.vault.as_slice() {
-        return quantamm_component(log, config);
-    }
-
     if let Some(version) = config
         .weighted_factories
         .version_of(pool_factory_address)
@@ -191,6 +161,51 @@ pub fn address_map(
     }
 
     if let Some(version) = config
+        .quantamm_factories
+        .version_of(pool_factory_address)
+    {
+        let QuantAmmPoolCreated { pool } = QuantAmmPoolCreated::match_and_decode(log)?;
+        // The factory takes its creation parameters as one nested struct, which the generated
+        // binding renders as an unnamed tuple, so its fields are read by position:
+        // 2 `tokens`, 5 `swapFeePercentage`, 6 `poolHooksContract`. `createWithoutArgs` takes the
+        // same struct and is the other way a pool is deployed.
+        let params = QuantAmmPoolCreate::match_and_decode(call)
+            .map(|create| create.params)
+            .or_else(|| {
+                QuantAmmPoolCreateWithoutArgs::match_and_decode(call).map(|create| create.params)
+            })?;
+        let (token_config, swap_fee_percentage, pool_hooks_contract) =
+            (params.2, params.5, params.6);
+        if has_hooks(&pool_hooks_contract) {
+            return None;
+        }
+        let rate_providers = collect_rate_providers(&token_config);
+        if should_skip_rate_provider_pool(config, &rate_providers) {
+            return None;
+        }
+
+        let tokens = token_config
+            .into_iter()
+            .map(|t| t.0)
+            .collect::<Vec<_>>();
+
+        let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
+        let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
+
+        let pool_type = pool_type_attribute("QuantAMMWeightedPoolFactory", version);
+
+        // No `normalized_weights`: a QuantAMM pool's weights are rewritten by its rule engine and
+        // interpolated with time, so `tycho-simulation` reads them from the pool at each block.
+        let mut attributes = vec![("pool_type", pool_type.as_bytes()), ("fee", &fee_bytes)];
+
+        if !rate_providers.is_empty() {
+            attributes.push(("rate_providers", &rate_providers_bytes));
+        }
+
+        return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
+    }
+
+    if let Some(version) = config
         .reclamm_factories
         .version_of(pool_factory_address)
     {
@@ -247,49 +262,6 @@ pub fn address_map(
     None
 }
 
-/// Builds a component for a QuantAMM pool from the Vault's `PoolRegistered` event.
-///
-/// Returns `None` for any pool the event does not attribute to a configured QuantAMM factory,
-/// which is every other pool the Vault registers — the other families are matched on their own
-/// factory's `PoolCreated` instead.
-///
-/// The interpolated weights the maths needs are not taken from the creation parameters: they move
-/// with every weight update the pool's rule engine performs, so `tycho-simulation` reads them from
-/// the pool's own getter at the block being quoted.
-fn quantamm_component(log: &Log, config: &DeploymentConfig) -> Option<ProtocolComponent> {
-    let PoolRegistered { pool, factory, token_config, swap_fee_percentage, hooks_config, .. } =
-        PoolRegistered::match_and_decode(log)?;
-    let version = config
-        .quantamm_factories
-        .version_of(&factory)?;
-
-    if hooks_affect_swaps(&hooks_config) {
-        return None;
-    }
-    let rate_providers = collect_rate_providers(&token_config);
-    if should_skip_rate_provider_pool(config, &rate_providers) {
-        return None;
-    }
-
-    let tokens = token_config
-        .into_iter()
-        .map(|token| token.0)
-        .collect::<Vec<_>>();
-
-    let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
-    let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
-
-    let pool_type = pool_type_attribute("QuantAMMWeightedPoolFactory", version);
-
-    let mut attributes = vec![("pool_type", pool_type.as_bytes()), ("fee", &fee_bytes)];
-
-    if !rate_providers.is_empty() {
-        attributes.push(("rate_providers", &rate_providers_bytes));
-    }
-
-    Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config))
-}
-
 fn create_pool_component(
     pool: &[u8],
     tokens: &[Vec<u8>],
@@ -300,6 +272,7 @@ fn create_pool_component(
     // without calling the pool contract.
     let mut attributes = attributes.to_vec();
     attributes.push(("vault", config.vault.as_slice()));
+
     ProtocolComponent::new(&address_id(pool))
         .with_contracts(&[pool.to_vec(), config.vault.clone()])
         .with_tokens(tokens)
@@ -334,38 +307,6 @@ mod tests {
             pool_type_attribute("ReClammPoolFactory", "20250101-v3-reclamm"),
             "ReClammPoolFactory@20250101-v3-reclamm"
         );
-    }
-
-    /// Builds a hooks config with every flag cleared, for tests to set one at a time.
-    fn hookless_config() -> HooksConfigTuple {
-        (false, false, false, false, false, false, false, false, false, false, vec![0u8; 20])
-    }
-
-    #[test]
-    fn liquidity_only_hooks_do_not_count_as_swap_hooks() {
-        let mut config = hookless_config();
-        // A hook contract that only runs on add/remove liquidity cannot change a swap's outcome,
-        // so such a pool stays quotable and must still be indexed.
-        config.6 = true; // shouldCallBeforeAddLiquidity
-        config.9 = true; // shouldCallAfterRemoveLiquidity
-        config.10 = vec![0xab; 20];
-        assert!(!hooks_affect_swaps(&config));
-    }
-
-    #[test]
-    fn every_swap_affecting_flag_is_rejected() {
-        // Indexes into `HooksConfigTuple` that the native maths cannot reproduce.
-        for flag in [0usize, 3, 4, 5] {
-            let mut config = hookless_config();
-            match flag {
-                0 => config.0 = true,
-                3 => config.3 = true,
-                4 => config.4 = true,
-                _ => config.5 = true,
-            }
-            assert!(hooks_affect_swaps(&config), "flag {flag} must disqualify the pool");
-        }
-        assert!(!hooks_affect_swaps(&hookless_config()));
     }
 
     #[test]
