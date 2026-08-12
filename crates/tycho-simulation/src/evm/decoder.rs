@@ -271,7 +271,12 @@ where
     }
 
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
-    /// components
+    /// components.
+    ///
+    /// A message with an empty `state_msgs` map (no synchronizer advanced this tick) decodes
+    /// into a status-only update: empty state maps, `sync_states` passed through, and the block
+    /// number of the last decoded message. Such a message before the first decoded block is an
+    /// error.
     pub async fn decode(&self, msg: &FeedMessage<H>) -> Result<Update, StreamDecodeError> {
         // stores all states updated in this tick/msg
         let mut updated_states = HashMap::new();
@@ -279,6 +284,26 @@ where
         let mut removed_pairs = HashMap::new();
         let mut contracts_map = HashMap::new();
         let mut msg_failed_components = HashSet::new();
+
+        // The BlockSynchronizer emits one FeedMessage per tick even when no synchronizer
+        // advanced (e.g. all delayed or stale during a websocket reconnect). Such a message
+        // carries only sync status. Emit a status-only update so consumers keep observing
+        // sync_states instead of failing on a transient stall.
+        if msg.state_msgs.is_empty() {
+            let current_block_number = self
+                .state
+                .read()
+                .await
+                .current_block_number;
+            if current_block_number == 0 {
+                return Err(StreamDecodeError::Fatal(
+                    "Received an empty FeedMessage before the first block".into(),
+                ));
+            }
+            debug!(current_block_number, "Empty FeedMessage; emitting status-only update");
+            return Ok(Update::new(current_block_number, HashMap::new(), HashMap::new())
+                .set_sync_states(msg.sync_states.clone()));
+        }
 
         let header = msg
             .state_msgs
@@ -1328,6 +1353,44 @@ mod tests {
         assert_eq!(res2.states.len(), 1);
         assert_eq!(res1.sync_states.len(), 1);
         assert_eq!(res2.sync_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_decode_empty_message_returns_status_only_update() {
+        let decoder = setup_decoder(true).await;
+
+        let msg = load_test_msg("uniswap_v2_snapshot");
+        let snapshot_update = decoder
+            .decode(&msg)
+            .await
+            .expect("decode failure");
+
+        let empty_msg =
+            FeedMessage { state_msgs: HashMap::new(), sync_states: msg.sync_states.clone() };
+        let update = decoder
+            .decode(&empty_msg)
+            .await
+            .expect("empty message should decode to a status-only update");
+
+        assert_eq!(update.block_number_or_timestamp, snapshot_update.block_number_or_timestamp);
+        assert!(!update.is_partial);
+        assert!(update.states.is_empty());
+        assert!(update.new_pairs.is_empty());
+        assert!(update.removed_pairs.is_empty());
+        assert_eq!(update.sync_states, msg.sync_states);
+    }
+
+    #[tokio::test]
+    async fn test_decode_empty_message_before_first_block_fails() {
+        let decoder = setup_decoder(true).await;
+
+        let empty_msg = FeedMessage { state_msgs: HashMap::new(), sync_states: HashMap::new() };
+        let res = decoder.decode(&empty_msg).await;
+
+        assert!(matches!(
+            res,
+            Err(StreamDecodeError::Fatal(ref m)) if m.contains("before the first block")
+        ));
     }
 
     #[tokio::test]
