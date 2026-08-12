@@ -16,8 +16,9 @@ use crate::encoding::{
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
             metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
-            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
+            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
+            uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -165,6 +166,7 @@ impl SwapEncoderRegistry {
             "rocketpool" => {
                 Ok(Box::new(RocketpoolSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "sky" => Ok(Box::new(SkySwapEncoder::new(executor_address, self.chain, config)?)),
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
             }

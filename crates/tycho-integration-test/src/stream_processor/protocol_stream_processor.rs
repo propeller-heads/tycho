@@ -31,6 +31,7 @@ use tycho_simulation::{
             ramses_v3::state::RamsesV3State,
             ring_swap_v2::state::RingSwapV2State,
             rocketpool::state::RocketpoolState,
+            sky::state::SkyState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -201,6 +202,7 @@ impl ProtocolStreamProcessor {
                 "cowamm".to_string(),
                 "ekubo_v3".to_string(),
                 "rocketpool".to_string(),
+                "sky".to_string(),
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
                 "vm:bopamm".to_string(),
@@ -354,6 +356,9 @@ impl ProtocolStreamProcessor {
             }
             "rocketpool" => {
                 stream = stream.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None);
+            }
+            "sky" => {
+                stream = stream.exchange::<SkyState>("sky", tvl_filter.clone(), None);
             }
             "cowamm" => {
                 stream = stream.exchange::<CowAMMState>("cowamm", tvl_filter.clone(), None);

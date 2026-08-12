@@ -28,6 +28,7 @@ ignore = [
     "base-aerodrome-slipstreams/src/abi",
     "base-lunarbase/src/abi",
     "ethereum-erc4626/src/abi",
+    "ethereum-sky/src/abi",
     "ethereum-rocketpool/src/abi",
     "unichain-velodrome/src/abi",
     "polygon-ramses-v3/src/abi",

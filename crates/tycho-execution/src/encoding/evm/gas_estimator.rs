@@ -45,6 +45,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "rfq:metric",
     "erc4626",
     "ring_swap_v2",
+    "sky",
 ];
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra

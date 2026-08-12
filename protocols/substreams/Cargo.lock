@@ -1218,6 +1218,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-sky"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "ethabi 18.0.0",
+ "itertools 0.10.5",
+ "num-bigint",
+ "serde",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-template-factory"
 version = "0.1.0"
 dependencies = [
