@@ -9,7 +9,7 @@ use balancer_maths_rust::{
         pool_base::PoolBase,
         types::{PoolState, SwapInput, SwapKind, SwapParams},
         utils::{
-            compute_and_charge_aggregate_swap_fees, to_raw_undo_rate_round_down,
+            compute_and_charge_aggregate_swap_fees_raw, to_raw_undo_rate_round_down,
             to_scaled_18_apply_rate_round_down,
         },
         WAD as ONE_WAD_SCALED_18,
@@ -274,6 +274,9 @@ impl BalancerV3State {
                 let max_out_scaled_18 = mul_down_fixed(&MAX_TOKEN_OUT_RATIO, &balances[index_out])
                     .map_err(maths_error)?;
                 let mutable = &state.mutable;
+                // A pool whose reserves and virtual balances are small enough for its invariant to
+                // round to zero has no price range to speak of, and reports as much rather than
+                // dividing by it. Recoverable: a re-seeded pool quotes again.
                 let (virtual_balance_a, virtual_balance_b, _) = compute_current_virtual_balances(
                     &mutable.current_timestamp,
                     balances,
@@ -286,7 +289,13 @@ impl BalancerV3State {
                     &mutable.end_fourth_root_price_ratio,
                     &mutable.price_ratio_update_start_time,
                     &mutable.price_ratio_update_end_time,
-                );
+                )
+                .map_err(|e| {
+                    SimulationError::RecoverableError(format!(
+                        "balancer_v3 reCLAMM pool {} has no usable price range: {e:?}",
+                        self.pool_address
+                    ))
+                })?;
                 compute_in_given_out(
                     balances,
                     &virtual_balance_a,
@@ -577,12 +586,11 @@ impl BalancerV3State {
         let total_fee_scaled =
             mul_up_fixed(&amount_in_scaled, &base.swap_fee).map_err(maths_error)?;
         // The Vault charges the protocol's share in the input token's own units, truncating the
-        // fee to whole ones before deducting it from the raw balance. That is what this returns —
-        // despite the scaled-18 name the maths library gives it — so it has to be scaled back up
-        // before meeting balances that are held scaled to 18 decimals. Skipping that step leaves
-        // the deduction short by the token's scaling factor, which is invisible for 18-decimal
-        // tokens at a rate of one and a factor of 10^12 for something like USDC.
-        let protocol_fee_raw = compute_and_charge_aggregate_swap_fees(
+        // fee to whole ones before deducting it from the raw balance, which is what this returns.
+        // It has to be scaled back up before meeting balances that are held scaled to 18 decimals:
+        // skipping that leaves the deduction short by the token's scaling factor, which is nothing
+        // for an 18-decimal token at a rate of one and a factor of 10^12 for something like USDC.
+        let protocol_fee_raw = compute_and_charge_aggregate_swap_fees_raw(
             &total_fee_scaled,
             &base.aggregate_swap_fee,
             &base.scaling_factors,

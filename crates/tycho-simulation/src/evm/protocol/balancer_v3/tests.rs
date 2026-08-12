@@ -24,7 +24,7 @@ use num_bigint::BigUint;
 use serde_json::Value;
 use tycho_common::{
     models::{token::Token, Chain},
-    simulation::protocol_sim::ProtocolSim,
+    simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
     Bytes,
 };
 
@@ -821,6 +821,76 @@ fn spot_price_is_positive_in_both_directions() {
                 .expect("spot price resolves");
             assert!(price.is_finite() && price > 0.0, "spot price must be finite and positive");
         }
+    }
+}
+
+/// A reCLAMM pool small enough that its invariant rounds to zero has no price range to divide by.
+/// `balancer-maths-rust` used to panic on one; since 0.5.0 it reports `ZeroInvariant`, which has to
+/// reach the caller as an ordinary recoverable error rather than unwinding the thread quoting it.
+///
+/// The state is the reproduction that upstream took for its own regression test: balances far
+/// enough off centre to trigger the price-range update, and small enough that
+/// `(balance + virtual)` products fall below one WAD.
+#[test]
+fn reclamm_pool_with_a_zero_invariant_is_reported_not_panicked() {
+    let dust = U256::from(100_000_000u64);
+    let base = BasePoolState {
+        pool_address: "0x00000000000000000000000000000000000000f0".to_string(),
+        pool_type: "RECLAMM_V2".to_string(),
+        tokens: vec![
+            "0x000000000000000000000000000000000000000a".to_string(),
+            "0x000000000000000000000000000000000000000b".to_string(),
+        ],
+        scaling_factors: vec![U256::from(1u8); 2],
+        token_rates: vec![uint_wad(), uint_wad()],
+        balances_live_scaled_18: vec![dust, U256::from(1u8)],
+        swap_fee: U256::ZERO,
+        aggregate_swap_fee: U256::ZERO,
+        total_supply: dust,
+        supports_unbalanced_liquidity: true,
+        hook_type: None,
+    };
+    let pool = BalancerV3State::new(
+        address("0x00000000000000000000000000000000000000f0"),
+        address(VAULT),
+        PoolTypeAttribute { pool_type: BalancerPoolType::Reclamm, version: None },
+        base.tokens
+            .iter()
+            .map(|t| address(t))
+            .collect(),
+        Vec::new(),
+        200,
+        PoolState::ReClammV2(ReClammV2State {
+            immutable: ReClammV2Immutable {
+                pool_address: base.pool_address.clone(),
+                tokens: base.tokens.clone(),
+            },
+            base,
+            mutable: ReClammV2Mutable {
+                last_virtual_balances: vec![dust, dust],
+                daily_price_shift_base: uint_wad(),
+                last_timestamp: U256::from(100u64),
+                current_timestamp: U256::from(200u64),
+                // Above the pool's centeredness, so the price-range update runs.
+                centeredness_margin: uint_wad() / U256::from(2u8),
+                start_fourth_root_price_ratio: uint_wad(),
+                end_fourth_root_price_ratio: uint_wad(),
+                price_ratio_update_start_time: U256::ZERO,
+                price_ratio_update_end_time: U256::ZERO,
+            },
+        }),
+    );
+
+    let error = pool
+        .get_limits(pool.token_addresses()[0].clone(), pool.token_addresses()[1].clone())
+        .expect_err("a pool with no price range cannot report a limit");
+    match error {
+        // Recoverable rather than fatal: a re-seeded pool quotes again.
+        SimulationError::RecoverableError(reason) => assert!(
+            reason.contains("no usable price range"),
+            "expected the price-range report, got: {reason}"
+        ),
+        other => panic!("expected a recoverable error, got {other:?}"),
     }
 }
 
