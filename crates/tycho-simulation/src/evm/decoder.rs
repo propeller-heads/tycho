@@ -62,8 +62,14 @@ struct DecoderState {
     // again TODO: handle more gracefully inside tycho-client. We could fetch the snapshot and
     // try to decode it again.
     failed_components: HashSet<String>,
-    // The block number of the last confirmed block decoded via `decode()`.
+    // The block number of the last block decoded via `decode()`, confirmed or partial.
     current_block_number: u64,
+    // Whether the last block decoded via `decode()` was a partial (flashblock) header. Carried
+    // over onto status-only updates so `is_partial` reflects the real confirmation state.
+    current_block_is_partial: bool,
+    // Set while consecutive empty FeedMessages are being received. Lets the decoder log the
+    // start of a stall loudly and every repeat quietly, instead of spamming on every tick.
+    in_stall_episode: bool,
 }
 
 type DecodeFut =
@@ -275,8 +281,8 @@ where
     ///
     /// A message with an empty `state_msgs` map (no synchronizer advanced this tick) decodes
     /// into a status-only update: empty state maps, `sync_states` passed through, and the block
-    /// number of the last decoded message. Such a message before the first decoded block is an
-    /// error.
+    /// number and partial-block status carried over from the last decoded message. Such a
+    /// message before the first decoded block is an error.
     pub async fn decode(&self, msg: &FeedMessage<H>) -> Result<Update, StreamDecodeError> {
         // stores all states updated in this tick/msg
         let mut updated_states = HashMap::new();
@@ -290,18 +296,33 @@ where
         // carries only sync status. Emit a status-only update so consumers keep observing
         // sync_states instead of failing on a transient stall.
         if msg.state_msgs.is_empty() {
-            let current_block_number = self
-                .state
-                .read()
-                .await
-                .current_block_number;
-            if current_block_number == 0 {
-                return Err(StreamDecodeError::Fatal(
-                    "Received an empty FeedMessage before the first block".into(),
-                ));
+            let (current_block_number, current_block_is_partial, is_new_stall) = {
+                let mut state = self.state.write().await;
+                if state.current_block_number == 0 {
+                    return Err(StreamDecodeError::Fatal(
+                        "Received an empty FeedMessage before the first block".into(),
+                    ));
+                }
+                let is_new_stall = !state.in_stall_episode;
+                state.in_stall_episode = true;
+                (state.current_block_number, state.current_block_is_partial, is_new_stall)
+            };
+
+            if is_new_stall {
+                // Log the start of a stall loudly: until sync-status metrics land, this is the
+                // only in-band signal an operator has. Subsequent empty messages while the
+                // episode continues are logged at `debug!` — on a fast chain this line would
+                // otherwise repeat every block time for as long as the stall lasts.
+                warn!(
+                    current_block_number,
+                    sync_states = ?msg.sync_states,
+                    "All synchronizers stalled; emitting a status-only update"
+                );
+            } else {
+                debug!(current_block_number, "Empty FeedMessage; emitting status-only update");
             }
-            debug!(current_block_number, "Empty FeedMessage; emitting status-only update");
             return Ok(Update::new(current_block_number, HashMap::new(), HashMap::new())
+                .set_is_partial(current_block_is_partial)
                 .set_sync_states(msg.sync_states.clone()));
         }
 
@@ -959,6 +980,11 @@ where
         // Persist the newly added/updated states
         let mut state_guard = self.state.write().await;
 
+        if state_guard.in_stall_episode {
+            state_guard.in_stall_episode = false;
+            info!(block_number_or_timestamp, "Synchronizers recovered; resuming state updates");
+        }
+
         // Update failed components with any new ones
         state_guard
             .failed_components
@@ -983,6 +1009,7 @@ where
             .extend(updated_states.clone());
 
         state_guard.current_block_number = block_number_or_timestamp;
+        state_guard.current_block_is_partial = is_partial;
 
         // Add new components to persistent state
         for (id, component) in new_pairs.iter() {
@@ -1391,6 +1418,42 @@ mod tests {
             res,
             Err(StreamDecodeError::Fatal(ref m)) if m.contains("before the first block")
         ));
+    }
+
+    #[tokio::test]
+    async fn test_decode_empty_message_preserves_state_for_later_delta() {
+        let decoder = setup_decoder(true).await;
+
+        let snapshot_msg = load_test_msg("uniswap_v2_snapshot");
+        let snapshot_update = decoder
+            .decode(&snapshot_msg)
+            .await
+            .expect("snapshot decode failure");
+        assert_eq!(snapshot_update.states.len(), 1);
+
+        let empty_msg = FeedMessage {
+            state_msgs: HashMap::new(),
+            sync_states: snapshot_msg.sync_states.clone(),
+        };
+        // Two consecutive heartbeats: the first opens the stall episode, the second is the
+        // repeated case. Neither should disturb the state built from the snapshot.
+        decoder
+            .decode(&empty_msg)
+            .await
+            .expect("first heartbeat should decode to a status-only update");
+        decoder
+            .decode(&empty_msg)
+            .await
+            .expect("second heartbeat should decode to a status-only update");
+
+        let delta_msg = load_test_msg("uniswap_v2_delta");
+        let delta_update = decoder
+            .decode(&delta_msg)
+            .await
+            .expect("delta decode after heartbeats should still apply to the snapshot state");
+
+        assert_eq!(delta_update.states.len(), 1);
+        assert_eq!(delta_update.sync_states.len(), 1);
     }
 
     #[tokio::test]
