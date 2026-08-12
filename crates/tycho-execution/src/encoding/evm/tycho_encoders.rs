@@ -89,57 +89,99 @@ impl TychoRouterEncoder {
     /// its wrapped counterpart but doesn't include the corresponding
     /// wrapping or unwrapping swap.
     ///
-    /// A bridge swap carries a 0% split, meaning "consume the entire remaining balance of
-    /// its input token", so one is only inserted when that balance is genuinely dangling.
-    /// If any swap in the solution consumes the token itself, the apparent gap between two
-    /// adjacent swaps is a split solution's parallel-branch boundary rather than a
-    /// sequential discontinuity: a bridge there would starve that swap and violate the
-    /// one-remainder-per-token split ordering. A mid-route bridge is also skipped when its
-    /// input is the solution's output token — that balance is the payout, and wrapping it
-    /// would re-route it through later swaps.
+    /// An inserted wrap swap carries a 0% split, meaning "consume the entire remaining
+    /// balance of the input token". Mid-route, a wrap swap is therefore inserted directly
+    /// before the first swap that consumes a token which no earlier swap produces. This
+    /// position is after every swap that takes a fraction of the wrap swap's input token,
+    /// which the split ordering rules require. `missing_wrap_swap` lists the conditions
+    /// for an insertion.
     fn add_native_wrap_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
         let swaps = solution.swaps();
         let mut new_swaps: Vec<Swap> = Vec::with_capacity(swaps.len());
+        let mut available_tokens = HashSet::from([solution.token_in().clone()]);
 
         // Check if we need to add a wrapping swap at the beginning of the solution
-        if let Some(s) =
-            self._wrapping_bridge(solution.token_in(), &swaps[0].token_in().address, chain)
+        if let Some(wrap_swap) =
+            self.wrap_swap_between(solution.token_in(), &swaps[0].token_in().address, chain)
         {
-            new_swaps.push(s);
+            available_tokens.insert(wrap_swap.token_out().address.clone());
+            new_swaps.push(wrap_swap);
         }
 
-        // Iterate through the swaps and add them to the new solution, adding wrapping/unwrapping
-        // swaps in between if needed
-        for i in 0..swaps.len() {
-            new_swaps.push(swaps[i].clone());
-            if i + 1 < swaps.len() {
-                let token_out = &swaps[i].token_out().address;
-                let token_in = &swaps[i + 1].token_in().address;
-                if let Some(s) = self._wrapping_bridge(token_out, token_in, chain) {
-                    let bridge_input = &s.token_in().address;
-                    let is_consumed = swaps
-                        .iter()
-                        .any(|swap| &swap.token_in().address == bridge_input);
-                    if !is_consumed && bridge_input != solution.token_out() {
-                        new_swaps.push(s);
-                    }
-                }
+        for swap in swaps {
+            if let Some(wrap_swap) =
+                self.missing_wrap_swap(&swap.token_in().address, &available_tokens, solution, chain)
+            {
+                available_tokens.insert(wrap_swap.token_out().address.clone());
+                new_swaps.push(wrap_swap);
             }
+            available_tokens.insert(swap.token_out().address.clone());
+            new_swaps.push(swap.clone());
         }
 
         // Check if we need to add an unwrapping swap at the end of the solution
         if let Some(last_swap) = swaps.last() {
-            if let Some(s) =
-                self._wrapping_bridge(&last_swap.token_out().address, solution.token_out(), chain)
+            if let Some(unwrap_swap) =
+                self.wrap_swap_between(&last_swap.token_out().address, solution.token_out(), chain)
             {
-                new_swaps.push(s);
+                new_swaps.push(unwrap_swap);
             }
         }
 
         solution.clone().with_swaps(new_swaps)
     }
 
-    fn _wrapping_bridge(&self, token_a: &Bytes, token_b: &Bytes, chain: &Chain) -> Option<Swap> {
+    /// Returns the wrap swap that must run before a swap that consumes `consumed_token`,
+    /// or `None` if no wrap swap is needed or possible.
+    ///
+    /// A wrap swap is needed when `consumed_token` is not available yet and the remaining
+    /// balance of its native/wrapped counterpart is dangling, meaning all of:
+    /// * the counterpart is available;
+    /// * no swap takes the counterpart's remainder with a 0% split — a swap with a non-zero split
+    ///   takes only a fraction, so the remainder still needs wrapping or unwrapping;
+    /// * the counterpart is not the solution's output token — that balance is the payout, and
+    ///   wrapping it would re-route it through later swaps.
+    fn missing_wrap_swap(
+        &self,
+        consumed_token: &Bytes,
+        available_tokens: &HashSet<Bytes>,
+        solution: &Solution,
+        chain: &Chain,
+    ) -> Option<Swap> {
+        if available_tokens.contains(consumed_token) {
+            return None;
+        }
+        let native = chain.native_token().address;
+        let wrapped = chain.wrapped_native_token().address;
+        let counterpart = if *consumed_token == native {
+            wrapped
+        } else if *consumed_token == wrapped {
+            native
+        } else {
+            return None;
+        };
+
+        let remainder_taken = solution
+            .swaps()
+            .iter()
+            .any(|swap| swap.token_in().address == counterpart && swap.split() == 0.0);
+        if !available_tokens.contains(&counterpart) ||
+            remainder_taken ||
+            counterpart == *solution.token_out()
+        {
+            return None;
+        }
+        self.wrap_swap_between(&counterpart, consumed_token, chain)
+    }
+
+    /// Returns the swap that wraps or unwraps `token_in` into `token_out`, or `None`
+    /// if the two tokens are not the chain's native/wrapped-native pair.
+    fn wrap_swap_between(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        chain: &Chain,
+    ) -> Option<Swap> {
         let native = chain.native_token();
         let wrapped_native = chain.wrapped_native_token();
         let wrap_component = ProtocolComponent {
@@ -147,9 +189,9 @@ impl TychoRouterEncoder {
             ..Default::default()
         };
 
-        if token_a == &wrapped_native.address && token_b == &native.address {
+        if token_in == &wrapped_native.address && token_out == &native.address {
             Some(Swap::new(wrap_component, wrapped_native, native, BigUint::from(14_000u64)))
-        } else if token_a == &native.address && token_b == &wrapped_native.address {
+        } else if token_in == &native.address && token_out == &wrapped_native.address {
             Some(Swap::new(wrap_component, native, wrapped_native, BigUint::from(7_000u64)))
         } else {
             None
@@ -585,11 +627,10 @@ mod tests {
             }
         }
 
-        /// A split solution containing a WETH/ETH-touching adjacency whose native balance is
-        /// not dangling: no wrap swap may be inserted. In `split_branch_boundary` the DAI→ETH
-        /// swap's output is consumed by the parallel ETH→USDC branch, not by the neighbouring
-        /// WETH→USDC swap. In `native_payout` the ETH produced by the DAI→ETH swap is the
-        /// solution's output, so nothing consumes it.
+        /// A split solution with parallel ETH and WETH branches and no dangling balance:
+        /// no wrap swap may be inserted. In `split_branch_boundary` the DAI→ETH swap's
+        /// output is fully consumed by the ETH→USDC branch. In `native_payout` the ETH
+        /// produced by the DAI→ETH swap is the solution's output, so nothing consumes it.
         #[rstest]
         //       ┌──[70%]── WETH ──┐
         // DAI ──┤                 ├── USDC   (ETH is consumed by its own branch)
@@ -615,7 +656,7 @@ mod tests {
             ],
             eth()
         )]
-        fn test_no_wrap_swap_for_non_dangling_balance(
+        fn test_add_native_wrap_swaps_non_dangling_balance(
             #[case] input_swaps: Vec<Swap>,
             #[case] token_out: Bytes,
         ) {
@@ -627,11 +668,65 @@ mod tests {
                 token_out,
                 BigUint::from_str("1000_000000000000000000").unwrap(),
                 BigUint::from_str("990_000000").unwrap(),
+                BigUint::from_str("970_000000").unwrap(),
                 input_swaps.clone(),
             );
 
             let solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
             assert_eq!(solution.swaps(), input_swaps.as_slice());
+        }
+
+        /// A split solution where one branch takes a fraction of the ETH (or WETH)
+        /// balance and the other branch consumes the counterpart token: the remainder
+        /// dangles, so a wrap (or unwrap) swap must be inserted after the fractional
+        /// consumer, and the solution must still encode as a split swap.
+        #[rstest]
+        //                ┌──[30%]───────────┐
+        // DAI ─── ETH ───┤                  ├── USDC
+        //                └──[rem]── WETH ───┘
+        #[case::wrap_remainder(eth(), weth())]
+        //                ┌──[30%]───────────┐
+        // DAI ─── WETH ──┤                  ├── USDC
+        //                └──[rem]── ETH ────┘
+        #[case::unwrap_remainder(weth(), eth())]
+        fn test_add_native_wrap_swaps_dangling_remainder(
+            #[case] remainder_token: Bytes,
+            #[case] counterpart_token: Bytes,
+        ) {
+            let encoder = get_tycho_router_encoder();
+            let input_swaps = vec![
+                univ2_swap(&dai(), &remainder_token, 0.0),
+                univ2_swap(&remainder_token, &usdc(), 0.3),
+                univ2_swap(&counterpart_token, &usdc(), 0.0),
+            ];
+            let solution = Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                dai(),
+                usdc(),
+                BigUint::from_str("1000_000000000000000000").unwrap(),
+                BigUint::from_str("990_000000").unwrap(),
+                BigUint::from_str("970_000000").unwrap(),
+                input_swaps.clone(),
+            );
+
+            let wrapped_solution = encoder.add_native_wrap_swaps(&solution, &encoder.chain);
+
+            let swaps = wrapped_solution.swaps();
+            assert_eq!(swaps.len(), 4);
+            assert_eq!(swaps[..2], input_swaps[..2]);
+            assert_eq!(swaps[2].component().protocol_system, "native_wrapper");
+            assert_eq!(swaps[2].token_in().address, remainder_token);
+            assert_eq!(swaps[2].token_out().address, counterpart_token);
+            assert_eq!(swaps[2].split(), 0.0);
+            assert_eq!(swaps[3], input_swaps[2]);
+
+            let encoded_solution = encoder
+                .encode_solution(&solution)
+                .unwrap();
+            assert!(encoded_solution
+                .function_signature()
+                .contains("splitSwap"));
         }
 
         /// End-to-end regression: the split solution below must encode as a split swap
@@ -650,6 +745,7 @@ mod tests {
                 usdc(),
                 BigUint::from_str("1000_000000000000000000").unwrap(),
                 BigUint::from_str("990_000000").unwrap(),
+                BigUint::from_str("970_000000").unwrap(),
                 vec![
                     univ2_swap(&dai(), &weth(), 0.7),
                     univ2_swap(&dai(), &eth(), 0.0),
