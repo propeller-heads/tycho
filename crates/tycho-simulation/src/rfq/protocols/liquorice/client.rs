@@ -6,6 +6,7 @@ use std::{
 
 use alloy::primitives::utils::keccak256;
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use futures::stream::BoxStream;
 use num_bigint::BigUint;
 use reqwest::Client;
@@ -81,6 +82,13 @@ impl LiquoriceClient {
             quote_timeout,
             quote_expiry_secs,
         })
+    }
+
+    /// Build the `Authorization: Basic <base64(solver:token)>` header value
+    /// required by the Liquorice REST API.
+    fn basic_auth_header(&self) -> String {
+        let credentials = format!("{}:{}", self.auth_solver, self.auth_key);
+        format!("Basic {}", BASE64_STANDARD.encode(credentials.as_bytes()))
     }
 
     fn normalize_tvl(
@@ -258,8 +266,7 @@ impl LiquoriceClient {
             .get(&self.price_levels_endpoint)
             .query(&query_params)
             .header("accept", "application/json")
-            .header("solver", &self.auth_solver)
-            .header("authorization", &self.auth_key);
+            .header("authorization", self.basic_auth_header());
 
         let response = request
             .send()
@@ -448,8 +455,7 @@ impl RFQClient for LiquoriceClient {
                 .post(&url)
                 .json(&quote_request)
                 .header("accept", "application/json")
-                .header("solver", &self.auth_solver)
-                .header("authorization", &self.auth_key);
+                .header("authorization", self.basic_auth_header());
 
             let response = match timeout(remaining_time, request.send()).await {
                 Ok(Ok(resp)) => resp,
