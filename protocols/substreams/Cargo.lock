@@ -1225,7 +1225,6 @@ dependencies = [
  "anyhow",
  "ethabi 18.0.0",
  "itertools 0.10.5",
- "num-bigint",
  "serde",
  "serde_qs 0.13.0",
  "substreams 0.5.22",

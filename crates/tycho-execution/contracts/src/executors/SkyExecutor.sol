@@ -44,28 +44,28 @@ contract SkyExecutor is IExecutor {
         Converter // DaiUsds: USDS (gem) <-> DAI
     }
 
-    IDssLitePsm private immutable _PSM;
-    IDssLitePsm private immutable _WRAPPER;
-    IDaiUsds private immutable _CONVERTER;
-    address private immutable _DAI;
-    address private immutable _USDC;
-    address private immutable _USDS;
-    uint256 private immutable _PSM_FACTOR;
-    uint256 private immutable _WRAPPER_FACTOR;
+    IDssLitePsm private immutable _psm;
+    IDssLitePsm private immutable _wrapper;
+    IDaiUsds private immutable _converter;
+    address private immutable _dai;
+    address private immutable _usdc;
+    address private immutable _usds;
+    uint256 private immutable _psmFactor;
+    uint256 private immutable _wrapperFactor;
 
     constructor(address psm_, address wrapper_, address converter_) {
-        _PSM = IDssLitePsm(psm_);
-        _WRAPPER = IDssLitePsm(wrapper_);
-        _CONVERTER = IDaiUsds(converter_);
-        _DAI = _CONVERTER.dai();
-        _USDS = _CONVERTER.usds();
-        _USDC = _PSM.gem();
-        _PSM_FACTOR = _PSM.to18ConversionFactor();
-        _WRAPPER_FACTOR = _WRAPPER.to18ConversionFactor();
+        _psm = IDssLitePsm(psm_);
+        _wrapper = IDssLitePsm(wrapper_);
+        _converter = IDaiUsds(converter_);
+        _dai = _converter.dai();
+        _usds = _converter.usds();
+        _usdc = _psm.gem();
+        _psmFactor = _psm.to18ConversionFactor();
+        _wrapperFactor = _wrapper.to18ConversionFactor();
         // The three venues must agree on the token set they are wired for.
         if (
-            _PSM.dai() != _DAI || _WRAPPER.gem() != _USDC
-                || _WRAPPER.dai() != _USDS
+            _psm.dai() != _dai || _wrapper.gem() != _usdc
+                || _wrapper.dai() != _usds
         ) {
             revert SkyExecutor__TokenMismatch();
         }
@@ -90,16 +90,16 @@ contract SkyExecutor is IExecutor {
 
         if (target == Target.Converter) {
             if (gemToStable) {
-                _CONVERTER.usdsToDai(receiver, amountIn);
+                _converter.usdsToDai(receiver, amountIn);
             } else {
-                _CONVERTER.daiToUsds(receiver, amountIn);
+                _converter.daiToUsds(receiver, amountIn);
             }
             return;
         }
 
         (IDssLitePsm psm, uint256 factor) = target == Target.Psm
-            ? (_PSM, _PSM_FACTOR)
-            : (_WRAPPER, _WRAPPER_FACTOR);
+            ? (_psm, _psmFactor)
+            : (_wrapper, _wrapperFactor);
         if (gemToStable) {
             // slither-disable-next-line unused-return
             psm.sellGem(receiver, amountIn);
@@ -135,11 +135,11 @@ contract SkyExecutor is IExecutor {
         address stable;
         address gem;
         if (target == Target.Psm) {
-            (stable, gem, receiver) = (_DAI, _USDC, address(_PSM));
+            (stable, gem, receiver) = (_dai, _usdc, address(_psm));
         } else if (target == Target.Wrapper) {
-            (stable, gem, receiver) = (_USDS, _USDC, address(_WRAPPER));
+            (stable, gem, receiver) = (_usds, _usdc, address(_wrapper));
         } else {
-            (stable, gem, receiver) = (_DAI, _USDS, address(_CONVERTER));
+            (stable, gem, receiver) = (_dai, _usds, address(_converter));
         }
         (tokenIn, tokenOut) = gemToStable ? (gem, stable) : (stable, gem);
     }

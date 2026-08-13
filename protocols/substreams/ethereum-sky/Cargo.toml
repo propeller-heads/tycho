@@ -12,7 +12,6 @@ alloy-primitives = { version = "1.4.1", features = ["serde"] }
 anyhow = "1.0.95"
 ethabi = "18.0.0"
 itertools = "0.10.5"
-num-bigint = "0.4.6"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_qs = "0.13.0"
 substreams = "0.5.22"
