@@ -1,0 +1,25 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "baseline"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "baseline"
+skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
+
+tests:
+  - name: test_ethereum_from_relay_deployment
+    # Covers the first Ethereum Baseline pool creation plus early swaps while
+    # keeping the storage-slot tracking range short.
+    start_block: 24921292
+    stop_block: 24922792
+    expected_components:
+      - id: "0x7a68e9216c6e238e6388dd67e737e3de92c5c93b"
+        tokens:
+          - "0x7a68e9216c6e238e6388dd67e737e3de92c5c93b"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+          reserve: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          manual_updates: "0x01"
+        creation_tx: "0x7576a097a1680a8ec8a595212572b49e0d9cc8d64cfdcd891f5bc2bce2aa2178"
+        skip_simulation: false
+        skip_execution: false

@@ -31,6 +31,7 @@ const deploy_protocols = {
         "vm:fermiswap",
         "vm:bopamm",
         "rfq:metric",
+        "baseline",
     ],
     "base": [
         "uniswap_v2",
@@ -42,6 +43,7 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "rfq:metric",
+        "baseline",
     ],
     "unichain": [
         "uniswap_v2",

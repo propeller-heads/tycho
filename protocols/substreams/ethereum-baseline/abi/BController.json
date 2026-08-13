@@ -1,0 +1,40 @@
+[
+  {
+    "type": "event",
+    "name": "CreatorFeePctSet",
+    "inputs": [
+      {
+        "name": "bToken",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "creatorFeePct",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LiquidityFeePctSet",
+    "inputs": [
+      {
+        "name": "bToken",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "liquidityFeePct",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  }
+]

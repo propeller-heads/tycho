@@ -1,0 +1,32 @@
+# NOT CURRENTLY LOADED. The test runner only reads `integration_test.tycho.yaml`, or
+# `integration_test_<protocol>.tycho.yaml` when the protocol is in CLONE_TO_BASE_PROTOCOL
+# (protocols/testing/src/test_runner.rs). This filename matches neither, and the
+# `base-baseline` mapping was dropped in "chore: clean up baseline testing changes".
+# To run this: rename to `integration_test_base_baseline.tycho.yaml`, add
+# ("base-baseline", "ethereum-baseline") to CLONE_TO_BASE_PROTOCOL, and add the matching
+# `base-baseline)` case to both resolve_base blocks in protocols/testing/run.Dockerfile.
+# Otherwise delete this file.
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "baseline"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "baseline"
+skip_balance_check: true # Baseline is singleton-style; native simulation is hydrated from quote-state attributes.
+
+tests:
+  - name: test_base_recent_pool_creation
+    # First Base pool creation through first swap, keeping storage-store warm-up short.
+    start_block: 45073551
+    stop_block: 45079661
+    expected_components:
+      - id: "0x4082b90beba6935c7718497165557106e43a6ac6"
+        tokens:
+          - "0x4082b90beba6935c7718497165557106e43a6ac6"
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+        static_attributes:
+          relay: "0xc81Fd894C0acE037d133aF4886550aC8133568E8"
+          reserve: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          manual_updates: "0x01"
+        creation_tx: "0xe4bec092a4b160d4020052938cffa7abfbafd1111a237e721ab8a0f5f3085a1c"
+        skip_simulation: false
+        skip_execution: false

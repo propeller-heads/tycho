@@ -1,0 +1,87 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_baseline"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_baseline.wasm
+
+network: mainnet
+networks:
+  mainnet:
+    initialBlock:
+      map_protocol_components: 24920863
+      store_components: 24920863
+      store_component_ids: 24920863
+      store_slot_index: 24920863
+      store_state_slots: 24920863
+      map_protocol_changes: 24920863
+  base:
+    initialBlock:
+      map_protocol_components: 45070267
+      store_components: 45070267
+      store_component_ids: 45070267
+      store_slot_index: 45070267
+      store_state_slots: 45070267
+      map_protocol_changes: 45070267
+modules:
+  - name: map_protocol_components
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_components
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_component_ids
+    kind: store
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  # Slots are keccak-derived per bToken, so instead of watching a slot range the exact
+  # slots are indexed as soon as a bToken address appears in a factory event.
+  - name: store_slot_index
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+
+  - name: store_state_slots
+    kind: store
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_slot_index
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_components
+      - store: store_component_ids
+      - store: store_state_slots
+        mode: deltas
+      - store: store_state_slots
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

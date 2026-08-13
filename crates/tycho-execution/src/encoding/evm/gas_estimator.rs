@@ -45,12 +45,13 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "rfq:metric",
     "erc4626",
     "ring_swap_v2",
+    "baseline",
 ];
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper"];
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "baseline"];
 
 pub const ROUTER_FEES_ACTIVE: bool = true;
 
