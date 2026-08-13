@@ -180,9 +180,9 @@ fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
 
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
     const UNSUPPORTED_POOLS: [&str; 4] = [
-        "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
+        "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
-        "0xfE6eb3b609a7C8352A241f7F3A21CEA4e9209B8f",
+        "0xfe6eb3b609a7c8352a241f7f3a21cea4e9209b8f",
         "0x83f20f44975d03b1b09e64809b757c47f942beea",
     ];
     if UNSUPPORTED_POOLS.contains(
@@ -223,6 +223,15 @@ mod tests {
         }
     }
 
+    fn erc4626_component(id: &str) -> ComponentWithState {
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { id: id.to_string(), ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
     #[test]
     fn non_angstrom_filter_excludes_angstrom_pools() {
         assert!(!uniswap_v4_non_angstrom_hook_pool_filter(&hooks_component(Some("angstrom_v1"))));
@@ -252,6 +261,14 @@ mod tests {
         // ETH/ETHx and legacy stETH expose a non-empty rebase_tokens list.
         let m = attrs(&[("rebase_tokens", r#"["0xa35b1b31ce002fbf2058d22f30f95d405200a15b"]"#)]);
         assert!(attr_json_list_non_empty(&m, "rebase_tokens"));
+    }
+
+    #[test]
+    fn erc4626_excludes_unsupported_pools_regardless_of_id_case() {
+        // Component ids arrive checksummed; the entries must be lower case to ever match.
+        assert!(!erc4626_filter(&erc4626_component("0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d")));
+        assert!(!erc4626_filter(&erc4626_component("0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d")));
+        assert!(erc4626_filter(&erc4626_component("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd")));
     }
 
     #[test]
