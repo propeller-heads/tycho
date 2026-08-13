@@ -9609,6 +9609,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "num-bigint",
+ "num-traits",
  "once_cell",
  "reqwest 0.12.23",
  "rstest 0.24.0",
