@@ -103,6 +103,9 @@ impl TychoRouterEncoder {
     /// `available_tokens` tracks the tokens that still hold a balance at each point of the
     /// route. A 0%-split swap takes its input token's whole remainder, so it also removes
     /// that token again.
+    ///
+    /// `validate_native_wrap_gaps` has already rejected the solutions where a needed conversion
+    /// amount is ambiguous, so an unservable gap here simply inserts nothing.
     fn add_native_wrap_swaps(&self, solution: &Solution, chain: &Chain) -> Solution {
         let swaps = solution.swaps();
         let mut new_swaps: Vec<Swap> = Vec::with_capacity(swaps.len());
@@ -154,8 +157,8 @@ impl TychoRouterEncoder {
     ///
     /// The wrap swap takes the counterpart's whole remaining balance unless a later swap still
     /// consumes the counterpart, in which case it takes only the share `wrap_share` derives.
-    /// Without a derivable share the counterpart is left alone, because wrapping all of it would
-    /// starve that later swap.
+    /// Without a derivable share nothing is inserted; `validate_native_wrap_gaps` rejects those
+    /// solutions before they reach here.
     fn missing_wrap_swap(
         &self,
         consumed_token: &Bytes,
@@ -192,6 +195,61 @@ impl TychoRouterEncoder {
         Some(wrap_swap.with_split(share))
     }
 
+    /// Raises an `EncodingError` if a swap consumes a native or wrapped token that no swap
+    /// provides and the amount to convert from its counterpart does not follow from the solution.
+    ///
+    /// The amount is ambiguous when the counterpart's balance is the solution's payout, or when a
+    /// later swap also consumes the counterpart and `wrap_share` cannot derive a share. Either way
+    /// the solver has to emit an explicit `native_wrapper` swap carrying the split it wants.
+    ///
+    /// A token that neither the solution nor its counterpart can supply is left to the strategy
+    /// validators, which report it as an unconnected token.
+    fn validate_native_wrap_gaps(&self, solution: &Solution) -> Result<(), EncodingError> {
+        let swaps = solution.swaps();
+        let native = self.chain.native_token().address;
+        let wrapped = self
+            .chain
+            .wrapped_native_token()
+            .address;
+
+        for (i, swap) in swaps.iter().enumerate() {
+            let consumed_token = &swap.token_in().address;
+            let counterpart = if *consumed_token == native {
+                &wrapped
+            } else if *consumed_token == wrapped {
+                &native
+            } else {
+                continue;
+            };
+            if is_supplied(consumed_token, solution) || !is_supplied(counterpart, solution) {
+                continue;
+            }
+            if *counterpart == *solution.token_out() {
+                return Err(EncodingError::InvalidInput(format!(
+                    "A swap consumes {consumed_token} which no swap provides, and its counterpart \
+                     {counterpart} is the solution's output token. Converting that balance would \
+                     spend the payout. Add an explicit native_wrapper swap with the split to \
+                     convert."
+                )));
+            }
+            let remaining_swaps = &swaps[i..];
+            let counterpart_consumed_later = remaining_swaps
+                .iter()
+                .any(|swap| swap.token_in().address == *counterpart);
+            if counterpart_consumed_later &&
+                wrap_share(consumed_token, counterpart, swaps, remaining_swaps).is_none()
+            {
+                return Err(EncodingError::InvalidInput(format!(
+                    "A swap consumes {consumed_token} which no swap provides, and a later swap \
+                     also consumes its counterpart {counterpart}. The amount to convert does not \
+                     follow from the solution. Add an explicit native_wrapper swap with the split \
+                     to convert, or set estimated_amount_in on the swaps that consume both tokens."
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the swap that wraps or unwraps `token_in` into `token_out`, or `None`
     /// if the two tokens are not the chain's native/wrapped-native pair.
     fn wrap_swap_between(
@@ -215,6 +273,16 @@ impl TychoRouterEncoder {
             None
         }
     }
+}
+
+/// Returns whether `token` holds a balance at some point of the route, either because the
+/// solution starts from it or because a swap produces it.
+fn is_supplied(token: &Bytes, solution: &Solution) -> bool {
+    token == solution.token_in() ||
+        solution
+            .swaps()
+            .iter()
+            .any(|swap| swap.token_out().address == *token)
 }
 
 /// Returns the fraction of `counterpart`'s balance that must be wrapped to supply
@@ -292,7 +360,11 @@ impl TychoEncoder for TychoRouterEncoder {
     ///   `expectedAmountOut`).
     /// * The token cannot appear more than once in the solution unless it is the first and last
     ///   token (i.e. a true cyclical swap).
+    /// * Where a swap consumes a native or wrapped token that no swap provides, the amount to
+    ///   convert from its counterpart follows from the solution. `validate_native_wrap_gaps` lists
+    ///   what makes that amount ambiguous.
     fn validate_solution(&self, solution: &Solution) -> Result<(), EncodingError> {
+        self.validate_native_wrap_gaps(solution)?;
         if solution.swaps().is_empty() {
             return Err(EncodingError::FatalError("No swaps found in solution".to_string()));
         }
@@ -828,6 +900,71 @@ mod tests {
             assert!(encoded_solution
                 .function_signature()
                 .contains("splitSwap"));
+        }
+
+        /// The same shape as `test_add_native_wrap_swaps_partial_share`, but no swap carries an
+        /// estimated amount, so the share to convert does not follow from the solution.
+        #[rstest]
+        #[case::wrapped_branch_first(eth(), weth())]
+        #[case::native_branch_first(weth(), eth())]
+        fn test_validate_fails_undetermined_wrap_share(
+            #[case] input_token: Bytes,
+            #[case] counterpart_token: Bytes,
+        ) {
+            let encoder = get_tycho_router_encoder();
+            let solution = Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                input_token.clone(),
+                usdc(),
+                BigUint::from(1000u64),
+                BigUint::from_str("990_000000").unwrap(),
+                BigUint::from_str("970_000000").unwrap(),
+                vec![
+                    univ2_swap(&counterpart_token, &usdc(), 0.0),
+                    univ2_swap(&input_token, &usdc(), 0.0),
+                ],
+            );
+
+            let result = encoder.validate_solution(&solution);
+
+            let Err(EncodingError::InvalidInput(message)) = result else {
+                panic!("expected an InvalidInput error, got {result:?}");
+            };
+            assert!(message.contains("does not follow from the solution"), "{message}");
+        }
+
+        /// A cyclical solution whose mid-route branch needs the counterpart of the output token.
+        /// That balance is the payout, so converting it would deliver less than quoted.
+        //
+        //        ┌──[50%]── USDC ──┐
+        // WETH ──┤                 ├── WETH
+        //        └── (ETH) ── DAI ─┘
+        #[test]
+        fn test_validate_fails_wrap_would_spend_payout() {
+            let encoder = get_tycho_router_encoder();
+            let solution = Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                weth(),
+                weth(),
+                BigUint::from_str("1000_000000000000000000").unwrap(),
+                BigUint::from_str("1010_000000000000000000").unwrap(),
+                BigUint::from_str("1005_000000000000000000").unwrap(),
+                vec![
+                    univ2_swap(&weth(), &usdc(), 0.5),
+                    univ2_swap(&eth(), &dai(), 0.0),
+                    univ2_swap(&usdc(), &weth(), 0.0),
+                    univ2_swap(&dai(), &weth(), 0.0),
+                ],
+            );
+
+            let result = encoder.validate_solution(&solution);
+
+            let Err(EncodingError::InvalidInput(message)) = result else {
+                panic!("expected an InvalidInput error, got {result:?}");
+            };
+            assert!(message.contains("output token"), "{message}");
         }
 
         /// The solution's input token feeds one branch directly and its counterpart feeds
