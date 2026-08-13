@@ -1,0 +1,102 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "vm:tempest"
+adapter_contract: "TempestAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0x00000003f1ec2379e79F58E12EC6C4F51Ee92149"
+# All pairs draw on one shared vault, so each component reports the full vault balance for its
+# tokens rather than a per-pair share. The balance check assumes disjoint per-component reserves.
+skip_balance_check: true
+
+# Only the registry, which predates the start block. The router and vault proxies are created in
+# the start block itself, so the package witnesses their construction and emits full storage —
+# including the ERC1967 implementation slot. Bootstrapping them here instead creates the account
+# from RPC with code and balance but no storage, and that pre-existing account suppresses the
+# creation storage the package emits in the same block, leaving the proxy with no implementation
+# pointer until its first upgrade happens to write the slot.
+initialized_accounts:
+  - "0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F" # Shared ETH PrioUpdateRegistry.
+
+protocol_type_names:
+  - "tempest_pair"
+
+tests:
+  - name: test_pair_creation
+    start_block: 25637319
+    # The router and vault proxies are deployed at the start block; the three `addPair` calls land
+    # at 25637575 (WETH/USDT), 25637589 (USDC/WETH) and 25637601 (USDC/USDT).
+    stop_block: 25637601
+    expected_components:
+      - id: "0x2b2f5776e38002e0c013d0d89828fdb06fee595ea2d5ed4b194e3883e823e350"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        static_attributes:
+          self_contained_tokens: "0x5b22307863303261616133396232323366653864306130653563346632376561643930383363373536636332222c22307864616331376639353864326565353233613232303632303639393435393763313364383331656337225d" # ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","0xdac17f958d2ee523a2206206994597c13d831ec7"]
+        creation_tx: "0x84ee526d01f198575c653afc6ae14993af4de4dfb72780a21597371805e8c676"
+        # No lane has ever been written for this pair, so `getState` reverts `StaleUpdate`.
+        skip_simulation: true
+        skip_execution: true
+      - id: "0x85053f65cd1ece2bb37b70c13d66eadebf2779df5ddd68cf12f3ccfdc6bfe760"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+        static_attributes:
+          self_contained_tokens: "0x5b22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307863303261616133396232323366653864306130653563346632376561643930383363373536636332225d" # ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
+        creation_tx: "0x5ffcf6add469b9490dceff2e03c3a86827232c2b0f6ed4478e684442068262a9"
+        # Indexing-only here; simulation and execution are covered by test_pair_simulation.
+        skip_simulation: true
+        skip_execution: true
+      - id: "0x4aafb64a36177dc82e7ace74cf60cc655659bc049da9533b5f7a6881bea995c6"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        static_attributes:
+          self_contained_tokens: "0x5b22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307864616331376639353864326565353233613232303632303639393435393763313364383331656337225d" # ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0xdac17f958d2ee523a2206206994597c13d831ec7"]
+        creation_tx: "0xaac181daaf77566de42b6a01a9c4c53eec1a9bd2522f0cd0181c19e31514e573"
+        # No lane has ever been written for this pair, so `getState` reverts `StaleUpdate`.
+        skip_simulation: true
+        skip_execution: true
+
+  - name: test_pair_simulation
+    start_block: 25637319
+    # The router only prices a lane whose committed `updateTimestamp` is inside `laneWindow`
+    # (currently 12s either side of the settling block). The stop block is the first `updateState`
+    # for the USDC/WETH lane, whose `updateTimestamp` equals this block's timestamp exactly — so
+    # the `override_block_timestamp` the package emits lands the simulation dead centre in the
+    # window. Stopping earlier reverts with `StaleUpdate`.
+    stop_block: 25673321
+    expected_components:
+      - id: "0x85053f65cd1ece2bb37b70c13d66eadebf2779df5ddd68cf12f3ccfdc6bfe760"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+        static_attributes:
+          self_contained_tokens: "0x5b22307861306238363939316336323138623336633164313964346132653965623063653336303665623438222c22307863303261616133396232323366653864306130653563346632376561643930383363373536636332225d" # ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
+        creation_tx: "0x5ffcf6add469b9490dceff2e03c3a86827232c2b0f6ed4478e684442068262a9"
+        skip_simulation: false
+        # Execution is skipped, not broken. The harness replays encoded calldata against real
+        # forked state, where TychoRouter is not on the venue's `allowedTaker` list, so every fill
+        # reverts `TakerNotAllowed` (0xf774ea08) — confirmed by running it. That is an on-chain
+        # grant Flowdesk has to make (`addTaker(<tychoRouter>)`), not something this package can
+        # fix. The execution path itself is covered by
+        # `tycho-execution/contracts/test/protocols/Tempest.t.sol::testSingleSwap`, which patches
+        # the allowlist and runs Rust-encoded calldata through TychoRouter into the live venue.
+        # Flip this to false once the router is allowlisted on mainnet.
+        skip_execution: true
+      # USDC/WETH above is the only pair the maker has ever quoted. The other two are registered
+      # and indexed, so they must be listed here to be skipped — `run_simulation` walks every
+      # decoded component, not just the ones under test.
+      - id: "0x2b2f5776e38002e0c013d0d89828fdb06fee595ea2d5ed4b194e3883e823e350"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        creation_tx: "0x84ee526d01f198575c653afc6ae14993af4de4dfb72780a21597371805e8c676"
+        skip_simulation: true
+        skip_execution: true
+      - id: "0x4aafb64a36177dc82e7ace74cf60cc655659bc049da9533b5f7a6881bea995c6"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        creation_tx: "0xaac181daaf77566de42b6a01a9c4c53eec1a9bd2522f0cd0181c19e31514e573"
+        skip_simulation: true
+        skip_execution: true

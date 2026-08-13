@@ -20,6 +20,7 @@ pub const FERMISWAP: &[u8] = include_bytes!("assets/FermiSwapAdapter.evm.runtime
 pub const MAVERICK_V2: &[u8] = include_bytes!("assets/MaverickV2SwapAdapter.evm.runtime");
 pub const LIQUIDITY_PARTY: &[u8] = include_bytes!("assets/LiquidityPartySwapAdapter.evm.runtime");
 pub const BOPAMM: &[u8] = include_bytes!("assets/BopAMMSwapAdapter.evm.runtime");
+pub const TEMPEST: &[u8] = include_bytes!("assets/TempestAdapter.evm.runtime");
 pub fn get_adapter_file(protocol: &str) -> Result<&'static [u8], SimulationError> {
     match protocol {
         "balancer_v2" => Ok(BALANCER_V2),
@@ -29,6 +30,7 @@ pub fn get_adapter_file(protocol: &str) -> Result<&'static [u8], SimulationError
         "maverick_v2" => Ok(MAVERICK_V2),
         "liquidityparty" => Ok(LIQUIDITY_PARTY),
         "bopamm" => Ok(BOPAMM),
+        "tempest" => Ok(TEMPEST),
         _ => Err(SimulationError::FatalError(format!("Adapter for protocol {protocol} not found"))),
     }
 }

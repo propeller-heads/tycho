@@ -9,6 +9,7 @@ import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
+import {TempestExecutor} from "../src/executors/TempestExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
 import {
     LiquidityPartyExecutor
@@ -130,6 +131,7 @@ contract TychoRouterTestSetup is
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
     FermiSwapExecutor public fermiSwapExecutor;
+    TempestExecutor public tempestExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
     RingSwapV2Executor public ringSwapV2Executor;
@@ -259,8 +261,9 @@ contract TychoRouterTestSetup is
             new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
         propAMMExecutor = new PropAMMExecutor();
         propAMMFallbackExecutor = new PropAMMFallbackExecutor();
+        tempestExecutor = new TempestExecutor(TEMPEST_ROUTER);
 
-        address[] memory executors = new address[](27);
+        address[] memory executors = new address[](28);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -288,6 +291,7 @@ contract TychoRouterTestSetup is
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
         executors[26] = address(propAMMFallbackExecutor);
+        executors[27] = address(tempestExecutor);
         return executors;
     }
 

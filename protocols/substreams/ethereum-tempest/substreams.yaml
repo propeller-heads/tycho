@@ -1,0 +1,131 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_tempest"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+  excludePaths:
+    - sf/substreams
+    - google
+    - tycho
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_tempest.wasm
+
+network: mainnet
+
+params:
+  map_protocol_components: &tempest_params "router_address=00000003f1ec2379e79f58e12ec6c4f51ee92149&vault_address=c9d748e601d9984a43da0b80e5b91dc28d31d9fb&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"
+  store_pair_registered: *tempest_params
+  store_implementations: *tempest_params
+  map_vault_balance_deltas: *tempest_params
+  map_protocol_changes: *tempest_params
+
+modules:
+  - name: store_pair_registered
+    kind: store
+    updatePolicy: set
+    valueType: string
+    # Router and vault proxies are both created in the same tx at this block.
+    initialBlock: &initial_block 25637319
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  # The proxies' construction storage does not reach the indexer, so the implementation address is
+  # taken from `Upgraded` and re-asserted onto the ERC1967 slot in `map_protocol_changes`.
+  - name: store_implementations
+    kind: store
+    updatePolicy: set
+    valueType: string
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_components
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pair_registered
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_component_index
+    kind: store
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_vault_balance_deltas
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_component_index
+        mode: deltas
+      - store: store_component_index
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_vault_token_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_vault_balance_deltas
+
+  - name: map_balance_deltas
+    kind: map
+    inputs:
+      - map: map_protocol_components
+      - map: map_vault_balance_deltas
+      - store: store_vault_token_balances
+        mode: get
+      - store: store_component_index
+        mode: get
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_deltas
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_pair_registered
+        mode: get
+      - store: store_pair_registered
+        mode: deltas
+      - store: store_component_index
+        mode: get
+      - store: store_implementations
+        mode: get
+      - map: map_balance_deltas
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

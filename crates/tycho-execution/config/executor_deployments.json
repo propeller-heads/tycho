@@ -77,6 +77,10 @@
     },
     "pricelevelstream": { "contract": "PropAMMExecutor", "args": [] },
     "propammfallback": { "contract": "PropAMMFallbackExecutor", "args": [] },
+    "vm:tempest": {
+      "contract": "TempestExecutor",
+      "args": ["0x00000003f1ec2379e79F58E12EC6C4F51Ee92149"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]

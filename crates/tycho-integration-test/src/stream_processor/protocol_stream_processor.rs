@@ -205,6 +205,7 @@ impl ProtocolStreamProcessor {
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
                 "vm:bopamm".to_string(),
+                "vm:tempest".to_string(),
                 "ring_swap_v2".to_string(),
                 "vm:balancer_v3".to_string(),
             ],
@@ -385,6 +386,13 @@ impl ProtocolStreamProcessor {
             "vm:bopamm" => {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
                     "vm:bopamm",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "vm:tempest" => {
+                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:tempest",
                     tvl_filter.clone(),
                     None,
                 );

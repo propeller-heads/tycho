@@ -20,6 +20,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>vm:maverick_v2</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>vm:bopamm</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>vm:fermiswap</code></td><td>VM (<code>EVMPoolState</code>)</td><td>4 ms</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>vm:tempest</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td>Flowdesk's propAMM. Quotes are only valid inside the router's lane-freshness window, so execution requires landing in the same block as the maker's quote commit — via a builder bundle. TychoRouter must also be on the venue's taker allowlist.</td></tr>
 <tr><td><code>aerodrome_v1</code></td><td>Native (<code>AerodromeV1State</code>)</td><td>3 μs (0.003 ms)</td><td>Base</td><td></td></tr>
 <tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td></td></tr>
 <tr><td><code>lunarbase</code></td><td>Native (<code>LunarBaseState</code>)</td><td>7 μs (0.007 ms)</td><td>Base</td><td></td></tr>
@@ -65,6 +66,7 @@ fn register_exchanges(
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:bopamm", tvl_filter.clone(), None)
                 .exchange::<EVMPoolState<PreCachedDB>>("vm:fermiswap", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:tempest", tvl_filter.clone(), None)
         }
         Chain::Base => {
             builder = builder
