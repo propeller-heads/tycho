@@ -180,19 +180,18 @@ fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
 
 /// Filters out ERC4626 vaults that cannot be quoted correctly.
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
-    const UNSUPPORTED_POOLS: [&str; 4] = [
-        // Spark Vault V2 (spUSDC, spUSDT, spETH). Their rate is `nowChi()`, which reads `vsr`
-        // (slot 4) only on the `block.timestamp > rho` branch. Any deposit/withdraw leaves
+    const UNSUPPORTED_POOLS: [&str; 3] = [
+        // Spark Vault V2 (spUSDC, spUSDT). Their rate is `nowChi()`, which reads `vsr` (slot 4)
+        // only on the `block.timestamp > rho` branch. Any deposit/withdraw leaves
         // `rho == block.timestamp`, and entrypoints are traced once, at the component's first
         // one — so the trace takes the `chi` branch and never touches `vsr`. The vault is one
         // of the component's tokens, so DCI indexes only the slots the trace saw: `vsr` reads
         // back as 0, `_rpow(0, dt)` collapses `nowChi()` to 0, and `convertToShares` reverts
-        // on the division, so the component fails to decode. Confirmed against production for
-        // spUSDC and spUSDT. spETH currently has the slot, from a source we could not find
-        // recorded in any tracing result, so it stays excluded.
+        // on the division, so the component fails to decode. Confirmed against production.
+        // spETH is not affected: a Curve pool holding it traces `convertToAssets` off a
+        // non-drip block, so `vsr` is captured and stays indexed.
         "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
-        "0xfe6eb3b609a7c8352a241f7f3a21cea4e9209b8f",
         "0x83f20f44975d03b1b09e64809b757c47f942beea",
     ];
     if UNSUPPORTED_POOLS.contains(
