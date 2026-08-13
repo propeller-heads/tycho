@@ -394,7 +394,26 @@ contract TokenProxy {
 
     function allowance(address owner, address spender) public returns (uint256) {
         if (_hasCustomApproval(owner)) {
-            return _customApprovalStorage()[owner][spender];
+            uint256 approved = _customApprovalStorage()[owner][spender];
+
+            // Caveat this trades off: with the approval system disabled, simulation now *assumes*
+            // spendability rather than checking it. A protocol that gates quoting on its own
+            // standing approval will be quoted even if that approval has been revoked on chain.
+            // That matches how `transferFrom` already behaves here, and the alternative -- report
+            // zero and refuse to quote anything -- is strictly worse, but it means an allowance
+            // read is not a safety check under simulation.
+            //
+            // An explicit in-simulation `approve` wins. Otherwise mirror `transferFrom`: with the
+            // approval system globally disabled, a holder flagged for custom approval can be spent
+            // from without any allowance at all, so returning the unpopulated mapping's zero
+            // contradicts what a transfer would actually do. Report the unlimited allowance
+            // `transferFrom` would honour instead — protocols that gate quoting on an `allowance`
+            // read (e.g. a pAMM checking its own vault's standing approval before pricing) would
+            // otherwise refuse to quote against state that can in fact be spent.
+            if (approved == 0 && !_useApprovalSystem()) {
+                return type(uint256).max;
+            }
+            return approved;
         }
 
         (bool success, bytes memory data) =
