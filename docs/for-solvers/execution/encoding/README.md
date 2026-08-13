@@ -298,6 +298,8 @@ that surplus beyond your quote reaches the receiver. Amounts between `minAmountO
 
 The encoder automatically bridges ETH↔WETH gaps anywhere in the swap path — at the start, end, or between swaps — using a dedicated WETH executor. Set `token_in` and `token_out` to the tokens the user actually holds and expects to receive, and the encoder inserts wrap/unwrap steps as needed. This works with protocols like Uniswap V4 that accept native ETH directly, with no extra configuration required.
 
+A split that sends part of the route through native ETH and part through WETH also works: the encoder reads the `estimated_amount_in` of each branch to decide how much to convert, and gives the inserted wrap swap the matching split. It only does this where the amount follows from the solution. If several swaps each take a percentage of the same balance, adding a wrap in front of them changes what those percentages are measured against, and the solution does not say whether you already allowed for that — the encoder rejects it rather than guess. The same applies when the balance to convert is the solution's output token, since converting it would spend the user's payout. In both cases, add an explicit swap on the `native_wrapper` protocol carrying the split you want.
+
 #### Client Fee Signature <a href="#client-fee-signature" id="client-fee-signature"></a>
 
 Only required when charging a fee or allowing a client contribution. The `clientFeeReceiver` must sign
