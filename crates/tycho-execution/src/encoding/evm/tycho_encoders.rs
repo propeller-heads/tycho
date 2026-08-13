@@ -632,11 +632,7 @@ mod tests {
                 default_token(token_out.clone()),
                 BigUint::ZERO,
             );
-            if split > 0.0 {
-                swap.with_split(split)
-            } else {
-                swap
-            }
+            swap.with_split(split)
         }
 
         /// A split solution with parallel ETH and WETH branches and no dangling balance:
