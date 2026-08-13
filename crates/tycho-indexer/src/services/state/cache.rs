@@ -2,11 +2,15 @@
 //!
 //! Two entity families are cached:
 //!
-//! - **Accounts** (contract state), keyed by address. Several extractors can write the same account
-//!   at different block heights, so every cached value carries the block that last wrote it: a
-//!   newer block always wins, the same block twice is a no-op.
+//! - **Accounts** (contract state), keyed by address. Several extractors can write the same
+//!   account, so every cached value carries the time it was last written — the writing block's
+//!   timestamp, the same unit the database's `valid_from` versioning uses. A newer write always
+//!   wins; re-applying an equal-time change is a no-op because delta values are absolute.
 //! - **Component states** (protocol state), keyed by `(protocol system, component id)`. Exactly one
-//!   extractor writes each protocol system, in block order, so one height per entry is enough.
+//!   extractor writes each protocol system, in order, so one write time per entry is enough.
+//!
+//! Tags compare with "not older" (>=), never "strictly newer": consecutive blocks can share a
+//! timestamp on fast chains, and a strict comparison would silently drop the second block.
 //!
 //! The cache is written from exactly two places: the startup load, which runs before the
 //! extractors start, and the folds coming out of the block windows. It never reads the database,
@@ -24,6 +28,7 @@ use std::{
     sync::{RwLock, RwLockReadGuard},
 };
 
+use chrono::NaiveDateTime;
 use tycho_common::{
     models::{
         blockchain::BlockAggregatedChanges,
@@ -37,14 +42,14 @@ use tycho_common::{
 
 use super::window::FoldSink;
 
-/// A cached value together with the block number that last wrote it.
-type Tagged<T> = (T, u64);
+/// A cached value together with the time it was last written (the writing block's timestamp).
+type Tagged<T> = (T, NaiveDateTime);
 
 /// Cached state of one contract account.
 ///
-/// Every value carries the block that last wrote it, so writes from different extractors (which
-/// run at different block heights) can never regress a value: newer block wins, same block is a
-/// no-op.
+/// Every value carries the time it was last written, so writes from different extractors (which
+/// run at different points of the chain) can never regress a value: newer wins, equal-time
+/// re-application is a no-op.
 pub(crate) struct CachedAccount {
     chain: Chain,
     title: String,
@@ -61,24 +66,23 @@ pub(crate) struct CachedAccount {
 }
 
 impl CachedAccount {
-    /// Builds an entry from the startup snapshot. Every value arrives with the block **number**
-    /// that wrote it, which becomes its tag. (The rows version by timestamp, so the loader
-    /// recovers the block through each row's `modify_tx` — see the plan's snapshot-read task.)
+    /// Builds an entry from the startup snapshot. Each value's tag is its row's `valid_from`
+    /// timestamp, taken as-is — the cache versions by time exactly like the database does.
     #[allow(unused_variables)]
-    fn from_snapshot(filled: &Account, value_blocks: &HashMap<StoreKey, u64>) -> Self {
+    fn from_snapshot(filled: &Account, value_times: &HashMap<StoreKey, NaiveDateTime>) -> Self {
         todo!("build entry from snapshot")
     }
 
-    /// Builds an entry from a `Creation` delta folded at `block` — after startup, the only way a
-    /// new contract enters the cache. Creation deltas carry the whole initial tracked state.
+    /// Builds an entry from a `Creation` delta folded at time `at` — after startup, the only way
+    /// a new contract enters the cache. Creation deltas carry the whole initial tracked state.
     #[allow(unused_variables)]
-    fn from_creation(delta: &AccountDelta, block: u64) -> Self {
+    fn from_creation(delta: &AccountDelta, at: NaiveDateTime) -> Self {
         todo!("build entry from creation delta")
     }
 
-    /// Applies one folded delta; every changed value gets `block` as its tag.
+    /// Applies one folded delta; every changed value gets the block's timestamp as its tag.
     #[allow(unused_variables)]
-    fn fold(&mut self, delta: &AccountDelta, block: u64) {
+    fn fold(&mut self, delta: &AccountDelta, at: NaiveDateTime) {
         // Deleted slots become the zero value (as in `Account::apply_delta`). A delta that
         // carries code also refreshes `code_hash` — `Account::apply_delta` does not maintain
         // that field, so don't reuse it blindly.
@@ -96,29 +100,29 @@ impl CachedAccount {
 pub(crate) struct CachedComponentState {
     attributes: HashMap<AttrStoreKey, StoreVal>,
     balances: HashMap<Address, Balance>,
-    /// One height covers the whole entry: a single extractor writes each protocol system, in
-    /// block order.
-    height: u64,
+    /// One write time covers the whole entry: a single extractor writes each protocol system,
+    /// in order.
+    updated_at: NaiveDateTime,
 }
 
 impl CachedComponentState {
-    /// Builds an entry from the startup snapshot at the given height.
+    /// Builds an entry from the startup snapshot, tagged with its newest `valid_from`.
     #[allow(unused_variables)]
-    fn from_snapshot(state: &ProtocolComponentState, height: u64) -> Self {
+    fn from_snapshot(state: &ProtocolComponentState, at: NaiveDateTime) -> Self {
         todo!("build entry from snapshot")
     }
 
-    /// Applies one folded state delta for `block` when it is newer than the entry.
+    /// Applies one folded state delta when it is not older than the entry.
     #[allow(unused_variables)]
-    fn fold(&mut self, delta: &ProtocolComponentStateDelta, block: u64) {
-        // Skip when `block <= self.height` (replayed block). Deleted attributes are plain key
+    fn fold(&mut self, delta: &ProtocolComponentStateDelta, at: NaiveDateTime) {
+        // Skip when `at < self.updated_at` (replayed block). Deleted attributes are plain key
         // removals. Out-of-order folds from the single writer are a bug — debug-assert.
         todo!("apply folded state delta")
     }
 
-    /// Applies folded balance changes for `block`.
+    /// Applies folded balance changes.
     #[allow(unused_variables)]
-    fn fold_balances(&mut self, balances: &HashMap<Address, Balance>, block: u64) {
+    fn fold_balances(&mut self, balances: &HashMap<Address, Balance>, at: NaiveDateTime) {
         todo!("apply folded balances")
     }
 
@@ -187,12 +191,12 @@ impl FoldSink for EntityCache {
         // before their first attributes arrive:
         //
         // 1. `new_protocol_components` — create entries.
-        // 2. `state_deltas` — apply where newer than the entry height.
+        // 2. `state_deltas` — apply where not older than the entry.
         // 3. `component_balances` — apply.
         // 4. `deleted_protocol_components` — remove entries.
-        // 5. `account_deltas` — apply per value, tagged with this block; a `Creation` delta for an
-        //    unknown address creates the entry, any other change for an unknown address is skipped
-        //    (partial data must never create an entry).
+        // 5. `account_deltas` — apply per value, tagged with this block's timestamp; a `Creation`
+        //    delta for an unknown address creates the entry, any other change for an unknown
+        //    address is skipped (partial data must never create an entry).
         // 6. `account_balances` — apply.
         //
         // Not folded in phase 1: `new_tokens`, `component_tvl`, `dci_update` — DB-served.
