@@ -1966,6 +1966,7 @@ fn test_single_encoding_strategy_baseline_buy() {
         token_out,
         BigUint::from_str("1000000000000000").unwrap(),
         BigUint::from_str("675625833670487764").unwrap(),
+        BigUint::from_str("662113316997078008").unwrap(),
         vec![swap],
     );
 
@@ -2018,6 +2019,7 @@ fn test_single_encoding_strategy_baseline_sell() {
         token_out,
         BigUint::from_str("1000000000000000000").unwrap(),
         BigUint::from_str("1450991853685636").unwrap(),
+        BigUint::from_str("1421972016611923").unwrap(),
         vec![swap],
     );
 
@@ -2076,6 +2078,7 @@ fn test_split_encoding_strategy_baseline_gas() {
         token_out,
         BigUint::from_str("1000000000000000").unwrap(),
         BigUint::from_str("675625833670487764").unwrap(),
+        BigUint::from_str("662113316997078008").unwrap(),
         vec![split_swap, remainder_swap],
     );
 

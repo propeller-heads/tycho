@@ -23,7 +23,7 @@
     "rfq:liquorice": "0x3381cD18e2Fb4dB236BF0525938AB6E43Db0440f",
     "vm:fermiswap": "0xe8dc788818033232EF9772CB2e6622F1Ec8bc840",
     "vm:bopamm": "0x27cc01A4676C73fe8b6d0933Ac991BfF1D77C4da",
-    "baseline": "0x796f2974e3C1af763252512dd6d521E9E984726C"
+    "baseline": "0x92a6649Fdcc044DA968d94202465578a9371C7b1"
   },
   "base": {
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",

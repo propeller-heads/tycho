@@ -946,7 +946,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "tiny-keccak",
- "tycho-substreams 0.8.0",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
