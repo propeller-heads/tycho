@@ -61,8 +61,9 @@ pub(crate) struct CachedAccount {
 }
 
 impl CachedAccount {
-    /// Builds an entry from the startup snapshot. Every value arrives with the block that wrote
-    /// it (the row's `valid_from`), which becomes its tag.
+    /// Builds an entry from the startup snapshot. Every value arrives with the block **number**
+    /// that wrote it, which becomes its tag. (The rows version by timestamp, so the loader
+    /// recovers the block through each row's `modify_tx` — see the plan's snapshot-read task.)
     #[allow(unused_variables)]
     fn from_snapshot(filled: &Account, value_blocks: &HashMap<StoreKey, u64>) -> Self {
         todo!("build entry from snapshot")
