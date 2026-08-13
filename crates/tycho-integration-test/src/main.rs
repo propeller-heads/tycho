@@ -29,7 +29,10 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
 use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
-use tycho_execution::encoding::evm::get_router_address;
+use tycho_execution::encoding::evm::{
+    get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+    utils::bytes_to_address,
+};
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
@@ -43,7 +46,7 @@ use tycho_simulation::{
 use tycho_test::{
     execution::{
         encoding::encode_swap,
-        models::{TychoExecutionInput, TychoExecutionResult},
+        models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction, tenderly,
     },
     is_block_not_found,
@@ -181,6 +184,13 @@ struct Cli {
     /// execution). Useful for diagnosing stream latency without execution overhead.
     #[arg(long, default_value_t = false)]
     disable_execution: bool,
+
+    /// Mark all known executors as activated on the router in the execution simulation's state
+    /// overrides, so executors that are unapproved or still inside their 3-day activation timelock
+    /// can be validated. Read-only: this affects the simulation call only, never a real
+    /// transaction. Leave off to keep the test failing when an executor was never activated.
+    #[arg(long, default_value_t = false)]
+    bypass_executor_timelock: bool,
 }
 
 impl Debug for Cli {
@@ -192,6 +202,7 @@ impl Debug for Cli {
             .field("tycho_url", &self.tycho_url)
             .field("rpc_url", &self.rpc_url)
             .field("metrics_port", &self.metrics_port)
+            .field("bypass_executor_timelock", &self.bypass_executor_timelock)
             .finish()
     }
 }
@@ -287,6 +298,13 @@ async fn main() -> miette::Result<()> {
 
 async fn run(cli: Cli) -> miette::Result<()> {
     info!("Starting integration test");
+
+    if cli.bypass_executor_timelock {
+        warn!(
+            "Executor activation timelock is bypassed in execution simulations - a passing run does \
+             not prove that the executors are activated on the router"
+        );
+    }
 
     let chain = cli.chain;
     let tvl_threshold = cli
@@ -701,6 +719,39 @@ async fn poll_rpc_for_block(
     Ok(BlockPollResult::Timeout)
 }
 
+/// Creates the router overwrites for the execution simulation: no bytecode is replaced, since the
+/// deployed contracts are what this test validates, but every executor known for `chain` is marked
+/// as activated on the router. That lets an executor be validated while it is unapproved or still
+/// inside its 3-day activation timelock, which `Dispatcher._validateExecutor` would otherwise
+/// reject.
+///
+/// This cannot help an executor that has no bytecode deployed at its address.
+///
+/// # Errors
+/// Returns an error if the default swap encoders cannot be built for `chain`, or if the chain has
+/// no executors configured.
+fn create_router_overwrites_data(chain: Chain) -> miette::Result<RouterOverwritesData> {
+    let registry = SwapEncoderRegistry::new(chain)
+        .add_default_encoders(None)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("Failed to build the default swap encoders for {chain}"))?;
+
+    let mut executors = HashMap::new();
+    for (protocol, executor_address) in registry.executor_addresses() {
+        let executor = bytes_to_address(&executor_address)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Invalid executor address for protocol {protocol}"))?;
+        // Protocol systems share executors, so this deduplicates by address.
+        executors.insert(executor, None);
+    }
+    if executors.is_empty() {
+        return Err(miette!("No executors configured for {chain}"));
+    }
+    debug!("Activating {} executors for the execution simulations", executors.len());
+
+    Ok(RouterOverwritesData { executors, ..Default::default() })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_update(
     cli: Arc<Cli>,
@@ -991,13 +1042,25 @@ async fn process_update(
         return Ok(());
     }
 
-    let results =
-        match simulate_swap_transaction(&rpc_tools, block_execution_info.clone(), &block, None)
-            .await
-        {
-            Ok(results) => results,
-            Err((e, _, _)) => return Err(e),
-        };
+    // Everything is simulated against the deployed contracts; the executors are only activated
+    // when asked for, so that a missing activation still surfaces as a revert.
+    let router_overwrites_data = if cli.bypass_executor_timelock {
+        create_router_overwrites_data(chain)?
+    } else {
+        RouterOverwritesData::default()
+    };
+
+    let results = match simulate_swap_transaction(
+        &rpc_tools,
+        block_execution_info.clone(),
+        &block,
+        router_overwrites_data,
+    )
+    .await
+    {
+        Ok(results) => results,
+        Err((e, _, _)) => return Err(e),
+    };
 
     let mut n_reverts = 0;
     let mut n_failures = 0;

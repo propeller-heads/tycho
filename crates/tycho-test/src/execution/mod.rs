@@ -35,11 +35,21 @@ pub mod models;
 pub mod tenderly;
 mod traces;
 
+/// Simulates every encoded swap in `execution_info` against `block` and returns one result per
+/// simulation id.
+///
+/// `router_overwrites_data` decides which contracts are simulated as deployed and which are
+/// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
+///
+/// # Errors
+/// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`. An `Err`
+/// signals that the whole batch could not be simulated, and carries the state overwrites and
+/// metadata of the batch when they were already built, for Tenderly link generation.
 pub async fn simulate_swap_transaction(
     rpc_tools: &RPCTools,
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
-    router_overwrites_data: Option<RouterOverwritesData>,
+    router_overwrites_data: RouterOverwritesData,
 ) -> Result<
     HashMap<String, TychoExecutionResult>,
     (miette::Error, Option<AddressHashMap<AccountOverride>>, Option<tenderly::OverwriteMetadata>),
@@ -64,21 +74,11 @@ pub async fn simulate_swap_transaction(
 
     let token_slots = detect_token_slots(rpc_tools, &token_addresses, &to_address).await;
 
-    let router_overwrites: Option<AddressHashMap<AccountOverride>> =
-        if let Some(router_overwrites_data) = router_overwrites_data {
-            Some(
-                setup_router_overwrites(
-                    bytes_to_address(&to_address).map_err(|e| (miette!("{e}"), None, None))?,
-                    router_overwrites_data.router_bytecode,
-                    router_overwrites_data.executor_bytecode,
-                    router_overwrites_data.fee_calculator_bytecode,
-                )
-                .await
-                .map_err(|e| (e, None, None))?,
-            )
-        } else {
-            None
-        };
+    let router_overwrites = setup_router_overwrites(
+        bytes_to_address(&to_address).map_err(|e| (miette!("{e}"), None, None))?,
+        router_overwrites_data,
+    )
+    .map_err(|e| (e, None, None))?;
 
     let fermiswap_pairs = collect_fermiswap_pairs(&execution_info).map_err(|e| (e, None, None))?;
     let fermiswap_overwrites = if fermiswap_pairs.is_empty() {
@@ -137,9 +137,7 @@ pub async fn simulate_swap_transaction(
                 continue;
             }
         };
-        if let Some(ref router_overwrites) = router_overwrites {
-            state_overwrites.extend(router_overwrites.clone());
-        }
+        state_overwrites.extend(router_overwrites.clone());
         if let Some(ref fermiswap_overwrites) = fermiswap_overwrites {
             state_overwrites.extend(fermiswap_overwrites.clone());
         }

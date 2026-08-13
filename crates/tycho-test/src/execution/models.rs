@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use alloy::{
-    primitives::map::AddressHashMap,
+    primitives::{map::AddressHashMap, Address},
     rpc::types::{state::AccountOverride, TransactionRequest},
 };
 use num_bigint::BigUint;
@@ -64,20 +66,24 @@ pub(super) enum SimulationResult {
     Revert { reason: String },
 }
 
-/// Contains the bytecode required to set up router and executor overwrites for swap simulation.
+/// What to overwrite on the Tycho router and its executors for a swap simulation.
 ///
-/// This struct packages the bytecode for both the Tycho router contract and the protocol-specific
-/// executor contract that will be used during execution simulation. The bytecode is loaded from
-/// embedded JSON files and used to override contract code at specific addresses during simulation.
+/// Every field is optional: `Default::default()` simulates the deployed contracts as they are. A
+/// bytecode field set to `Some` replaces that contract's code with a locally compiled build, which
+/// is how a not-yet-deployed router, executor or fee calculator gets tested.
 ///
 /// # Fields
-/// * `router_bytecode` - The runtime bytecode for the Tycho router contract
-/// * `executor_bytecode` - The runtime bytecode for the protocol-specific executor contract
-#[derive(Clone)]
+/// * `router_bytecode` - Runtime bytecode to plant at the router address.
+/// * `executors` - Executors to mark as activated on the router (bypassing the activation
+///   timelock), each with optional runtime bytecode to plant at its address. Executors without
+///   bytecode keep their deployed code, so they must already be deployed.
+/// * `fee_calculator_bytecode` - Runtime bytecode to plant at the fee calculator address. Also
+///   points the router's `_feeCalculator` slot at that address.
+#[derive(Clone, Default)]
 pub struct RouterOverwritesData {
-    pub router_bytecode: Vec<u8>,
-    pub executor_bytecode: Vec<u8>,
-    pub fee_calculator_bytecode: Vec<u8>,
+    pub router_bytecode: Option<Vec<u8>>,
+    pub executors: HashMap<Address, Option<Vec<u8>>>,
+    pub fee_calculator_bytecode: Option<Vec<u8>>,
 }
 
 /// An encoded EVM transaction ready to be submitted on-chain.
