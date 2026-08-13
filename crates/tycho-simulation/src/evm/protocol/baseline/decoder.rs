@@ -35,6 +35,7 @@ const PENDING_SURPLUS: &str = "pending_surplus";
 const SHOULD_SETTLE_PENDING_SURPLUS: &str = "should_settle_pending_surplus";
 const MAX_SELL_DELTA: &str = "max_sell_delta";
 const SNAPSHOT_ACTIVE_PRICE: &str = "snapshot_active_price";
+const PAUSED: &str = "paused";
 
 #[cfg(test)]
 const REQUIRED_QUOTE_STATE_ATTRIBUTES: &[&str] = &[
@@ -57,6 +58,7 @@ const REQUIRED_QUOTE_STATE_ATTRIBUTES: &[&str] = &[
     SHOULD_SETTLE_PENDING_SURPLUS,
     MAX_SELL_DELTA,
     SNAPSHOT_ACTIVE_PRICE,
+    PAUSED,
 ];
 
 impl TryFromWithBlock<ComponentWithState, BlockHeader> for BaselineState {
@@ -144,6 +146,7 @@ pub(super) fn decode_quote_state(
         should_settle_pending_surplus: get_bool(attributes, SHOULD_SETTLE_PENDING_SURPLUS)?,
         max_sell_delta: get_u256(attributes, MAX_SELL_DELTA)?,
         snapshot_active_price: get_u256(attributes, SNAPSHOT_ACTIVE_PRICE)?,
+        paused: get_bool(attributes, PAUSED)?,
     })
 }
 
@@ -218,7 +221,7 @@ mod tests {
     };
 
     use super::{
-        BaselineState, InvalidSnapshotError, LIQUIDITY_FEE_PCT, RELAY_ATTRIBUTE,
+        BaselineState, InvalidSnapshotError, LIQUIDITY_FEE_PCT, PAUSED, RELAY_ATTRIBUTE,
         REQUIRED_QUOTE_STATE_ATTRIBUTES, RESERVE_ATTRIBUTE, SHOULD_SETTLE_PENDING_SURPLUS,
         SNAPSHOT_CURVE_BLV,
     };
@@ -276,6 +279,7 @@ mod tests {
             (SHOULD_SETTLE_PENDING_SURPLUS.to_owned(), Bytes::from(vec![1])),
             ("max_sell_delta".to_owned(), u256_attr(17)),
             ("snapshot_active_price".to_owned(), u256_attr(18)),
+            (PAUSED.to_owned(), Bytes::from(vec![0])),
         ])
     }
 
@@ -495,6 +499,7 @@ mod tests {
     #[case::should_settle_pending_surplus(REQUIRED_QUOTE_STATE_ATTRIBUTES[16])]
     #[case::max_sell_delta(REQUIRED_QUOTE_STATE_ATTRIBUTES[17])]
     #[case::snapshot_active_price(REQUIRED_QUOTE_STATE_ATTRIBUTES[18])]
+    #[case::paused(REQUIRED_QUOTE_STATE_ATTRIBUTES[19])]
     async fn rejects_missing_quote_state_attribute(#[case] missing_attribute: &str) {
         let mut snapshot = create_test_snapshot();
         snapshot

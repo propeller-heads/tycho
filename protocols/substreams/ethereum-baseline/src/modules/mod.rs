@@ -15,10 +15,15 @@ use itertools::Itertools;
 use std::collections::HashMap;
 use substreams::{
     pb::substreams::StoreDeltas,
-    store::{StoreGet, StoreGetString, StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsString},
+    store::{
+        Appender, StoreAppend, StoreGet, StoreGetString, StoreNew, StoreSetIfNotExists,
+        StoreSetIfNotExistsString,
+    },
 };
 use substreams_ethereum::{pb::eth, Event};
 use tycho_substreams::prelude::*;
+
+const COMPONENT_IDS_KEY: &str = "all";
 
 /// The last transaction that touched a component's quote state in a block, and the highest
 /// storage-delta ordinal to read the state stores at (`None` means end of block).
@@ -96,6 +101,15 @@ fn store_components(
         });
 }
 
+#[substreams::handlers::store]
+fn store_component_ids(components: BlockTransactionProtocolComponents, store: StoreAppend<String>) {
+    components
+        .tx_components
+        .into_iter()
+        .flat_map(|tx_components| tx_components.components)
+        .for_each(|component| store.append(0, COMPONENT_IDS_KEY, component.id));
+}
+
 fn component_key(component_id: &str) -> String {
     format!("pool:{component_id}")
 }
@@ -106,6 +120,7 @@ fn map_protocol_changes(
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
     components_store: StoreGetString,
+    component_ids_store: StoreGetString,
     state_deltas: StoreDeltas,
     state: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
@@ -204,6 +219,47 @@ fn map_protocol_changes(
             );
         });
 
+    state_deltas
+        .deltas
+        .iter()
+        .filter(|delta| delta.key == slot_stores::protocol_paused_state_key())
+        .for_each(|delta| {
+            let Some(tx) = transaction_for_ordinal(&block, delta.ordinal) else {
+                return;
+            };
+            let tx: Transaction = (&tx).into();
+            let builder = transaction_changes
+                .entry(tx.index)
+                .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+            component_ids_store
+                .get_last(COMPONENT_IDS_KEY)
+                .unwrap_or_default()
+                .split(';')
+                .filter(|id| !id.is_empty())
+                .chain(
+                    new_components
+                        .tx_components
+                        .iter()
+                        .flat_map(|tx_components| tx_components.components.iter())
+                        .map(|component| component.id.as_str()),
+                )
+                .unique()
+                .filter(|component_id| {
+                    created_at_tx
+                        .get(*component_id)
+                        .is_none_or(|creation_tx| *creation_tx <= tx.index)
+                })
+                .for_each(|component_id| {
+                    builder.mark_component_as_updated(component_id);
+                    record_quote_state_update(
+                        &mut quote_state_updates,
+                        component_id.to_string(),
+                        tx.index,
+                        Some(delta.ordinal),
+                    );
+                });
+        });
+
     // Emit the computed quote state once per touched component, attached to the last
     // transaction that changed it.
     quote_state_updates
@@ -216,7 +272,8 @@ fn map_protocol_changes(
                 &state,
                 &component_id,
                 update.read_ordinal,
-                block.number,
+                // Quotes are for next block, so +1 here
+                block.number.saturating_add(1),
             )
             .unwrap_or_default();
             if !quote_state_attributes.is_empty() {

@@ -41,6 +41,7 @@ pub struct BaselineQuoteState {
     pub should_settle_pending_surplus: bool,
     pub max_sell_delta: U256,
     pub snapshot_active_price: U256,
+    pub paused: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +225,7 @@ mod tests {
             should_settle_pending_surplus: false,
             max_sell_delta: u("100000000000000000000000"),
             snapshot_active_price: U256::ZERO,
+            paused: false,
         }
     }
 

@@ -22,6 +22,7 @@ pub fn quote_buy_exact_in(
     state: &BaselineQuoteState,
     reserves_in: &BigUint,
 ) -> Result<BaselineQuoteResult, SimulationError> {
+    ensure_unpaused(state)?;
     if reserves_in.is_zero() {
         return Err(invalid_input("invalid amount in"));
     }
@@ -45,6 +46,7 @@ pub fn quote_sell_exact_in(
     state: &BaselineQuoteState,
     tokens_in: &BigUint,
 ) -> Result<BaselineQuoteResult, SimulationError> {
+    ensure_unpaused(state)?;
     if tokens_in.is_zero() {
         return Err(invalid_input("invalid amount in"));
     }
@@ -72,6 +74,7 @@ pub fn quote_sell_exact_in(
 /// inversion of the discounted price. Baseline applies twice the stored `swapFee` per swap
 /// (see the `wad + 2 * swap_fee` payment term in `compute_zero_circ_swap`).
 pub(super) fn spot_price(state: &BaselineQuoteState, is_buy: bool) -> Result<f64, SimulationError> {
+    ensure_unpaused(state)?;
     let price = compute_active_price(&state.snapshot_curve)?;
     let fee_adjustment = u_to_bi(state.snapshot_curve.swap_fee) * 2u8;
     let price = if is_buy {
@@ -98,11 +101,18 @@ pub(super) fn get_limits(
     state: &BaselineQuoteState,
     is_buy: bool,
 ) -> Result<(BigUint, BigUint), SimulationError> {
+    ensure_unpaused(state)?;
     if is_buy {
-        let max_input = positive_bigint_to_biguint(&(u_to_bi(state.total_reserves) / 100u8))?;
-        if max_input.is_zero() {
+        let inventory_limit = (u_to_bi(state.total_b_tokens) * 99u8) / 100u8;
+        let max_output = match convexity_safe_max_buy(&state.snapshot_curve)? {
+            Some(convexity_limit) => inventory_limit.min(convexity_limit),
+            None => inventory_limit,
+        };
+        if max_output <= BigInt::zero() {
             return Err(no_rate());
         }
+        let (max_input, _) = quote_buy_exact_out_cost(state, &max_output)?;
+        let max_input = positive_bigint_to_biguint(&max_input)?;
         let quote = quote_buy_exact_in(state, &max_input)?;
         return Ok((max_input, quote.amount_out));
     }
@@ -113,6 +123,13 @@ pub(super) fn get_limits(
     }
     let quote = quote_sell_exact_in(state, &max_input)?;
     Ok((max_input, quote.amount_out))
+}
+
+fn ensure_unpaused(state: &BaselineQuoteState) -> Result<(), SimulationError> {
+    if state.paused {
+        return Err(SimulationError::RecoverableError("Baseline pool is paused".into()));
+    }
+    Ok(())
 }
 
 fn solve_buy(
@@ -824,6 +841,7 @@ mod tests {
             should_settle_pending_surplus: false,
             max_sell_delta: u("100000000000000000000000"),
             snapshot_active_price: U256::ZERO,
+            paused: false,
         }
     }
 
@@ -850,6 +868,7 @@ mod tests {
             should_settle_pending_surplus: false,
             max_sell_delta: u("11745139237756845387879106"),
             snapshot_active_price: u("1410914696199449"),
+            paused: false,
         }
     }
 
@@ -876,6 +895,7 @@ mod tests {
             should_settle_pending_surplus: false,
             max_sell_delta: u("980408781053427769929256283"),
             snapshot_active_price: u("22927126532619896"),
+            paused: false,
         }
     }
 
@@ -935,6 +955,35 @@ mod tests {
         let err = quote_buy_exact_in(&state, &"1000000000000000".parse().unwrap()).unwrap_err();
 
         assert!(matches!(err, SimulationError::FatalError(message) if message == "solver failed"));
+    }
+
+    #[test]
+    fn fresh_launch_buy_limit_is_reachable() {
+        let mut state = kyber_reference_state();
+        state.snapshot_curve.circ = U256::ZERO;
+        state.snapshot_curve.supply = state.total_supply;
+        state.snapshot_curve.reserves = U256::ZERO;
+        state.snapshot_curve.last_invariant = U256::ZERO;
+        state.total_b_tokens = state.total_supply;
+        state.total_reserves = U256::ZERO;
+        state.max_sell_delta = U256::ZERO;
+
+        let (max_input, max_output) = get_limits(&state, true).unwrap();
+        let quote = quote_buy_exact_in(&state, &max_input).unwrap();
+
+        assert!(!max_input.is_zero());
+        assert_eq!(quote.amount_out, max_output);
+    }
+
+    #[test]
+    fn paused_pool_has_no_quotes() {
+        let mut state = kyber_reference_state();
+        state.paused = true;
+
+        assert!(quote_buy_exact_in(&state, &BigUint::from(1u8)).is_err());
+        assert!(quote_sell_exact_in(&state, &BigUint::from(1u8)).is_err());
+        assert!(spot_price(&state, true).is_err());
+        assert!(get_limits(&state, true).is_err());
     }
 
     #[test]

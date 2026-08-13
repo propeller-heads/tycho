@@ -22,6 +22,7 @@ networks:
     initialBlock:
       map_protocol_components: 24920863
       store_components: 24920863
+      store_component_ids: 24920863
       store_slot_index: 24920863
       store_state_slots: 24920863
       map_protocol_changes: 24920863
@@ -29,6 +30,7 @@ networks:
     initialBlock:
       map_protocol_components: 45070267
       store_components: 45070267
+      store_component_ids: 45070267
       store_slot_index: 45070267
       store_state_slots: 45070267
       map_protocol_changes: 45070267
@@ -43,6 +45,13 @@ modules:
   - name: store_components
     kind: store
     updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_component_ids
+    kind: store
+    updatePolicy: append
     valueType: string
     inputs:
       - map: map_protocol_components
@@ -70,6 +79,7 @@ modules:
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
       - store: store_components
+      - store: store_component_ids
       - store: store_state_slots
         mode: deltas
       - store: store_state_slots

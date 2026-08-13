@@ -169,6 +169,7 @@ impl From<IBaselineRelay::QuoteState> for BaselineQuoteState {
             should_settle_pending_surplus: state.shouldSettlePendingSurplus,
             max_sell_delta: state.maxSellDelta,
             snapshot_active_price: state.snapshotActivePrice,
+            paused: false,
         }
     }
 }

@@ -11,6 +11,7 @@ use tiny_keccak::{Hasher, Keccak};
 pub(crate) const ADDRESS_LEN: usize = 20;
 pub(crate) const SLOT_LEN: usize = 32;
 
+pub(crate) const META_SLOT_NAMESPACE: &str = "Baseline.State.Meta";
 pub(crate) const POOL_SLOT_NAMESPACE: &str = "Baseline.State.Pool";
 pub(crate) const MAKER_SLOT_NAMESPACE: &str = "Baseline.State.Maker";
 pub(crate) const BLOCK_PRICING_SLOT_NAMESPACE: &str = "Baseline.State.BlockPricing";
@@ -58,6 +59,10 @@ pub(crate) struct BlockPricingState {
     pub block_number: u64,
 }
 
+pub(crate) fn meta_namespace_slot() -> [u8; SLOT_LEN] {
+    namespace_slot(META_SLOT_NAMESPACE)
+}
+
 pub(crate) fn pool_namespace_slot() -> [u8; SLOT_LEN] {
     namespace_slot(POOL_SLOT_NAMESPACE)
 }
@@ -80,6 +85,10 @@ pub(crate) fn maker_base_slot(b_token: &[u8; ADDRESS_LEN]) -> [u8; SLOT_LEN] {
 
 pub(crate) fn block_pricing_base_slot(b_token: &[u8; ADDRESS_LEN]) -> [u8; SLOT_LEN] {
     mapping_base_slot(b_token, &block_pricing_namespace_slot())
+}
+
+pub(crate) fn protocol_paused_slot() -> [u8; SLOT_LEN] {
+    slot_with_offset(&meta_namespace_slot(), 3)
 }
 
 pub(crate) fn slot_with_offset(base: &[u8; SLOT_LEN], offset: u8) -> [u8; SLOT_LEN] {
@@ -108,6 +117,10 @@ pub(crate) fn decode_pool(slots: &[[u8; SLOT_LEN]; 8]) -> PoolState {
         protocol_claimable: low_uint128(&slots[7]),
         pending_yield: high_uint128(&slots[7]),
     }
+}
+
+pub(crate) fn decode_protocol_paused(slot: &[u8; SLOT_LEN]) -> bool {
+    byte_from_right(slot, 20) != 0
 }
 
 pub(crate) fn decode_maker(slots: &[[u8; SLOT_LEN]; 5]) -> MakerState {
@@ -314,6 +327,15 @@ mod tests {
         assert_eq!(pool.creator_claimable, dec("0"));
         assert_eq!(pool.protocol_claimable, dec("79835526823073"));
         assert_eq!(pool.pending_yield, dec("239506580469219"));
+    }
+
+    #[test]
+    fn decodes_protocol_pause_from_meta_slot() {
+        let mut slot = [0; SLOT_LEN];
+        slot[11] = 1;
+
+        assert!(decode_protocol_paused(&slot));
+        assert!(!decode_protocol_paused(&[0; SLOT_LEN]));
     }
 
     #[test]

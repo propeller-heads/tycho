@@ -9,10 +9,10 @@
 
 use super::{
     slot_layout::{
-        decode_block_pricing, decode_maker, decode_pool, BlockPricingState, MakerState, PoolState,
-        SLOT_LEN,
+        decode_block_pricing, decode_maker, decode_pool, decode_protocol_paused,
+        BlockPricingState, MakerState, PoolState, SLOT_LEN,
     },
-    slot_stores::{state_slot_key, StateArea},
+    slot_stores::{state_slot_key, StateArea, PROTOCOL_STATE_ID},
 };
 use num_bigint::BigInt;
 use num_traits::{One, ToPrimitive, Zero};
@@ -35,7 +35,7 @@ const SNAPSHOT_CURVE_FIELDS: [&str; 8] = [
     "snapshot_curve_last_invariant",
 ];
 
-const QUOTE_STATE_FIELDS: [&str; 11] = [
+const QUOTE_STATE_FIELDS: [&str; 12] = [
     "quote_block_buy_delta_circ",
     "quote_block_sell_delta_circ",
     "total_supply",
@@ -47,6 +47,7 @@ const QUOTE_STATE_FIELDS: [&str; 11] = [
     "should_settle_pending_surplus",
     "max_sell_delta",
     "snapshot_active_price",
+    "paused",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +78,7 @@ pub(crate) fn default_attributes() -> Vec<Attribute> {
         .iter()
         .chain(QUOTE_STATE_FIELDS.iter())
         .map(|name| {
-            if *name == "should_settle_pending_surplus" {
+            if matches!(*name, "should_settle_pending_surplus" | "paused") {
                 bool_attribute(name, false, ChangeType::Creation)
             } else {
                 uint_attribute(name, BigInt::zero(), ChangeType::Creation)
@@ -92,27 +93,43 @@ pub(crate) fn attributes_from_store(
     read_ordinal: Option<u64>,
     current_block_number: u64,
 ) -> Option<Vec<Attribute>> {
-    load_state(store, component_id, read_ordinal).and_then(|(pool, maker, pricing)| {
-        attributes_from_state(&pool, &maker, &pricing, current_block_number, ChangeType::Update)
-    })
+    load_state(store, component_id, read_ordinal).and_then(
+        |(pool, maker, pricing, protocol_paused)| {
+            attributes_from_state(
+                &pool,
+                &maker,
+                &pricing,
+                protocol_paused,
+                current_block_number,
+                ChangeType::Update,
+            )
+        },
+    )
 }
 
 fn load_state(
     store: &StoreGetString,
     component_id: &str,
     read_ordinal: Option<u64>,
-) -> Option<(PoolState, MakerState, BlockPricingState)> {
+) -> Option<(PoolState, MakerState, BlockPricingState, bool)> {
     let pool = read_slots::<8>(store, component_id, StateArea::Pool, read_ordinal)?;
     let maker = read_slots::<5>(store, component_id, StateArea::Maker, read_ordinal)?;
     let block_pricing =
         read_slots::<4>(store, component_id, StateArea::BlockPricing, read_ordinal)?;
-    Some((decode_pool(&pool), decode_maker(&maker), decode_block_pricing(&block_pricing)))
+    let meta = read_slots::<1>(store, PROTOCOL_STATE_ID, StateArea::Meta, read_ordinal)?;
+    Some((
+        decode_pool(&pool),
+        decode_maker(&maker),
+        decode_block_pricing(&block_pricing),
+        decode_protocol_paused(&meta[0]),
+    ))
 }
 
 fn attributes_from_state(
     pool: &PoolState,
     maker: &MakerState,
     pricing: &BlockPricingState,
+    protocol_paused: bool,
     current_block_number: u64,
     change: ChangeType,
 ) -> Option<Vec<Attribute>> {
@@ -143,6 +160,7 @@ fn attributes_from_state(
         BigInt::from(u8::from(should_settle_pending_surplus(pool, pricing, current_block_number))),
         max_sell_delta,
         active_price,
+        BigInt::from(u8::from(pool.paused || protocol_paused)),
     ];
 
     let mut attributes = Vec::with_capacity(SNAPSHOT_CURVE_FIELDS.len() + QUOTE_STATE_FIELDS.len());
@@ -157,7 +175,7 @@ fn attributes_from_state(
             .iter()
             .zip(quote_values)
             .map(|(name, value)| {
-                if *name == "should_settle_pending_surplus" {
+                if matches!(*name, "should_settle_pending_surplus" | "paused") {
                     bool_attribute(name, !value.is_zero(), change)
                 } else {
                     uint_attribute(name, value, change)
@@ -1042,6 +1060,7 @@ mod tests {
                 &mainnet_pool(),
                 &mainnet_maker(),
                 &stale_mainnet_pricing(),
+                false,
                 25_329_977,
                 ChangeType::Update,
             )
@@ -1086,7 +1105,7 @@ mod tests {
         let maker = safety_maker();
         let pricing = stale_safety_pricing();
         let attributes = attr_map(
-            attributes_from_state(&pool, &maker, &pricing, 100, ChangeType::Update).unwrap(),
+            attributes_from_state(&pool, &maker, &pricing, false, 100, ChangeType::Update).unwrap(),
         );
 
         let raw_reserves = normalize_wad(&pool.total_reserves, pool.reserve_decimals);
@@ -1104,6 +1123,7 @@ mod tests {
                 &base_pool(),
                 &base_maker(),
                 &stale_base_pricing(),
+                false,
                 47_411_888,
                 ChangeType::Update,
             )
@@ -1153,6 +1173,7 @@ mod tests {
                 &mainnet_pool(),
                 &mainnet_maker(),
                 &pricing,
+                false,
                 25_329_977,
                 ChangeType::Update,
             )
@@ -1212,6 +1233,7 @@ mod tests {
                 &mainnet_pool(),
                 &mainnet_maker(),
                 &pricing,
+                false,
                 25_329_977,
                 ChangeType::Update,
             )
@@ -1239,6 +1261,58 @@ mod tests {
     }
 
     #[test]
+    fn post_block_state_clears_same_block_deltas() {
+        let mut pricing = stale_mainnet_pricing();
+        pricing.block_number = 25_329_977;
+        let attributes = attr_map(
+            attributes_from_state(
+                &mainnet_pool(),
+                &mainnet_maker(),
+                &pricing,
+                false,
+                pricing.block_number + 1,
+                ChangeType::Update,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(uint_value(&attributes, "quote_block_buy_delta_circ"), BigInt::zero());
+        assert_eq!(uint_value(&attributes, "quote_block_sell_delta_circ"), BigInt::zero());
+    }
+
+    #[test]
+    fn exposes_pool_or_protocol_pause() {
+        let pricing = stale_mainnet_pricing();
+        let mut pool = mainnet_pool();
+        let protocol_paused = attr_map(
+            attributes_from_state(
+                &pool,
+                &mainnet_maker(),
+                &pricing,
+                true,
+                25_329_977,
+                ChangeType::Update,
+            )
+            .unwrap(),
+        );
+        pool.paused = true;
+        let pool_paused = attr_map(
+            attributes_from_state(
+                &pool,
+                &mainnet_maker(),
+                &pricing,
+                false,
+                25_329_977,
+                ChangeType::Update,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(protocol_paused.get("paused"), Some(&vec![1]));
+        assert_eq!(pool_paused.get("paused"), Some(&vec![1]));
+    }
+
+    #[test]
     fn uses_burned_pool_state_after_block_pricing_reset() {
         let mut pool = mainnet_pool();
         let maker_before = mainnet_maker();
@@ -1262,8 +1336,15 @@ mod tests {
         };
 
         let attributes = attr_map(
-            attributes_from_state(&pool, &maker_after, &pricing, 25_329_977, ChangeType::Update)
-                .unwrap(),
+            attributes_from_state(
+                &pool,
+                &maker_after,
+                &pricing,
+                false,
+                25_329_977,
+                ChangeType::Update,
+            )
+            .unwrap(),
         );
 
         assert_eq!(&pool.total_supply - &pool.total_b_tokens, circ_before);
@@ -1278,6 +1359,39 @@ mod tests {
         assert_eq!(uint_value(&attributes, "quote_block_buy_delta_circ"), BigInt::zero());
         assert_eq!(uint_value(&attributes, "quote_block_sell_delta_circ"), BigInt::zero());
         assert!(uint_value(&attributes, "snapshot_active_price") > price_before);
+    }
+
+    #[test]
+    fn zero_circulation_burn_keeps_invariant_and_price() {
+        let mut pool = mainnet_pool();
+        pool.total_b_tokens = pool.total_supply.clone();
+        let maker = mainnet_maker();
+        let invariant_before = maker.last_invariant.clone();
+        let price_before = compute_active_price(&stored_curve_params(&pool, &maker)).unwrap();
+
+        let burn_amount = dec("1000000000000000000000");
+        pool.total_supply -= &burn_amount;
+        pool.total_b_tokens -= &burn_amount;
+        let pricing = BlockPricingState {
+            start_reserves: BigInt::zero(),
+            start_supply: BigInt::zero(),
+            block_buy_delta_circ: BigInt::zero(),
+            block_sell_delta_circ: BigInt::zero(),
+            start_last_invariant: BigInt::zero(),
+            block_number: 0,
+        };
+        let attributes = attr_map(
+            attributes_from_state(&pool, &maker, &pricing, false, 25_329_977, ChangeType::Update)
+                .unwrap(),
+        );
+
+        assert_eq!(&pool.total_supply - &pool.total_b_tokens, BigInt::zero());
+        assert_eq!(uint_value(&attributes, "total_supply"), pool.total_supply);
+        assert_eq!(uint_value(&attributes, "total_b_tokens"), pool.total_b_tokens);
+        assert_eq!(uint_value(&attributes, "snapshot_curve_last_invariant"), invariant_before);
+        assert_eq!(uint_value(&attributes, "snapshot_active_price"), price_before);
+        assert_eq!(uint_value(&attributes, "quote_block_buy_delta_circ"), BigInt::zero());
+        assert_eq!(uint_value(&attributes, "quote_block_sell_delta_circ"), BigInt::zero());
     }
 
     #[test]

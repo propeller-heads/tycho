@@ -1,6 +1,6 @@
 use super::slot_layout::{
-    block_pricing_base_slot, maker_base_slot, pool_base_slot, slot_with_offset, ADDRESS_LEN,
-    SLOT_LEN,
+    block_pricing_base_slot, maker_base_slot, pool_base_slot, protocol_paused_slot,
+    slot_with_offset, ADDRESS_LEN, SLOT_LEN,
 };
 use crate::pool_factories::{factory_b_token, RELAY_ADDRESS};
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ const BLOCK_PRICING_SLOT_COUNT: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StateArea {
+    Meta,
     Pool,
     Maker,
     BlockPricing,
@@ -24,6 +25,7 @@ pub(crate) enum StateArea {
 impl StateArea {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Meta => "meta",
             Self::Pool => "pool",
             Self::Maker => "maker",
             Self::BlockPricing => "block_pricing",
@@ -32,6 +34,7 @@ impl StateArea {
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
+            "meta" => Some(Self::Meta),
             "pool" => Some(Self::Pool),
             "maker" => Some(Self::Maker),
             "block_pricing" => Some(Self::BlockPricing),
@@ -39,6 +42,8 @@ impl StateArea {
         }
     }
 }
+
+pub(crate) const PROTOCOL_STATE_ID: &str = "protocol";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct IndexedSlot {
@@ -112,10 +117,14 @@ fn store_state_slots(block: eth::v2::Block, slot_index: StoreGetString, store: S
             .filter(|change| change.address.as_slice() == RELAY_ADDRESS)
             .filter_map(|change| {
                 let key = slot_index_key(&change.key);
-                let location = same_block_index
-                    .get(&key)
-                    .cloned()
-                    .or_else(|| slot_index.get_last(key))?;
+                let location = if change.key.as_slice() == protocol_paused_slot() {
+                    format!("{PROTOCOL_STATE_ID}|meta|0")
+                } else {
+                    same_block_index
+                        .get(&key)
+                        .cloned()
+                        .or_else(|| slot_index.get_last(key))?
+                };
                 let location = SlotLocation::decode(&location)?;
                 Some((change.ordinal, location, slot_value_hex(&change.new_value)))
             })
@@ -193,6 +202,10 @@ pub(crate) fn slot_index_key(slot: &[u8]) -> String {
 
 pub(crate) fn state_slot_key(component_id: &str, area: StateArea, offset: u8) -> String {
     format!("state:{component_id}:{}:{offset}", area.as_str())
+}
+
+pub(crate) fn protocol_paused_state_key() -> String {
+    state_slot_key(PROTOCOL_STATE_ID, StateArea::Meta, 0)
 }
 
 pub(crate) fn slot_value_hex(value: &[u8]) -> String {
