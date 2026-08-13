@@ -183,6 +183,11 @@ pub fn erc4626_filter(component: &ComponentWithState) -> bool {
         "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
         "0xfE6eb3b609a7C8352A241f7F3A21CEA4e9209B8f",
+        // sDAI: DCI's one-shot entrypoint trace happens at the vault's first
+        // Deposit/Withdraw, which pins `pot.rho() == block.timestamp` (deposit
+        // calls `pot.drip()`), so the trace captures only the chi-only branch of
+        // the time-dependent conversion rate and never the `_rpow` accrual branch
+        // needed at runtime — only fixable by a manual retrigger.
         "0x83f20f44975d03b1b09e64809b757c47f942beea",
     ];
     if UNSUPPORTED_POOLS.contains(
