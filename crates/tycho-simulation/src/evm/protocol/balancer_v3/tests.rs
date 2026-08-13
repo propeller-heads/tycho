@@ -12,12 +12,15 @@ use std::{fs, path::PathBuf, str::FromStr};
 
 use alloy::primitives::{I256, U256};
 use balancer_maths_rust::{
-    common::types::{BasePoolState, PoolState},
+    common::{
+        maths::mul_down_fixed,
+        types::{BasePoolState, PoolState},
+    },
     pools::{
         quantamm::quantamm_data::{QuantAmmImmutable, QuantAmmMutable, QuantAmmState},
         reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
         stable::stable_data::{StableMutable, StableState},
-        weighted::WeightedState,
+        weighted::{WeightedState, MAX_IN_RATIO},
     },
 };
 use num_bigint::BigUint;
@@ -597,10 +600,11 @@ fn stable_pool_zero_balance_on_untouched_token_does_not_divide_by_zero() {
     );
 }
 
-/// Builds a synthetic 50/50 weighted pool for exercising the v2 `MinTokenBalanceLib` cap, which
-/// the recorded parity dataset predates and so never carries.
+/// Builds a synthetic weighted pool for exercising the v2 `MinTokenBalanceLib` cap, which the
+/// recorded parity dataset predates and so never carries.
 fn weighted_pool_with_min_balances(
     balances: [U256; 2],
+    weights: [U256; 2],
     min_token_balances: Vec<U256>,
 ) -> BalancerV3State {
     let base = BasePoolState {
@@ -620,7 +624,7 @@ fn weighted_pool_with_min_balances(
         supports_unbalanced_liquidity: true,
         hook_type: None,
     };
-    let weights = vec![uint_wad() / U256::from(2u8), uint_wad() / U256::from(2u8)];
+    let weights = weights.to_vec();
     let tokens = base
         .tokens
         .iter()
@@ -645,6 +649,46 @@ fn uint_wad() -> U256 {
     U256::from(1_000_000_000_000_000_000u128)
 }
 
+/// The even split the min-balance tests use unless the weight ratio is what they are probing.
+fn even_weights() -> [U256; 2] {
+    [uint_wad() / U256::from(2u8), uint_wad() / U256::from(2u8)]
+}
+
+/// Inverting the minimum-balance bound raises `amountOut`'s share of the output reserve to
+/// `weight_out / weight_in`, an exponent of 99 on a 99/1 pool. Draining that reserve down to a
+/// floor of `1e12` would take more input than a `U256` holds, so the inversion overflows — which
+/// says the minimum cannot bind before `MAX_IN_RATIO` does, not that the pool is unquotable.
+///
+/// The numbers are `0x48995dbdca50fa5346b0771d40a5ae7664262f7e` as it stood at block 25746755,
+/// one of four mainnet pools that reported a fatal `MathOverflow` here during a live sweep.
+#[test]
+fn weighted_v2_unreachable_min_balance_falls_back_to_the_ratio_cap() {
+    let balances = [
+        U256::from_str("2995456711788000000000000").expect("balance parses"),
+        U256::from_str("1968911072000000000000").expect("balance parses"),
+    ];
+    let weights =
+        [uint_wad() * U256::from(99u8) / U256::from(100u8), uint_wad() / U256::from(100u8)];
+    let floor = U256::from(1_000_000_000_000u64);
+    let pool = weighted_pool_with_min_balances(balances, weights, vec![floor, floor]);
+    let token0 = token("0x0000000000000000000000000000000000000a");
+    let token1 = token("0x0000000000000000000000000000000000000b");
+
+    // Selling the 1%-weight token for the 99%-weight one: the exponent is 0.99 / 0.01.
+    let (max_in, max_out) = pool
+        .get_limits(token1.address.clone(), token0.address.clone())
+        .expect("an unreachable minimum must not fail the limit");
+
+    assert_eq!(
+        max_in,
+        u256_to_biguint(mul_down_fixed(&balances[1], &MAX_IN_RATIO).expect("ratio cap")),
+        "MAX_IN_RATIO alone should cap an input whose minimum-balance bound is unreachable"
+    );
+    assert!(max_out > BigUint::ZERO, "the pool still quotes at that limit");
+    pool.get_amount_out(max_in, &token1, &token0)
+        .expect("the reported limit must be quotable");
+}
+
 /// A v2 weighted pool's per-token minimum balance can bind tighter than `MAX_IN_RATIO`: buying
 /// down to a high minimum on the output side cannot spend anywhere near 30% of the input reserve
 /// in a deep, evenly weighted pool.
@@ -653,7 +697,7 @@ fn weighted_v2_min_balance_caps_input_tighter_than_ratio() {
     let balances = [uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32)];
     // Token 1 may not drop below 900 of the 1000 it holds; token 0 has no floor of its own.
     let min_balances = vec![U256::ZERO, uint_wad() * U256::from(900u32)];
-    let pool = weighted_pool_with_min_balances(balances, min_balances);
+    let pool = weighted_pool_with_min_balances(balances, even_weights(), min_balances);
     let token0 = token("0x0000000000000000000000000000000000000a");
     let token1 = token("0x0000000000000000000000000000000000000b");
 
@@ -695,7 +739,7 @@ fn weighted_v2_zero_min_balance_on_output_token_does_not_divide_by_zero() {
     let balances = [uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32)];
     // Token 0 has no registered floor; token 1's floor is irrelevant to this direction.
     let min_balances = vec![U256::ZERO, uint_wad() * U256::from(900u32)];
-    let pool = weighted_pool_with_min_balances(balances, min_balances);
+    let pool = weighted_pool_with_min_balances(balances, even_weights(), min_balances);
     let token0 = token("0x0000000000000000000000000000000000000a");
     let token1 = token("0x0000000000000000000000000000000000000b");
 
@@ -720,7 +764,7 @@ fn weighted_v2_min_balance_dust_pool_returns_zero_limits() {
     let balances = [uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32)];
     // Token 1's balance already equals its own minimum: there is no headroom to sell into.
     let min_balances = vec![U256::ZERO, uint_wad() * U256::from(1_000u32)];
-    let pool = weighted_pool_with_min_balances(balances, min_balances);
+    let pool = weighted_pool_with_min_balances(balances, even_weights(), min_balances);
     let token0 = token("0x0000000000000000000000000000000000000a");
     let token1 = token("0x0000000000000000000000000000000000000b");
 
@@ -800,7 +844,7 @@ fn dust_pool_below_minimum_trade_amount_returns_zero_limits() {
     // 30% of a 1e6-scaled18 balance is 3e5, below the Vault's 1e6 floor.
     let balances =
         [uint_wad() / U256::from(1_000_000_000_000u64), uint_wad() * U256::from(1_000u32)];
-    let pool = weighted_pool_with_min_balances(balances, Vec::new());
+    let pool = weighted_pool_with_min_balances(balances, even_weights(), Vec::new());
     let token0 = token("0x0000000000000000000000000000000000000a");
     let token1 = token("0x0000000000000000000000000000000000000b");
 

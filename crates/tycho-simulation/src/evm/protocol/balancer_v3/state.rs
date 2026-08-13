@@ -434,14 +434,21 @@ impl BalancerV3State {
             return Ok(U256::ZERO);
         }
 
-        let min_balance_cap = weighted_in_given_exact_out_unguarded(
+        let min_balance_cap = match weighted_in_given_exact_out_unguarded(
             &balances[index_in],
             &weights[index_in],
             &balances[index_out],
             &weights[index_out],
             &target_out,
-        )
-        .map_err(maths_error)?;
+        ) {
+            Ok(cap) => cap,
+            // The inversion raises the output reserve's depletion ratio to `weight_out /
+            // weight_in`, which is 99 on a 99/1 pool. Overflowing it means buying the output side
+            // down to its floor would take more input than a `U256` holds, so the minimum sits
+            // far beyond `MAX_IN_RATIO` and cannot be what binds.
+            Err(PoolError::MathOverflow) => return Ok(ratio_cap),
+            Err(e) => return Err(maths_error(e)),
+        };
         Ok(ratio_cap.min(min_balance_cap))
     }
 
