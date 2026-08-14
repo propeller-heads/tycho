@@ -126,18 +126,21 @@ After choosing the best swap, you can use Tycho Execution to encode it. This is 
 
 #### Create a solution object
 
-The key parameter is **minimum amount out**, which protects against slippage and MEV. The quickstart applies 0.25% slippage tolerance.
+The key parameters are the quoted **expected amount out** and the **min amount out** you accept below it. The router uses both as guardrails, protecting you against slippage and MEV. The quickstart sets the min amount out 0.25% below the quote.
 
 {% hint style="warning" %}
-For maximum security, you should determine the minimum amount from a **third-party source.**
+For maximum security, you should determine the quoted amount from a **third-party source.**
 {% endhint %}
 
 Build the Swap and Solution:
 
 <pre class="language-rust"><code class="lang-rust">let swap =
-    Swap::new(component, sell_token.address.clone(), buy_token.address.clone())
-        .protocol_state(state)
-        .estimated_amount_in(sell_amount.clone());
+    Swap::new(component, sell_token.clone(), buy_token.clone(), gas_usage)
+        .with_protocol_state(state)
+        .with_estimated_amount_in(sell_amount.clone());
+
+// 0.25% below the quote
+let min_amount_out = &expected_amount * BigUint::from(9975u64) / BigUint::from(10_000u64);
 
 <strong>let solution = Solution::new(
 </strong>    user_address.clone(),
@@ -145,7 +148,8 @@ Build the Swap and Solution:
     sell_token.address,
     buy_token.address,
     sell_amount,
-    min_amount_out,
+    expected_amount, // the quoted output
+    min_amount_out,  // the smallest acceptable output
     vec![simple_swap],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -203,7 +207,7 @@ let tx = encode_tycho_router_call(
 {% hint style="danger" %}
 These functions are only examples intended for use within the quickstart. **Do not use them in production.** You must write your own logic to:
 
-* Control parameters like `minAmountOut` and `receiver`
+* Control parameters like `expectedAmountOut`, `minAmountOut` and `receiver`
 * Sign the permit2 object safely and correctly.
 
 This gives you full control over execution. And it protects you from MEV and slippage risks.

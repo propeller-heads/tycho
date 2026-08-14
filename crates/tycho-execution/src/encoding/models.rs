@@ -27,7 +27,7 @@ use crate::encoding::serde_primitives::biguint_string;
 ///
 /// - `UseVaultsFunds`: No transfer will be performed and the Vault's funds will be used
 ///     - Assumes the tokens are already present in the Tycho Router.
-///     - The tokens must be deposited into the TychoRouter before performing the swap
+///     - The tokens must be deposited into the TychoRouterV3 before performing the swap
 #[derive(Clone, Debug, PartialEq, ValueEnum, Serialize, Deserialize, Default)]
 pub enum UserTransferType {
     TransferFromPermit2,
@@ -42,12 +42,12 @@ pub enum UserTransferType {
 /// and signing this struct; `tycho-execution` does not use it internally.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ClientFeeParams {
-    /// Fee in basis points charged by the client (0–10000).
-    client_fee_bps: u16,
+    /// Fee in fee units charged by the client (0–100_000_000, where 100_000_000 = 100%).
+    client_fee_bps: u32,
     /// Address that identifies the client and receives any client fee.
     client_fee_receiver: Bytes,
-    /// Maximum amount the client will contribute from their vault if slippage reduces the output
-    /// below `min_amount_out`.
+    /// Maximum amount the client will contribute from their vault if the output falls below the
+    /// router's `minAmountOut` argument.
     #[serde(with = "biguint_string")]
     max_client_contribution: BigUint,
     /// Deadline for the fee signature as a unix timestamp.
@@ -63,7 +63,7 @@ impl ClientFeeParams {
         client_fee_receiver: Bytes,
         client_signature: Bytes,
         deadline: BigUint,
-        client_fee_bps: u16,
+        client_fee_bps: u32,
     ) -> Self {
         Self {
             client_fee_bps,
@@ -98,7 +98,7 @@ impl ClientFeeParams {
 #[cfg(feature = "evm")]
 impl ClientFeeParams {
     /// Converts into the ABI-encodable tuple matching the Solidity `ClientFeeParams` struct.
-    pub fn into_abi_params(self) -> (u16, Address, U256, U256, Vec<u8>) {
+    pub fn into_abi_params(self) -> (u32, Address, U256, U256, Vec<u8>) {
         let receiver = if self.client_fee_receiver.is_empty() {
             Address::ZERO
         } else {
@@ -120,7 +120,7 @@ impl ClientFeeParams {
 
 /// Represents a solution containing details describing an order, and instructions for filling
 /// the order.
-#[derive(Clone, Default, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Solution {
     /// Address of the sender.
     sender: Bytes,
@@ -133,7 +133,13 @@ pub struct Solution {
     amount_in: BigUint,
     /// The token being bought
     token_out: Bytes,
-    /// Minimum amount that the receiver must receive at the end of the transaction.
+    /// Quoted output amount from simulation. Passed to the router as `expectedAmountOut`,
+    /// the baseline for positive slippage detection.
+    #[serde(with = "biguint_string")]
+    expected_amount_out: BigUint,
+    /// Smallest output the swap may return. Passed to the router as `minAmountOut`, the revert
+    /// guardrail. `TychoRouter` rejects a value above `expected_amount_out` or further than
+    /// `MAX_SLIPPAGE_TOLERANCE_BPS` below it, which also excludes zero.
     #[serde(with = "biguint_string")]
     min_amount_out: BigUint,
     /// List of swaps to fulfill the solution.
@@ -143,12 +149,14 @@ pub struct Solution {
 }
 
 impl Solution {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sender: Bytes,
         receiver: Bytes,
         token_in: Bytes,
         token_out: Bytes,
         amount_in: BigUint,
+        expected_amount_out: BigUint,
         min_amount_out: BigUint,
         swaps: Vec<Swap>,
     ) -> Self {
@@ -158,6 +166,7 @@ impl Solution {
             token_in,
             token_out,
             amount_in,
+            expected_amount_out,
             min_amount_out,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
@@ -182,6 +191,10 @@ impl Solution {
         &self.token_out
     }
 
+    pub fn expected_amount_out(&self) -> &BigUint {
+        &self.expected_amount_out
+    }
+
     pub fn min_amount_out(&self) -> &BigUint {
         &self.min_amount_out
     }
@@ -192,36 +205,6 @@ impl Solution {
 
     pub fn user_transfer_type(&self) -> &UserTransferType {
         &self.user_transfer_type
-    }
-
-    pub fn with_sender(mut self, sender: Bytes) -> Self {
-        self.sender = sender;
-        self
-    }
-
-    pub fn with_receiver(mut self, receiver: Bytes) -> Self {
-        self.receiver = receiver;
-        self
-    }
-
-    pub fn with_token_in(mut self, token_in: Bytes) -> Self {
-        self.token_in = token_in;
-        self
-    }
-
-    pub fn with_amount_in(mut self, amount_in: BigUint) -> Self {
-        self.amount_in = amount_in;
-        self
-    }
-
-    pub fn with_token_out(mut self, token_out: Bytes) -> Self {
-        self.token_out = token_out;
-        self
-    }
-
-    pub fn with_min_amount_out(mut self, min_amount_out: BigUint) -> Self {
-        self.min_amount_out = min_amount_out;
-        self
     }
 
     pub fn with_swaps(mut self, swaps: Vec<Swap>) -> Self {
@@ -400,7 +383,7 @@ impl EncodedSolution {
         &self.estimated_gas
     }
 
-    /// Byte offset within TychoRouter calldata where the client fee signature starts.
+    /// Byte offset within TychoRouterV3 calldata where the client fee signature starts.
     pub fn client_fee_signature_offset(&self) -> usize {
         let name = self
             .function_signature
@@ -411,10 +394,10 @@ impl EncodedSolution {
             "singleSwap" |
             "singleSwapUsingVault" |
             "sequentialSwap" |
-            "sequentialSwapUsingVault" => 7,
-            "splitSwap" | "splitSwapUsingVault" => 8,
-            "singleSwapPermit2" | "sequentialSwapPermit2" => 14,
-            "splitSwapPermit2" => 15,
+            "sequentialSwapUsingVault" => 8,
+            "splitSwap" | "splitSwapUsingVault" => 9,
+            "singleSwapPermit2" | "sequentialSwapPermit2" => 15,
+            "splitSwapPermit2" => 16,
             _ => 0,
         };
         // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple
@@ -533,6 +516,7 @@ pub fn default_token(address: Bytes) -> Token {
     Token::new(&address, "", 0, 0, &[Some(60_000u64)], Default::default(), 100)
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 

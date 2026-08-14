@@ -85,6 +85,7 @@ fn test_evm_split_swap_strategy_encoder() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("25650453").unwrap(),
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -127,8 +128,7 @@ fn test_evm_split_input_cyclic_swap() {
     // USDC -> WETH (Pool 1) - 60% of input
     let swap_usdc_weth_pool1 = Swap::new(
         ProtocolComponent {
-            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 1 */
+            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), // USDC-WETH USV3 Pool 1
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -148,8 +148,7 @@ fn test_evm_split_input_cyclic_swap() {
     // USDC -> WETH (Pool 2) - 40% of input (remaining)
     let swap_usdc_weth_pool2 = Swap::new(
         ProtocolComponent {
-            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 2 */
+            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), // USDC-WETH USV3 Pool 2
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -169,8 +168,7 @@ fn test_evm_split_input_cyclic_swap() {
     // WETH -> USDC (Pool 2)
     let swap_weth_usdc_pool2 = Swap::new(
         ProtocolComponent {
-            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), /* USDC-WETH USV2
-                                                                           * Pool 2 */
+            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), // USDC-WETH USV2 Pool 2
             protocol_system: "uniswap_v2".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -196,6 +194,7 @@ fn test_evm_split_input_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99574171").unwrap(),
+        BigUint::from_str("97582687").unwrap(),
         vec![swap_usdc_weth_pool1, swap_usdc_weth_pool2, swap_weth_usdc_pool2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -220,15 +219,14 @@ fn test_evm_split_input_cyclic_swap() {
 
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "e6675f5c", // selector (splitSwapPermit2)
-        "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
-        "0000000000000000000000000000000000000000000000000000000005ef619b", // min amount out
-        "0000000000000000000000000000000000000000000000000000000000000002", // tokens length
+        "9b676069", // selector (splitSwapPermit2)
+        "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
+        "0000000000000000000000000000000000000000000000000000000005ef619b", // expectedAmountOut
+        "0000000000000000000000000000000000000000000000000000000005d0fe5f", // minAmountOut (2% below expected)
+        "0000000000000000000000000000000000000000000000000000000000000002", // nTokens
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000001e0", /* clientFeeParams
-                     * offset = 480 */
     ]
     .join("");
 
@@ -236,11 +234,9 @@ fn test_evm_split_input_cyclic_swap() {
     // time) it's hard to assert back
 
     let expected_swaps = [
-        "000000000000000000000000000000000000000000000000000000000000010d", /* length of ple
-                                                                             * encoded swaps
-                                                                             * without padding
-                                                                             * (269 bytes) */
-        "0059",                                     // ple encoded swaps (89 bytes)
+        "000000000000000000000000000000000000000000000000000000000000010d", // swapData len = 269
+        // ple encoded swaps (89 bytes)
+        "0059",
         "00",                                       // token in index
         "01",                                       // token out index
         "999999",                                   // split
@@ -272,7 +268,7 @@ fn test_evm_split_input_cyclic_swap() {
     ]
     .join("");
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1672..], expected_swaps);
     write_calldata_to_file("test_split_input_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -291,7 +287,7 @@ fn test_evm_split_output_cyclic_swap() {
 
     let swap_usdc_weth_v2 = Swap::new(
         ProtocolComponent {
-            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), /* USDC-WETH USV2 */
+            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), // USDC-WETH USV2
             protocol_system: "uniswap_v2".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -308,8 +304,7 @@ fn test_evm_split_output_cyclic_swap() {
 
     let swap_weth_usdc_v3_pool1 = Swap::new(
         ProtocolComponent {
-            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 1 */
+            id: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640".to_string(), // USDC-WETH USV3 Pool 1
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -327,8 +322,7 @@ fn test_evm_split_output_cyclic_swap() {
 
     let swap_weth_usdc_v3_pool2 = Swap::new(
         ProtocolComponent {
-            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), /* USDC-WETH USV3
-                                                                           * Pool 2 */
+            id: "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8".to_string(), // USDC-WETH USV3 Pool 2
             protocol_system: "uniswap_v3".to_string(),
             static_attributes: {
                 let mut attrs = HashMap::new();
@@ -354,6 +348,7 @@ fn test_evm_split_output_cyclic_swap() {
         usdc.clone(),
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99025908").unwrap(),
+        BigUint::from_str("97045389").unwrap(),
         vec![swap_usdc_weth_v2, swap_weth_usdc_v3_pool1, swap_weth_usdc_v3_pool2],
     )
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -378,15 +373,14 @@ fn test_evm_split_output_cyclic_swap() {
 
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "e6675f5c", // selector (splitSwapPermit2)
-        "0000000000000000000000000000000000000000000000000000000005f5e100", // given amount
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // given token
-        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // checked token
-        "0000000000000000000000000000000000000000000000000000000005e703f4", // min amount out
-        "0000000000000000000000000000000000000000000000000000000000000002", // tokens length
+        "9b676069", // selector (splitSwapPermit2)
+        "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
+        "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
+        "0000000000000000000000000000000000000000000000000000000005e703f4", // expectedAmountOut
+        "0000000000000000000000000000000000000000000000000000000005c8cb8d", // minAmountOut (2% below expected)
+        "0000000000000000000000000000000000000000000000000000000000000002", // nTokens
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
-        "00000000000000000000000000000000000000000000000000000000000001e0", /* clientFeeParams
-                     * offset = 480 */
     ]
     .join("");
 
@@ -394,11 +388,9 @@ fn test_evm_split_output_cyclic_swap() {
     // time) it's hard to assert back
 
     let expected_swaps = [
-        "000000000000000000000000000000000000000000000000000000000000010d", /* length of ple
-                                                                             * encoded swaps
-                                                                             * without padding
-                                                                             * (269 bytes) */
-        "0055",                                     // ple encoded swaps (85 bytes)
+        "000000000000000000000000000000000000000000000000000000000000010d", // swapData len = 269
+        // ple encoded swaps (85 bytes)
+        "0055",
         "00",                                       // token in index
         "01",                                       // token out index
         "000000",                                   // split
@@ -431,7 +423,7 @@ fn test_evm_split_output_cyclic_swap() {
     .join("");
 
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1672..], expected_swaps);
     write_calldata_to_file("test_split_output_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -499,7 +491,8 @@ fn test_evm_split_swap_strategy_with_fees() {
         weth,
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("1995860454").unwrap(),
+        BigUint::from_str("1955943244").unwrap(),
         vec![swap_weth_dai, swap_weth_wbtc, swap_dai_usdc, swap_wbtc_usdc],
     );
 
@@ -514,7 +507,7 @@ fn test_evm_split_swap_strategy_with_fees() {
         &solution,
         &eth(),
         Some(get_signer()),
-        100,
+        1_000_000,
         client_fee_receiver(),
         BigUint::ZERO,
     )

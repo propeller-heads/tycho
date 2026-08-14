@@ -1,0 +1,20 @@
+specVersion: v0.1.0
+package:
+  name: "example_protocol_anchors"
+  version: v0.1.0
+
+modules:
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: &initial_block 1000000
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+  - name: store_component_state
+    kind: store
+    initialBlock: *initial_block
+    inputs:
+      - map: map_protocol_changes
+    updatePolicy: set
+    valueType: proto:tycho.evm.v1.BlockChanges

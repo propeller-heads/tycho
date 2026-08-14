@@ -80,7 +80,7 @@ evm_ekubo_sdk = { version = "0.6.5", features = ["serde"] }
 balancer-maths-rust = "0.5.0"
 
 # rfq
-alloy-chains = "0.2.18"
+alloy-chains = "0.2.37"
 async-stream = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 hex-literal = { workspace = true }

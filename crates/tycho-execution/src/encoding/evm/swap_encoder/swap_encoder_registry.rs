@@ -219,6 +219,7 @@ mod tests {
             Chain::Bsc,
             Chain::Polygon,
             Chain::Plasma,
+            Chain::Robinhood,
         ];
         for chain in chains {
             let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {

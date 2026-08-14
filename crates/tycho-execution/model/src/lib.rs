@@ -1,7 +1,7 @@
 //! # Run
 //!
 //! Run the model using:
-//! ```
+//! ```text
 //! cargo run --release
 //! ```
 //!
@@ -77,9 +77,9 @@
 //! # Highlevel Overview
 //!
 //! [simulate], the project's most important function, takes [Params](params::Params)
-//! and runs the [model] of TychoRouter V3.
+//! and runs the [model] of TychoRouterV3.
 //!
-//! [model] mostly follows the naming and file structure of the original Solidity TychoRouter.
+//! [model] mostly follows the naming and file structure of the original Solidity TychoRouterV3.
 //!
 //! [Params](params::Params) represents all parameters the execution depends on,
 //! like whether to call `singleSwap` or `sequentialSwap`, each swap's

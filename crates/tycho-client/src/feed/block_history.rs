@@ -64,23 +64,57 @@ impl BlockHistory {
             let mut current_hash = latest.parent_hash.clone();
             let mut current_number = latest.number;
 
-            // Find connected blocks in sequence
-            for block in history.iter().skip(1) {
-                // Skip duplicates or same-height forks. The input may contain overlapping blocks
-                // (e.g. when merging retained history with current stream headers on reinit).
+            // Find connected blocks in sequence, one height at a time.
+            let mut i = 1;
+            while i < history.len() {
+                let block = &history[i];
+                // Skip duplicates or same-height forks already consumed at a taller height. The
+                // input may contain overlapping blocks (e.g. when merging retained history with
+                // current stream headers on reinit).
                 if block.number >= current_number {
+                    i += 1;
                     continue;
                 }
                 // If we find a gap in block numbers, stop building the chain
                 if block.number != current_number - 1 {
                     break;
                 }
-                // Check hash connection (preceeding block is parent of current block)
-                if block.hash == current_hash {
-                    connected_chain.push(block.clone());
-                    current_hash = block.parent_hash.clone();
-                    current_number = block.number;
-                }
+
+                // Consider every candidate at this height together, not just the first one
+                // encountered. A real hash match always wins: flashblock partials carry ephemeral
+                // hashes (only the last partial of a block holds the sealed hash), so a
+                // hash-matching full block must never be displaced by a same-height partial from
+                // a losing fork. Only fall back to a partial when no candidate at this height
+                // hash-matches — same height still means same canonical block.
+                let height = block.number;
+                let same_height_end = i + history[i..]
+                    .iter()
+                    .take_while(|b| b.number == height)
+                    .count();
+                let candidates = &history[i..same_height_end];
+                let chosen = candidates
+                    .iter()
+                    .find(|b| b.hash == current_hash)
+                    .or_else(|| {
+                        let fallback = candidates
+                            .iter()
+                            .find(|b| b.is_partial());
+                        if let Some(b) = fallback {
+                            debug!(
+                                number = b.number,
+                                hash = ?b.hash,
+                                expected_parent = ?current_hash,
+                                "HistoryStitchHeightFallback"
+                            );
+                        }
+                        fallback
+                    });
+
+                let Some(chosen) = chosen else { break };
+                connected_chain.push(chosen.clone());
+                current_hash = chosen.parent_hash.clone();
+                current_number = chosen.number;
+                i = same_height_end;
             }
         }
 
@@ -108,6 +142,15 @@ impl BlockHistory {
                 // block (via parent hash) -> we are dealing with a
                 // revert.
                 if block.revert {
+                    // A real hash match anywhere in history is always preferred: prefer walking
+                    // down to it over stopping early at a same-height partial. Height is only a
+                    // fallback for when the fork point is retained solely under an ephemeral
+                    // mid-block partial hash, so it genuinely cannot be found by hash — that is
+                    // the crash case this fallback exists for. The gate is defensive: it makes a
+                    // real hash match win whenever the fork point is findable at all. BlockHistory
+                    // keeps at most one entry per height, so there is no stale same-height sibling
+                    // for it to guard against in practice.
+                    let hash_findable = self.hash_in_history(&block.parent_hash);
                     // keep removing the head until the new block fits
                     loop {
                         let head = self
@@ -117,23 +160,39 @@ impl BlockHistory {
 
                         if head.hash == block.parent_hash {
                             break;
-                        } else {
-                            let reverted_block = self
-                                .history
-                                .pop_back()
-                                .ok_or(BlockHistoryError::RevertPositionNotFound)?;
-                            // record reverted blocks in cache
-                            self.reverts
-                                .push(reverted_block.hash.clone(), reverted_block);
                         }
+                        if !hash_findable && head.is_partial() && head.number + 1 == block.number {
+                            debug!(
+                                revert_number = block.number,
+                                revert_parent = ?block.parent_hash,
+                                fork_number = head.number,
+                                fork_hash = ?head.hash,
+                                "RevertForkPointHeightFallback"
+                            );
+                            break;
+                        }
+                        let reverted_block = self
+                            .history
+                            .pop_back()
+                            .ok_or(BlockHistoryError::RevertPositionNotFound)?;
+                        // record reverted blocks in cache
+                        self.reverts
+                            .push(reverted_block.hash.clone(), reverted_block);
                     }
                 }
-                // Final sanity check against things going awfully wrong.
-                if let Some(true) = self
-                    .latest()
-                    .map(|b| b.hash != block.parent_hash)
-                {
-                    return Err(BlockHistoryError::DetachedBlock);
+                // This mirrors the drain loop's two exit conditions above, so it can never fail
+                // today — `push` never returns having stopped anywhere else. It is a
+                // belt-and-braces check against future changes to that loop, not a live guard
+                // against a stale same-height sibling: BlockHistory retains at most one entry per
+                // height, so that state cannot arise.
+                if let Some(latest) = self.latest() {
+                    let connects = latest.hash == block.parent_hash ||
+                        (!self.hash_in_history(&block.parent_hash) &&
+                            latest.is_partial() &&
+                            latest.number + 1 == block.number);
+                    if !connects {
+                        return Err(BlockHistoryError::DetachedBlock);
+                    }
                 }
                 // Push new block to history, marking it as latest.
                 debug!(
@@ -253,6 +312,16 @@ impl BlockHistory {
                     // if this is not a revert it means this block is delayed.
                     BlockPosition::Delayed
                 }
+            } else if block.revert && self.partial_at_height(block.number) {
+                // A revert to a block retained only as a mid-block partial: the revert carries
+                // the sealed hash, which an ephemeral partial hash can never match. Same height
+                // means same canonical block, so this is the expected forward update.
+                debug!(
+                    number = block.number,
+                    hash = ?block.hash,
+                    "RevertClassifiedByPartialHeight"
+                );
+                BlockPosition::NextExpected
             } else if block.is_partial() && !block.revert {
                 // A non-revert partial block at or below the tip whose hash is not in history is a
                 // superseded/delayed partial. Partials share a block number but carry ephemeral
@@ -287,6 +356,12 @@ impl BlockHistory {
         self.history
             .iter()
             .any(|b| &b.hash == h)
+    }
+
+    fn partial_at_height(&self, number: u64) -> bool {
+        self.history
+            .iter()
+            .any(|b| b.number == number && b.is_partial())
     }
 
     pub fn latest(&self) -> Option<&BlockHeader> {
@@ -426,6 +501,64 @@ mod test {
         assert_eq!(history.history.len(), 4);
         assert_eq!(history.oldest().unwrap().number, 5);
         assert_eq!(history.latest().unwrap().number, 8);
+    }
+
+    #[test]
+    fn test_new_stitches_partial_parent_by_height() {
+        // Reinit merges retained history with stream headers. The child of a mid-block partial
+        // links to the sealed block hash, which the partial's ephemeral hash can never match —
+        // the chain must connect by height instead of dropping all ancestry.
+        let mut blocks = generate_blocks(2, 7, None); // full blocks 7, 8
+        blocks.push(partial_block(9, 2, int_hash(8))); // mid-block partial, ephemeral hash
+        blocks.push(partial_block(10, 0, int_hash(9))); // child linking to the sealed hash of 9
+
+        let history = BlockHistory::new(blocks, 15).expect("failed to create history");
+
+        let retained: Vec<u64> = history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![7, 8, 9, 10], "ancestry must survive the ephemeral-hash break");
+    }
+
+    #[test]
+    fn test_new_prefers_hash_match_over_partial_at_same_height() {
+        // Regression: among several candidates at the same height, the connected-chain stitch
+        // used to accept the first one that either hash-matched or was a partial. Since stream
+        // headers are appended after retained history and the list is reversed, a same-height
+        // partial from a Delayed synchronizer's losing fork was examined before — and beat —
+        // the canonical hash-matching block, dropping the canonical block and all its ancestors.
+        let mut retained = generate_blocks(2, 323, None); // full 323, full 324
+        retained.push(partial_block(325, 2, int_hash(324))); // mid-block partial, ephemeral hash
+
+        // Stream headers merged in on reinit: the tip advanced via a partial parented on the
+        // sealed hash of 325, and a Delayed synchronizer still holds a losing-fork partial at
+        // 324's height. Appended after retained history, it is examined first once reversed —
+        // exactly the ordering that made the old first-match code pick it over canonical 324.
+        let mut input = retained;
+        input.push(partial_block(326, 0, int_hash(325)));
+        input.push(partial_block(324, 1, random_hash()));
+
+        let history = BlockHistory::new(input, 15).expect("failed to create history");
+
+        let retained: Vec<u64> = history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(
+            retained,
+            vec![323, 324, 325, 326],
+            "canonical 324 and its ancestor 323 must survive"
+        );
+        assert_eq!(
+            history
+                .blocks()
+                .find(|b| b.number == 324)
+                .unwrap()
+                .hash,
+            int_hash(324),
+            "the canonical full block must win, not the losing-fork partial"
+        );
     }
 
     #[test]
@@ -691,6 +824,31 @@ mod test {
     }
 
     #[test]
+    fn test_revert_to_block_retained_as_partial_is_next_expected() {
+        // History retains block 9 only as a mid-block partial (ephemeral hash). A revert to
+        // sealed 9 cannot be found by hash but is the same canonical block by height.
+        let mut blocks = generate_blocks(2, 7, None); // full blocks 7, 8
+        blocks.push(partial_block(9, 2, int_hash(8)));
+        blocks.push(partial_block(10, 0, int_hash(9)));
+        let history = BlockHistory::new(blocks, 15).unwrap();
+
+        let revert = BlockHeader {
+            number: 9,
+            hash: int_hash(9),
+            parent_hash: int_hash(8),
+            revert: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            history
+                .determine_block_position(&revert)
+                .expect("must classify, not error"),
+            BlockPosition::NextExpected
+        );
+    }
+
+    #[test]
     fn test_partial_below_tip_is_delayed() {
         // History tip has advanced to the next block's first partial, while an earlier partial of
         // the previous block arrives late from a catching-up synchronizer. It must classify as
@@ -836,5 +994,36 @@ mod test {
         assert!(history
             .reverts
             .contains(&partial_1.hash));
+    }
+
+    #[test]
+    fn test_revert_drain_stops_at_partial_fork_point() {
+        // The fork point (block 9) is retained as a mid-block partial. A revert to block 10
+        // must drain down to it and re-push the reverted-to block, not exhaust the history.
+        let mut blocks = generate_blocks(2, 7, None); // full blocks 7, 8
+        blocks.push(partial_block(9, 2, int_hash(8)));
+        blocks.push(partial_block(10, 0, int_hash(9)));
+        let mut history = BlockHistory::new(blocks, 15).unwrap();
+
+        let revert = BlockHeader {
+            number: 10,
+            hash: int_hash(10),
+            parent_hash: int_hash(9),
+            revert: true,
+            ..Default::default()
+        };
+
+        history
+            .push(revert)
+            .expect("revert with a partial fork point must resolve");
+
+        let retained: Vec<u64> = history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![7, 8, 9, 10]);
+        let latest = history.latest().unwrap();
+        assert!(latest.revert);
+        assert!(!latest.is_partial());
     }
 }

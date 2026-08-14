@@ -154,7 +154,7 @@ mod tests {
         "fD0b31d2E955fA55e3fa641Fe90e08b677188d35",
         "ZeroAllowanceUser"
     )]
-    // TychoRouter - Balancer Vault
+    // TychoRouterV3 - Balancer Vault
     #[case(
         "fD0b31d2E955fA55e3fa641Fe90e08b677188d35",
         "BA12222222228d8Ba445958a75a0704d566BF2C8",

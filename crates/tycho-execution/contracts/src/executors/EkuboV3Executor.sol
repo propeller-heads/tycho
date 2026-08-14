@@ -43,13 +43,12 @@ address payable constant CORE_ADDRESS =
 ICore constant CORE = ICore(CORE_ADDRESS);
 address constant MEV_CAPTURE_ADDRESS =
     0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be;
-// PLACEHOLDER non-zero address — must NOT be address(0). Signed Ekubo V3
-// (SignedExclusiveSwap, forward-only) pools set their pool config extension to
-// this address; the executor detects a signed hop by comparing each hop's
-// poolConfig.extension() against it and routes that hop through the signed path.
-// TODO: replace with the deployed SignedExclusiveSwap extension address.
+// Signed Ekubo V3 (SignedExclusiveSwap) pools set their pool
+// config extension to this address; the executor detects a signed hop by
+// comparing each hop's poolConfig.extension() against it and routes that hop
+// through the signed path.
 address constant SIGNED_EXCLUSIVE_SWAP_ADDRESS =
-    0x5519eD5e5e5E5E5e5E5E5e5e5e5E5e5e5e5E5E5E;
+    0x55b703eED01b35641963da2FB2E14885993605A3;
 
 contract EkuboV3Executor is IExecutor, ICallback {
     error EkuboV3Executor__InvalidDataLength();

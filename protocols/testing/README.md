@@ -78,7 +78,7 @@ docker compose up --build
 
 ## Runtime Bytecode Fixtures
 
-Execution validation overrides the TychoRouter, FeeCalculator, and protocol executors at simulation
+Execution validation overrides the TychoRouterV3, FeeCalculator, and protocol executors at simulation
 time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated from the
 `tycho-execution` contracts, so they must be regenerated whenever those contracts change.
 

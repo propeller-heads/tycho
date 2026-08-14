@@ -87,7 +87,7 @@ contract MetricExecutor is IExecutor, ICallback {
         if (oracleUpdateMode == OracleUpdateMode.Always) {
             // Always mode updates the configured Metric oracle before the first swap.
             // Keep the target on the immutable instead of user data since this executor runs
-            // through TychoRouter delegatecall.
+            // through TychoRouterV3 delegatecall.
             _updateOracle(oracleArgs);
         }
 
