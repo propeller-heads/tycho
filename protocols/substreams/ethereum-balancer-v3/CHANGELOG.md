@@ -49,9 +49,6 @@
   the pool itself — and reCLAMM's earlier maths is kept out by configuring only
   its newest factory.
 
-- Emit the configured Vault address as a `vault` static attribute on every
-  component, so consumers can resolve it without calling the pool contract.
-
 - Skip pools created with an external hooks contract. Hooks run arbitrary code
   on swaps, which the native maths in `tycho-simulation` does not model, so
   such pools could never be quoted. This also drops pools whose hook only

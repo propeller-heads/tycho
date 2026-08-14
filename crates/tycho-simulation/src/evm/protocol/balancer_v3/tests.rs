@@ -40,9 +40,6 @@ use crate::evm::protocol::{
 };
 
 const DATASET: &str = "tests/assets/balancer_v3/native_parity_dataset.json";
-/// Placeholder Vault address: these tests never touch the VM, so the value is only carried around.
-const VAULT: &str = "0xba1333333333a1ba1108e8412f11850a5c319ba9";
-
 fn uint(value: &Value, field: &str) -> U256 {
     value[field]
         .as_str()
@@ -213,7 +210,6 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
                 .as_str()
                 .expect("pool_address"),
         ),
-        address(VAULT),
         tokens,
         min_token_balances,
         timestamp,
@@ -526,7 +522,6 @@ fn stable_pool_with_balances(balances: Vec<U256>) -> BalancerV3State {
     };
     BalancerV3State::new(
         address("0x000000000000000000000000000000000000f0"),
-        address(VAULT),
         tokens
             .iter()
             .map(|t| address(t))
@@ -593,7 +588,6 @@ fn weighted_pool_with_min_balances(
         .collect();
     BalancerV3State::new(
         address("0x000000000000000000000000000000000000f0"),
-        address(VAULT),
         tokens,
         min_token_balances,
         0,
@@ -760,7 +754,6 @@ fn protocol_fee_leaves_the_pool_in_the_balances_own_units() {
     let weights = vec![uint_wad() / U256::from(2u8); 2];
     let pool = BalancerV3State::new(
         address("0x00000000000000000000000000000000000000f0"),
-        address(VAULT),
         base.tokens
             .iter()
             .map(|t| address(t))
@@ -852,7 +845,6 @@ fn reclamm_pool_with_a_zero_invariant_is_reported_not_panicked() {
     };
     let pool = BalancerV3State::new(
         address("0x00000000000000000000000000000000000000f0"),
-        address(VAULT),
         base.tokens
             .iter()
             .map(|t| address(t))

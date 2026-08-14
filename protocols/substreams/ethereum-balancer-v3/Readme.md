@@ -18,7 +18,8 @@ substreams registry publish
 
 Contract addresses are configured per manifest via query-string params on map/store modules:
 
-- `vault` — Balancer V3 Vault; also emitted on every component as the `vault` static attribute
+- `vault` — Balancer V3 Vault; linked as a contract on every component, since its storage is
+  what the pool getters read through
 - `vault_extension` — Vault extension contract
 - `batch_router` — Batch router for swaps
 - `permit2` — Permit2 authorization contract

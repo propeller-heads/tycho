@@ -11,7 +11,7 @@ use std::{collections::HashMap, fmt::Debug};
 
 use alloy::{
     core::sol,
-    primitives::{Address as AlloyAddress, U256},
+    primitives::{address, Address as AlloyAddress, U256},
     sol_types::SolCall,
 };
 use balancer_maths_rust::{
@@ -190,6 +190,14 @@ const DECIMAL_DIFF_MASK: u64 = (1 << DECIMAL_DIFF_BITLENGTH) - 1;
 const NORMALIZED_WEIGHTS_ATTRIBUTE: &str = "normalized_weights";
 const POOL_TYPE_ATTRIBUTE: &str = "pool_type";
 
+/// The Balancer V3 Vault, which every pool of every generation is registered with.
+///
+/// Balancer deploys it from the same CREATE2 salt on every chain, so the address is identical on
+/// all four this package indexes — checked against the deployment manifests. A chain that ever
+/// broke that would have no code here, and its pools would be rejected at decode time rather than
+/// quoted against the wrong contract.
+const VAULT: AlloyAddress = address!("bA1333333333a1BA1108E8412f11850A5C319bA9");
+
 /// The pool families this module can quote natively. Balancer V3 exposes more (Gyro, LBP, and
 /// anything built on the hook system); those are rejected at decode time rather than approximated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,7 +291,6 @@ pub(super) fn resolve_pool_type(
 pub(super) fn read_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
     pool: &AlloyAddress,
-    vault: &AlloyAddress,
     pool_type: BalancerPoolType,
     tokens: &[Bytes],
     static_attributes: &HashMap<String, Bytes>,
@@ -293,12 +300,12 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let config = read_pool_config(engine, pool, vault)?;
+    let config = read_pool_config(engine, pool)?;
 
     // The factory a pool came from says nothing about its hooks: a StablePoolFactory pool can carry
     // a dynamic-fee hook, and quoting it as hookless yields amounts the Vault rejects.
     let hooks: HooksConfig =
-        call(engine, vault, IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
+        call(engine, &VAULT, IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
     if hooks.affects_swaps() {
         return Err(SimulationError::FatalError(format!(
             "balancer_v3 pool {pool} uses swap hook {:?}, which the native maths does not model",
@@ -419,20 +426,19 @@ where
 fn read_pool_config<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
     pool: &AlloyAddress,
-    vault: &AlloyAddress,
 ) -> Result<PoolConfig, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
     let config: PoolConfig =
-        call(engine, vault, IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
+        call(engine, &VAULT, IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
     if !config.isPoolInitialized {
         return Err(SimulationError::RecoverableError(format!(
             "balancer_v3 pool {pool} is not initialized"
         )));
     }
-    if is_paused(engine, vault, pool, &config)? {
+    if is_paused(engine, pool, &config)? {
         return Err(SimulationError::RecoverableError(format!("balancer_v3 pool {pool} is paused")));
     }
     Ok(config)
@@ -483,7 +489,6 @@ where
 pub(super) fn refresh_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
     pool: &AlloyAddress,
-    vault: &AlloyAddress,
     previous: &PoolState,
     block_timestamp: u64,
 ) -> Result<PoolState, SimulationError>
@@ -491,7 +496,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let config = read_pool_config(engine, pool, vault)?;
+    let config = read_pool_config(engine, pool)?;
 
     match previous {
         PoolState::Weighted(prev) => {
@@ -641,7 +646,6 @@ fn aggregate_swap_fee(config: &PoolConfig) -> U256 {
 /// only when the stored bit is set, which for almost every pool it never is.
 fn is_paused<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
-    vault: &AlloyAddress,
     pool: &AlloyAddress,
     config: &PoolConfig,
 ) -> Result<bool, SimulationError>
@@ -653,7 +657,7 @@ where
         return Ok(false);
     }
     let state: IBalancerV3Vault::getPoolPausedStateReturn =
-        call(engine, vault, IBalancerV3Vault::getPoolPausedStateCall { pool: *pool })?;
+        call(engine, &VAULT, IBalancerV3Vault::getPoolPausedStateCall { pool: *pool })?;
     Ok(state._0)
 }
 

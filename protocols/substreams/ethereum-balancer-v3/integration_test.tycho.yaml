@@ -19,7 +19,6 @@ tests:
           - "0x249ca82617ec3dfb2589c4c17ab7ec9765350a18"
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           normalized_weights: "0x5b22307830623161326263326563353030303030222c22307830326336386166306262313430303030225d"
           fee: "0x038d7ea4c68000"
           pool_type: "0x5765696768746564506f6f6c466163746f7279"
@@ -35,7 +34,6 @@ tests:
           - "0x440017A1b021006d556d7fc06A54c32E42Eb745B"
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           pool_type: "0x5765696768746564506f6f6c466163746f7279"
           normalized_weights: "0x5b22307830366630356235396433623230303030222c22307830366630356235396433623230303030225d"
           fee: "0x0aa87bee538000"
@@ -51,7 +49,6 @@ tests:
           - "0xafd9268fdfebee905f7439b12c943bc18ad293c2"
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           pool_type: "0x5765696768746564506f6f6c466163746f7279"
           normalized_weights: "0x5b22307830646264326663313337613330303030222c2230783233383666323666633130303030225d"
           fee: "0x038d7ea4c68000"
@@ -67,7 +64,6 @@ tests:
           - "0x18084fba666a33d37592fa2633fd49a74dd93a88"
           - "0x249ca82617ec3dfb2589c4c17ab7ec9765350a18"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           pool_type: "0x5765696768746564506f6f6c466163746f7279"
           normalized_weights: "0x5b22307830326336386166306262313430303030222c22307830623161326263326563353030303030225d"
           fee: "0x038d7ea4c68000"
@@ -83,7 +79,6 @@ tests:
           - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           pool_type: "0x5265436c616d6d506f6f6c466163746f7279"
           fee: "0x01c6bf52634000"
           initial_min_price: "0x01a7055297dc47"
@@ -108,7 +103,6 @@ tests:
           - "0x68917a0e538cf4a807b3d415c1af5cdbab0ff4dc"
           - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           normalized_weights: "0x5b22307830646264326663313337613330303030222c2230783233383666323666633130303030225d"
           fee: "0x0aa87bee538000"
           pool_type: "0x5765696768746564506f6f6c466163746f7279"
@@ -125,7 +119,6 @@ tests:
           - "0x4ba01f22827018b4772cd326c7627fb4956a7c00"
           - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           bpt: "0x111ce2a60c30f6058a57d0dbae1a39a42d998826"
           fee: "0x5af3107a4000"
           pool_type: "0x537461626c65506f6f6c466163746f7279"
@@ -143,7 +136,6 @@ tests:
           - "0x531e90a2376902de8915789fcc1075e3b0c153e7"
           - "0xac2435e3c25e8246870d33ce0a26988a46d5db68"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           bpt: "0xda28666719e28bc243b2f44a889e5c0577185a54"
           fee: "0x48c273950000"
           pool_type: "0x537461626c65506f6f6c466163746f7279"
@@ -163,7 +155,6 @@ tests:
           - "0x45804880de22913dafe09f4980848ece6ecbaf78"
           - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           fee: "0x470de4df820000"
           pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279"
         # The pool is funded in a later block, so there is nothing to quote in this range.
@@ -182,7 +173,6 @@ tests:
           - "0x45804880de22913dafe09f4980848ece6ecbaf78"
           - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         static_attributes:
-          vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           fee: "0x470de4df820000"
           pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279"
         skip_simulation: false

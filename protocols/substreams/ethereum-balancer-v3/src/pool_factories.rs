@@ -256,18 +256,13 @@ fn create_pool_component(
     attributes: &[(&str, &[u8])],
     config: &DeploymentConfig,
 ) -> ProtocolComponent {
-    // Every component carries the Vault it is registered with, so consumers can resolve it
-    // without calling the pool contract.
-    let mut attributes = attributes.to_vec();
-    attributes.push(("vault", config.vault.as_slice()));
-
-    // `tokens` is the pool's registration order, which its balances, rates and weights are all
-    // indexed by. The indexer preserves that order and `tycho-simulation` reads the pool's state
-    // in it, so it must not be sorted here.
+    // The Vault stays a linked contract — its storage is what the pool's getters read through —
+    // but not a static attribute: Balancer deploys it from the same CREATE2 salt on every chain,
+    // so consumers hold the address as a constant rather than one copy per component.
     ProtocolComponent::new(&address_id(pool))
         .with_contracts(&[pool.to_vec(), config.vault.clone()])
         .with_tokens(tokens)
-        .with_attributes(&attributes)
+        .with_attributes(attributes)
         .as_swap_type("balancer_v3_pool", ImplementationType::Vm)
 }
 
@@ -300,20 +295,21 @@ mod tests {
     }
 
     #[test]
-    fn components_carry_the_vault_static_attribute() {
+    fn components_link_the_vault_and_keep_their_factory_attributes() {
         let config = sample_config(false);
         let component = create_pool_component(
             &[0xab; 20],
             &[vec![0x01; 20], vec![0x02; 20]],
-            &[("pool_type", "WeightedPoolFactory@v1".as_bytes())],
+            &[("pool_type", "WeightedPoolFactory".as_bytes())],
             &config,
         );
-        let vault = component
-            .static_att
-            .iter()
-            .find(|attribute| attribute.name == "vault")
-            .expect("component must carry a `vault` static attribute");
-        assert_eq!(vault.value, config.vault);
+        // The Vault's storage is what every pool getter reads through, so it has to be tracked.
+        assert!(
+            component
+                .contracts
+                .contains(&config.vault),
+            "the Vault must be a linked contract"
+        );
         assert!(
             component
                 .static_att

@@ -23,9 +23,6 @@ use crate::{
     },
 };
 
-/// `vault` static attribute emitted by the `ethereum-balancer-v3` Substreams package.
-const VAULT_ATTRIBUTE: &str = "vault";
-
 impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for BalancerV3State {
     type Error = InvalidSnapshotError;
 
@@ -43,26 +40,9 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             ))
         })?;
 
-        // Both static attributes are resolved before any engine work: components missing them can
-        // only fail, so they must not cost stateless-contract fetches first.
-        let vault_bytes = value
-            .component
-            .static_attributes
-            .get(VAULT_ATTRIBUTE)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "balancer_v3 pool {pool_address} has no `{VAULT_ATTRIBUTE}`"
-                ))
-            })?
-            .clone();
-        let vault = AlloyAddress::try_from(vault_bytes.as_ref()).map_err(|e| {
-            InvalidSnapshotError::ValueError(format!(
-                "balancer_v3 pool {pool_address} carries an invalid `{VAULT_ATTRIBUTE}` static \
-                 attribute: {e}"
-            ))
-        })?;
-
         let pool = AlloyAddress::from_slice(pool_address.as_ref());
+        // Resolved before any engine work: a component whose family this module cannot quote can
+        // only fail, so it must not cost stateless-contract fetches first.
         let pool_type = vm::resolve_pool_type(&value.component.static_attributes, &pool)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
@@ -87,7 +67,6 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
         let state = vm::read_pool_state(
             &engine,
             &pool,
-            &vault,
             pool_type,
             &tokens,
             &value.component.static_attributes,
@@ -103,13 +82,6 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             vm::BalancerPoolType::QuantAmm => Vec::new(),
         };
 
-        Ok(BalancerV3State::new(
-            pool_address,
-            vault_bytes,
-            tokens,
-            min_token_balances,
-            block.timestamp,
-            state,
-        ))
+        Ok(BalancerV3State::new(pool_address, tokens, min_token_balances, block.timestamp, state))
     }
 }

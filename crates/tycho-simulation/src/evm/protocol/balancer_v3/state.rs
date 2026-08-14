@@ -76,8 +76,6 @@ const STABLE_MAX_IMBALANCE_RATIO: U256 = U256::from_limbs([10_000, 0, 0, 0]);
 pub struct BalancerV3State {
     /// Pool contract address (the Tycho component id).
     pool_address: Bytes,
-    /// Vault the pool is registered with, kept so updates need no extra lookup.
-    vault: Bytes,
     /// Token addresses in pool registration order, which the maths library indexes balances, rates
     /// and weights by.
     tokens: Vec<Bytes>,
@@ -95,13 +93,12 @@ pub struct BalancerV3State {
 impl BalancerV3State {
     pub(super) fn new(
         pool_address: Bytes,
-        vault: Bytes,
         tokens: Vec<Bytes>,
         min_token_balances: Vec<U256>,
         block_timestamp: u64,
         state: PoolState,
     ) -> Self {
-        Self { pool_address, vault, tokens, min_token_balances, block_timestamp, state }
+        Self { pool_address, tokens, min_token_balances, block_timestamp, state }
     }
 
     /// Token addresses in pool registration order.
@@ -700,10 +697,8 @@ impl ProtocolSim for BalancerV3State {
 
         let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
         let pool = AlloyAddress::from_slice(self.pool_address.as_ref());
-        let vault = AlloyAddress::from_slice(self.vault.as_ref());
-        self.state =
-            vm::refresh_pool_state(&engine, &pool, &vault, &self.state, self.block_timestamp)
-                .map_err(TransitionError::SimulationError)?;
+        self.state = vm::refresh_pool_state(&engine, &pool, &self.state, self.block_timestamp)
+            .map_err(TransitionError::SimulationError)?;
         Ok(())
     }
 
