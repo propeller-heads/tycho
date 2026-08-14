@@ -38,9 +38,11 @@ weighted_factories[v1]=201efd508c8dfe9de1a13c2452863a78cb2a86cc&weighted_factori
 ```
 
 Balancer keeps the `create` signature and the `PoolCreated` event stable across generations, so one
-decoder handles every version of a family. The label is free-form and reaches consumers through the
-`pool_type` static attribute, which is written as `<family>@<version>` — for example
-`WeightedPoolFactory@v1`. Consumers split on the first `@`, so a label may itself contain one.
+decoder handles every version of a family. The label names the generation for whoever reads the
+manifest and goes no further: the `pool_type` static attribute carries the family alone — for
+example `WeightedPoolFactory` — because a family prices the same whichever generation built the
+pool. Where a generation does differ, consumers probe the pool for the feature rather than read a
+label, and reCLAMM's earlier maths is kept out by configuring only its newest factory.
 
 Omit a family entirely when it is not deployed on a chain. `map_components` fails when no family is
 configured at all, since it would have nothing left to match.

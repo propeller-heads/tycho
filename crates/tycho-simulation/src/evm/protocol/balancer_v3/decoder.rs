@@ -30,10 +30,6 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
     type Error = InvalidSnapshotError;
 
     /// Decodes a `vm:balancer_v3` snapshot.
-    ///
-    /// Token order follows the pool's registration order as reported by the type-specific
-    /// immutable-data getter, not `component.tokens` (which Tycho sorts by address): balances,
-    /// rates and weights are all indexed in the former.
     async fn try_from_with_header(
         value: ComponentWithState,
         block: tycho_client::feed::BlockHeader,
@@ -47,17 +43,15 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             ))
         })?;
 
-        // Checked before any engine work: components indexed without the attribute can only fail,
-        // so they must not cost stateless-contract fetches or getter probing first.
+        // Both static attributes are resolved before any engine work: components missing them can
+        // only fail, so they must not cost stateless-contract fetches first.
         let vault_bytes = value
             .component
             .static_attributes
             .get(VAULT_ATTRIBUTE)
             .ok_or_else(|| {
                 InvalidSnapshotError::ValueError(format!(
-                    "balancer_v3 pool {pool_address} carries no `{VAULT_ATTRIBUTE}` static \
-                     attribute; it was indexed with an ethereum-balancer-v3 package older than \
-                     0.6.0"
+                    "balancer_v3 pool {pool_address} has no `{VAULT_ATTRIBUTE}`"
                 ))
             })?
             .clone();
@@ -67,6 +61,10 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
                  attribute: {e}"
             ))
         })?;
+
+        let pool = AlloyAddress::from_slice(pool_address.as_ref());
+        let pool_type = vm::resolve_pool_type(&value.component.static_attributes, &pool)
+            .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
         let engine = create_engine(
             SHARED_TYCHO_DB.clone(),
@@ -83,44 +81,31 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
             .await
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
 
-        let pool = AlloyAddress::from_slice(pool_address.as_ref());
-        let factory = vm::resolve_pool_type(&value.component.static_attributes, &engine, &pool)
-            .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
+        // The component's token list is the pool's registration order, which its balances, rates
+        // and weights are all indexed by.
+        let tokens = value.component.tokens.clone();
         let state = vm::read_pool_state(
             &engine,
             &pool,
             &vault,
-            factory.pool_type,
+            pool_type,
+            &tokens,
             &value.component.static_attributes,
             block.timestamp,
         )
         .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
         // Only the weighted family registers per-token minimum balances. QuantAMM shares
         // `WeightedMath`'s curve but not that check — it bounds swaps by its own trade-size ratio.
-        let min_token_balances = match factory.pool_type {
+        let min_token_balances = match pool_type {
             vm::BalancerPoolType::Weighted => vm::read_weighted_min_token_balances(&engine, &pool),
             vm::BalancerPoolType::Stable |
             vm::BalancerPoolType::Reclamm |
             vm::BalancerPoolType::QuantAmm => Vec::new(),
         };
 
-        let tokens = state
-            .base()
-            .tokens
-            .iter()
-            .map(|token| {
-                Bytes::from_str(token).map_err(|e| {
-                    InvalidSnapshotError::ValueError(format!(
-                        "balancer_v3 pool {pool_address} reported an invalid token {token}: {e}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         Ok(BalancerV3State::new(
             pool_address,
             vault_bytes,
-            factory,
             tokens,
             min_token_balances,
             block.timestamp,

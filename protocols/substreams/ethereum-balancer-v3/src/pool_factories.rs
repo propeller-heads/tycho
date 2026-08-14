@@ -29,9 +29,6 @@ use tycho_substreams::{
 // Token config: (token_address, rate, rate_provider_address, is_exempt_from_yield_fees)
 type TokenConfig = Vec<(Vec<u8>, substreams::scalar::BigInt, Vec<u8>, bool)>;
 
-/// Separates the factory family from its generation label in the `pool_type` static attribute.
-const POOL_TYPE_VERSION_SEPARATOR: char = '@';
-
 fn collect_rate_providers(tokens: &TokenConfig) -> Vec<Vec<u8>> {
     tokens
         .iter()
@@ -57,24 +54,15 @@ fn has_hooks(pool_hooks_contract: &[u8]) -> bool {
         .any(|byte| *byte != 0)
 }
 
-/// Renders the `pool_type` static attribute: the factory family, then the configured generation.
-///
-/// `tycho-simulation`'s balancer_v3 decoder splits this on the first
-/// [`POOL_TYPE_VERSION_SEPARATOR`] — the family selects the maths, the version names the
-/// generation. Keep the two sides in step when changing the separator.
-fn pool_type_attribute(family: &str, version: &str) -> String {
-    format!("{family}{POOL_TYPE_VERSION_SEPARATOR}{version}")
-}
-
 pub fn address_map(
     pool_factory_address: &[u8],
     log: &Log,
     call: &Call,
     config: &DeploymentConfig,
 ) -> Option<ProtocolComponent> {
-    if let Some(version) = config
+    if config
         .weighted_factories
-        .version_of(pool_factory_address)
+        .contains(pool_factory_address)
     {
         let WeightedPoolCreated { pool } = WeightedPoolCreated::match_and_decode(log)?;
         let WeightedPoolCreate {
@@ -105,7 +93,7 @@ pub fn address_map(
         let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
-        let pool_type = pool_type_attribute("WeightedPoolFactory", version);
+        let pool_type = "WeightedPoolFactory";
 
         let mut attributes = vec![
             ("pool_type", pool_type.as_bytes()),
@@ -120,9 +108,9 @@ pub fn address_map(
         return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
     }
 
-    if let Some(version) = config
+    if config
         .stable_factories
-        .version_of(pool_factory_address)
+        .contains(pool_factory_address)
     {
         let StablePoolCreated { pool } = StablePoolCreated::match_and_decode(log)?;
         let StablePoolCreate {
@@ -148,7 +136,7 @@ pub fn address_map(
         let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
-        let pool_type = pool_type_attribute("StablePoolFactory", version);
+        let pool_type = "StablePoolFactory";
 
         let mut attributes =
             vec![("pool_type", pool_type.as_bytes()), ("bpt", &pool), ("fee", &fee_bytes)];
@@ -160,9 +148,9 @@ pub fn address_map(
         return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
     }
 
-    if let Some(version) = config
+    if config
         .quantamm_factories
-        .version_of(pool_factory_address)
+        .contains(pool_factory_address)
     {
         let QuantAmmPoolCreated { pool } = QuantAmmPoolCreated::match_and_decode(log)?;
         // The factory takes its creation parameters as one nested struct, which the generated
@@ -192,7 +180,7 @@ pub fn address_map(
         let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
-        let pool_type = pool_type_attribute("QuantAMMWeightedPoolFactory", version);
+        let pool_type = "QuantAMMWeightedPoolFactory";
 
         // No `normalized_weights`: a QuantAMM pool's weights are rewritten by its rule engine and
         // interpolated with time, so `tycho-simulation` reads them from the pool at each block.
@@ -205,9 +193,9 @@ pub fn address_map(
         return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
     }
 
-    if let Some(version) = config
+    if config
         .reclamm_factories
-        .version_of(pool_factory_address)
+        .contains(pool_factory_address)
     {
         let ReClammPoolCreated { pool } = ReClammPoolCreated::match_and_decode(log)?;
         let ReClammPoolCreate {
@@ -238,7 +226,7 @@ pub fn address_map(
         let token_b_price_includes_rate_bytes = [price_params.4 as u8];
         let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
 
-        let pool_type = pool_type_attribute("ReClammPoolFactory", version);
+        let pool_type = "ReClammPoolFactory";
 
         let mut attributes = vec![
             ("pool_type", pool_type.as_bytes()),
@@ -273,12 +261,9 @@ fn create_pool_component(
     let mut attributes = attributes.to_vec();
     attributes.push(("vault", config.vault.as_slice()));
 
-    // `tokens` is the pool's registration order, which is what its balances, rates and weights are
-    // all indexed by — and which the component's own token list does not preserve. Recording it
-    // lets consumers rebuild the pool's state without asking the chain for the token list.
-    let token_order = json_serialize_address_list(tokens);
-    attributes.push(("token_order", &token_order));
-
+    // `tokens` is the pool's registration order, which its balances, rates and weights are all
+    // indexed by. The indexer preserves that order and `tycho-simulation` reads the pool's state
+    // in it, so it must not be sorted here.
     ProtocolComponent::new(&address_id(pool))
         .with_contracts(&[pool.to_vec(), config.vault.clone()])
         .with_tokens(tokens)
@@ -303,16 +288,6 @@ mod tests {
              &skip_rate_provider_pools={skip_rate_provider_pools}"
         ))
         .unwrap()
-    }
-
-    #[test]
-    fn pool_type_attribute_carries_the_generation() {
-        assert_eq!(pool_type_attribute("WeightedPoolFactory", "v1"), "WeightedPoolFactory@v1");
-        // Version labels are free-form; only the first separator delimits the family.
-        assert_eq!(
-            pool_type_attribute("ReClammPoolFactory", "20250101-v3-reclamm"),
-            "ReClammPoolFactory@20250101-v3-reclamm"
-        );
     }
 
     #[test]

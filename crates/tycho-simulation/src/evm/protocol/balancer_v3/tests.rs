@@ -34,7 +34,7 @@ use tycho_common::{
 use crate::evm::protocol::{
     balancer_v3::{
         state::BalancerV3State,
-        vm::{BalancerPoolType, PoolTypeAttribute},
+        vm::{parse_pool_type, BalancerPoolType},
     },
     u256_num::u256_to_biguint,
 };
@@ -95,7 +95,7 @@ fn token_list(value: &Value) -> Vec<String> {
 
 /// Rebuilds the maths library's state from a recorded entry, standing in for what
 /// `vm::read_pool_state` produces from live storage.
-fn pool_state(state: &Value, timestamp: u64) -> (BalancerPoolType, PoolState) {
+fn pool_state(state: &Value, timestamp: u64) -> PoolState {
     let base = BasePoolState {
         pool_address: state["pool_address"]
             .as_str()
@@ -121,60 +121,48 @@ fn pool_state(state: &Value, timestamp: u64) -> (BalancerPoolType, PoolState) {
         .as_str()
         .expect("pool_type")
     {
-        "WEIGHTED" => (
-            BalancerPoolType::Weighted,
-            PoolState::Weighted(WeightedState::new(base, uint_list(state, "weights"))),
-        ),
-        "STABLE" => (
-            BalancerPoolType::Stable,
-            PoolState::Stable(StableState {
-                base,
-                mutable: StableMutable { amp: uint(state, "amp") },
-            }),
-        ),
-        "QUANT_AMM_WEIGHTED" => (
-            BalancerPoolType::QuantAmm,
-            PoolState::QuantAmm(QuantAmmState {
-                base,
-                mutable: QuantAmmMutable {
-                    first_four_weights_and_multipliers: int_list(
-                        state,
-                        "first_four_weights_and_multipliers",
-                    ),
-                    second_four_weights_and_multipliers: int_list(
-                        state,
-                        "second_four_weights_and_multipliers",
-                    ),
-                    last_update_time: uint(state, "last_update_time"),
-                    last_interop_time: uint(state, "last_interop_time"),
-                    current_timestamp: U256::from(timestamp),
-                },
-                immutable: QuantAmmImmutable {
-                    max_trade_size_ratio: uint(state, "max_trade_size_ratio"),
-                },
-            }),
-        ),
-        "RECLAMM" => (
-            BalancerPoolType::Reclamm,
-            PoolState::ReClammV2(ReClammV2State {
-                immutable: ReClammV2Immutable {
-                    pool_address: base.pool_address.clone(),
-                    tokens: base.tokens.clone(),
-                },
-                base,
-                mutable: ReClammV2Mutable {
-                    last_virtual_balances: uint_list(state, "last_virtual_balances"),
-                    daily_price_shift_base: uint(state, "daily_price_shift_base"),
-                    last_timestamp: uint(state, "last_timestamp"),
-                    current_timestamp: U256::from(timestamp),
-                    centeredness_margin: uint(state, "centeredness_margin"),
-                    start_fourth_root_price_ratio: uint(state, "start_fourth_root_price_ratio"),
-                    end_fourth_root_price_ratio: uint(state, "end_fourth_root_price_ratio"),
-                    price_ratio_update_start_time: uint(state, "price_ratio_update_start_time"),
-                    price_ratio_update_end_time: uint(state, "price_ratio_update_end_time"),
-                },
-            }),
-        ),
+        "WEIGHTED" => PoolState::Weighted(WeightedState::new(base, uint_list(state, "weights"))),
+        "STABLE" => PoolState::Stable(StableState {
+            base,
+            mutable: StableMutable { amp: uint(state, "amp") },
+        }),
+        "QUANT_AMM_WEIGHTED" => PoolState::QuantAmm(QuantAmmState {
+            base,
+            mutable: QuantAmmMutable {
+                first_four_weights_and_multipliers: int_list(
+                    state,
+                    "first_four_weights_and_multipliers",
+                ),
+                second_four_weights_and_multipliers: int_list(
+                    state,
+                    "second_four_weights_and_multipliers",
+                ),
+                last_update_time: uint(state, "last_update_time"),
+                last_interop_time: uint(state, "last_interop_time"),
+                current_timestamp: U256::from(timestamp),
+            },
+            immutable: QuantAmmImmutable {
+                max_trade_size_ratio: uint(state, "max_trade_size_ratio"),
+            },
+        }),
+        "RECLAMM" => PoolState::ReClammV2(ReClammV2State {
+            immutable: ReClammV2Immutable {
+                pool_address: base.pool_address.clone(),
+                tokens: base.tokens.clone(),
+            },
+            base,
+            mutable: ReClammV2Mutable {
+                last_virtual_balances: uint_list(state, "last_virtual_balances"),
+                daily_price_shift_base: uint(state, "daily_price_shift_base"),
+                last_timestamp: uint(state, "last_timestamp"),
+                current_timestamp: U256::from(timestamp),
+                centeredness_margin: uint(state, "centeredness_margin"),
+                start_fourth_root_price_ratio: uint(state, "start_fourth_root_price_ratio"),
+                end_fourth_root_price_ratio: uint(state, "end_fourth_root_price_ratio"),
+                price_ratio_update_start_time: uint(state, "price_ratio_update_start_time"),
+                price_ratio_update_end_time: uint(state, "price_ratio_update_end_time"),
+            },
+        }),
         other => panic!("dataset carries pool type `{other}`, which the decoder cannot build"),
     }
 }
@@ -207,7 +195,7 @@ fn load_dataset() -> (u64, Vec<Value>) {
 }
 
 fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
-    let (pool_type, state) = pool_state(&entry["state"], timestamp);
+    let state = pool_state(&entry["state"], timestamp);
     let tokens = state
         .base()
         .tokens
@@ -226,9 +214,6 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
                 .expect("pool_address"),
         ),
         address(VAULT),
-        // The dataset records no factory generation, which is also what a pool indexed before
-        // generations were labelled reports.
-        PoolTypeAttribute { pool_type, version: None },
         tokens,
         min_token_balances,
         timestamp,
@@ -237,44 +222,21 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
 }
 
 #[test]
-fn pool_type_attribute_splits_family_from_generation() {
-    assert_eq!(
-        PoolTypeAttribute::parse("WeightedPoolFactory@v1"),
-        Ok(PoolTypeAttribute {
-            pool_type: BalancerPoolType::Weighted,
-            version: Some("v1".to_string()),
-        })
-    );
-    // Only the first separator delimits the family, so labels may contain it themselves.
-    assert_eq!(
-        PoolTypeAttribute::parse("ReClammPoolFactory@2025-01-01@rc2"),
-        Ok(PoolTypeAttribute {
-            pool_type: BalancerPoolType::Reclamm,
-            version: Some("2025-01-01@rc2".to_string()),
-        })
-    );
-}
-
-#[test]
-fn pool_type_attribute_without_a_generation_still_resolves() {
-    assert_eq!(
-        PoolTypeAttribute::parse("StablePoolFactory"),
-        Ok(PoolTypeAttribute { pool_type: BalancerPoolType::Stable, version: None })
-    );
+fn pool_type_attribute_names_the_family_whose_maths_applies() {
+    assert_eq!(parse_pool_type("WeightedPoolFactory"), Ok(BalancerPoolType::Weighted));
+    assert_eq!(parse_pool_type("StablePoolFactory"), Ok(BalancerPoolType::Stable));
+    assert_eq!(parse_pool_type("ReClammPoolFactory"), Ok(BalancerPoolType::Reclamm));
+    assert_eq!(parse_pool_type("QuantAMMWeightedPoolFactory"), Ok(BalancerPoolType::QuantAmm));
 }
 
 #[test]
 fn pool_type_attribute_rejects_unquotable_and_malformed_values() {
-    for marker in ["GyroECLPPoolFactory@v1", "LBPoolFactory", "@v1", ""] {
-        assert!(
-            PoolTypeAttribute::parse(marker).is_err(),
-            "`{marker}` must not resolve to a pool family"
-        );
+    // `WeightedPoolFactory@v1` is what an earlier package wrote. Such components predate the
+    // `vault` attribute too, so they are rejected either way — but rejecting the marker keeps a
+    // stale package from being quoted on the strength of a family name alone.
+    for marker in ["GyroECLPPoolFactory", "LBPoolFactory", "WeightedPoolFactory@v1", ""] {
+        assert!(parse_pool_type(marker).is_err(), "`{marker}` must not resolve to a pool family");
     }
-    // A separator with nothing after it is a packaging slip, not a versionless pool.
-    assert!(PoolTypeAttribute::parse("WeightedPoolFactory@")
-        .expect_err("empty version must be rejected")
-        .contains("empty factory version"));
 }
 
 #[test]
@@ -565,7 +527,6 @@ fn stable_pool_with_balances(balances: Vec<U256>) -> BalancerV3State {
     BalancerV3State::new(
         address("0x000000000000000000000000000000000000f0"),
         address(VAULT),
-        PoolTypeAttribute { pool_type: BalancerPoolType::Stable, version: None },
         tokens
             .iter()
             .map(|t| address(t))
@@ -633,10 +594,6 @@ fn weighted_pool_with_min_balances(
     BalancerV3State::new(
         address("0x000000000000000000000000000000000000f0"),
         address(VAULT),
-        PoolTypeAttribute {
-            pool_type: BalancerPoolType::Weighted,
-            version: Some("v2".to_string()),
-        },
         tokens,
         min_token_balances,
         0,
@@ -804,7 +761,6 @@ fn protocol_fee_leaves_the_pool_in_the_balances_own_units() {
     let pool = BalancerV3State::new(
         address("0x00000000000000000000000000000000000000f0"),
         address(VAULT),
-        PoolTypeAttribute { pool_type: BalancerPoolType::Weighted, version: None },
         base.tokens
             .iter()
             .map(|t| address(t))
@@ -897,7 +853,6 @@ fn reclamm_pool_with_a_zero_invariant_is_reported_not_panicked() {
     let pool = BalancerV3State::new(
         address("0x00000000000000000000000000000000000000f0"),
         address(VAULT),
-        PoolTypeAttribute { pool_type: BalancerPoolType::Reclamm, version: None },
         base.tokens
             .iter()
             .map(|t| address(t))

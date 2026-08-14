@@ -13,8 +13,9 @@
 
   Balancer keeps the `create` signature and the `PoolCreated` event stable
   across generations, so one decoder serves every version of a family. The
-  version label is free-form and only names the generation in log output. A
-  family may be omitted entirely when it is not deployed on a chain.
+  version label is free-form and names the generation for whoever reads the
+  manifest; only the address is matched. A family may be omitted entirely when
+  it is not deployed on a chain.
 
 - Reject a factory address configured under two version labels, and reject an
   address that is not 20 bytes, at parameter-parsing time.
@@ -40,11 +41,13 @@
   are also used by Balancer V2 deployments, whose `create` signature differs.
   Only tasks whose id contains `-v3-` belong here.
 
-- Carry the generation in the `pool_type` static attribute as
-  `<family>@<version>`, for example `WeightedPoolFactory@v1`. Consumers split on
-  the first `@`: the family selects the maths, the version names the generation.
-  A value without a separator still resolves to a family with no version, which
-  is what pools indexed before this release report.
+- Write the factory family alone into the `pool_type` static attribute, for
+  example `WeightedPoolFactory`. A family prices the same whichever generation
+  built the pool, so the generation label stays in the manifest rather than
+  travelling with every component. Where a generation does differ, the consumer
+  probes the pool for the feature — the weighted minimum balance is read from
+  the pool itself — and reCLAMM's earlier maths is kept out by configuring only
+  its newest factory.
 
 - Emit the configured Vault address as a `vault` static attribute on every
   component, so consumers can resolve it without calling the pool contract.

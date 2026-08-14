@@ -22,7 +22,7 @@ tests:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           normalized_weights: "0x5b22307830623161326263326563353030303030222c22307830326336386166306262313430303030225d"
           fee: "0x038d7ea4c68000"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
         skip_simulation: true # This test is only for creation, simulation tests are below
         creation_tx: "0xaf0f8da4b7b148f156605673c6ac56657f67c47001aadd5b3b64d6cb787daad4"
 
@@ -36,7 +36,7 @@ tests:
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         static_attributes:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
           normalized_weights: "0x5b22307830366630356235396433623230303030222c22307830366630356235396433623230303030225d"
           fee: "0x0aa87bee538000"
         skip_simulation: false
@@ -52,7 +52,7 @@ tests:
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
           normalized_weights: "0x5b22307830646264326663313337613330303030222c2230783233383666323666633130303030225d"
           fee: "0x038d7ea4c68000"
         skip_simulation: false
@@ -68,7 +68,7 @@ tests:
           - "0x249ca82617ec3dfb2589c4c17ab7ec9765350a18"
         static_attributes:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
           normalized_weights: "0x5b22307830326336386166306262313430303030222c22307830623161326263326563353030303030225d"
           fee: "0x038d7ea4c68000"
         skip_simulation: false
@@ -84,7 +84,7 @@ tests:
           - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         static_attributes:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
-          pool_type: "0x5265436c616d6d506f6f6c466163746f7279407633"
+          pool_type: "0x5265436c616d6d506f6f6c466163746f7279"
           fee: "0x01c6bf52634000"
           initial_min_price: "0x01a7055297dc47"
           initial_max_price: "0x01b32a38cac3fb"
@@ -111,7 +111,7 @@ tests:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           normalized_weights: "0x5b22307830646264326663313337613330303030222c2230783233383666323666633130303030225d"
           fee: "0x0aa87bee538000"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279407632"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
         # Liquidity was added well after creation, so there is nothing to quote in this range.
         skip_simulation: true
         creation_tx: "0xe3142ae8e86019a7800aab4e9e3d64824083146e8f25015828af3475b1bcbae8"
@@ -128,7 +128,7 @@ tests:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           bpt: "0x111ce2a60c30f6058a57d0dbae1a39a42d998826"
           fee: "0x5af3107a4000"
-          pool_type: "0x537461626c65506f6f6c466163746f7279407632"
+          pool_type: "0x537461626c65506f6f6c466163746f7279"
         skip_simulation: false
         creation_tx: "0x48b355986dc3c4beef8fe7b6468354732a375cd538523cee379857722d2af7be"
 
@@ -146,7 +146,7 @@ tests:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           bpt: "0xda28666719e28bc243b2f44a889e5c0577185a54"
           fee: "0x48c273950000"
-          pool_type: "0x537461626c65506f6f6c466163746f7279407633"
+          pool_type: "0x537461626c65506f6f6c466163746f7279"
           rate_providers: "0x5b22307830653630313365623535343064626638316531396662373636373463656335396232613234326134222c22307830393432356137633364323561306537343366353234326632373639663737366435623730383439225d"
         skip_simulation: true
         creation_tx: "0x08b69b2409fa1d919c5c502f35eefeea7323d1e17ccc04dd7b350aa442b994a9"
@@ -165,7 +165,7 @@ tests:
         static_attributes:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           fee: "0x470de4df820000"
-          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279"
         # The pool is funded in a later block, so there is nothing to quote in this range.
         skip_simulation: true
         creation_tx: "0x28fe2c31a2b97f60874dfc458af6242b371828a2c9fe2c2fe0f2c7c90117204c"
@@ -184,6 +184,6 @@ tests:
         static_attributes:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           fee: "0x470de4df820000"
-          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279"
         skip_simulation: false
         creation_tx: "0x28fe2c31a2b97f60874dfc458af6242b371828a2c9fe2c2fe0f2c7c90117204c"

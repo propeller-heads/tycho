@@ -38,7 +38,7 @@ use tycho_common::{
 use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
-        balancer_v3::vm::{self, BalancerPoolType, PoolTypeAttribute},
+        balancer_v3::vm,
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
@@ -67,31 +67,23 @@ const STABLE_MAX_IMBALANCE_RATIO: U256 = U256::from_limbs([10_000, 0, 0, 0]);
 
 /// A single Balancer V3 pool quoted through `balancer_maths_rust`.
 ///
-/// `tokens` follows the pool's own registration order, which is what the maths library indexes
-/// balances, rates and weights by. The storage-derived parts of the state are re-read from the VM
-/// on every [`ProtocolSim::delta_transition`] rather than patched from the delta, because the
-/// values the maths needs (live balances, token rates, amplification) are derived from storage
-/// that other contracts — rate providers above all — own. What registration fixed forever
-/// (tokens, scaling factors, weights, the hook check) is kept from decode time.
+/// The storage-derived parts of the state are re-read from the VM on every
+/// [`ProtocolSim::delta_transition`] rather than patched from the delta: the values the maths
+/// needs (live balances, token rates, amplification) are derived from storage that other
+/// contracts — rate providers above all — own. What registration fixed forever (tokens, scaling
+/// factors, weights, the hook check) is kept from decode time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BalancerV3State {
     /// Pool contract address (the Tycho component id).
     pool_address: Bytes,
     /// Vault the pool is registered with, kept so updates need no extra lookup.
     vault: Bytes,
-    /// Resolved pool family.
-    pool_type: BalancerPoolType,
-    /// Factory generation this pool was created by, as labelled in the Substreams deployment
-    /// params. `None` for pools indexed before generations were labelled. Every generation of a
-    /// family shares the same maths, so this never affects quoting.
-    factory_version: Option<String>,
-    /// Token addresses in pool registration order.
+    /// Token addresses in pool registration order, which the maths library indexes balances, rates
+    /// and weights by.
     tokens: Vec<Bytes>,
-    /// Per-token minimum live balance (scaled 18, pool registration order) a weighted pool's own
-    /// `MinTokenBalanceLib` check enforces. Empty for non-weighted pools and for weighted pools
-    /// from factory generations that predate the check (`getMinTokenBalances` reverts on them),
-    /// in which case no such floor applies. Fixed at registration, so it is read once at decode
-    /// time like the other immutable fields.
+    /// Per-token minimum live balance (scaled 18, registration order) a weighted pool's own
+    /// `MinTokenBalanceLib` check enforces. Empty when no such floor applies: non-weighted pools,
+    /// and weighted generations predating the check (`getMinTokenBalances` reverts on them).
     min_token_balances: Vec<U256>,
     /// Timestamp of the block this state was read at. reCLAMM quotes depend on it, so it is
     /// refreshed on every update; the other families ignore it.
@@ -101,33 +93,15 @@ pub struct BalancerV3State {
 }
 
 impl BalancerV3State {
-    /// Constructs a state from a resolved `pool_type` attribute and a state read out of the VM.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         pool_address: Bytes,
         vault: Bytes,
-        factory: PoolTypeAttribute,
         tokens: Vec<Bytes>,
         min_token_balances: Vec<U256>,
         block_timestamp: u64,
         state: PoolState,
     ) -> Self {
-        let PoolTypeAttribute { pool_type, version } = factory;
-        Self {
-            pool_address,
-            vault,
-            pool_type,
-            factory_version: version,
-            tokens,
-            min_token_balances,
-            block_timestamp,
-            state,
-        }
-    }
-
-    /// The factory generation this pool was created by, when the indexer labelled one.
-    pub fn factory_version(&self) -> Option<&str> {
-        self.factory_version.as_deref()
+        Self { pool_address, vault, tokens, min_token_balances, block_timestamp, state }
     }
 
     /// Token addresses in pool registration order.
@@ -169,16 +143,9 @@ impl BalancerV3State {
             })
     }
 
-    /// Renders an address the way the maths library expects it (lowercase, `0x`-prefixed).
-    fn token_key(token: &Bytes) -> String {
-        format!("0x{}", hex::encode(token))
-    }
-
-    /// Builds the pool implementation the maths dispatches a swap to.
-    ///
-    /// This mirrors what `Vault::swap` does internally, and is built here so that swapping can go
-    /// through [`vault::swap::swap`] against a borrowed state. [`Self::spot_price`] needs it for a
-    /// second reason: only `on_swap` reports an amount before the swap fee is taken.
+    /// Builds the pool implementation the maths dispatches a swap to, which `Vault::swap` would
+    /// otherwise build itself. [`Self::spot_price`] needs it for a second reason: only `on_swap`
+    /// reports an amount before the swap fee is taken.
     fn pool_impl(&self) -> Result<Box<dyn PoolBase>, PoolError> {
         match &self.state {
             PoolState::Weighted(state) => Ok(Box::new(WeightedPool::from(state.clone()))),
@@ -205,43 +172,23 @@ impl BalancerV3State {
         let input = SwapInput {
             amount_raw: amount_in,
             swap_kind: SwapKind::GivenIn,
-            token_in: Self::token_key(token_in),
-            token_out: Self::token_key(token_out),
+            token_in: format!("0x{}", hex::encode(token_in)),
+            token_out: format!("0x{}", hex::encode(token_out)),
         };
-        // `Vault::swap` would take the state by `Box<PoolState>`, forcing a full clone of it on
-        // every call — which the limit searches make hundreds of. Its body only builds the pool
-        // implementation and the hook before delegating here, so both are supplied directly and
-        // the state is borrowed. Pools carrying a swap hook never reach this far: the decoder
-        // rejects them, leaving the maths library's own no-op hook as the faithful choice.
+        // `Vault::swap` takes the state by `Box<PoolState>`, cloning it on every call — which the
+        // limit searches make hundreds of. Supplying the pool implementation and hook directly is
+        // all its body does before delegating here, and lets the state be borrowed. The no-op hook
+        // is faithful because the decoder rejects pools carrying a swap hook.
         vault_swap(&input, &self.state, self.pool_impl()?.as_ref(), &DefaultHook::new(), None)
-    }
-
-    /// Swaps `amount_in` of `token_in` for `token_out`, returning the raw output amount.
-    fn swap_exact_in(
-        &self,
-        amount_in: U256,
-        token_in: &Bytes,
-        token_out: &Bytes,
-    ) -> Result<U256, SimulationError> {
-        self.vault_swap_exact_in(amount_in, token_in, token_out)
-            .map_err(|e| {
-                SimulationError::RecoverableError(format!(
-                    "balancer_v3 swap failed for pool {}: {e:?}",
-                    self.pool_address
-                ))
-            })
     }
 
     /// Largest input the Vault accepts for a swap from `index_in` to `index_out`, in the input
     /// token's raw units.
     ///
-    /// Mirrors the reference implementation's `getMaxSwapAmount` for exact-in swaps. Weighted
-    /// pools cap the input at [`MAX_IN_RATIO`] of the input reserve (`WeightedMath`, enforced on
-    /// every generation) and, for pools that register one, a per-token minimum balance (see
-    /// [`Self::weighted_max_swap_amount_in`]). Stable pools are capped by
-    /// [`Self::stable_max_swap_amount_in`]. reCLAMM pools are bounded by the output side: the
-    /// limit is the input that buys [`MAX_TOKEN_OUT_RATIO`] of the output reserve at the current
-    /// virtual balances.
+    /// Mirrors the reference implementation's `getMaxSwapAmount` for exact-in swaps. Each family
+    /// bounds it differently — see the per-family functions below; reCLAMM is bounded on the
+    /// output side, by the input that buys [`MAX_TOKEN_OUT_RATIO`] of the output reserve at the
+    /// current virtual balances.
     fn max_swap_amount_in(
         &self,
         index_in: usize,
@@ -330,15 +277,13 @@ impl BalancerV3State {
 
     /// Largest raw input a QuantAMM pool accepts, found by binary search over the Vault path.
     ///
-    /// `onSwap` applies `maxTradeSizeRatio` to *both* sides of the trade, so the input reserve's
-    /// share of it is only an upper bound — on a pool whose weights are far apart, a permitted
-    /// input can still buy more of the output reserve than the same ratio allows. Inverting the
-    /// output bound in closed form would mean recomputing the pool's time-interpolated weights
-    /// here, duplicating logic that lives in `balancer_maths_rust` and would silently drift from
-    /// the quotes it produces; probing the real swap instead keeps the limit consistent with
-    /// [`Self::get_amount_out`] by construction. The predicate is monotonic in the input, so the
-    /// search converges on the largest amount the Vault accepts, and reports zero when it accepts
-    /// none.
+    /// `onSwap` applies `maxTradeSizeRatio` to *both* sides, so the input reserve's share of it is
+    /// only an upper bound — on a pool whose weights are far apart, a permitted input can still
+    /// buy more of the output reserve than the same ratio allows. Inverting the output bound in
+    /// closed form would mean recomputing the pool's time-interpolated weights here, which would
+    /// drift from the quotes `balancer_maths_rust` produces; probing the real swap keeps the limit
+    /// consistent with [`Self::get_amount_out`] by construction. The predicate is monotonic in the
+    /// input, so the search converges on the largest accepted amount, or zero if there is none.
     fn quantamm_max_swap_amount_in(
         &self,
         index_in: usize,
@@ -389,10 +334,9 @@ impl BalancerV3State {
     ///
     /// Every generation enforces [`MAX_IN_RATIO`] inside `WeightedMath.computeOutGivenExactIn`.
     /// Pools registering a per-token minimum balance (`MinTokenBalanceLib`, added to the v2
-    /// factory generation and not modelled by `balancer_maths_rust`) additionally require that
-    /// neither token's balance fall below its own minimum after the swap; that bound is inverted
-    /// through [`weighted_in_given_exact_out_unguarded`]. Both caps apply, so the tighter one
-    /// wins.
+    /// generation and not modelled by `balancer_maths_rust`) also require that neither balance
+    /// fall below its minimum after the swap, inverted here through
+    /// [`weighted_in_given_exact_out_unguarded`]. The tighter of the two wins.
     fn weighted_max_swap_amount_in(
         &self,
         index_in: usize,
@@ -453,10 +397,9 @@ impl BalancerV3State {
     }
 
     /// Largest exact-in input a stable-pool swap can take without the live balances drifting past
-    /// [`StableMath.ensureBalancesWithinMaxImbalanceRange`][`STABLE_MAX_IMBALANCE_RATIO`], found by
-    /// binary search since that check has no closed-form inverse over the stable invariant.
-    /// [`Self::stable_swap_keeps_balance_valid`] is monotonic in the input amount, so the search
-    /// converges to within a wei.
+    /// [`STABLE_MAX_IMBALANCE_RATIO`]. That check has no closed-form inverse over the stable
+    /// invariant, but [`Self::stable_swap_keeps_balance_valid`] is monotonic in the input, so the
+    /// binary search converges to within a wei.
     pub(super) fn stable_max_swap_amount_in(
         &self,
         index_in: usize,
@@ -508,11 +451,9 @@ impl BalancerV3State {
             ))
         };
 
-        // `stable_math::compute_invariant` divides by each balance directly (not through a
-        // checked helper), so a zero balance on a token this swap does not even touch — possible
-        // in a pool with more than two tokens, since `get_limits` only screens `index_in` and
-        // `index_out` — would panic rather than error. Such a pool cannot be swapped through at
-        // all until re-seeded.
+        // `stable_math::compute_invariant` divides by each balance unchecked, so a zero balance on
+        // an untouched token would panic rather than error — reachable in a pool with more than
+        // two tokens, since `get_limits` only screens `index_in` and `index_out`.
         if balances.iter().any(U256::is_zero) {
             return Ok(false);
         }
@@ -563,9 +504,8 @@ impl BalancerV3State {
     /// Applies a completed swap to the live balances, mirroring what the Vault does on-chain.
     ///
     /// The protocol's share of the swap fee leaves the pool, so it is deducted from the input
-    /// increment. `amount_out` is re-scaled from the raw amount the swap returned, which can land
-    /// one unit below the value the Vault used internally; the resulting balance is short by at
-    /// most that unit, which only matters for a route that crosses the same pool twice.
+    /// increment. Re-scaling `amount_out` from the raw amount can land one unit below the value
+    /// the Vault used, which only matters for a route crossing the same pool twice.
     fn with_swap_applied(
         &self,
         amount_in: U256,
@@ -592,11 +532,9 @@ impl BalancerV3State {
         .map_err(maths_error)?;
         let total_fee_scaled =
             mul_up_fixed(&amount_in_scaled, &base.swap_fee).map_err(maths_error)?;
-        // The Vault charges the protocol's share in the input token's own units, truncating the
-        // fee to whole ones before deducting it from the raw balance, which is what this returns.
-        // It has to be scaled back up before meeting balances that are held scaled to 18 decimals:
-        // skipping that leaves the deduction short by the token's scaling factor, which is nothing
-        // for an 18-decimal token at a rate of one and a factor of 10^12 for something like USDC.
+        // This returns the fee in the input token's raw units, truncated to whole ones, so it has
+        // to be scaled back up before meeting balances held at 18 decimals. Skipping that leaves
+        // the deduction short by the token's scaling factor — 10^12 for something like USDC.
         let protocol_fee_raw = compute_and_charge_aggregate_swap_fees_raw(
             &total_fee_scaled,
             &base.aggregate_swap_fee,
@@ -691,7 +629,14 @@ impl ProtocolSim for BalancerV3State {
         let index_in = self.token_index(&token_in.address)?;
         let index_out = self.token_index(&token_out.address)?;
         let amount_in = biguint_to_u256(&amount_in);
-        let amount_out = self.swap_exact_in(amount_in, &token_in.address, &token_out.address)?;
+        let amount_out = self
+            .vault_swap_exact_in(amount_in, &token_in.address, &token_out.address)
+            .map_err(|e| {
+                SimulationError::RecoverableError(format!(
+                    "balancer_v3 swap failed for pool {}: {e:?}",
+                    self.pool_address
+                ))
+            })?;
         let new_state = self.with_swap_applied(amount_in, amount_out, index_in, index_out)?;
 
         Ok(GetAmountOutResult::new(
@@ -756,15 +701,9 @@ impl ProtocolSim for BalancerV3State {
         let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
         let pool = AlloyAddress::from_slice(self.pool_address.as_ref());
         let vault = AlloyAddress::from_slice(self.vault.as_ref());
-        self.state = vm::refresh_pool_state(
-            &engine,
-            &pool,
-            &vault,
-            &self.state,
-            self.pool_type,
-            self.block_timestamp,
-        )
-        .map_err(TransitionError::SimulationError)?;
+        self.state =
+            vm::refresh_pool_state(&engine, &pool, &vault, &self.state, self.block_timestamp)
+                .map_err(TransitionError::SimulationError)?;
         Ok(())
     }
 
@@ -790,11 +729,9 @@ impl ProtocolSim for BalancerV3State {
 
 /// `WeightedMath.computeInGivenExactOut` without its own `MAX_OUT_RATIO` guard.
 ///
-/// That guard exists to bound real exact-out swaps; here the formula is only used to invert
-/// `computeOutGivenExactIn` and find the input a min-balance-derived output ceiling implies, a use
-/// the ratio was never meant to constrain — a heavily skewed weighted pool can legitimately move
-/// more than 30% of the output reserve on an exact-in swap that only spends a small share of the
-/// input reserve.
+/// That guard bounds real exact-out swaps; here the formula only inverts `computeOutGivenExactIn`
+/// to find the input a min-balance-derived output ceiling implies. A heavily skewed pool can
+/// legitimately move more than 30% of the output reserve on an exact-in swap.
 fn weighted_in_given_exact_out_unguarded(
     balance_in: &U256,
     weight_in: &U256,

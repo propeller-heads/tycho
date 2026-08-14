@@ -21,7 +21,7 @@ tests:
           vault: "0xba1333333333a1ba1108e8412f11850a5c319ba9"
           normalized_weights: "0x5b22307830623161326263326563353030303030222c22307830326336386166306262313430303030225d"
           fee: "0x0aa87bee538000"
-          pool_type: "0x5765696768746564506f6f6c466163746f7279407631"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
         skip_simulation: true # This test only covers component creation and static attributes.
         creation_tx: "0xe62361b12a708c5752c1f4c9aeae7bae4f884eb2a480d2ee9ccfc69adc659112"
 

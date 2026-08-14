@@ -1,39 +1,37 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use serde::{de, Deserialize, Deserializer};
 
 const ADDRESS_BYTES: usize = 20;
 
-/// The factory deployments of one pool family, resolved by factory address.
+/// The factory addresses of one pool family.
 ///
 /// Balancer deploys a new factory contract per pool-type generation while keeping the `create`
-/// signature and the `PoolCreated` event stable, so several generations can be indexed by the same
-/// decoder. The deployment params key each address by a version label, which is retained here to
-/// name the generation in diagnostics — the label itself carries no meaning to the indexing logic.
+/// signature and the `PoolCreated` event stable, so several generations are indexed by the same
+/// decoder and price identically. The deployment params key each address by a version label, which
+/// names the generation for whoever reads the manifest; only membership reaches the indexing path.
 #[derive(Debug, Clone, Default)]
-pub struct FactoryVersions(HashMap<Vec<u8>, String>);
+pub struct FactoryAddresses(HashSet<Vec<u8>>);
 
-impl FactoryVersions {
-    /// Returns the version label configured for the factory at `address`, or `None` when `address`
-    /// is not a configured factory of this family.
-    pub fn version_of(&self, address: &[u8]) -> Option<&str> {
-        self.0.get(address).map(String::as_str)
+impl FactoryAddresses {
+    /// Whether `address` is a configured factory of this family.
+    pub fn contains(&self, address: &[u8]) -> bool {
+        self.0.contains(address)
     }
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Number of configured generations. Only the manifest checks care how many there are; the
-    /// indexing path resolves by address.
+    /// Number of configured generations. Only the manifest checks care how many there are.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-impl<'de> Deserialize<'de> for FactoryVersions {
+impl<'de> Deserialize<'de> for FactoryAddresses {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let by_version = HashMap::<String, String>::deserialize(deserializer)?;
         let mut by_address: HashMap<Vec<u8>, String> = HashMap::with_capacity(by_version.len());
@@ -55,8 +53,8 @@ impl<'de> Deserialize<'de> for FactoryVersions {
                     address.len()
                 )));
             }
-            // Two labels pointing at one contract would make the reported version arbitrary, and
-            // is far more likely to be a copy-paste slip than a deliberate alias.
+            // One contract under two labels is far more likely to be a copy-paste slip than a
+            // deliberate alias, and would misreport how many generations a manifest configures.
             if let Some(existing) = by_address.insert(address.clone(), version.clone()) {
                 return Err(de::Error::custom(format!(
                     "factory {} is configured under both `{existing}` and `{version}`",
@@ -65,7 +63,7 @@ impl<'de> Deserialize<'de> for FactoryVersions {
             }
         }
 
-        Ok(Self(by_address))
+        Ok(Self(by_address.into_keys().collect()))
     }
 }
 
@@ -82,16 +80,16 @@ pub struct DeploymentConfig {
     /// Weighted pool factories, keyed by version label. Absent means the family is not deployed
     /// on this chain, or that the consuming module does not look at factories.
     #[serde(default)]
-    pub weighted_factories: FactoryVersions,
+    pub weighted_factories: FactoryAddresses,
     #[serde(default)]
-    pub stable_factories: FactoryVersions,
+    pub stable_factories: FactoryAddresses,
     #[serde(default)]
-    pub reclamm_factories: FactoryVersions,
+    pub reclamm_factories: FactoryAddresses,
     /// QuantAMM weighted pool factories, keyed by version label. Unlike the other families these
     /// are matched against the `factory` field of the Vault's `PoolRegistered` event rather than
     /// the log emitter, because the factory's `create` parameters are too deeply nested to decode.
     #[serde(default)]
-    pub quantamm_factories: FactoryVersions,
+    pub quantamm_factories: FactoryAddresses,
     #[serde(default)]
     pub skip_rate_provider_pools: bool,
 }
@@ -135,18 +133,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vault.len(), ADDRESS_BYTES);
-        assert_eq!(
-            config
-                .weighted_factories
-                .version_of(&address("201efd508c8dfe9de1a13c2452863a78cb2a86cc")),
-            Some("v1")
-        );
-        assert_eq!(
-            config
-                .reclamm_factories
-                .version_of(&address("3ccd78683effffddc1a16f5553c896ac6d3ab7ff")),
-            Some("v1")
-        );
+        assert!(config
+            .weighted_factories
+            .contains(&address("201efd508c8dfe9de1a13c2452863a78cb2a86cc")));
+        assert!(config
+            .reclamm_factories
+            .contains(&address("3ccd78683effffddc1a16f5553c896ac6d3ab7ff")));
         assert!(!config.skip_rate_provider_pools);
         assert!(!config.has_no_factories());
     }
@@ -160,19 +152,13 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(
-            config
-                .weighted_factories
-                .version_of(&address("201efd508c8dfe9de1a13c2452863a78cb2a86cc")),
-            Some("v1")
-        );
+        assert!(config
+            .weighted_factories
+            .contains(&address("201efd508c8dfe9de1a13c2452863a78cb2a86cc")));
         // The `0x` prefix is accepted because both spellings appear in existing manifests.
-        assert_eq!(
-            config
-                .weighted_factories
-                .version_of(&address("5f2a3e0e4b6e1e0d0f8a9b7c6d5e4f3a2b1c0d9e")),
-            Some("v2")
-        );
+        assert!(config
+            .weighted_factories
+            .contains(&address("5f2a3e0e4b6e1e0d0f8a9b7c6d5e4f3a2b1c0d9e")));
     }
 
     #[test]
@@ -182,12 +168,9 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(
-            config
-                .weighted_factories
-                .version_of(&address("3ccd78683effffddc1a16f5553c896ac6d3ab7ff")),
-            None
-        );
+        assert!(!config
+            .weighted_factories
+            .contains(&address("3ccd78683effffddc1a16f5553c896ac6d3ab7ff")));
         assert!(config.stable_factories.is_empty());
     }
 

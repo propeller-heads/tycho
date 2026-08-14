@@ -29,10 +29,7 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
-    protocol::{
-        u256_num::biguint_to_u256,
-        vm::utils::{json_deserialize_address_list, json_deserialize_be_bigint_list},
-    },
+    protocol::{u256_num::biguint_to_u256, vm::utils::json_deserialize_be_bigint_list},
     simulation::{SimulationEngine, SimulationParameters},
 };
 
@@ -184,49 +181,31 @@ impl HooksConfig {
     }
 }
 
-/// Bits `registerPool` packs each token's `18 - decimals` into inside `tokenDecimalDiffs`
+/// Bit width `registerPool` packs each token's `18 - decimals` into inside `tokenDecimalDiffs`
 /// (`PoolConfigConst.DECIMAL_DIFF_BITLENGTH`).
 const DECIMAL_DIFF_BITLENGTH: usize = 5;
-/// Mask for one [`DECIMAL_DIFF_BITLENGTH`]-wide field.
 const DECIMAL_DIFF_MASK: u64 = (1 << DECIMAL_DIFF_BITLENGTH) - 1;
-/// Static attribute carrying the pool's token registration order, which its balances, rates and
-/// weights are indexed by. The component's own token list is not in that order.
-const TOKEN_ORDER_ATTRIBUTE: &str = "token_order";
-/// Static attribute carrying a weighted pool's normalized weights, in registration order.
-const NORMALIZED_WEIGHTS_ATTRIBUTE: &str = "normalized_weights";
 
-/// `pool_type` static attribute emitted by the `ethereum-balancer-v3` Substreams package.
+// Static attributes the `ethereum-balancer-v3` Substreams package emits.
+const NORMALIZED_WEIGHTS_ATTRIBUTE: &str = "normalized_weights";
 const POOL_TYPE_ATTRIBUTE: &str = "pool_type";
 
-/// Separates the factory family from its generation label inside [`POOL_TYPE_ATTRIBUTE`].
-///
-/// The Substreams package writes `<family>@<version>`, so several factory generations of one
-/// family are distinguishable without changing the family name the maths keys on. Keep the two
-/// sides in step when changing this.
-const POOL_TYPE_VERSION_SEPARATOR: char = '@';
-
-/// The pool families this module can quote natively.
-///
-/// Balancer V3 exposes far more (Gyro, QuantAMM, LBP, and anything built on the hook system);
-/// those are deliberately rejected at decode time rather than approximated.
+/// The pool families this module can quote natively. Balancer V3 exposes more (Gyro, LBP, and
+/// anything built on the hook system); those are rejected at decode time rather than approximated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BalancerPoolType {
-    /// Constant weighted product pools.
     Weighted,
-    /// StableMath pools, including pools whose amplification is mid-update.
     Stable,
     /// AutoRange pools, whose price range shifts with time.
     Reclamm,
-    /// Weighted pools whose weights are interpolated over time by an off-chain rule engine.
+    /// Weighted pools whose weights are interpolated by an off-chain rule engine.
     QuantAmm,
 }
 
 impl BalancerPoolType {
-    /// Every family this module handles. Kept next to [`Self::from_factory_marker`] so adding a
-    /// variant means touching both.
+    /// Kept next to [`Self::factory_marker`] so adding a variant means touching both.
     const ALL: [Self; 4] = [Self::Weighted, Self::Stable, Self::Reclamm, Self::QuantAmm];
 
-    /// Resolves the `pool_type` attribute value the Substreams package writes into a family.
     fn from_factory_marker(marker: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -245,11 +224,9 @@ impl BalancerPoolType {
 
     /// The `pool_type` string `balancer_maths_rust` keys its pool implementations on.
     ///
-    /// Every generation of a family shares one marker: Balancer keeps the swap maths stable across
-    /// factory versions, so the version never selects a different implementation.
-    ///
-    /// The V3-generation pools we index share their swap maths with the library's V2
-    /// implementation, which Balancer confirmed, so both map onto `RECLAMM_V2`.
+    /// One marker per family: Balancer keeps the swap maths stable across factory generations. The
+    /// V3 reCLAMM pools share their maths with the library's V2 implementation, which Balancer
+    /// confirmed, so both map onto `RECLAMM_V2`.
     fn maths_marker(self) -> &'static str {
         match self {
             Self::Weighted => "WEIGHTED",
@@ -260,90 +237,39 @@ impl BalancerPoolType {
     }
 }
 
-/// A decoded [`POOL_TYPE_ATTRIBUTE`]: the family whose maths prices the pool, and the factory
-/// generation it was created by.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PoolTypeAttribute {
-    pub pool_type: BalancerPoolType,
-    /// The generation label configured in the Substreams deployment params. `None` for pools
-    /// indexed before generations were labelled, and for pools resolved by probing the getters.
-    pub version: Option<String>,
-}
-
-impl PoolTypeAttribute {
-    /// Parses `<family>` or `<family>@<version>`.
-    ///
-    /// Splitting on the first separator leaves version labels free to contain it. Returns the
-    /// reason the value could not be used, for the caller to attribute to a pool.
-    pub(super) fn parse(marker: &str) -> Result<Self, String> {
-        let (family, version) = match marker.split_once(POOL_TYPE_VERSION_SEPARATOR) {
-            Some((_, "")) => {
-                return Err(format!("pool_type `{marker}` carries an empty factory version"))
-            }
-            Some((family, version)) => (family, Some(version.to_string())),
-            None => (marker, None),
-        };
-        let pool_type = BalancerPoolType::from_factory_marker(family)
-            .ok_or_else(|| format!("unsupported pool_type `{marker}`"))?;
-        Ok(Self { pool_type, version })
-    }
-}
-
-/// Determines which pool family `pool` belongs to, and which factory generation created it.
+/// Parses a [`POOL_TYPE_ATTRIBUTE`] value into the family whose maths prices the pool.
 ///
-/// Prefers the `pool_type` static attribute and falls back to probing the type-specific getter,
-/// so pools indexed before the attribute existed still resolve — those report no version. Returns
-/// an error for any family this module cannot quote, which keeps such pools out of the native
-/// decoder instead of letting them be priced by the wrong maths.
-pub(super) fn resolve_pool_type<D: EngineDatabaseInterface + Clone + Debug>(
-    static_attributes: &HashMap<String, Bytes>,
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-) -> Result<PoolTypeAttribute, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    if let Some(raw) = static_attributes.get(POOL_TYPE_ATTRIBUTE) {
-        let marker = String::from_utf8(raw.to_vec()).map_err(|e| {
-            SimulationError::FatalError(format!("balancer_v3 pool_type is not UTF-8: {e}"))
-        })?;
-        return PoolTypeAttribute::parse(&marker).map_err(|reason| {
-            SimulationError::FatalError(format!("balancer_v3 pool {pool}: {reason}"))
-        });
-    }
+/// The attribute names the factory family alone, without the generation that built the pool:
+/// a family quotes the same across every generation this decoder sees, and where a generation
+/// does differ the pool is probed for the feature — the weighted minimum balance is read from the
+/// pool, and reCLAMM's earlier maths is kept out by indexing only the newest generation. Returns
+/// the reason the value could not be used, for the caller to attribute to a pool.
+pub(super) fn parse_pool_type(marker: &str) -> Result<BalancerPoolType, String> {
+    BalancerPoolType::from_factory_marker(marker)
+        .ok_or_else(|| format!("unsupported pool_type `{marker}`"))
+}
 
-    let probed = if call::<D, _, _>(
-        engine,
-        pool,
-        IBalancerV3Pool::getWeightedPoolDynamicDataCall {},
-    )
-    .is_ok()
-    {
-        BalancerPoolType::Weighted
-    } else if call::<D, _, _>(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})
-        .is_ok()
-    {
-        BalancerPoolType::Stable
-    } else if call::<D, _, _>(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})
-        .is_ok()
-    {
-        BalancerPoolType::Reclamm
-    } else if call::<D, _, _>(
-        engine,
-        pool,
-        IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {},
-    )
-    .is_ok()
-    {
-        BalancerPoolType::QuantAmm
-    } else {
-        return Err(SimulationError::FatalError(format!(
-            "balancer_v3 pool {pool} exposes none of the weighted, stable, reCLAMM or \
-                 QuantAMM getters"
-        )));
-    };
-    Ok(PoolTypeAttribute { pool_type: probed, version: None })
+/// Determines which pool family `pool` belongs to.
+///
+/// Reads the `pool_type` static attribute the Substreams package writes. Returns an error for any
+/// family this module cannot quote, which keeps such pools out of the native decoder instead of
+/// letting them be priced by the wrong maths.
+pub(super) fn resolve_pool_type(
+    static_attributes: &HashMap<String, Bytes>,
+    pool: &AlloyAddress,
+) -> Result<BalancerPoolType, SimulationError> {
+    let raw = static_attributes
+        .get(POOL_TYPE_ATTRIBUTE)
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+                "balancer_v3 pool {pool} has no `{POOL_TYPE_ATTRIBUTE}`"
+            ))
+        })?;
+    let marker = String::from_utf8(raw.to_vec()).map_err(|e| {
+        SimulationError::FatalError(format!("balancer_v3 pool_type is not UTF-8: {e}"))
+    })?;
+    parse_pool_type(&marker)
+        .map_err(|reason| SimulationError::FatalError(format!("balancer_v3 pool {pool}: {reason}")))
 }
 
 /// Builds the maths library's pool state for `pool` from the indexed storage.
@@ -359,6 +285,7 @@ pub(super) fn read_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &AlloyAddress,
     vault: &AlloyAddress,
     pool_type: BalancerPoolType,
+    tokens: &[Bytes],
     static_attributes: &HashMap<String, Bytes>,
     block_timestamp: u64,
 ) -> Result<PoolState, SimulationError>
@@ -366,20 +293,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    // `Vault.getAggregateSwapFeePercentage` is not implemented on the Vault entrypoint, so the
-    // aggregate fee has to come from the packed pool config.
-    let config: PoolConfig =
-        call(engine, vault, IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
-    if !config.isPoolInitialized {
-        return Err(SimulationError::RecoverableError(format!(
-            "balancer_v3 pool {pool} is not initialized"
-        )));
-    }
-    // A paused pool reverts every swap, so it must not be quoted. Both states are recoverable:
-    // governance can lift either, and the pause lapses on its own once its window elapses.
-    if is_paused(engine, vault, pool, &config)? {
-        return Err(SimulationError::RecoverableError(format!("balancer_v3 pool {pool} is paused")));
-    }
+    let config = read_pool_config(engine, pool, vault)?;
 
     // The factory a pool came from says nothing about its hooks: a StablePoolFactory pool can carry
     // a dynamic-fee hook, and quoting it as hookless yields amounts the Vault rejects.
@@ -394,7 +308,10 @@ where
 
     // Registration fixes the token order and each token's decimals, so both come from what the
     // indexer recorded and from the config already read, rather than from a further getter call.
-    let tokens = address_list_attribute(static_attributes, TOKEN_ORDER_ATTRIBUTE, pool)?;
+    let tokens = tokens
+        .iter()
+        .map(|token| format!("0x{}", hex::encode(token)))
+        .collect::<Vec<_>>();
     let scaling_factors = scaling_factors(&config, tokens.len());
 
     match pool_type {
@@ -444,9 +361,6 @@ where
         BalancerPoolType::QuantAmm => {
             let dynamic: QuantAmmPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
-            // The trade-size ratio is the one immutable this family cannot recover from the
-            // component: it is nested too deeply in the factory's creation parameters for the
-            // Substreams package to decode, so its getter stays.
             let immutable: QuantAmmPoolImmutableData =
                 call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolImmutableDataCall {})?;
             let mutable = quantamm_mutable(pool, &dynamic, block_timestamp)?;
@@ -471,6 +385,7 @@ where
         BalancerPoolType::Reclamm => {
             let dynamic: ReClammPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
+            let mutable = reclamm_mutable(&dynamic, block_timestamp);
             let base = base_state(
                 pool,
                 pool_type,
@@ -483,28 +398,62 @@ where
                 dynamic.totalSupply,
                 &config.liquidityManagement,
             );
-            // Unlike the other families, the maths recomputes the virtual balances itself from
-            // `last_timestamp` to `current_timestamp`, so the quote depends on the block being
-            // quoted rather than only on stored state.
             Ok(PoolState::ReClammV2(ReClammV2State {
                 immutable: ReClammV2Immutable {
                     pool_address: base.pool_address.clone(),
                     tokens: base.tokens.clone(),
                 },
                 base,
-                mutable: ReClammV2Mutable {
-                    last_virtual_balances: dynamic.lastVirtualBalances,
-                    daily_price_shift_base: dynamic.dailyPriceShiftBase,
-                    last_timestamp: dynamic.lastTimestamp,
-                    current_timestamp: U256::from(block_timestamp),
-                    centeredness_margin: dynamic.centerednessMargin,
-                    start_fourth_root_price_ratio: dynamic.startFourthRootPriceRatio,
-                    end_fourth_root_price_ratio: dynamic.endFourthRootPriceRatio,
-                    price_ratio_update_start_time: U256::from(dynamic.priceRatioUpdateStartTime),
-                    price_ratio_update_end_time: U256::from(dynamic.priceRatioUpdateEndTime),
-                },
+                mutable,
             }))
         }
+    }
+}
+
+/// Reads the pool's packed config and rejects the states in which it cannot be quoted.
+///
+/// `Vault.getAggregateSwapFeePercentage` is not implemented on the Vault entrypoint, so the
+/// aggregate fee has to come from this config too. An uninitialized or paused pool reverts every
+/// swap, and both are recoverable: governance can lift either, and the pause lapses on its own
+/// once its window elapses.
+fn read_pool_config<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    pool: &AlloyAddress,
+    vault: &AlloyAddress,
+) -> Result<PoolConfig, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let config: PoolConfig =
+        call(engine, vault, IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
+    if !config.isPoolInitialized {
+        return Err(SimulationError::RecoverableError(format!(
+            "balancer_v3 pool {pool} is not initialized"
+        )));
+    }
+    if is_paused(engine, vault, pool, &config)? {
+        return Err(SimulationError::RecoverableError(format!("balancer_v3 pool {pool} is paused")));
+    }
+    Ok(config)
+}
+
+/// The reCLAMM state that moves with time.
+///
+/// Unlike the other families, the maths recomputes the virtual balances itself from
+/// `last_timestamp` to `current_timestamp`, so the quote depends on the block being quoted rather
+/// than only on stored state.
+fn reclamm_mutable(dynamic: &ReClammPoolDynamicData, block_timestamp: u64) -> ReClammV2Mutable {
+    ReClammV2Mutable {
+        last_virtual_balances: dynamic.lastVirtualBalances.clone(),
+        daily_price_shift_base: dynamic.dailyPriceShiftBase,
+        last_timestamp: dynamic.lastTimestamp,
+        current_timestamp: U256::from(block_timestamp),
+        centeredness_margin: dynamic.centerednessMargin,
+        start_fourth_root_price_ratio: dynamic.startFourthRootPriceRatio,
+        end_fourth_root_price_ratio: dynamic.endFourthRootPriceRatio,
+        price_ratio_update_start_time: U256::from(dynamic.priceRatioUpdateStartTime),
+        price_ratio_update_end_time: U256::from(dynamic.priceRatioUpdateEndTime),
     }
 }
 
@@ -536,35 +485,16 @@ pub(super) fn refresh_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &AlloyAddress,
     vault: &AlloyAddress,
     previous: &PoolState,
-    pool_type: BalancerPoolType,
     block_timestamp: u64,
 ) -> Result<PoolState, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let config: PoolConfig =
-        call(engine, vault, IBalancerV3Vault::getPoolConfigCall { pool: *pool })?;
-    if !config.isPoolInitialized {
-        return Err(SimulationError::RecoverableError(format!(
-            "balancer_v3 pool {pool} is not initialized"
-        )));
-    }
-    // A paused pool reverts every swap, so it must not be quoted. Both states are recoverable:
-    // governance can lift either, and the pause lapses on its own once its window elapses.
-    if is_paused(engine, vault, pool, &config)? {
-        return Err(SimulationError::RecoverableError(format!("balancer_v3 pool {pool} is paused")));
-    }
+    let config = read_pool_config(engine, pool, vault)?;
 
-    let mismatch = || {
-        SimulationError::FatalError(format!(
-            "balancer_v3 pool {pool} holds a state that does not match its {pool_type:?} family"
-        ))
-    };
-
-    match pool_type {
-        BalancerPoolType::Weighted => {
-            let PoolState::Weighted(prev) = previous else { return Err(mismatch()) };
+    match previous {
+        PoolState::Weighted(prev) => {
             let dynamic: WeightedPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getWeightedPoolDynamicDataCall {})?;
             Ok(PoolState::Weighted(WeightedState::new(
@@ -579,8 +509,7 @@ where
                 prev.weights.clone(),
             )))
         }
-        BalancerPoolType::Stable => {
-            let PoolState::Stable(prev) = previous else { return Err(mismatch()) };
+        PoolState::Stable(prev) => {
             let dynamic: StablePoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
             Ok(PoolState::Stable(StableState {
@@ -595,10 +524,10 @@ where
                 mutable: StableMutable { amp: dynamic.amplificationParameter },
             }))
         }
-        BalancerPoolType::Reclamm => {
-            let PoolState::ReClammV2(prev) = previous else { return Err(mismatch()) };
+        PoolState::ReClammV2(prev) => {
             let dynamic: ReClammPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getReClammPoolDynamicDataCall {})?;
+            let mutable = reclamm_mutable(&dynamic, block_timestamp);
             Ok(PoolState::ReClammV2(ReClammV2State {
                 immutable: prev.immutable.clone(),
                 base: refreshed_base(
@@ -609,21 +538,10 @@ where
                     aggregate_swap_fee(&config),
                     dynamic.totalSupply,
                 ),
-                mutable: ReClammV2Mutable {
-                    last_virtual_balances: dynamic.lastVirtualBalances,
-                    daily_price_shift_base: dynamic.dailyPriceShiftBase,
-                    last_timestamp: dynamic.lastTimestamp,
-                    current_timestamp: U256::from(block_timestamp),
-                    centeredness_margin: dynamic.centerednessMargin,
-                    start_fourth_root_price_ratio: dynamic.startFourthRootPriceRatio,
-                    end_fourth_root_price_ratio: dynamic.endFourthRootPriceRatio,
-                    price_ratio_update_start_time: U256::from(dynamic.priceRatioUpdateStartTime),
-                    price_ratio_update_end_time: U256::from(dynamic.priceRatioUpdateEndTime),
-                },
+                mutable,
             }))
         }
-        BalancerPoolType::QuantAmm => {
-            let PoolState::QuantAmm(prev) = previous else { return Err(mismatch()) };
+        PoolState::QuantAmm(prev) => {
             let dynamic: QuantAmmPoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getQuantAMMWeightedPoolDynamicDataCall {})?;
             // The weights and their interpolation window are re-read rather than kept: the pool's
@@ -642,6 +560,11 @@ where
                 immutable: prev.immutable.clone(),
             }))
         }
+        // `PoolState` covers families this module never builds, so the maths library adding one
+        // cannot reach here through a state it produced.
+        _ => Err(SimulationError::FatalError(format!(
+            "balancer_v3 pool {pool} holds a state of a family this module does not build"
+        ))),
     }
 }
 
@@ -659,32 +582,6 @@ fn scaling_factors(config: &PoolConfig, token_count: usize) -> Vec<U256> {
             U256::from(10u64).pow(U256::from(diff))
         })
         .collect()
-}
-
-/// Reads a static attribute holding a JSON list of addresses, in the order the Substreams package
-/// wrote them.
-fn address_list_attribute(
-    static_attributes: &HashMap<String, Bytes>,
-    name: &str,
-    pool: &AlloyAddress,
-) -> Result<Vec<String>, SimulationError> {
-    let raw = static_attributes
-        .get(name)
-        .ok_or_else(|| {
-            SimulationError::FatalError(format!(
-            "balancer_v3 pool {pool} carries no `{name}` static attribute; it was indexed with an \
-             ethereum-balancer-v3 package that predates it"
-        ))
-        })?;
-    let addresses = json_deserialize_address_list(raw).map_err(|e| {
-        SimulationError::FatalError(format!(
-            "balancer_v3 pool {pool} has a malformed `{name}`: {e}"
-        ))
-    })?;
-    Ok(addresses
-        .iter()
-        .map(|address| format!("0x{}", hex::encode(address)))
-        .collect())
 }
 
 /// Reads a static attribute holding a JSON list of big-endian integers.
