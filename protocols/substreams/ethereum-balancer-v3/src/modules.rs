@@ -10,7 +10,7 @@ use crate::{
         mapping_storage_key_for_address, pool_store_key,
     },
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use itertools::Itertools;
 use std::collections::HashMap;
 use substreams::store::{
@@ -33,6 +33,14 @@ pub fn map_components(
     block: eth::v2::Block,
 ) -> Result<BlockTransactionProtocolComponents> {
     let config = DeploymentConfig::parse(&params)?;
+    // Every other module tolerates an empty factory list, but this one exists solely to match
+    // factories, so an empty list can only be a mistyped or missing parameter.
+    if config.has_no_factories() {
+        return Err(anyhow!(
+            "no pool factory configured: set at least one of weighted_factories, \
+             stable_factories or reclamm_factories in the map_components params"
+        ));
+    }
     let mut tx_components = Vec::new();
     for tx in block.transactions() {
         let mut components = Vec::new();

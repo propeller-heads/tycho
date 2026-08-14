@@ -2,11 +2,12 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
-            ekubo::state::EkuboState, fluid::FluidV1, lunarbase::LunarBaseState,
-            pancakeswap_v2::state::PancakeswapV2State, ramses_v3::state::RamsesV3State,
-            ring_swap_v2::state::RingSwapV2State, rocketpool::state::RocketpoolState,
-            uniswap_v2::state::UniswapV2State, uniswap_v3::state::UniswapV3State,
-            uniswap_v4::state::UniswapV4State, vm::state::EVMPoolState,
+            balancer_v3::BalancerV3State, ekubo::state::EkuboState, fluid::FluidV1,
+            lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State, ring_swap_v2::state::RingSwapV2State,
+            rocketpool::state::RocketpoolState, uniswap_v2::state::UniswapV2State,
+            uniswap_v3::state::UniswapV3State, uniswap_v4::state::UniswapV4State,
+            vm::state::EVMPoolState,
         },
         stream::ProtocolStreamBuilder,
     },
@@ -84,6 +85,15 @@ pub fn register_protocol(
             decoder_context,
         ),
         "lunarbase" => stream_builder.exchange_with_decoder_context::<LunarBaseState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
+        // Keeps its `vm:` name because the indexing stays VM-shaped, but quotes come from
+        // `balancer-maths-rust` rather than the swap adapter — so this is what the tests must
+        // exercise.
+        "vm:balancer_v3" => stream_builder.exchange_with_decoder_context::<BalancerV3State>(
             protocol_system,
             tvl_filter,
             None,

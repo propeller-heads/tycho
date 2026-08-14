@@ -11,6 +11,7 @@ fn main() -> Result<(), anyhow::Error> {
         "abi/stable_pool_factory_contract.abi.json",
         "abi/weighted_pool_factory_contract.abi.json",
         "abi/reclamm_pool_factory_contract.abi.json",
+        "abi/quantamm_weighted_pool_factory_contract.abi.json",
         "abi/stable_pool_contract.abi.json",
         "abi/weighted_pool_contract.abi.json",
     ];
@@ -19,6 +20,7 @@ fn main() -> Result<(), anyhow::Error> {
         "src/abi/stable_pool_factory_contract.rs",
         "src/abi/weighted_pool_factory_contract.rs",
         "src/abi/reclamm_pool_factory_contract.rs",
+        "src/abi/quantamm_weighted_pool_factory_contract.rs",
         "src/abi/stable_pool_contract.rs",
         "src/abi/weighted_pool_contract.rs",
     ];
@@ -44,6 +46,17 @@ fn main() -> Result<(), anyhow::Error> {
         Abigen::from_bytes("Contract", re_sanitized_abi_file.as_bytes())?
             .generate()?
             .write_to_file(file_output_names[i])?;
+
+        // The QuantAMM factory takes its creation parameters as one deeply nested struct, which
+        // abigen renders as a single tuple field of seventeen elements. Rust only implements
+        // `Debug` and `PartialEq` for tuples up to twelve, so the generated derives do not
+        // compile; the bindings are only ever read field by field, so dropping them is enough.
+        if file_output_names[i].contains("quantamm_weighted_pool_factory_contract") {
+            let generated = fs::read_to_string(file_output_names[i])?;
+            let without_unsupported_derives =
+                generated.replace("#[derive(Debug, Clone, PartialEq)]", "#[derive(Clone)]");
+            fs::write(file_output_names[i], without_unsupported_derives)?;
+        }
 
         i = i + 1;
     }

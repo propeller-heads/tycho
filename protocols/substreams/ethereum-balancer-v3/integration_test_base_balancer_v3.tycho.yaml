@@ -3,9 +3,6 @@ protocol_system: "vm:balancer_v3"
 module_name: "map_protocol_changes"
 protocol_type_names:
   - "balancer_v3_pool"
-adapter_contract: "BalancerV3SwapAdapter"
-adapter_build_signature: "constructor(address,address,address,address)"
-adapter_build_args: "0xbA1333333333a1BA1108E8412f11850A5C319bA9,0x85a80afee867aDf27B50BdB7b76DA70f1E853062,0x000000000022D473030F116dDEE9F6B43aC78BA3,0x4200000000000000000000000000000000000006"
 skip_balance_check: true # Skipped because this Balancer V3 uses a Vault, the current version of the testing module doesn't support this.
 
 initialized_accounts:
