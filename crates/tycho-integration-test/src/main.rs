@@ -314,6 +314,14 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
 
+    // Everything is simulated against the deployed contracts; the executors are only activated
+    // when asked for, so that a missing activation still surfaces as a revert.
+    let router_overwrites_data = if cli.bypass_executor_timelock {
+        create_router_overwrites_data(chain)?
+    } else {
+        RouterOverwritesData::default()
+    };
+
     // Read the router fee on output from the on-chain FeeCalculator once at start-up. Slippage is
     // computed after backing this fee out of the simulated amount out, so a stale or wrong fee
     // would skew every slippage result.
@@ -527,6 +535,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
+                        let router_overwrites_data = router_overwrites_data.clone();
                         let permit = protocol_semaphore
                             .clone()
                             .acquire_owned()
@@ -534,7 +543,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -564,6 +573,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
+                        let router_overwrites_data = router_overwrites_data.clone();
                         let permit = rfq_semaphore
                             .clone()
                             .acquire_owned()
@@ -571,7 +581,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire RFQ permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -762,6 +772,7 @@ async fn process_update(
     token_prices: SharedTokenPrices,
     router_fee: RouterFeeOnOutput,
     update: &StreamUpdate,
+    router_overwrites_data: RouterOverwritesData,
 ) -> miette::Result<()> {
     info!(
         "Got protocol update with block/timestamp {}, {} new pairs, and {} states",
@@ -1041,14 +1052,6 @@ async fn process_update(
     if cli.disable_execution {
         return Ok(());
     }
-
-    // Everything is simulated against the deployed contracts; the executors are only activated
-    // when asked for, so that a missing activation still surfaces as a revert.
-    let router_overwrites_data = if cli.bypass_executor_timelock {
-        create_router_overwrites_data(chain)?
-    } else {
-        RouterOverwritesData::default()
-    };
 
     let results = match simulate_swap_transaction(
         &rpc_tools,
