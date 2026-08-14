@@ -79,11 +79,19 @@ pub(super) enum SimulationResult {
 ///   bytecode keep their deployed code, so they must already be deployed.
 /// * `fee_calculator_bytecode` - Runtime bytecode to plant at the fee calculator address. Also
 ///   points the router's `_feeCalculator` slot at that address.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RouterOverwritesData {
     pub router_bytecode: Option<Vec<u8>>,
     pub executors: HashMap<Address, Option<Vec<u8>>>,
     pub fee_calculator_bytecode: Option<Vec<u8>>,
+}
+
+impl RouterOverwritesData {
+    pub fn is_empty(&self) -> bool {
+        let Self { router_bytecode, executors, fee_calculator_bytecode } = self;
+
+        router_bytecode.is_none() && executors.is_empty() && fee_calculator_bytecode.is_none()
+    }
 }
 
 /// An encoded EVM transaction ready to be submitted on-chain.

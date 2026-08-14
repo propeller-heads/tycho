@@ -652,10 +652,7 @@ pub fn setup_router_overwrites(
     data: RouterOverwritesData,
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let mut state_overwrites = AddressHashMap::default();
-    if data.router_bytecode.is_none() &&
-        data.executors.is_empty() &&
-        data.fee_calculator_bytecode.is_none()
-    {
+    if data.is_empty() {
         return Ok(state_overwrites);
     }
 
