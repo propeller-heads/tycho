@@ -1491,31 +1491,36 @@ where
             .await
             .map_err(ExtractionError::Storage)?;
 
-        let missing_components_states_map: Vec<(ProtocolComponentState, Vec<String>)> = missing_map
-            .into_iter()
-            .map(|(component_id, keys)| {
-                let state = missing_components_states
-                    .iter()
-                    .find(|comp| comp.component_id == component_id)
-                    .cloned()
-                    .ok_or(ExtractionError::Storage(StorageError::NotFound(
-                        "Component".to_owned(),
-                        component_id.to_string(),
-                    )))?;
-                Ok((state, keys))
-            })
-            .collect::<Result<Vec<_>, ExtractionError>>()?;
-
-        let mut not_found: HashMap<_, HashSet<_>> = HashMap::new();
+        let mut not_found: HashMap<String, HashSet<String>> = HashMap::new();
         let mut db_states: HashMap<(String, String), Bytes> = HashMap::new();
 
-        for (state, keys) in missing_components_states_map {
+        for (component_id, keys) in missing_map {
+            let state = missing_components_states
+                .iter()
+                .find(|comp| comp.component_id == component_id);
+            if state.is_none() {
+                // No rows in buffer or DB: the component is younger than the finality
+                // horizon, or an upstream module mis-marked its attributes. Either way no
+                // previous value exists, so the revert deletes the attributes. Substreams
+                // output is external input — this must never be fatal.
+                warn!(
+                    component_id = component_id.as_str(),
+                    "Component not found in buffer or DB during revert; \
+                     reverting its attributes as deletions"
+                );
+                counter!(
+                    "extractor_revert_component_not_found",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                )
+                .increment(1);
+            }
             for key in keys {
-                if let Some(value) = state.attributes.get(&key) {
-                    db_states.insert((state.component_id.clone(), key.clone()), value.clone());
+                if let Some(value) = state.and_then(|s| s.attributes.get(&key)) {
+                    db_states.insert((component_id.clone(), key), value.clone());
                 } else {
                     not_found
-                        .entry(state.component_id.clone())
+                        .entry(component_id.clone())
                         .or_default()
                         .insert(key);
                 }
@@ -4264,6 +4269,230 @@ mod test {
                 .contains("fee"),
             "fee has history and must not be deleted, got: {:?}",
             pool_x_delta.deleted_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_update_attr_without_history_deletes() {
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
+            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
+        };
+
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // Component is non-finalized: not in DB.
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: empty anchor.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Block 2: create `pool_x` without attributes. Non-finalized.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(2)),
+                    changes: vec![TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
+                        component_changes: vec![PbProtocolComponent {
+                            id: "pool_x".to_string(),
+                            change: PbChangeType::Creation.into(),
+                            protocol_type: Some(ProtocolType {
+                                name: "pt_1".to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Some("cursor@2"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Partial block 3: first touch of the attribute, mis-marked as Update instead of
+        // Creation. No history in buffer or DB.
+        let mut partial = pb_fixtures::pb_block_scoped_data(
+            PbBlockChanges {
+                block: Some(pb_fixtures::pb_blocks(3)),
+                changes: vec![TransactionChanges {
+                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
+                    entity_changes: vec![EntityChanges {
+                        component_id: "pool_x".to_string(),
+                        attributes: vec![Attribute {
+                            name: "mis_marked".to_string(),
+                            value: Bytes::from(7_u64).lpad(32, 0).to_vec(),
+                            change: PbChangeType::Update.into(),
+                        }],
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Some("cursor@3_p0"),
+            Some(1),
+        );
+        partial.partial_index = Some(0);
+        partial.is_partial = true;
+        extractor
+            .handle_tick_scoped_data(partial)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
+                last_valid_cursor: "cursor@2".into(),
+            })
+            .await
+            .expect("revert must not error when the component has no rows in the DB")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert!(
+            pool_x_delta
+                .deleted_attributes
+                .contains("mis_marked"),
+            "Expected mis_marked in deleted_attributes, got: {:?}",
+            pool_x_delta.deleted_attributes
+        );
+        assert!(
+            pool_x_delta
+                .updated_attributes
+                .is_empty(),
+            "Expected no updated_attributes for pool_x, got: {:?}",
+            pool_x_delta.updated_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_on_component_absent_everywhere_deletes() {
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
+            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+            TransactionChanges,
+        };
+
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // No component rows anywhere.
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: empty anchor.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Block 2 (full block): attribute update on `pool_ghost`, a component that was never
+        // created in the buffer and has no DB rows.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(2)),
+                    changes: vec![TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
+                        entity_changes: vec![EntityChanges {
+                            component_id: "pool_ghost".to_string(),
+                            attributes: vec![Attribute {
+                                name: "reserve".to_string(),
+                                value: Bytes::from(42_u64).lpad(32, 0).to_vec(),
+                                change: PbChangeType::Update.into(),
+                            }],
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Some("cursor@2"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Revert to block 1 — sealed block 2 is reverted.
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 1_u64), number: 1 }),
+                last_valid_cursor: "cursor@1".into(),
+            })
+            .await
+            .expect("revert must not error when the component is absent everywhere")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let ghost_delta = revert_msg
+            .state_deltas
+            .get("pool_ghost")
+            .expect("state_deltas should contain pool_ghost");
+        assert!(
+            ghost_delta
+                .deleted_attributes
+                .contains("reserve"),
+            "Expected reserve in deleted_attributes, got: {:?}",
+            ghost_delta.deleted_attributes
         );
     }
 }
