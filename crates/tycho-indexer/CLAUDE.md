@@ -95,17 +95,17 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
 1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
    match purges strictly after the target; when the hash is absent, a buffered target
-   height purges from that height inclusive (stale copy). A hash miss is fatal when the
+   height purges from that height inclusive (stale copy). A hash miss is fatal when the height
    target is below the buffer, at the buffer's oldest block (no predecessor left to anchor
-   the revert), or above the buffer without a pending partial at exactly that height (the
-   flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
-   fallbacks log a warning and increment `extractor_revert_hash_miss`.
-2. Pending partials are dropped only when above the target height; partials at the target
-   height are the valid prefix of the last valid block and are kept.
-3. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
+   the revert), or above the buffer. Nonfatal hash-miss fallbacks log a warning and increment `extractor_revert_hash_miss`.
+2. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
-4. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
-   state is always on the canonical chain.
+3. Previous attribute values are restored from the buffer, then the DB. Attributes created
+   inside the reverted range, and attributes of components with no state in either place,
+   revert as deletions instead — with a warning and the `extractor_revert_component_not_found`
+   counter. A missing component is expected when it is younger than the finality horizon.
+4. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted state
+   is always on the canonical chain.
 
 `PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
 hash-only `purge` on the block named by the broadcast revert message.
