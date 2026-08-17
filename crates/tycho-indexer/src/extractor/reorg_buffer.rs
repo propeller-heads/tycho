@@ -64,6 +64,19 @@ where
     strict: bool,
 }
 
+/// Result of a height-aware purge. Hash match is authoritative; height is a fallback.
+#[derive(Debug)]
+pub enum PurgeOutcome<B> {
+    /// Target hash found; purged every block strictly after it.
+    HashMatch(Vec<B>),
+    /// Hash not found but a block at the target height was buffered — our copy of that
+    /// height is stale or forked. Purged from that height inclusive.
+    HeightMatch(Vec<B>),
+    /// Hash not found and the target height is above the newest buffered block (or the
+    /// buffer is empty). Nothing sealed is invalid; nothing purged.
+    TargetAhead,
+}
+
 /// The commitment status of a block or block-scoped data with the DB.
 #[derive(PartialEq, Clone, Debug, Copy)]
 pub enum CommitStatus {
@@ -176,6 +189,53 @@ where
         } else {
             Err(StorageError::NotFound("block".into(), target_hash.to_string()))
         }
+    }
+
+    /// Purges blocks invalidated by a revert targeting the given block.
+    ///
+    /// A hash match purges strictly after the matched block. When the hash is absent the
+    /// target height decides: a buffered height purges from that height inclusive, a height
+    /// above the buffer purges nothing. Errors only when the target is below the oldest
+    /// buffered block — a reorg past finality.
+    pub fn purge_to(
+        &mut self,
+        target_hash: &Bytes,
+        target_number: u64,
+    ) -> Result<PurgeOutcome<B>, StorageError> {
+        debug!(
+            "Purging reorg buffer... Target hash {} height {}",
+            target_hash.to_string(),
+            target_number
+        );
+
+        if let Some(idx) = self.find_index(|b| &b.block().hash == target_hash) {
+            let purged = self
+                .block_messages
+                .split_off(idx + 1)
+                .into();
+            trace!(?purged, "ReorgBuffer purged blocks");
+            return Ok(PurgeOutcome::HashMatch(purged));
+        }
+
+        if self
+            .block_messages
+            .back()
+            .is_none_or(|b| target_number > b.block().number)
+        {
+            return Ok(PurgeOutcome::TargetAhead);
+        }
+
+        let Some(idx) = self.find_index(|b| b.block().number == target_number) else {
+            // Neither hash nor height found: the target is below the oldest buffered
+            // block. Keep the exact error `purge` raises today — alerting greps it.
+            return Err(StorageError::NotFound("block".into(), target_hash.to_string()));
+        };
+        let purged = self
+            .block_messages
+            .split_off(idx)
+            .into();
+        trace!(?purged, "ReorgBuffer purged blocks from stale height");
+        Ok(PurgeOutcome::HeightMatch(purged))
     }
 
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
@@ -952,6 +1012,107 @@ mod test {
         );
 
         assert!(unknown.is_err());
+    }
+
+    fn filled_buffer() -> ReorgBuffer<BlockChanges> {
+        let mut reorg_buffer = ReorgBuffer::new();
+        for version in 1..=3 {
+            reorg_buffer
+                .insert_block(get_block_changes(version))
+                .unwrap();
+        }
+        reorg_buffer
+    }
+
+    fn unknown_hash() -> Bytes {
+        Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
+            .unwrap()
+    }
+
+    #[test]
+    fn test_purge_to_hash_match_purges_after_target() {
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(
+                &Bytes::from_str(
+                    "0x0000000000000000000000000000000000000000000000000000000000000001",
+                )
+                .unwrap(),
+                1,
+            )
+            .unwrap();
+
+        let PurgeOutcome::HashMatch(purged) = outcome else { panic!("expected HashMatch") };
+        assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
+        assert_eq!(reorg_buffer.block_messages.len(), 1);
+    }
+
+    #[test]
+    fn test_purge_to_hash_match_wins_over_height() {
+        // Height 2 with the real hash of block 2: the hash match keeps block 2
+        // (exclusive purge). A height fallback would wrongly purge it too.
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(
+                &Bytes::from_str(
+                    "0x0000000000000000000000000000000000000000000000000000000000000002",
+                )
+                .unwrap(),
+                2,
+            )
+            .unwrap();
+
+        let PurgeOutcome::HashMatch(purged) = outcome else { panic!("expected HashMatch") };
+        assert_eq!(purged, vec![get_block_changes(3)]);
+        assert_eq!(reorg_buffer.block_messages.len(), 2);
+    }
+
+    #[test]
+    fn test_purge_to_height_match_purges_inclusive() {
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(&unknown_hash(), 2)
+            .unwrap();
+
+        let PurgeOutcome::HeightMatch(purged) = outcome else { panic!("expected HeightMatch") };
+        assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
+        assert_eq!(reorg_buffer.block_messages.len(), 1);
+    }
+
+    #[test]
+    fn test_purge_to_target_ahead_purges_nothing() {
+        let mut reorg_buffer = filled_buffer();
+
+        let outcome = reorg_buffer
+            .purge_to(&unknown_hash(), 4)
+            .unwrap();
+
+        assert!(matches!(outcome, PurgeOutcome::TargetAhead));
+        assert_eq!(reorg_buffer.block_messages.len(), 3);
+    }
+
+    #[test]
+    fn test_purge_to_empty_buffer_is_target_ahead() {
+        let mut reorg_buffer = ReorgBuffer::<BlockChanges>::new();
+
+        let outcome = reorg_buffer
+            .purge_to(&unknown_hash(), 5)
+            .unwrap();
+
+        assert!(matches!(outcome, PurgeOutcome::TargetAhead));
+    }
+
+    #[test]
+    fn test_purge_to_below_oldest_errors() {
+        let mut reorg_buffer = filled_buffer();
+
+        let result = reorg_buffer.purge_to(&unknown_hash(), 0);
+
+        assert!(matches!(result, Err(StorageError::NotFound(_, _))));
+        assert_eq!(reorg_buffer.block_messages.len(), 3, "a fatal miss must not mutate");
     }
 
     #[test]
