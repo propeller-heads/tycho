@@ -1418,7 +1418,8 @@ where
                 acc
             });
 
-        // Second pass: build the lookup key set, excluding creation attributes (no prior state).
+        // Second pass: build the lookup key set, excluding attributes created inside the reverted
+        // range (no prior state).
         let reverted_protocol_state_keys: HashSet<_> = reverted_state
             .iter()
             .flat_map(|block_msg| {
@@ -1432,15 +1433,24 @@ where
                             .iter()
                             .filter(|(c_id, _)| !reverted_components_creations.contains_key(*c_id))
                             .flat_map(|(c_id, delta)| {
+                                // Attrs born inside the reverted range have no prior state
+                                // anywhere; their revert (deletion) is emitted by the
+                                // created-attrs loop below, so they must not be looked up.
+                                let has_prior_state = |attr: &&String| {
+                                    !reverted_created_attrs
+                                        .get(c_id.as_str())
+                                        .is_some_and(|created| created.contains(*attr))
+                                };
                                 delta
                                     .updated_attributes
                                     .keys()
-                                    .filter(|attr| {
-                                        !reverted_created_attrs
-                                            .get(c_id.as_str())
-                                            .is_some_and(|created| created.contains(*attr))
-                                    })
-                                    .chain(delta.deleted_attributes.iter())
+                                    .filter(has_prior_state)
+                                    .chain(
+                                        delta
+                                            .deleted_attributes
+                                            .iter()
+                                            .filter(has_prior_state),
+                                    )
                                     .map(move |key| (c_id, key))
                             })
                     })
@@ -3968,6 +3978,292 @@ mod test {
                 .is_empty(),
             "Expected no updated_attributes for pool_x, got: {:?}",
             pool_x_delta.updated_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_created_and_deleted_in_range() {
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
+            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
+        };
+
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // Component is non-finalized: not in DB.
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: empty anchor.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(2)),
+                    changes: vec![TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
+                        component_changes: vec![PbProtocolComponent {
+                            id: "pool_x".to_string(),
+                            change: PbChangeType::Creation.into(),
+                            protocol_type: Some(ProtocolType {
+                                name: "pt_1".to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Some("cursor@2"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Partial block 3: tx 0 mints a fresh tick (Creation), tx 1 burns it (Deletion) —
+        // the JIT-liquidity pattern from the production crashes.
+        let mut partial = pb_fixtures::pb_block_scoped_data(
+            PbBlockChanges {
+                block: Some(pb_fixtures::pb_blocks(3)),
+                changes: vec![
+                    TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(3, 0)),
+                        entity_changes: vec![EntityChanges {
+                            component_id: "pool_x".to_string(),
+                            attributes: vec![Attribute {
+                                name: "ticks/100/net-liquidity".to_string(),
+                                value: Bytes::from(5000_u64)
+                                    .lpad(32, 0)
+                                    .to_vec(),
+                                change: PbChangeType::Creation.into(),
+                            }],
+                        }],
+                        ..Default::default()
+                    },
+                    TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(3, 1)),
+                        entity_changes: vec![EntityChanges {
+                            component_id: "pool_x".to_string(),
+                            attributes: vec![Attribute {
+                                name: "ticks/100/net-liquidity".to_string(),
+                                value: Vec::new(),
+                                change: PbChangeType::Deletion.into(),
+                            }],
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            Some("cursor@3_p0"),
+            Some(1),
+        );
+        partial.partial_index = Some(0);
+        partial.is_partial = true;
+        extractor
+            .handle_tick_scoped_data(partial)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Revert to block 2 — partial block 3 is reverted.
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
+                last_valid_cursor: "cursor@2".into(),
+            })
+            .await
+            .expect("revert must not error when the attr was created and deleted in range")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert!(
+            pool_x_delta
+                .deleted_attributes
+                .contains("ticks/100/net-liquidity"),
+            "Expected ticks/100/net-liquidity in deleted_attributes, got: {:?}",
+            pool_x_delta.deleted_attributes
+        );
+        assert!(
+            pool_x_delta
+                .updated_attributes
+                .is_empty(),
+            "Expected no updated_attributes for pool_x, got: {:?}",
+            pool_x_delta.updated_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_deleted_attr_with_history_restores_value() {
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
+            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
+        };
+
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: empty anchor.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Block 2: create `pool_x` with attribute `fee` = 100. Stays in the buffer.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(2)),
+                    changes: vec![TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
+                        component_changes: vec![PbProtocolComponent {
+                            id: "pool_x".to_string(),
+                            change: PbChangeType::Creation.into(),
+                            protocol_type: Some(ProtocolType {
+                                name: "pt_1".to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        entity_changes: vec![EntityChanges {
+                            component_id: "pool_x".to_string(),
+                            attributes: vec![Attribute {
+                                name: "fee".to_string(),
+                                value: Bytes::from(100_u64)
+                                    .lpad(32, 0)
+                                    .to_vec(),
+                                change: PbChangeType::Creation.into(),
+                            }],
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Some("cursor@2"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Partial block 3: delete `fee`. Its creation is OUTSIDE the reverted range, so the
+        // revert must restore the previous value from the buffer.
+        let mut partial = pb_fixtures::pb_block_scoped_data(
+            PbBlockChanges {
+                block: Some(pb_fixtures::pb_blocks(3)),
+                changes: vec![TransactionChanges {
+                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
+                    entity_changes: vec![EntityChanges {
+                        component_id: "pool_x".to_string(),
+                        attributes: vec![Attribute {
+                            name: "fee".to_string(),
+                            value: Vec::new(),
+                            change: PbChangeType::Deletion.into(),
+                        }],
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Some("cursor@3_p0"),
+            Some(1),
+        );
+        partial.partial_index = Some(0);
+        partial.is_partial = true;
+        extractor
+            .handle_tick_scoped_data(partial)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
+                last_valid_cursor: "cursor@2".into(),
+            })
+            .await
+            .expect("revert must not error")
+            .expect("revert must produce a message");
+
+        assert!(revert_msg.revert);
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            pool_x_delta
+                .updated_attributes
+                .get("fee"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "Expected fee restored to its pre-revert value from the buffer"
+        );
+        assert!(
+            !pool_x_delta
+                .deleted_attributes
+                .contains("fee"),
+            "fee has history and must not be deleted, got: {:?}",
+            pool_x_delta.deleted_attributes
         );
     }
 }
