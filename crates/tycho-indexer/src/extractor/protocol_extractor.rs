@@ -42,7 +42,7 @@ use crate::{
         chain_state::ChainState,
         models::BlockChanges,
         protocol_cache::{ProtocolDataCache, ProtocolMemoryCache},
-        reorg_buffer::ReorgBuffer,
+        reorg_buffer::{PurgeOutcome, ReorgBuffer},
         BlockUpdateWithCursor, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::{
@@ -1126,19 +1126,59 @@ where
 
         let mut reorg_buffer = self.reorg_buffer.lock().await;
 
-        // Purge the reorg buffer
-        let mut reverted_state = reorg_buffer
-            .purge(block_hash)
-            .map_err(|e| ExtractionError::ReorgBufferError(e.to_string()))?;
+        // Purge the reorg buffer. Hash match is authoritative; height is the fallback for
+        // a target we sealed under a stale hash or have not sealed yet (still streaming
+        // as partials).
+        let mut reverted_state = match reorg_buffer
+            .purge_to(&block_hash, block_ref.number)
+            .map_err(|e| ExtractionError::ReorgBufferError(e.to_string()))?
+        {
+            PurgeOutcome::HashMatch(purged) => purged,
+            PurgeOutcome::HeightMatch(purged) => {
+                warn!(
+                    target_number = block_ref.number,
+                    "Revert target hash not in reorg buffer; purged from the target height inclusive"
+                );
+                counter!(
+                    "extractor_revert_hash_miss",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                    "resolution" => "height_purge",
+                )
+                .increment(1);
+                purged
+            }
+            PurgeOutcome::TargetAhead => {
+                warn!(
+                    target_number = block_ref.number,
+                    "Revert target hash not in reorg buffer; target is above sealed blocks, nothing to purge"
+                );
+                counter!(
+                    "extractor_revert_hash_miss",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                    "resolution" => "target_ahead",
+                )
+                .increment(1);
+                Vec::new()
+            }
+        };
 
-        // Purge partial block buffer
-        let partial_block = self
-            .partial_block_buffer
-            .lock()
-            .await
-            .take();
+        // Drop pending partials only above the revert target. Partials at the target
+        // height are the valid, still-incomplete prefix of the last valid block.
+        let dropped_partial = {
+            let mut buffer_guard = self.partial_block_buffer.lock().await;
+            if buffer_guard
+                .as_ref()
+                .is_some_and(|partial| partial.block.number > block_ref.number)
+            {
+                buffer_guard.take()
+            } else {
+                None
+            }
+        };
         let mut revert_partial_block_index = None;
-        if let Some(partial) = partial_block {
+        if let Some(partial) = dropped_partial {
             // If we have not reverted any full blocks and the partial block buffer is not empty,
             // mark it as a partial revert to avoid sending to full block subscribers.
             if reverted_state.is_empty() {
@@ -1148,6 +1188,16 @@ where
             // The partial block's cursor should be the current cursor
             let cursor = self.get_cursor().await;
             reverted_state.push(BlockUpdateWithCursor::new(partial, cursor));
+        }
+
+        if reverted_state.is_empty() {
+            // Nothing sealed or pending was invalidated: the undo targets the block we
+            // are still streaming, or the buffer head itself. Advance the cursor and
+            // continue; the parent-hash check on the next insert stays as the safety net.
+            info!("Nothing to revert; all buffered state is at or below the revert target");
+            self.update_cursor(inp.last_valid_cursor)
+                .await;
+            return Ok(None);
         }
 
         // Handle created and deleted components
@@ -3289,6 +3339,310 @@ mod test {
                 "Revert message missing account delta at {addr:x} from partial block 3"
             );
         }
+    }
+
+    /// Gateway mock for revert tests that reach the previous-value lookups.
+    fn revert_test_gateway() -> MockExtractorGateway {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw
+    }
+
+    /// Gateway mock for reverts that must return before any lookup. Lookup expectations
+    /// are omitted on purpose: mockall panics if the early return is missed.
+    fn no_lookup_gateway() -> MockExtractorGateway {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw
+    }
+
+    #[tokio::test]
+    async fn test_revert_hash_miss_purges_from_target_height() {
+        // Design rule 2: the undo names height 3 under a hash we never sealed. Our copy
+        // of height 3 is stale — purge it inclusively and revert to block 2.
+        let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(2, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(3, 1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(revert_msg.revert);
+        assert_eq!(
+            revert_msg.block.number, 2,
+            "revert must land on the block below the stale height"
+        );
+        assert_eq!(revert_msg.partial_block_index, None);
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            2,
+            "block 3 must be purged inclusively"
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo");
+    }
+
+    #[tokio::test]
+    async fn test_revert_target_ahead_keeps_partial_and_continues() {
+        // Design rule 3 + partial retention: the undo names the height currently pending
+        // in the partial block buffer. Nothing sealed is invalid; the partials are the
+        // valid prefix of the last valid block and must survive.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(2, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 2,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none(), "nothing was invalidated, no revert message");
+        assert_eq!(
+            extractor
+                .partial_block_buffer
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|p| p.partial_block_index),
+            Some(0),
+            "partials at the target height must be kept"
+        );
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            1
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo");
+    }
+
+    #[tokio::test]
+    async fn test_revert_burst_second_undo_names_restreamed_block() {
+        // Design burst sequence: undo #1 purges sealed block 3 by hash; the new fork's
+        // block 3 re-streams as partials; undo #2 names re-streamed block 3 by its sealed
+        // hash, which only exists as pending partials.
+        let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(2, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(3, 1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Undo #1: hash match on block 2, purges sealed block 3.
+        extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
+                last_valid_cursor: "cursor@2".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The new fork's block 3 re-streams as partials.
+        extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(3, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Undo #2 names re-streamed block 3 by a sealed hash we never saw.
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xbeef_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo2".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+        assert!(
+            extractor
+                .partial_block_buffer
+                .lock()
+                .await
+                .is_some(),
+            "re-streamed partials must survive the second undo"
+        );
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            2
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo2");
+    }
+
+    #[tokio::test]
+    async fn test_revert_below_buffer_stays_fatal() {
+        // Design rule 4: a target below the oldest buffered block is a reorg past
+        // finality and must keep crashing the extractor.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 0,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_revert_to_buffer_head_without_partial_is_noop() {
+        // Hash match on the buffer head with nothing after it and no pending partial.
+        // Today this dies with "Reorg buffer is empty after purge"; it must be a no-op.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 1_u64), number: 1 }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            1
+        );
+        assert_eq!(extractor.get_cursor().await, "cursor@undo");
     }
 
     // Tests that reverting a partial block containing a brand-new attribute on a non-finalized
