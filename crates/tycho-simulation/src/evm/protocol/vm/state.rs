@@ -57,12 +57,15 @@ where
     /// simulations. This has been deprecated in favor of `contract_balances`.
     #[deprecated(note = "Use contract_balances instead")]
     balance_owner: Option<Address>,
-    /// Read-through cache of spot prices by `(sell, buy)`. Lazily populated by `spot_price`,
-    /// eagerly warmed by `update_pool_state`, and cleared whenever pool state changes. Bypassed
-    /// for pools with live overrides (see later tasks).
+    /// Spot prices by `(sell, buy)`, cleared whenever pool state changes. For regular pools this
+    /// is a read-through cache: lazily populated by `spot_price`, eagerly warmed by
+    /// `update_pool_state`. Pools with live overrides only ever populate it eagerly (their
+    /// override-derived prices change sub-block, so `spot_price` errors on a miss instead of
+    /// computing against a possibly newer snapshot).
     spot_price_cache: RwLock<HashMap<(Address, Address), f64>>,
     /// Read-through cache of `(sell_limit, buy_limit)` by `(sell, buy)`. Stable per
-    /// pool-state-version; cleared whenever pool state changes. Bypassed under live overrides.
+    /// pool-state-version; cleared whenever pool state changes. Fully bypassed (no reads or
+    /// writes) for pools with live overrides.
     limit_cache: RwLock<HashMap<(Address, Address), (U256, U256)>>,
     /// The supported capabilities of this pool
     capabilities: HashSet<Capability>,
@@ -213,6 +216,16 @@ where
     /// Once set, the latest snapshot is read on every simulation; see [`Self::live_overrides`].
     pub fn set_live_overrides(&mut self, receiver: watch::Receiver<OverrideSnapshot>) {
         self.live_overrides = Some(receiver);
+        // Values cached before the channel was attached were computed without overrides and
+        // would otherwise be served by the cache-read fast paths.
+        self.spot_price_cache
+            .write()
+            .expect("spot_price_cache poisoned")
+            .clear();
+        self.limit_cache
+            .write()
+            .expect("limit_cache poisoned")
+            .clear();
     }
 
     /// Reads the latest live override snapshot once, if a channel is attached and still fresh.
@@ -958,14 +971,14 @@ where
                 Some(GetAmountOutResult::new(
                     u256_to_biguint(buy_amount),
                     u256_to_biguint(trade.gas_used),
-                    Box::new(new_state.clone()),
+                    Box::new(new_state),
                 )),
             ));
         }
         Ok(GetAmountOutResult::new(
             u256_to_biguint(buy_amount),
             u256_to_biguint(trade.gas_used),
-            Box::new(new_state.clone()),
+            Box::new(new_state),
         ))
     }
 
@@ -2203,6 +2216,38 @@ mod tests {
         let (_expired_tx, expired_rx) = watch::channel(expired);
         pool_state.set_live_overrides(expired_rx);
         assert!(pool_state.get_live_snapshot().is_none());
+    }
+
+    /// Attaching a live override channel must drop any values cached while the pool had no
+    /// overrides: they were computed against plain indexed state, and the cache-read fast paths
+    /// would keep serving them.
+    #[tokio::test]
+    async fn test_set_live_overrides_clears_caches() {
+        let mut pool_state = setup_pool_state().await;
+        pool_state
+            .spot_price_cache
+            .write()
+            .unwrap()
+            .insert((dai_addr(), bal_addr()), 1.0);
+        pool_state
+            .limit_cache
+            .write()
+            .unwrap()
+            .insert((dai_addr(), bal_addr()), (U256::from(1u64), U256::from(1u64)));
+
+        let (_tx, rx) = watch::channel(OverrideSnapshot::default());
+        pool_state.set_live_overrides(rx);
+
+        assert!(pool_state
+            .spot_price_cache
+            .read()
+            .unwrap()
+            .is_empty());
+        assert!(pool_state
+            .limit_cache
+            .read()
+            .unwrap()
+            .is_empty());
     }
 
     /// A live snapshot that corrupts the Balancer Vault's low storage slots (pause / reentrancy
