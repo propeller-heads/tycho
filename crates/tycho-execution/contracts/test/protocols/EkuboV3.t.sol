@@ -495,8 +495,8 @@ contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
         vm.makePersistent(address(executor));
     }
 
-    modifier setUpFork() {
-        vm.createSelectFork(vm.rpcUrl("robinhood"));
+    modifier setUpFork(uint256 blockNumber) {
+        vm.createSelectFork(vm.rpcUrl("robinhood"), blockNumber);
         // Precautionary, mirroring the mainnet fork workaround; Foundry
         // defaults unknown chains to the latest hardfork.
         address(vm)
@@ -508,7 +508,7 @@ contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
     // using the token pair of a live Ve33 pool. A fresh pool (distinct tick
     // spacing) is initialized because the executor needs a funded position
     // at a known price, not a specific market.
-    function testVe33Swap() public setUpFork {
+    function testVe33Swap() public setUpFork(39875978) {
         // Ve33 pools require zero fee and power-of-four tick spacing.
         PoolConfig poolConfig = createConcentratedPoolConfig({
             _fee: 0, _tickSpacing: 64, _extension: VE33_ADDRESS
