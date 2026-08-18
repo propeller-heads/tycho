@@ -2,9 +2,9 @@ pragma solidity ^0.8.26;
 
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
-import "@src/executors/EkuboV3ExecutorBase.sol";
-import "@src/executors/EkuboV3EthereumExecutor.sol";
-import "@src/executors/EkuboV3RobinhoodExecutor.sol";
+import "@src/executors/ekubo_v3/EkuboV3ExecutorBase.sol";
+import "@src/executors/ekubo_v3/EkuboV3EthereumExecutor.sol";
+import "@src/executors/ekubo_v3/EkuboV3RobinhoodExecutor.sol";
 import {
     IFlashAccountant,
     ILocker

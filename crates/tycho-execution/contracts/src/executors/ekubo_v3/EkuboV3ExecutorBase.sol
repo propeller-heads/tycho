@@ -23,8 +23,8 @@ import {
     MIN_SQRT_RATIO,
     MAX_SQRT_RATIO
 } from "@ekubo-v3/types/sqrtRatio.sol";
-import {TransferManager} from "../TransferManager.sol";
-import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
+import {TransferManager} from "../../TransferManager.sol";
+import {ETH_ADDRESS} from "../../../lib/NativeETH.sol";
 import {PoolKey} from "@ekubo-v3/types/poolKey.sol";
 import {PoolConfig} from "@ekubo-v3/types/poolConfig.sol";
 import {NATIVE_TOKEN_ADDRESS} from "@ekubo-v3/math/constants.sol";

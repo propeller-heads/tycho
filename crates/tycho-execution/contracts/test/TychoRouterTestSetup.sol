@@ -8,7 +8,7 @@ import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
 import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {
     EkuboV3EthereumExecutor
-} from "../src/executors/EkuboV3EthereumExecutor.sol";
+} from "../src/executors/ekubo_v3/EkuboV3EthereumExecutor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
