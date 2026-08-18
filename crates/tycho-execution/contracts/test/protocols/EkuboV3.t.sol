@@ -373,8 +373,9 @@ contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
     function testVe33Swap() public setUpFork(24218590) {
         deployCodeTo("Ve33.sol:Ve33", abi.encode(CORE, USDC_ADDR), VE33_ADDRESS);
 
+        // Ve33 pools require zero fee and power-of-four tick spacing.
         PoolConfig poolConfig = createConcentratedPoolConfig({
-            _fee: 0, _tickSpacing: 100, _extension: VE33_ADDRESS
+            _fee: 0, _tickSpacing: 64, _extension: VE33_ADDRESS
         });
         PoolKey memory poolKey =
             PoolKey({token0: USDC_ADDR, token1: USDT_ADDR, config: poolConfig});
@@ -383,9 +384,9 @@ contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
         LiquidityHelper liquidityHelper = new LiquidityHelper();
         deal(USDC_ADDR, address(liquidityHelper), 10_000_000_000);
         deal(USDT_ADDR, address(liquidityHelper), 10_000_000_000);
-        liquidityHelper.provide(poolKey, -1_000, 1_000, 1_000_000_000);
+        liquidityHelper.provide(poolKey, -960, 960, 1_000_000_000);
 
-        uint256 amountIn = 1_000_000;
+        uint256 amountIn = 100_000;
         deal(USDC_ADDR, address(executor), amountIn);
         uint256 usdtBalanceBefore = USDT.balanceOf(address(executor));
 
