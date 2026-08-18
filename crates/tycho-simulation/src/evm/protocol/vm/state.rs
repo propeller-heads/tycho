@@ -137,6 +137,7 @@ where
             self_contained_tokens: self.self_contained_tokens.clone(),
             block_overrides: self.block_overrides.clone(),
             live_overrides: self.live_overrides.clone(),
+            spot_price_caller: self.spot_price_caller,
         }
     }
 }
