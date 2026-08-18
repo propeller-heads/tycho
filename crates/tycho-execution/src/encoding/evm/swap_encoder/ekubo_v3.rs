@@ -307,7 +307,7 @@ mod tests {
         let usdc = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         let usdt = Bytes::from("0xdAC17F958D2ee523a2206206994597C13D831ec7");
 
-        // Must match SIGNED_EXCLUSIVE_SWAP_ADDRESS in EkuboV3EthereumExecutor.sol.
+        // Must match SIGNED_EXCLUSIVE_SWAP_ADDRESS in EkuboV3Executor.sol.
         let extension_hex = "0x55b703eed01b35641963da2fb2e14885993605a3";
         let extension_addr =
             Address::from_str("0x55b703eed01b35641963da2fb2e14885993605a3").unwrap();

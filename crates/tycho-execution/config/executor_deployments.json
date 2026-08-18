@@ -54,7 +54,7 @@
       "contract": "RocketpoolExecutor",
       "args": ["0xCE15294273CFb9D9b628F4D61636623decDF4fdC"]
     },
-    "ekubo_v3": { "contract": "EkuboV3EthereumExecutor", "args": [] },
+    "ekubo_v3": { "contract": "EkuboV3Executor", "args": [] },
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
