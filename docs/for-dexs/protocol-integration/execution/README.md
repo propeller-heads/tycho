@@ -70,7 +70,7 @@ Called by the Dispatcher via `delegatecall`. This function:
 ```solidity
 function getTransferData(bytes calldata data)
     external
-    payable
+    view
     returns (
         TransferManager.TransferType transferType,
         address receiver,
@@ -86,7 +86,7 @@ Called by the Dispatcher via `staticcall` before each swap to determine how inpu
 * `receiver`: Where tokens should be sent (typically the pool address or the router).
 * `tokenIn`: The input token address. For native ETH, this must be `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (the `ETH_ADDRESS` constant), not `address(0)`.
 * `tokenOut`: The output token address. Same rule applies for native ETH.
-* `outputToRouter`: Whether the protocol automatically sends the output token back to the TychoRouter. The Dispatcher uses this to decide whether it needs to transfer the token to the intended receiver.
+* `outputToRouter`: Whether the protocol automatically sends the output token back to the TychoRouterV3. The Dispatcher uses this to decide whether it needs to transfer the token to the intended receiver.
 
 `transferType`, `receiver` and `outputToRouter` must be **hardcoded** per-executor based on the protocol's requirements — they are not encodable in calldata.
 
@@ -116,24 +116,23 @@ function handleCallback(
 
 function verifyCallback(bytes calldata data) external view;
 
-function getCallbackTransferData(bytes calldata data)
+function getCallbackTransferData(
+    bytes calldata data,
+    address tokenIn,
+    address caller
+)
     external
-    payable
-    returns (
-        TransferManager.TransferType transferType,
-        address receiver,
-        address tokenIn,
-        uint256 amountIn
-    );
+    view
+    returns (TransferManager.TransferType transferType, address receiver);
 ```
 
 * `handleCallback`: The main entry point for handling callbacks.
 * `verifyCallback`: Should be called within `handleCallback` to ensure that the `msg.sender` is a valid pool from the expected protocol.
-* `getCallbackTransferData`: Called by the Dispatcher during the callback to determine how tokens should be transferred. Like `getTransferData`, the transfer type must be hardcoded — the Dispatcher handles the actual transfer based on the returned values.
+* `getCallbackTransferData`: Called by the Dispatcher during the callback to determine how tokens should be transferred. Like `getTransferData`, the transfer type must be hardcoded — the Dispatcher handles the actual transfer based on the returned values. The Dispatcher supplies `tokenIn` from its own transient storage (recorded during `getTransferData`) rather than trusting the callback data, so a protocol cannot inject a different token. `caller` is the `msg.sender` seen in the router's `fallback()`, which lets the executor validate the calling pool.
 
 **Callback Flow**
 
-When a protocol initiates a callback during swap execution, it flows through the `TychoRouter`'s `fallback()` method, which acts as the entry point for all callback requests. The router's fallback function delegates the call to the Dispatcher, which:
+When a protocol initiates a callback during swap execution, it flows through the `TychoRouterV3`'s `fallback()` method, which acts as the entry point for all callback requests. The router's fallback function delegates the call to the Dispatcher, which:
 
 1. Calls `getCallbackTransferData` on the executor to determine transfer requirements.
 2. Performs the token transfer via the `TransferManager` (the executor does not transfer tokens itself).
@@ -196,23 +195,23 @@ Balance checks before and after token transfers mean fee-on-transfer tokens and 
 
 ## Security Requirements
 
-TychoRouter calls executors via `delegatecall`, so executor code runs within TychoRouter's context — it can freely transfer the router's assets and write to the router's storage, including users' vault balances. Follow this checklist when building or reviewing an executor.
+TychoRouterV3 calls executors via `delegatecall`, so executor code runs within TychoRouterV3's context — it can freely transfer the router's assets and write to the router's storage, including users' vault balances. Follow this checklist when building or reviewing an executor.
 
 {% hint style="danger" %}
-**Executors run with TychoRouter's full privileges.** A bug or malicious executor can steal all router assets.
+**Executors run with TychoRouterV3's full privileges.** A bug or malicious executor can steal all router assets.
 {% endhint %}
 
-* **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Communicate transfer intent through `getTransferData` and `getCallbackTransferData` instead — TychoRouter performs the actual transfers with its own safeguards. The only exception is for native ETH transfers: this transfers must be handled inside the Executor and have a `transferType` of `TransferNativeInExecutor`.
-* **Never do ERC20 token approvals**. These are all handled by the TychoRouter.
-* **Never assign to a state variable** or perform any operation that writes to TychoRouter's storage.
-* **Do not execute `delegatecall`.** If a protocol makes it unavoidable, ensure the caller cannot control the `delegatecall` target — attacker-controlled targets enable arbitrary code execution within TychoRouter's context.
+* **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Communicate transfer intent through `getTransferData` and `getCallbackTransferData` instead — TychoRouterV3 performs the actual transfers with its own safeguards. The only exception is for native ETH transfers: this transfers must be handled inside the Executor and have a `transferType` of `TransferNativeInExecutor`.
+* **Never do ERC20 token approvals**. These are all handled by the TychoRouterV3.
+* **Never assign to a state variable** or perform any operation that writes to TychoRouterV3's storage.
+* **Do not execute `delegatecall`.** If a protocol makes it unavoidable, ensure the caller cannot control the `delegatecall` target — attacker-controlled targets enable arbitrary code execution within TychoRouterV3's context.
 * **Avoid trusting data sent via callback.** If necessary, call `verifyCallback` within `handleCallback` to confirm `msg.sender` is a valid pool from the expected protocol.
 * **`handleCallback`'s `data` argument** contains raw ABI-encoded calldata that the executor must decode manually.
 * **`handleCallback`'s return value** must be raw ABI-encoded return data that the executor encodes manually.
 
 ## Security Model
 
-Tycho maintains a Rust <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-execution/model" target="_blank" rel="noopener noreferrer">security model</a> of TychoRouter that simulates many swap-parameter combinations to find inputs that let a caller drain the router's assets. The model mirrors the router's Solidity logic and reports suspicious outcomes. During the V3 security assessment it surfaced several critical vulnerabilities, all of which the team fixed before launch. Adding new executors keeps this coverage up to date.
+Tycho maintains a Rust <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-execution/model" target="_blank" rel="noopener noreferrer">security model</a> of TychoRouterV3 that simulates many swap-parameter combinations to find inputs that let a caller drain the router's assets. The model mirrors the router's Solidity logic and reports suspicious outcomes. During the V3 security assessment it surfaced several critical vulnerabilities, all of which the team fixed before launch. Adding new executors keeps this coverage up to date.
 
 The model only covers executors that give the caller control over the called pool contract — for example, executors where the caller supplies the pool address. These executors present the highest risk and are the easiest to model. If your executor falls into this category, add it to the model so the simulation covers it.
 
@@ -229,7 +228,7 @@ Each new integration must be thoroughly tested in both Rust and Solidity. This i
 
 * Unit tests for the `SwapEncoder` in Rust
 * Unit tests for the `Executor` in Solidity
-* Two key **integration tests** to verify the full swap flow: `SwapEncoder` to `Executor` integration test and a full TychoRouter integration test
+* Two key **integration tests** to verify the full swap flow: `SwapEncoder` to `Executor` integration test and a full TychoRouterV3 integration test
 
 #### 1. SwapEncoder ↔ Executor Integration Test
 
@@ -242,7 +241,7 @@ Use the helper functions:
 
 These helpers save and load the calldata to/from `calldata.txt`.
 
-#### 2. Full TychoRouter Integration Test
+#### 2. Full TychoRouterV3 Integration Test
 
 * In `tests/protocol_integration_tests.rs`, write a Rust test that encodes a single swap and saves the calldata using `write_calldata_to_file()`.
 * In `TychoRouterTestSetup`, deploy your new executor and add it to executors list in `deployExecutors`.

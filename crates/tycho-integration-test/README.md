@@ -7,7 +7,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 2. **State Validation**: For each protocol update (after the first one) and for each swap direction:
     1. **Get Limits**: Retrieves maximum input/output limits for token pairs
     2. **Simulate Swap**: Calls `get_amount_out` with 0.1% of max input amount
-    3. **Encode Transaction**: Builds the actual swap transaction via TychoRouter
+    3. **Encode Transaction**: Builds the actual swap transaction via TychoRouterV3
     4. **Execute Simulation**: Runs `debug_traceCall` with necessary state overrides
     5. **Calculate Slippage**: Compares simulated vs actual execution results
 

@@ -503,7 +503,7 @@ contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
             )
         );
         tychoRouter.singleSwap(
-            amountIn, DAI_ADDR, WETH_ADDR, 1, ALICE, noClientFee(), swap
+            amountIn, DAI_ADDR, WETH_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
         vm.stopPrank();
 
@@ -533,7 +533,7 @@ contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
             )
         );
         tychoRouter.singleSwap(
-            amountIn, DAI_ADDR, WETH_ADDR, 1, ALICE, noClientFee(), swap
+            amountIn, DAI_ADDR, WETH_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
         vm.stopPrank();
 

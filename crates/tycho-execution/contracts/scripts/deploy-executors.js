@@ -32,9 +32,6 @@ const deploy_protocols = {
         "vm:bopamm",
         "rfq:metric",
     ],
-    "robinhood": [
-        "ekubo_v3",
-    ],
     "base": [
         "uniswap_v2",
         "uniswap_v3",
@@ -80,6 +77,13 @@ const deploy_protocols = {
         "uniswap_v3",
         "fluid_v1",
         "vm:curve",
+        "native_wrapper",
+    ],
+    "robinhood": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+        "ekubo_v3",
         "native_wrapper",
     ],
 };

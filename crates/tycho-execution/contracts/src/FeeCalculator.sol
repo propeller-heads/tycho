@@ -5,7 +5,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {
     EnumerableSet
 } from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
 
 error FeeCalculator__FeeTooHigh();
@@ -14,23 +14,20 @@ error FeeCalculator__AddressZero();
 /**
  * @title FeeCalculator
  * @notice Contract responsible for calculating fees on swap outputs and managing fee configuration
- * @dev This contract is called via staticCall from TychoRouter.
+ * @dev This contract is called via staticCall from TychoRouterV3.
  *      It calculates fees and returns the values - accounting is done by the caller.
  *      It also stores all fee-related configuration.
  *
  *      Router fees use an 8-decimal precision unit: 1 unit = 0.0001 BPS = 0.000001%.
  *      100% = 100_000_000 units. This allows sub-BPS fee rates (e.g. 1.5 BPS = 15_000 units).
- *
- *      The external interface (calculateFee, getEffectiveRouterFeeOnOutput) preserves legacy
- *      BPS semantics (10_000 = 100%) for compatibility with TychoRouter and Dispatcher.
  */
 contract FeeCalculator is AccessControl, IFeeCalculator {
     using EnumerableSet for EnumerableSet.AddressSet;
 
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
-    uint32 public constant MAX_FEE_BPS = 100_000_000;
-    // Combined denominator when both fees use the MAX_FEE_BPS scale (MAX_FEE_BPS^2)
-    uint64 public constant MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000;
+    uint32 public constant MAX_BPS = 100_000_000;
+    // Combined denominator when both fees use the MAX_BPS scale (MAX_BPS^2)
+    uint64 public constant MAX_BPS_SQUARED = 10_000_000_000_000_000;
 
     uint32 private _routerFeeOnOutputBps; // Router fee on output amount in fee units
     uint32 private _routerFeeOnClientFeeBps; // Router fee on client fee in fee units
@@ -43,6 +40,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     // Tracks all clients that currently have at least one custom fee override
     EnumerableSet.AddressSet private _customFeeClients;
+
+    // Positive slippage configuration
+    bool private _positiveSlippageEnabled;
 
     //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
@@ -61,92 +61,133 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event RouterFeeReceiverUpdated(
         address indexed oldReceiver, address indexed newReceiver
     );
+    event PositiveSlippageToggled(bool enabled);
 
     constructor(address routerFeeSetter) {
         _routerFeeReceiver = msg.sender;
-
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
     }
 
     /**
-     * @notice Calculates fees from the swap output amount
-     * @dev Called from TychoRouter. Does not perform any accounting.
+     * @notice Calculates all fees and slippage surplus from swap output
+     * @dev Called from TychoRouterV3. Does not perform any accounting.
+     *
+     *      Deduction order:
+     *      1. When positive slippage capture is enabled, the surplus
+     *         (actualAmountOut - expectedAmountOut) is taken by the router first.
+     *      2. Fees (client fee + router fees) are then calculated on
+     *         the amount *after* surplus extraction (expectedAmountOut when
+     *         surplus was taken, actualAmountOut otherwise).
+     *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
-     *      clientFeeBps uses the legacy BPS scale (10000 = 100%). Internally it is scaled to the
-     *      same 8-decimal unit system used for router fees (100_000_000 = 100%).
-     * @param amountIn The amount before fee deduction
-     * @param client The client address to look up custom router fees for and to receive fees.
-     *               Pass address(0) to fall back to tx.origin for the custom fee lookup.
-     * @param clientFeeBps Client fee in basis points (10000 = 100%)
-     * @return amountOut The amount remaining after all fee deductions
+     * @param feeInput Struct containing all fee calculation inputs
      * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
      */
-    function calculateFee(uint256 amountIn, address client, uint16 clientFeeBps)
+    function calculateFee(FeeInput memory feeInput)
         external
         view
-        returns (uint256 amountOut, FeeRecipient[] memory feeRecipients)
+        returns (FeeRecipient[] memory feeRecipients)
+    {
+        address resolvedClient = _resolveClient(feeInput.client);
+
+        uint256 positiveSlippage = _calculatePositiveSlippage(
+            feeInput.actualAmountOut, feeInput.expectedAmountOut
+        );
+
+        // Fee base = actual output minus any extracted surplus.
+        // When surplus is taken: feeBase = expectedAmountOut.
+        // When no surplus (disabled or actual <= expected): it is zero.
+        uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
+
+        (uint256 routerFee, uint256 clientFee) =
+            _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
+
+        feeRecipients = new FeeRecipient[](2);
+        feeRecipients[0] = FeeRecipient({
+            recipient: _routerFeeReceiver,
+            feeAmount: routerFee + positiveSlippage
+        });
+        feeRecipients[1] =
+            FeeRecipient({recipient: resolvedClient, feeAmount: clientFee});
+    }
+
+    /**
+     * @notice Whether funds must pass through the router after the final swap instead of going directly to the receiver
+     * @param clientFeeBps Client fee in basis points
+     * @param client The client address to check
+     * @return True if funds must pass through the router after the
+     *         final swap instead of going directly to the receiver
+     */
+    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
+        external
+        view
+        returns (bool)
+    {
+        // Slippage direction is unknown before the swap, so we always
+        // route funds through the router when positive slippage is enabled.
+        if (_positiveSlippageEnabled) return true;
+
+        address resolvedClient = _resolveClient(client);
+        (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
+            _getFeeInfo(resolvedClient);
+
+        if (clientFeeBps > 0) return true;
+        if (routerFeeOnOutputBps > 0) return true;
+
+        return false;
+    }
+
+    /**
+     * @dev Calculates fees from the fee base amount (output minus any
+     *      extracted surplus).
+     * @return routerFee Total router fee (fee on output + cut of the client fee)
+     * @return clientFee Client's portion of the client fee (after the router's cut)
+     */
+    function _calculateFee(uint256 feeBase, address client, uint32 clientFeeBps)
+        internal
+        view
+        returns (uint256 routerFee, uint256 clientFee)
     {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
-            _getFeeInfo(_resolveClient(client));
-
-        // Scale clientFeeBps from legacy scale (10_000 = 100%) to internal scale
-        // (100_000_000 = 100%) so both fee types can be compared and combined.
-        uint32 scaledClientFeeBps = uint32(clientFeeBps) * 10_000;
+            _getFeeInfo(client);
 
         if (
-            (scaledClientFeeBps + routerFeeOnOutputBps > MAX_FEE_BPS)
-                || routerFeeOnClientFeeBps > MAX_FEE_BPS
+            (clientFeeBps + routerFeeOnOutputBps > MAX_BPS)
+                || routerFeeOnClientFeeBps > MAX_BPS
         ) {
             revert FeeCalculator__FeeTooHigh();
         }
 
-        amountOut = amountIn;
         uint256 routerFeeOnClientFee = 0;
-        uint256 clientPortion = 0;
 
         // Calculate client fee if > 0
-        if (scaledClientFeeBps > 0) {
+        if (clientFeeBps > 0) {
             // Save numerator for later routerFeeOnClientFee calculation to avoid
             // divide-before-multiply precision loss and warning
-            uint256 clientFeeNumerator = amountOut * scaledClientFeeBps;
-            uint256 totalClientFee = clientFeeNumerator / MAX_FEE_BPS;
+            uint256 clientFeeNumerator = feeBase * clientFeeBps;
+            uint256 totalClientFee = clientFeeNumerator / MAX_BPS;
 
             // Calculate router's cut of the client fee
             if (routerFeeOnClientFeeBps > 0) {
                 // Both fees use the 100_000_000 scale, so denominator is 100_000_000^2
                 routerFeeOnClientFee =
                     (clientFeeNumerator * routerFeeOnClientFeeBps)
-                        / MAX_FEE_BPS_SQUARED;
+                        / MAX_BPS_SQUARED;
             }
 
             // Client gets their portion (after router's cut)
-            clientPortion = totalClientFee - routerFeeOnClientFee;
+            clientFee = totalClientFee - routerFeeOnClientFee;
         }
 
-        uint256 totalRouterFee = routerFeeOnClientFee;
+        routerFee = routerFeeOnClientFee;
 
         // Calculate router fee on output amount if > 0
         if (routerFeeOnOutputBps > 0) {
-            uint256 routerFeeOnOutput =
-                (amountOut * routerFeeOnOutputBps) / MAX_FEE_BPS;
-            totalRouterFee += routerFeeOnOutput;
+            routerFee += (feeBase * routerFeeOnOutputBps) / MAX_BPS;
         }
-
-        // Update amountOut considering both fees
-        amountOut -= (clientPortion + totalRouterFee);
-
-        // Build fee recipients array
-        feeRecipients = new FeeRecipient[](2);
-        feeRecipients[0] = FeeRecipient({
-            recipient: _routerFeeReceiver, feeAmount: totalRouterFee
-        });
-        feeRecipients[1] =
-            FeeRecipient({recipient: client, feeAmount: clientPortion});
-
-        return (amountOut, feeRecipients);
     }
 
     /**
@@ -157,6 +198,21 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // slither-disable-next-line tx-origin
     function _resolveClient(address client) internal view returns (address) {
         return client == address(0) ? tx.origin : client;
+    }
+
+    /**
+     * @dev Calculates the positive slippage surplus, all of which goes to the router
+     * @return positiveSlippage The surplus (zero if disabled or no surplus)
+     */
+    function _calculatePositiveSlippage(
+        uint256 actualAmountOut,
+        uint256 expectedAmountOut
+    ) internal view returns (uint256 positiveSlippage) {
+        if (!_positiveSlippageEnabled || actualAmountOut <= expectedAmountOut) {
+            return 0;
+        }
+
+        positiveSlippage = actualAmountOut - expectedAmountOut;
     }
 
     /**
@@ -190,7 +246,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         uint32 oldFeeBps = _routerFeeOnOutputBps;
         _routerFeeOnOutputBps = feeBps;
         emit RouterFeeOnOutputUpdated(oldFeeBps, feeBps);
@@ -212,7 +268,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         CustomFees memory customFees = _customRouterFees[client];
         uint32 oldFeeBps = customFees.hasCustomFeeOnOutput
             ? customFees.feeBpsOnOutput
@@ -250,46 +306,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Returns the effective router fee on output for a specific client in legacy BPS scale
-     *      (10_000 = 100%), for interface compatibility with TychoRouter and Dispatcher.
-     * @dev For full-precision value use getEffectiveRouterFeeOnOutputScaled.
-     * @param client The client address to check. Pass address(0) to fall back to tx.origin.
-     * @return Zero if no fee is set; otherwise the fee in legacy BPS (rounded down, minimum 1).
-     */
-    function getEffectiveRouterFeeOnOutput(address client)
-        external
-        view
-        returns (uint16)
-    {
-        CustomFees memory customFees = _customRouterFees[_resolveClient(client)];
-        uint32 fee = customFees.hasCustomFeeOnOutput
-            ? customFees.feeBpsOnOutput
-            : _routerFeeOnOutputBps;
-        if (fee == 0) return 0;
-        // Convert from internal scale (100_000_000 = 100%) to legacy BPS scale (10_000 = 100%).
-        // Return at least 1 so callers can detect that a fee is active.
-        uint32 legacyBps = fee / 10_000;
-        return uint16(legacyBps > 0 ? legacyBps : 1);
-    }
-
-    /**
-     * @dev Returns the effective router fee on output for a specific client in fee units
-     *      (100_000_000 = 100%).
-     * @param client The client address to check. Pass address(0) to fall back to tx.origin.
-     * @return The fee in fee units (custom if set, otherwise default)
-     */
-    function getEffectiveRouterFeeOnOutputScaled(address client)
-        external
-        view
-        returns (uint32)
-    {
-        CustomFees memory customFees = _customRouterFees[_resolveClient(client)];
-        return customFees.hasCustomFeeOnOutput
-            ? customFees.feeBpsOnOutput
-            : _routerFeeOnOutputBps;
-    }
-
-    /**
      * @dev Sets the router platform fee on client fee in fee units
      * @param feeBps Fee in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
      */
@@ -297,7 +313,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         uint32 oldFeeBps = _routerFeeOnClientFeeBps;
         _routerFeeOnClientFeeBps = feeBps;
         emit RouterFeeOnClientFeeUpdated(oldFeeBps, feeBps);
@@ -319,7 +335,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         external
         onlyRole(ROUTER_FEE_SETTER_ROLE)
     {
-        if (feeBps > MAX_FEE_BPS) revert FeeCalculator__FeeTooHigh();
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
         CustomFees memory customFees = _customRouterFees[client];
         uint32 oldFeeBps = customFees.hasCustomFeeOnClientFee
             ? customFees.feeBpsOnClientFee
@@ -353,22 +369,6 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
 
         emit CustomRouterFeeOnClientFeeRemoved(client);
-    }
-
-    /**
-     * @dev Returns the effective router fee on client fee for a specific client in fee units
-     * @param client The client address to check
-     * @return The fee in fee units (custom if set, otherwise default)
-     */
-    function getEffectiveRouterFeeOnClientFee(address client)
-        external
-        view
-        returns (uint32)
-    {
-        CustomFees memory customFees = _customRouterFees[client];
-        return customFees.hasCustomFeeOnClientFee
-            ? customFees.feeBpsOnClientFee
-            : _routerFeeOnClientFeeBps;
     }
 
     /**
@@ -417,5 +417,24 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      */
     function getRouterFeeReceiver() external view returns (address) {
         return _routerFeeReceiver;
+    }
+
+    /**
+     * @dev Enables or disables positive slippage capture
+     * @param enabled True to enable, false to disable
+     */
+    function setPositiveSlippageEnabled(bool enabled)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        _positiveSlippageEnabled = enabled;
+        emit PositiveSlippageToggled(enabled);
+    }
+
+    /**
+     * @dev Returns whether positive slippage capture is enabled
+     */
+    function getPositiveSlippageEnabled() external view returns (bool) {
+        return _positiveSlippageEnabled;
     }
 }

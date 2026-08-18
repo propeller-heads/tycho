@@ -33,7 +33,7 @@ interface ICallback {
      * @return transferType The transfer type for this executor (None,
      *     ProtocolWillDebit, or Transfer).
      * @return receiver The address that should receive the pre swap
-     *     tokens (usually a pool or the TychoRouter - depending on the
+     *     tokens (usually a pool or the TychoRouterV3 - depending on the
      *     protocol)
      */
     function getCallbackTransferData(

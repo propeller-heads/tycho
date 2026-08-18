@@ -71,8 +71,10 @@ for test in "${args[@]}"; do
 	rpc_url=$(get_rpc_url "$protocol")
 	export RPC_URL="$rpc_url"
 	echo "Running '$MODE' tests for protocol: $protocol (chain: $chain)"
+	# --prebuilt-wasm: the builder stage compiled every WASM binary and this image ships no Rust
+	# toolchain, so the packages must be packed as they are.
 	cmd=(tycho-protocol-sdk "$MODE" --package "$protocol" --chain "$chain" \
-		--rpc-url "$rpc_url" --db-url "$DATABASE_URL")
+		--rpc-url "$rpc_url" --db-url "$DATABASE_URL" --prebuilt-wasm)
 	# The "=" suffix in PROTOCOLS means different things per mode:
 	#   range → --match-test (run one named test case)
 	#   full  → --initial-block (start syncing from this block)

@@ -9,7 +9,7 @@ alloy = { workspace = true, features = [
     "sol-types",
     "contract",
 ] }
-alloy-chains = "0.2.6"
+alloy-chains = "0.2.37"
 alloy-rpc-types-trace = "1.0.38"
 async-trait = { workspace = true }
 colored = "3.0.0"

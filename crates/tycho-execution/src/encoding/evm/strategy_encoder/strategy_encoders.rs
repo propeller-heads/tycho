@@ -52,10 +52,20 @@ impl SingleSwapStrategyEncoder {
 impl StrategyEncoder for SingleSwapStrategyEncoder {
     fn encode_strategy(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         let function_signature = match solution.user_transfer_type() {
-            UserTransferType::TransferFromPermit2 => {"singleSwapPermit2(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"}
-            UserTransferType::TransferFrom => {"singleSwap(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)"}
-            UserTransferType::UseVaultsFunds => {"singleSwapUsingVault(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)"}
-        }.to_string();
+            UserTransferType::TransferFromPermit2 => {
+                "singleSwapPermit2(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
+            }
+            UserTransferType::TransferFrom => {
+                "singleSwap(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
+            }
+            UserTransferType::UseVaultsFunds => {
+                "singleSwapUsingVault(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
+            }
+        }
+        .to_string();
 
         let grouped_swaps = group_swaps(solution.swaps());
         let number_of_groups = grouped_swaps.len();
@@ -171,10 +181,20 @@ impl SequentialSwapStrategyEncoder {
 impl StrategyEncoder for SequentialSwapStrategyEncoder {
     fn encode_strategy(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         let function_signature = match solution.user_transfer_type() {
-            UserTransferType::TransferFromPermit2 => { "sequentialSwapPermit2(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)" }
-            UserTransferType::TransferFrom => { "sequentialSwap(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)" }
-            UserTransferType::UseVaultsFunds => { "sequentialSwapUsingVault(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)" }
-        }.to_string();
+            UserTransferType::TransferFromPermit2 => {
+                "sequentialSwapPermit2(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
+            }
+            UserTransferType::TransferFrom => {
+                "sequentialSwap(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
+            }
+            UserTransferType::UseVaultsFunds => {
+                "sequentialSwapUsingVault(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
+            }
+        }
+        .to_string();
         self.sequential_swap_validator
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
@@ -291,10 +311,20 @@ impl SplitSwapStrategyEncoder {
 impl StrategyEncoder for SplitSwapStrategyEncoder {
     fn encode_strategy(&self, solution: &Solution) -> Result<EncodedSolution, EncodingError> {
         let function_signature = match solution.user_transfer_type() {
-            UserTransferType::TransferFromPermit2 => { "splitSwapPermit2(uint256,address,address,uint256,uint256,address,(uint16,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)" }
-            UserTransferType::TransferFrom => { "splitSwap(uint256,address,address,uint256,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)" }
-            UserTransferType::UseVaultsFunds => { "splitSwapUsingVault(uint256,address,address,uint256,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)" }
-        }.to_string();
+            UserTransferType::TransferFromPermit2 => {
+                "splitSwapPermit2(uint256,address,address,uint256,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
+            }
+            UserTransferType::TransferFrom => {
+                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
+            }
+            UserTransferType::UseVaultsFunds => {
+                "splitSwapUsingVault(uint256,address,address,uint256,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
+            }
+        }
+        .to_string();
         self.split_swap_validator
             .validate_split_percentages(solution.swaps())?;
         self.split_swap_validator
@@ -437,7 +467,7 @@ mod tests {
         fn test_single_swap_strategy_encoder() {
             // Performs a single swap from WETH to DAI on a USV2 pool, with no grouping
             // optimizations.
-            let checked_amount = BigUint::from_str("2018817438608734439720").unwrap();
+            let expected_amount_out = BigUint::from_str("2018817438608734439720").unwrap();
             let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
             let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -460,7 +490,9 @@ mod tests {
                 weth,
                 dai,
                 BigUint::from_str("1_000000000000000000").unwrap(),
-                checked_amount.clone(),
+                expected_amount_out.clone(),
+                // 2% below the quote
+                &expected_amount_out * BigUint::from(9800u64) / BigUint::from(10_000u64),
                 vec![swap],
             )
             .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -479,7 +511,11 @@ mod tests {
             let hex_calldata = encode(encoded_solution.swaps());
 
             assert_eq!(hex_calldata, expected_swap);
-            assert_eq!(encoded_solution.function_signature(), "singleSwapPermit2(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)");
+            assert_eq!(
+                encoded_solution.function_signature(),
+                "singleSwapPermit2(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
+            );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
         }
     }
@@ -529,6 +565,7 @@ mod tests {
                 usdc,
                 BigUint::from_str("1_000000000000000000").unwrap(),
                 BigUint::from_str("26173932").unwrap(),
+                BigUint::from_str("25650453").unwrap(),
                 vec![swap_weth_wbtc, swap_wbtc_usdc],
             );
 
@@ -556,7 +593,8 @@ mod tests {
             assert_eq!(hex_calldata, expected);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "sequentialSwap(uint256,address,address,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)"
+                "sequentialSwap(uint256,address,address,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
         }
@@ -656,6 +694,7 @@ mod tests {
                 usdc.clone(),
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99574171").unwrap(),
+                BigUint::from_str("97582687").unwrap(),
                 vec![swap_usdc_weth_pool1, swap_usdc_weth_pool2, swap_weth_usdc_pool2],
             )
             .with_user_transfer_type(UserTransferType::TransferFromPermit2);
@@ -700,7 +739,8 @@ mod tests {
             assert_eq!(hex_calldata, expected_swaps);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "splitSwapPermit2(uint256,address,address,uint256,uint256,address,(uint16,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
+                "splitSwapPermit2(uint256,address,address,uint256,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
         }
@@ -792,6 +832,7 @@ mod tests {
                 usdc.clone(),
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99025908").unwrap(),
+                BigUint::from_str("97045389").unwrap(),
                 vec![swap_usdc_weth_v2, swap_weth_usdc_v3_pool1, swap_weth_usdc_v3_pool2],
             );
 
@@ -836,7 +877,8 @@ mod tests {
             assert_eq!(hex_calldata, expected_swaps);
             assert_eq!(
                 encoded_solution.function_signature(),
-                "splitSwap(uint256,address,address,uint256,uint256,address,(uint16,address,uint256,uint256,bytes),bytes)"
+                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,\
+(uint32,address,uint256,uint256,bytes),bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
         }

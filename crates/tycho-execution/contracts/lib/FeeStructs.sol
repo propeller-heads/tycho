@@ -10,3 +10,13 @@ struct FeeRecipient {
     address recipient;
     uint256 feeAmount;
 }
+
+struct FeeInput {
+    uint256 actualAmountOut;
+    uint256 expectedAmountOut;
+    uint256 amountIn;
+    address tokenIn;
+    address tokenOut;
+    uint32 clientFeeBps;
+    address client;
+}

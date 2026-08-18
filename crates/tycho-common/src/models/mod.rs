@@ -474,6 +474,7 @@ impl Chain {
             Chain::Plasma => {
                 wrapped_native_xpl(Chain::Plasma, "0x6100E367285b01F48D07953803A2d8dCA5D19873")
             }
+            // aeWETH: the Arbitrum bridge wrapper for native ETH, exposing the WETH9 interface.
             Chain::Robinhood => {
                 wrapped_native_eth(Chain::Robinhood, "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73")
             }

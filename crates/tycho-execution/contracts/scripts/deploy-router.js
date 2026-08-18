@@ -14,7 +14,7 @@ async function main() {
     const executorSetter = networkRoles.EXECUTOR_SETTER_ROLE[0];
     const routerFeeSetter = networkRoles.ROUTER_FEE_SETTER[0];
 
-    console.log(`Deploying TychoRouter to ${network} with:`);
+    console.log(`Deploying TychoRouterV3 to ${network} with:`);
     console.log(`- permit2: ${permit2}`);
     console.log(`- feeCalculator: ${feeCalculator}`);
     console.log(`- pauserAdmin: ${unpauser}`);
@@ -31,9 +31,9 @@ async function main() {
     const create2FactoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
     console.log(`Using CREATE2 factory at: ${create2FactoryAddress}`);
 
-    // Get TychoRouter bytecode with constructor arguments
-    const TychoRouter = await ethers.getContractFactory("TychoRouter");
-    const deployTx = TychoRouter.getDeployTransaction(
+    // Get TychoRouterV3 bytecode with constructor arguments
+    const TychoRouterV3 = await ethers.getContractFactory("TychoRouterV3");
+    const deployTx = TychoRouterV3.getDeployTransaction(
         permit2,
         feeCalculator,
         unpauser,
@@ -44,13 +44,13 @@ async function main() {
     const bytecode = deployTx.data;
 
     // Use a salt based on network and contract name for deterministic addresses
-    const salt = ethers.utils.id(`TychoRouter-${network}`);
+    const salt = ethers.utils.id(`TychoRouterV3-${network}`);
 
     // Compute the address where the contract will be deployed
     // CREATE2 address = keccak256(0xff ++ factory_address ++ salt ++ keccak256(bytecode))[12:]
     const bytecodeHash = ethers.utils.keccak256(bytecode);
     const computedAddress = ethers.utils.getCreate2Address(create2FactoryAddress, salt, bytecodeHash);
-    console.log(`TychoRouter will be deployed to: ${computedAddress}`);
+    console.log(`TychoRouterV3 will be deployed to: ${computedAddress}`);
 
     const deploymentData = ethers.utils.concat([salt, bytecode]);
     const tx = await deployer.sendTransaction({
@@ -58,13 +58,13 @@ async function main() {
         data: deploymentData,
     });
     await tx.wait();
-    console.log(`TychoRouter deployed to: ${computedAddress}`);
+    console.log(`TychoRouterV3 deployed to: ${computedAddress}`);
 
     // Verify on Tenderly
     try {
         console.log("Verifying contract on Tenderly...");
         await hre.tenderly.verify({
-            name: "TychoRouter",
+            name: "TychoRouterV3",
             address: computedAddress,
         });
         console.log("Contract verified successfully on Tenderly");
@@ -88,7 +88,7 @@ async function main() {
                 routerFeeSetter,
             ],
         });
-        console.log(`TychoRouter verified successfully on blockchain explorer!`);
+        console.log(`TychoRouterV3 verified successfully on blockchain explorer!`);
     } catch (error) {
         console.error(`Error during blockchain explorer verification:`, error);
     }

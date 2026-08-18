@@ -10,7 +10,8 @@ use crate::{
         models::{DecoderContext, TryFromWithBlock},
     },
     rfq::{
-        constants::get_bebop_auth, models::TimestampHeader,
+        constants::{get_bebop_auth, get_bebop_origins},
+        models::TimestampHeader,
         protocols::bebop::client_builder::BebopClientBuilder,
     },
 };
@@ -85,12 +86,23 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
         let auth = get_bebop_auth().map_err(|e| {
             InvalidSnapshotError::ValueError(format!("Failed to get Bebop authentication: {e}"))
         })?;
+        let origins = get_bebop_origins().map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("Failed to get Bebop origins: {e}"))
+        })?;
 
-        let client = BebopClientBuilder::new(snapshot.component.chain, auth.key)
-            .build()
-            .map_err(|e| {
-                InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
-            })?;
+        let mut client_builder = BebopClientBuilder::new(snapshot.component.chain, auth.key);
+        if let Some(origin_address) = origins.address {
+            client_builder = client_builder.origin_address(origin_address);
+        }
+        if let Some(origin_target) = origins.target {
+            client_builder = client_builder.origin_target(origin_target);
+        }
+        if let Some(origin_source) = origins.source {
+            client_builder = client_builder.origin_source(origin_source);
+        }
+        let client = client_builder.build().map_err(|e| {
+            InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
+        })?;
 
         Ok(BebopState { base_token, quote_token, price_data, client })
     }

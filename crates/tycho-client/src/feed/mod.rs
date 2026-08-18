@@ -1292,6 +1292,35 @@ mod tests {
         }
     }
 
+    /// Builds a partial block header with an ephemeral hash derived from number + partial index.
+    /// Flashblocks only carry the correct block hash on the last partial (`is_last_partial`), so
+    /// mid-block partials have hashes that no later header can link to.
+    fn partial_header(number: u64, partial_idx: u32, parent: u64) -> BlockHeader {
+        BlockHeader {
+            number,
+            hash: Bytes::from(
+                [number.to_be_bytes().as_slice(), partial_idx.to_be_bytes().as_slice()].concat(),
+            ),
+            parent_hash: Bytes::from(parent.to_be_bytes()),
+            revert: false,
+            timestamp: 1000,
+            partial_block_index: Some(partial_idx),
+        }
+    }
+
+    /// Builds the last partial of a block: still a partial, but carrying the sealed block hash
+    /// (same 8-byte scheme as `full_header`).
+    fn sealed_partial_header(number: u64, partial_idx: u32, parent: u64) -> BlockHeader {
+        BlockHeader {
+            number,
+            hash: Bytes::from(number.to_be_bytes()),
+            parent_hash: Bytes::from(parent.to_be_bytes()),
+            revert: false,
+            timestamp: 1000,
+            partial_block_index: Some(partial_idx),
+        }
+    }
+
     /// Builds a `SynchronizerStream` pinned to a given state, for exercising state-transition
     /// logic without a live synchronizer. The receiver is never polled by these tests.
     fn stream_in_state(name: &str, state: SynchronizerState) -> SynchronizerStream {
@@ -1531,6 +1560,112 @@ mod tests {
             vec![400],
             "detached advanced block must not be stitched to old history"
         );
+    }
+
+    /// Companion regression test for the same crash with a *partial* advanced block — the
+    /// variant actually running on Base (the only chain with `--partial-blocks`).
+    ///
+    /// The retained tip is a mid-block partial whose ephemeral hash differs from the sealed
+    /// block hash (flashblocks only carry the correct hash on the last partial). The advanced
+    /// partial of the next block links to the sealed hash, so the hash-based stitch in
+    /// `BlockHistory::new` cannot connect it to anything retained and the rebuilt history is
+    /// rooted at the advanced partial alone — every fork point below it is lost.
+    #[test]
+    fn test_reinit_preserves_history_for_partial_advanced_block() {
+        // Old history: sealed 323 -> sealed 324 -> mid-block partial of 325 (ephemeral hash).
+        let old_blocks = vec![
+            full_header(323, 323, 322),
+            full_header(324, 324, 323),
+            partial_header(325, 2, 324),
+        ];
+        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+
+        // A stream races ahead by one partial: first partial of 326, parented on the sealed
+        // hash of 325, which the history never saw. This is what classifies it Advanced.
+        let advanced = partial_header(326, 0, 325);
+        assert_eq!(
+            old_history
+                .determine_block_position(&advanced)
+                .unwrap(),
+            BlockPosition::Advanced
+        );
+
+        let mut streams = vec![
+            stream_in_state("aerodrome", SynchronizerState::Advanced(advanced)),
+            stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
+        ];
+
+        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &mut old_history,
+        )
+        .expect("reinit failed");
+
+        let retained: Vec<u64> = new_history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![323, 324, 325, 326]);
+    }
+
+    /// Full prod sequence behind the Base outages: partial-advanced reinit, the stream proceeds
+    /// for one more block, then a shallow (1-block) revert arrives. The revert must resolve;
+    /// in prod it drained the whole history and killed the feed with "Reverting block's insert
+    /// position not found! History exceeded".
+    #[test]
+    fn test_revert_below_tip_resolves_after_partial_advanced_reinit() {
+        let old_blocks = vec![
+            full_header(323, 323, 322),
+            full_header(324, 324, 323),
+            partial_header(325, 2, 324),
+        ];
+        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+
+        let mut streams = vec![
+            stream_in_state("aerodrome", SynchronizerState::Advanced(partial_header(326, 0, 325))),
+            stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
+        ];
+
+        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &mut old_history,
+        )
+        .expect("reinit failed");
+
+        // The stream proceeds normally: the last partial seals 326 with the correct hash, then
+        // the first partial of 327 arrives on top of it.
+        new_history
+            .push(sealed_partial_header(326, 5, 325))
+            .expect("sealed partial push failed");
+        new_history
+            .push(partial_header(327, 0, 326))
+            .expect("next partial push failed");
+
+        // The chain reorgs one block: revert to sealed 326. Its fork point is block 325, which
+        // the client saw (as a partial) and which the reinit must have retained.
+        let revert = BlockHeader {
+            number: 326,
+            hash: Bytes::from(326u64.to_be_bytes()),
+            parent_hash: Bytes::from(325u64.to_be_bytes()),
+            revert: true,
+            timestamp: 1000,
+            partial_block_index: None,
+        };
+        new_history
+            .push(revert)
+            .expect("1-block revert after partial-advanced reinit must resolve");
+
+        // The drain must stop exactly at the retained partial fork point (325), not overshoot
+        // it or stop early at some other same-height block.
+        let retained: Vec<u64> = new_history
+            .blocks()
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(retained, vec![323, 324, 325, 326]);
+        let latest = new_history.latest().unwrap();
+        assert_eq!(latest.number, 326);
+        assert!(latest.revert);
+        assert!(!latest.is_partial());
     }
 
     #[test(tokio::test)]

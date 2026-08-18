@@ -19,7 +19,7 @@ contract Commands {
     uint256 constant PERMIT2_PERMIT = 0x0a;
 }
 
-// A gas test to compare the gas usage of the UniversalRouter with the TychoRouter
+// A gas test to compare the gas usage of the UniversalRouter with the TychoRouterV3
 
 contract GasTest is Commands, Test, Constants {
     IUniversalRouter universalRouter = IUniversalRouter(UNIVERSAL_ROUTER);

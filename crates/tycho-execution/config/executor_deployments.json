@@ -190,9 +190,6 @@
       "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
     }
   },
-  "robinhood": {
-    "ekubo_v3": { "contract": "EkuboV3RobinhoodExecutor", "args": [] }
-  },
   "plasma": {
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "fluid_v1": {
@@ -209,6 +206,22 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x6100E367285b01F48D07953803A2d8dCA5D19873"]
+    }
+  },
+  "robinhood": {
+    "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ekubo_v3": { "contract": "EkuboV3RobinhoodExecutor", "args": [] },
+    "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
+    "uniswap_v4": {
+      "contract": "UniswapV4Executor",
+      "args": [
+        "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+        "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+      ]
+    },
+    "native_wrapper": {
+      "contract": "NativeWrapExecutor",
+      "args": ["0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"]
     }
   }
 }

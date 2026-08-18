@@ -16,12 +16,13 @@
     "fluid_v1": "0xAB081CBB3c88219A030928Ece277feAd99cAB742",
     "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
     "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
-    "ekubo_v3": "0xc77A1a9B8ebecc6bFB386720E0A37Bc900860f5b",
+    "ekubo_v3": "0xD58B803DBE049903f3C1aDaacc2D82e9e514647C",
     "native_wrapper": "0x8FD892DD5F8E153fe15cc3A7567E18ed6f7b1E0A",
     "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
     "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
     "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C",
-    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F"
+    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F",
+    "ring_swap_v2": "0x08BA9E85c8944098DEAacE0E164b7EC379A7e810"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -74,5 +75,11 @@
     "fluid_v1": "0x5020a5012cDC3545d2E98B6fb3EA4b9dc90552a6",
     "vm:curve": "0xC015Bc2f482b6CF31D6C30e663a57417A6761949",
     "native_wrapper": "0x1D9220eA65cA79997C532ba8fbC79b1c463Bd505"
+  },
+  "robinhood": {
+    "uniswap_v2": "0x81aFB56E21AB0744330ACf400E2A65e6B64D495E",
+    "uniswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
+    "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
+    "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F"
   }
 }

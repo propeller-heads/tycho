@@ -45,9 +45,9 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 | Crate | Description |
 |---|---|
-| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; native and VM-backed implementations under `evm`, plus `rfq` request-for-quote protocols |
-| `tycho-execution` | Swap encoding and execution: Solidity TychoRouter contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
-| `tycho-router-model` (`tycho-execution/model`) | Rust security model that explores caller-controlled TychoRouter swap parameters and flags suspicious outcomes |
+| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; `evm` module for EVM storage-based protocols, `protocol` module for custom implementations, `rfq` for request-for-quote protocols |
+| `tycho-execution` | Swap encoding and execution: Solidity TychoRouterV3 contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
+| `tycho-router-model` (`tycho-execution/model`) | Rust security model that explores caller-controlled TychoRouterV3 swap parameters and flags suspicious outcomes |
 
 ### Consumer SDK
 
@@ -111,10 +111,10 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
     - Custom protocols: update decoded state fields directly
     - VM protocols: patch EVM storage slots, code, balances in a local `SimulationDB`
 12. Consumer queries `ProtocolSim::get_amount_out` / `spot_price` to price swap routes
-13. `tycho-execution` encodes a chosen route into calldata for `TychoRouter`
+13. `tycho-execution` encodes a chosen route into calldata for `TychoRouterV3`
     - Selects the appropriate executor contract for each DEX hop
     - Constructs `SwapSequence` with per-hop amounts, tokens, and executor addresses
-14. Consumer submits the encoded transaction to the chain via `TychoRouter.swap()`
+14. Consumer submits the encoded transaction to the chain via `TychoRouterV3.swap()`
 
 ## Key Architectural Patterns
 

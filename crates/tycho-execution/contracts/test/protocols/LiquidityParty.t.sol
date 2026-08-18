@@ -26,38 +26,28 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
     using SafeERC20 for IERC20;
 
     LiquidityPartyExecutorExposed liquidityPartyExposed;
-    IERC20 WETH = IERC20(WETH_ADDR);
     IERC20 USDC = IERC20(USDC_ADDR);
-    IERC20 WBTC = IERC20(WBTC_ADDR);
-    IERC20 USDT = IERC20(USDT_ADDR);
-    IERC20 UNI = IERC20(0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984);
-    IERC20 PEPE = IERC20(PEPE_ADDR);
+    IERC20 WETH = IERC20(WETH_ADDR);
+    IERC20 AAVE = IERC20(AAVE_ADDR);
 
     // LiquidityParty pool address
     address constant LIQUIDITY_PARTY_POOL =
-        0xfA0be6148F66A6499666cf790d647D00daB76904;
+        0x1270Da05Cf1d047763CEEfDe25a4a5438b26fdA6;
 
     // Token indices in the pool
-    uint8 constant USDT_INDEX = 0;
-    uint8 constant USDC_INDEX = 1;
-    uint8 constant WBTC_INDEX = 2;
-    uint8 constant WETH_INDEX = 3;
-    uint8 constant UNI_INDEX = 4;
-    uint8 constant WSOL_INDEX = 5;
-    uint8 constant TRX_INDEX = 6;
-    uint8 constant AAVE_INDEX = 7;
-    uint8 constant PEPE_INDEX = 8;
-    uint8 constant SHIB_INDEX = 9;
+    uint8 constant USDC_INDEX = 0;
+    uint8 constant WETH_INDEX = 1;
+    uint8 constant AAVE_INDEX = 2;
 
-    address constant WSOL_ADDR =
-        address(0xD31a59c85aE9D8edEFeC411D448f90841571b89c);
+    address internal constant AAVE_ADDR =
+        address(0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9);
 
     // Mock pool address for decode testing
     address constant MOCK_POOL =
         address(0x1234567890123456789012345678901234567890);
 
     function setUp() public {
-        uint256 forkBlock = 24537169;
+        uint256 forkBlock = 25301915;
         vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
         liquidityPartyExposed = new LiquidityPartyExecutorExposed();
     }
@@ -119,7 +109,7 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
 
     function testDecodeParamsWithRealPool() public view {
         bytes memory params = abi.encodePacked(
-            LIQUIDITY_PARTY_POOL, WETH_ADDR, USDC_ADDR, WETH_INDEX, USDC_INDEX
+            LIQUIDITY_PARTY_POOL, WETH_ADDR, AAVE_ADDR, WETH_INDEX, AAVE_INDEX
         );
 
         (
@@ -132,9 +122,9 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
 
         assertEq(address(pool), LIQUIDITY_PARTY_POOL);
         assertEq(tokenIn, WETH_ADDR);
-        assertEq(tokenOut, USDC_ADDR);
+        assertEq(tokenOut, AAVE_ADDR);
         assertEq(indexIn, WETH_INDEX);
-        assertEq(indexOut, USDC_INDEX);
+        assertEq(indexOut, AAVE_INDEX);
     }
 
     /// @dev Mimics what the Dispatcher does in production: transfers tokens to the pool
@@ -146,39 +136,51 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
         IERC20(token).safeTransfer(LIQUIDITY_PARTY_POOL, amount);
     }
 
+    /// @dev Verifies that Rust-encoded calldata from test_encode_liquidityparty()
+    /// (WETH → AAVE) executes correctly against a mainnet fork.
     function testDecodeSwap() public {
         bytes memory protocolData =
             loadCallDataFromFile("test_encode_liquidityparty");
-        uint256 amountIn = 1000000;
-        uint256 amountOut = 4643054;
-        // This receiver address must match the encoding in liquidity_party.rs test_encode_liquidityparty()
-        address expectedReceiver =
-            address(0x1D96F2f6BeF1202E4Ce1Ff6Dad0c2CB002861d3e);
-        _fundPool(USDC_ADDR, amountIn);
+        uint256 amountIn = 1e13; // 0.00001 WETH
+        uint256 expectedAmountOut = 258564911454692; // AAVE out at fork block
+        address expectedReceiver = makeAddr("decode_swap_receiver");
+        _fundPool(WETH_ADDR, amountIn);
         liquidityPartyExposed.swap(amountIn, protocolData, expectedReceiver);
 
-        uint256 finalBalance = IERC20(WSOL_ADDR).balanceOf(expectedReceiver);
-        assertGe(finalBalance, amountOut);
+        assertGe(AAVE.balanceOf(expectedReceiver), expectedAmountOut);
     }
 
-    function testSwapWETHToUSDC() public {
-        // Pool has only 7500705 [7.5e6] USDC available, use 0.001 ether to get ~3 USDC
-        uint256 amountIn = 0.001 ether;
+    function testSwapWETHToAAVE() public {
+        uint256 amountIn = 1e13; // 0.00001 WETH
+        uint256 expectedAmountOut = 258564911454692; // AAVE out at fork block
         bytes memory protocolData = abi.encodePacked(
-            LIQUIDITY_PARTY_POOL, WETH_ADDR, USDC_ADDR, WETH_INDEX, USDC_INDEX
+            LIQUIDITY_PARTY_POOL, WETH_ADDR, AAVE_ADDR, WETH_INDEX, AAVE_INDEX
         );
 
-        uint256 balanceBefore = USDC.balanceOf(BOB);
+        uint256 balanceBefore = AAVE.balanceOf(BOB);
         _fundPool(WETH_ADDR, amountIn);
         liquidityPartyExposed.swap(amountIn, protocolData, BOB);
 
-        uint256 balanceAfter = USDC.balanceOf(BOB);
-        assertGt(balanceAfter, balanceBefore);
+        assertGe(AAVE.balanceOf(BOB) - balanceBefore, expectedAmountOut);
+    }
+
+    function testSwapAAVEToWETH() public {
+        uint256 amountIn = 1e13; // 0.00001 AAVE (18 decimals)
+        uint256 expectedAmountOut = 384925572039; // WETH out at fork block
+        bytes memory protocolData = abi.encodePacked(
+            LIQUIDITY_PARTY_POOL, AAVE_ADDR, WETH_ADDR, AAVE_INDEX, WETH_INDEX
+        );
+
+        uint256 balanceBefore = WETH.balanceOf(BOB);
+        _fundPool(AAVE_ADDR, amountIn);
+        liquidityPartyExposed.swap(amountIn, protocolData, BOB);
+
+        assertGe(WETH.balanceOf(BOB) - balanceBefore, expectedAmountOut);
     }
 
     function testSwapUSDCToWETH() public {
-        // Pool has 7500705 [7.5e6] USDC, use 5% = 375035
-        uint256 amountIn = 375035;
+        uint256 amountIn = 10000; // 0.01 USDC (6 decimals)
+        uint256 expectedAmountOut = 6002311486634; // WETH out at fork block
         bytes memory protocolData = abi.encodePacked(
             LIQUIDITY_PARTY_POOL, USDC_ADDR, WETH_ADDR, USDC_INDEX, WETH_INDEX
         );
@@ -187,67 +189,6 @@ contract LiquidityPartyExecutorTest is Constants, TestUtils {
         _fundPool(USDC_ADDR, amountIn);
         liquidityPartyExposed.swap(amountIn, protocolData, BOB);
 
-        uint256 balanceAfter = WETH.balanceOf(BOB);
-        assertGt(balanceAfter, balanceBefore);
-    }
-
-    function testSwapUSDTToUSDC() public {
-        // Pool has 7431790 [7.431e6] USDT, use 5% = 371589
-        uint256 amountIn = 371589;
-        bytes memory protocolData = abi.encodePacked(
-            LIQUIDITY_PARTY_POOL, USDT_ADDR, USDC_ADDR, USDT_INDEX, USDC_INDEX
-        );
-
-        uint256 balanceBefore = USDC.balanceOf(BOB);
-        _fundPool(USDT_ADDR, amountIn);
-        liquidityPartyExposed.swap(amountIn, protocolData, BOB);
-
-        uint256 balanceAfter = USDC.balanceOf(BOB);
-        assertGt(balanceAfter, balanceBefore);
-    }
-
-    function testSwapWBTCToWETH() public {
-        // Pool has 11007 [1.1e4] WBTC (8 decimals), use 5% = 550
-        uint256 amountIn = 550;
-        bytes memory protocolData = abi.encodePacked(
-            LIQUIDITY_PARTY_POOL, WBTC_ADDR, WETH_ADDR, WBTC_INDEX, WETH_INDEX
-        );
-
-        uint256 balanceBefore = WETH.balanceOf(BOB);
-        _fundPool(WBTC_ADDR, amountIn);
-        liquidityPartyExposed.swap(amountIn, protocolData, BOB);
-
-        uint256 balanceAfter = WETH.balanceOf(BOB);
-        assertGt(balanceAfter, balanceBefore);
-    }
-
-    function testSwapUNIToUSDC() public {
-        // Pool has 1838224140769039670 [1.838e18] UNI, use 5% = 0.092 ether
-        uint256 amountIn = 0.092 ether;
-        bytes memory protocolData = abi.encodePacked(
-            LIQUIDITY_PARTY_POOL, address(UNI), USDC_ADDR, UNI_INDEX, USDC_INDEX
-        );
-
-        uint256 balanceBefore = USDC.balanceOf(BOB);
-        _fundPool(address(UNI), amountIn);
-        liquidityPartyExposed.swap(amountIn, protocolData, BOB);
-
-        uint256 balanceAfter = USDC.balanceOf(BOB);
-        assertGt(balanceAfter, balanceBefore);
-    }
-
-    function testSwapPEPEToWETH() public {
-        // Pool has 1777240401501820332402892 [1.777e24] PEPE, use 5% = 88862020075091016620144
-        uint256 amountIn = 88862020075091016620144;
-        bytes memory protocolData = abi.encodePacked(
-            LIQUIDITY_PARTY_POOL, PEPE_ADDR, WETH_ADDR, PEPE_INDEX, WETH_INDEX
-        );
-
-        uint256 balanceBefore = WETH.balanceOf(BOB);
-        _fundPool(PEPE_ADDR, amountIn);
-        liquidityPartyExposed.swap(amountIn, protocolData, BOB);
-
-        uint256 balanceAfter = WETH.balanceOf(BOB);
-        assertGt(balanceAfter, balanceBefore);
+        assertGe(WETH.balanceOf(BOB) - balanceBefore, expectedAmountOut);
     }
 }

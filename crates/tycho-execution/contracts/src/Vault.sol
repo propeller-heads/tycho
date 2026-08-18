@@ -99,7 +99,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
 
     /**
      * @dev Create new _mint that does not emit a Transfer event. This should be used by inner methods of the
-     * TychoRouter to save gas during swapping.
+     * TychoRouterV3 to save gas during swapping.
      */
     function _mintWithoutEvent(address to, uint256 id, uint256 amount)
         internal
@@ -271,6 +271,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
         if (oldDelta != 0 && newDelta == 0) {
             // Was non zero, now zero: decrement counter
             _setNonZeroDeltaCount(_getNonZeroDeltaCount() - 1);
+            // slither-disable-next-line incorrect-equality
         } else if (oldDelta == 0 && newDelta != 0) {
             // Was zero, now non zero: increment counter
             _setNonZeroDeltaCount(_getNonZeroDeltaCount() + 1);
@@ -357,6 +358,7 @@ abstract contract Vault is ERC6909, ReentrancyGuard, Pausable {
                 revert Vault__UnexpectedNonZeroCount(nonZeroCount);
             } else if (nonZeroCount == 1) {
                 int256 inputDelta = _getDelta(inputToken);
+                // slither-disable-next-line incorrect-equality
                 if (inputDelta == 0 || inputDelta != -int256(inputAmount)) {
                     revert Vault__UnexpectedInputDelta(inputDelta);
                 }

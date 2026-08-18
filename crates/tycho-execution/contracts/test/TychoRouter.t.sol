@@ -1,9 +1,9 @@
 pragma solidity ^0.8.26;
 
 import {
-    TychoRouter,
+    TychoRouterV3,
     TychoRouter__NoPendingFeeCalculator
-} from "@src/TychoRouter.sol";
+} from "@src/TychoRouterV3.sol";
 import {FeeCalculator} from "@src/FeeCalculator.sol";
 import {
     IAccessControl

@@ -401,6 +401,7 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
 
     let direct_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
+        .enable_token_cache()
         .build_direct_gw()
         .await?;
 
@@ -461,6 +462,7 @@ async fn create_indexing_tasks(
         .set_chains(chains)
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
+        .enable_token_cache()
         .build()
         .await?;
     let token_processor = EthereumTokenPreProcessor::new(

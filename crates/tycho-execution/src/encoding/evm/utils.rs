@@ -21,7 +21,7 @@ use tycho_common::Bytes;
 use crate::encoding::{errors::EncodingError, evm::constants::ROUTER_ETH_ADDRESS, models::Swap};
 
 /// Converts `Address::ZERO` (protocol-native ETH marker) to the
-/// `ETH_ADDRESS` marker (0xEeee…) used by the TychoRouter. Non-zero
+/// `ETH_ADDRESS` marker (0xEeee…) used by the TychoRouterV3. Non-zero
 /// addresses pass through unchanged.
 pub fn convert_to_router_token(addr: Address) -> Address {
     if addr == Address::ZERO {
