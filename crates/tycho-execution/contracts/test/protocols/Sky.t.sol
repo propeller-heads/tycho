@@ -149,6 +149,46 @@ contract SkyExecutorTest is Constants, TestUtils {
         assertEq(IERC20(DAI_ADDR).balanceOf(address(skyExposed)), 123456);
     }
 
+    function _fileTout(uint256 value) internal {
+        // MCD_PAUSE_PROXY is a ward of the LitePSM, so it can set fees the
+        // way governance would.
+        vm.prank(0xBE8E3e3618f7474F8cB1d074A26afFef007E98FB);
+        (bool ok,) = SKY_LITE_PSM.call(
+            abi.encodeWithSignature(
+                "file(bytes32,uint256)", bytes32("tout"), value
+            )
+        );
+        require(ok, "file(tout) failed");
+    }
+
+    function testBuyGemPsmWithTout() public {
+        // At 1% tout the cost per gem unit is 1.01 stable, so 1010 DAI buys
+        // exactly 1000 USDC and the sizing spends the full input.
+        _fileTout(0.01e18);
+        uint256 amountIn = 1010e18;
+        deal(DAI_ADDR, address(skyExposed), amountIn);
+        vm.prank(address(skyExposed));
+        IERC20(DAI_ADDR).approve(SKY_LITE_PSM, amountIn);
+
+        uint256 balanceBefore = IERC20(USDC_ADDR).balanceOf(BOB);
+        skyExposed.swap(amountIn, _params(SkyExecutor.Target.Psm, false), BOB);
+        assertEq(IERC20(USDC_ADDR).balanceOf(BOB) - balanceBefore, 1000e6);
+        assertEq(IERC20(DAI_ADDR).balanceOf(address(skyExposed)), 0);
+    }
+
+    function testBuyGemPsmHaltedReverts() public {
+        // A HALTED tout (uint256.max) must revert on the checked addition in
+        // the sizing, matching the venue's halt semantics.
+        _fileTout(type(uint256).max);
+        uint256 amountIn = 1000e18;
+        deal(DAI_ADDR, address(skyExposed), amountIn);
+        vm.prank(address(skyExposed));
+        IERC20(DAI_ADDR).approve(SKY_LITE_PSM, amountIn);
+
+        vm.expectRevert(stdError.arithmeticError);
+        skyExposed.swap(amountIn, _params(SkyExecutor.Target.Psm, false), BOB);
+    }
+
     function testSellGemWrapper() public {
         uint256 amountIn = 1000e6;
         deal(USDC_ADDR, address(skyExposed), amountIn);
