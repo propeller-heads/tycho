@@ -30,8 +30,6 @@ import {
 import {
     SignedExclusiveSwap
 } from "@ekubo-v3/extensions/SignedExclusiveSwap.sol";
-// Imported so Forge compiles the artifact for deployCodeTo.
-import {Ve33} from "@ekubo-v3/extensions/Ve33.sol";
 
 // Handles callbacks directly and receives the native token directly
 abstract contract EkuboV3StandaloneBase is EkuboV3ExecutorBase, ILocker {
@@ -353,56 +351,59 @@ contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
     EkuboV3RobinhoodExecutorStandalone immutable executor =
         new EkuboV3RobinhoodExecutorStandalone();
 
-    IERC20 USDT = IERC20(USDT_ADDR);
+    // The token pair of the deployed WETH/USDG Ve33 pool on Robinhood Chain.
+    address constant RHC_WETH = 0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73;
+    address constant RHC_USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
 
     constructor() {
         vm.makePersistent(address(executor));
     }
 
-    modifier setUpFork(uint256 blockNumber) {
-        vm.createSelectFork(vm.rpcUrl("mainnet"), blockNumber);
-        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
+    modifier setUpFork() {
+        vm.createSelectFork(vm.rpcUrl("robinhood"));
+        // Precautionary, mirroring the mainnet fork workaround; Foundry
+        // defaults unknown chains to the latest hardfork.
         address(vm)
             .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
         _;
     }
 
-    // Runs on an Ethereum mainnet fork; Ve33 is planted at its Robinhood
-    // address via deployCodeTo, since Core is deployed at the same
-    // deterministic address on both chains.
-    function testVe33Swap() public setUpFork(24218590) {
-        deployCodeTo("Ve33.sol:Ve33", abi.encode(CORE, USDC_ADDR), VE33_ADDRESS);
-
+    // Runs on a Robinhood Chain fork against the deployed Ve33 extension,
+    // using the token pair of a live Ve33 pool. A fresh pool (distinct tick
+    // spacing) is initialized because the executor needs a funded position
+    // at a known price, not a specific market.
+    function testVe33Swap() public setUpFork {
         // Ve33 pools require zero fee and power-of-four tick spacing.
         PoolConfig poolConfig = createConcentratedPoolConfig({
             _fee: 0, _tickSpacing: 64, _extension: VE33_ADDRESS
         });
         PoolKey memory poolKey =
-            PoolKey({token0: USDC_ADDR, token1: USDT_ADDR, config: poolConfig});
+            PoolKey({token0: RHC_WETH, token1: RHC_USDG, config: poolConfig});
         CORE.initializePool(poolKey, 0);
 
         LiquidityHelper liquidityHelper = new LiquidityHelper();
-        deal(USDC_ADDR, address(liquidityHelper), 10_000_000_000);
-        deal(USDT_ADDR, address(liquidityHelper), 10_000_000_000);
+        deal(RHC_WETH, address(liquidityHelper), 10_000_000_000);
+        deal(RHC_USDG, address(liquidityHelper), 10_000_000_000);
         liquidityHelper.provide(poolKey, -960, 960, 1_000_000_000);
 
         uint256 amountIn = 100_000;
-        deal(USDC_ADDR, address(executor), amountIn);
-        uint256 usdtBalanceBefore = USDT.balanceOf(address(executor));
+        deal(RHC_WETH, address(executor), amountIn);
+        uint256 usdgBalanceBefore =
+            IERC20(RHC_USDG).balanceOf(address(executor));
 
         executor.swap(
             amountIn,
-            abi.encodePacked(
-                USDC_ADDR, USDT_ADDR, PoolConfig.unwrap(poolConfig)
-            ),
+            abi.encodePacked(RHC_WETH, RHC_USDG, PoolConfig.unwrap(poolConfig)),
             address(executor)
         );
 
-        assertGt(USDT.balanceOf(address(executor)), usdtBalanceBefore);
+        assertGt(
+            IERC20(RHC_USDG).balanceOf(address(executor)), usdgBalanceBefore
+        );
     }
 }
 
-contract EkuboV3SignedSwapTest is Constants, TestUtils {
+contract EkuboV3EthereumExecutorTest is Constants, TestUtils {
     using SignedExclusiveSwapLib for ISignedExclusiveSwap;
 
     EkuboV3EthereumExecutorStandalone immutable executor =
