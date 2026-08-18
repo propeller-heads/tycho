@@ -95,9 +95,11 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
 1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
    match purges strictly after the target; when the hash is absent, a buffered target
-   height purges from that height inclusive (stale copy), and a height above the buffer
-   purges nothing. A target below the buffer's oldest block is fatal. Hash-miss fallbacks
-   log a warning and increment `extractor_revert_hash_miss`.
+   height purges from that height inclusive (stale copy). A hash miss is fatal when the
+   target is below the buffer, at the buffer's oldest block (no predecessor left to anchor
+   the revert), or above the buffer without a pending partial at exactly that height (the
+   flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
+   fallbacks log a warning and increment `extractor_revert_hash_miss`.
 2. Pending partials are dropped only when above the target height; partials at the target
    height are the valid prefix of the last valid block and are kept.
 3. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise

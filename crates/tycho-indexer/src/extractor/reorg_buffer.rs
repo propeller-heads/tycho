@@ -195,8 +195,9 @@ where
     ///
     /// A hash match purges strictly after the matched block. When the hash is absent the
     /// target height decides: a buffered height purges from that height inclusive, a height
-    /// above the buffer purges nothing. Errors only when the target is below the oldest
-    /// buffered block — a reorg past finality.
+    /// above the buffer purges nothing. Errors when the target is below the oldest buffered
+    /// block (a reorg past finality) or at the oldest buffered block — an inclusive purge
+    /// there would empty the buffer, leaving no predecessor to anchor a revert message.
     pub fn purge_to(
         &mut self,
         target_hash: &Bytes,
@@ -230,6 +231,12 @@ where
             // block. Keep the exact error `purge` raises today — alerting greps it.
             return Err(StorageError::NotFound("block".into(), target_hash.to_string()));
         };
+        if idx == 0 {
+            // Purging inclusively from the oldest buffered block would empty the buffer,
+            // leaving no in-buffer predecessor to anchor the revert message. Fatal, same
+            // as a below-buffer target.
+            return Err(StorageError::NotFound("block".into(), target_hash.to_string()));
+        }
         let purged = self
             .block_messages
             .split_off(idx)
@@ -1110,6 +1117,18 @@ mod test {
         let mut reorg_buffer = filled_buffer();
 
         let result = reorg_buffer.purge_to(&unknown_hash(), 0);
+
+        assert!(matches!(result, Err(StorageError::NotFound(_, _))));
+        assert_eq!(reorg_buffer.block_messages.len(), 3, "a fatal miss must not mutate");
+    }
+
+    #[test]
+    fn test_purge_to_height_match_at_oldest_errors() {
+        // An inclusive purge at the oldest buffered height would empty the buffer,
+        // leaving no in-buffer predecessor to anchor the revert message.
+        let mut reorg_buffer = filled_buffer();
+
+        let result = reorg_buffer.purge_to(&unknown_hash(), 1);
 
         assert!(matches!(result, Err(StorageError::NotFound(_, _))));
         assert_eq!(reorg_buffer.block_messages.len(), 3, "a fatal miss must not mutate");

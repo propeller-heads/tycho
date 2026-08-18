@@ -1115,7 +1115,12 @@ where
             return Ok(None);
         }
 
-        // Send revert to DCI plugin
+        // Send revert to DCI plugin.
+        // DCI reverts are hash-only: they have no height fallback and would fail on the
+        // hash-miss paths handled below. Safe today because DCI cannot run on
+        // partial-block chains (its block-layer validation needs parent-hash linkage,
+        // which ephemeral partial hashes break), so a DCI extractor never reaches those
+        // paths. Revisit when DCI supports a flashblocks chain (e.g. Base).
         if let Some(dci_plugin) = &self.dci_plugin {
             dci_plugin
                 .lock()
@@ -1149,9 +1154,24 @@ where
                 purged
             }
             PurgeOutcome::TargetAhead => {
+                // A target above the sealed buffer is only legitimate when it names the
+                // block currently streaming as partials (flashblocks). Anything else
+                // violates the stream's history invariant and must stay fatal.
+                let partial_at_target = self
+                    .partial_block_buffer
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|partial| partial.block.number == block_ref.number);
+                if !partial_at_target {
+                    return Err(ExtractionError::ReorgBufferError(format!(
+                        "Revert target {} (hash {}) is above the sealed buffer with no pending partial at that height",
+                        block_ref.number, block_hash,
+                    )));
+                }
                 warn!(
                     target_number = block_ref.number,
-                    "Revert target hash not in reorg buffer; target is above sealed blocks, nothing to purge"
+                    "Revert target hash not in reorg buffer; target is streaming as partials, nothing to purge"
                 );
                 counter!(
                     "extractor_revert_hash_miss",
@@ -3605,6 +3625,151 @@ mod test {
             .await;
 
         assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_revert_target_ahead_without_partial_is_fatal() {
+        // A target above the sealed buffer is only legitimate when that exact height is
+        // pending in the partial block buffer. With no partial at all it violates the
+        // stream's history invariant and must stay fatal.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            1
+        );
+        assert_eq!(
+            extractor.get_cursor().await,
+            "cursor@1",
+            "cursor must not advance on a fatal revert"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_target_ahead_with_wrong_height_partial_is_fatal() {
+        // A pending partial only legitimizes a target above the sealed buffer when its
+        // height matches the target exactly.
+        let extractor = create_extractor(no_lookup_gateway()).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(2, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 3,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+        assert!(
+            extractor
+                .partial_block_buffer
+                .lock()
+                .await
+                .is_some(),
+            "a fatal revert must not consume the pending partial"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_hash_miss_at_oldest_height_is_fatal() {
+        // A hash miss at the oldest buffered height has no in-buffer predecessor left to
+        // anchor the revert message. It must fail before mutating the buffer instead of
+        // dying on "Reorg buffer is empty after purge" with the buffer already emptied.
+        let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                tycho_pb::BlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(2, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        extractor
+            .handle_tick_scoped_data(make_full_block_with_data(3, 1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef {
+                    id: format!("0x{:0>64x}", 0xdead_u64),
+                    number: 1,
+                }),
+                last_valid_cursor: "cursor@undo".into(),
+            })
+            .await;
+
+        assert!(matches!(result, Err(ExtractionError::ReorgBufferError(_))));
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            3,
+            "a fatal miss must not mutate the buffer"
+        );
+        assert_eq!(
+            extractor.get_cursor().await,
+            "cursor@3",
+            "cursor must not advance on a fatal revert"
+        );
     }
 
     #[tokio::test]
