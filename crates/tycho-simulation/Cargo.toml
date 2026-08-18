@@ -11,6 +11,10 @@ license.workspace = true
 categories.workspace = true
 readme = "README.md"
 rust-version = "1.91.0"
+exclude = [
+    "benches/fixtures",
+    "tests/assets",
+]
 
 [package.metadata.cargo-machete]
 ignored = ["ruint"]
