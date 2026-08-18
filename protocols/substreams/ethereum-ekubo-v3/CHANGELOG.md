@@ -5,6 +5,9 @@
 - Track Ve33 pool swap-fee changes for accurate off-chain quotes. The Ve33
   extension address is chain-specific and passed to the package via module
   params; omitting it (e.g. on Ethereum) disables Ve33 handling.
+- Add a `robinhood-ekubo-v3.yaml` manifest with the Robinhood Ve33 extension
+  address baked into the module params, plus a Robinhood integration test
+  config covering the first Ve33 pool.
 
 ## v0.2.2
 
