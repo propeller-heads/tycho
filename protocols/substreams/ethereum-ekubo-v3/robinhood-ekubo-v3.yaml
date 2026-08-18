@@ -26,8 +26,8 @@ binaries:
 # release notes of EkuboProtocol/evm-contracts). Enables Ve33 pool handling
 # in map_events and map_components.
 params:
-  map_events: "0xD18685a514E59b06d59824e16Db07e73345d9953"
-  map_components: "0xD18685a514E59b06d59824e16Db07e73345d9953"
+  map_events: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953"
+  map_components: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953"
 
 modules:
   # Stage 1

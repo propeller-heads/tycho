@@ -30,7 +30,7 @@ networks:
 
 # The Ve33 extension address for the indexed chain, or empty on chains
 # without a Ve33 deployment (e.g. Ethereum). Override at deployment time,
-# e.g. `-p map_events=0x... -p map_components=0x...`.
+# e.g. `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
 params:
   map_events: ""
   map_components: ""
