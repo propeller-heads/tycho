@@ -42,9 +42,6 @@ pub trait EkuboPool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError>;
 
-    fn quote(
-        &self,
-        token_amount: EvmTokenAmount,
-    ) -> Result<crate::evm::protocol::ekubo_v3::pool::EkuboPoolQuote, SimulationError>;
+    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError>;
     fn get_limit(&self, token_in: Address) -> Result<i128, SimulationError>;
 }

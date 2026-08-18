@@ -23,7 +23,7 @@ use tycho_common::{
 
 use super::pool::{
     concentrated::ConcentratedPool, full_range::FullRangePool, oracle::OraclePool,
-    twamm::TwammPool, ve33::Ve33Pool, EkuboPool,
+    twamm::TwammPool, ve33::Ve33Pool, EkuboPool, EkuboPoolQuote,
 };
 use crate::evm::protocol::{
     ekubo_v3::{
