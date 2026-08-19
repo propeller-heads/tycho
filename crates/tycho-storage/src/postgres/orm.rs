@@ -724,7 +724,7 @@ impl ProtocolState {
             .into_boxed();
 
         // Apply pagination and fetch total count
-        let count: Option<i64> = if let Some(pagination) = pagination_params {
+        let count: Option<u64> = if let Some(pagination) = pagination_params {
             component_query = component_query
                 .limit(pagination.page_size)
                 .offset(pagination.page * pagination.page_size);
@@ -737,7 +737,7 @@ impl ProtocolState {
                     .count()
                     .get_result::<i64>(conn)
                     .await
-                    .unwrap_or(0),
+                    .unwrap_or(0) as u64,
             )
         } else {
             None
@@ -803,7 +803,7 @@ impl ProtocolState {
         }
 
         // Apply pagination and fetch total count
-        let count: Option<i64> = if let Some(pagination) = pagination_params {
+        let count: Option<u64> = if let Some(pagination) = pagination_params {
             component_query = component_query
                 .order_by(protocol_component::id)
                 .limit(pagination.page_size)
@@ -820,7 +820,7 @@ impl ProtocolState {
                     .count()
                     .get_result::<i64>(conn)
                     .await
-                    .unwrap_or(0),
+                    .unwrap_or(0) as u64,
             )
         } else {
             None
@@ -902,7 +902,7 @@ impl ProtocolState {
         }
 
         // Step 3: Apply pagination and fetch total count
-        let count: Option<i64> = if let Some(pagination) = pagination_params {
+        let count: Option<u64> = if let Some(pagination) = pagination_params {
             component_ids_query = component_ids_query
                 .limit(pagination.page_size)
                 .offset(pagination.page * pagination.page_size);
@@ -911,7 +911,7 @@ impl ProtocolState {
                     .count()
                     .get_result::<i64>(conn)
                     .await
-                    .unwrap_or(0),
+                    .unwrap_or(0) as u64,
             )
         } else {
             None

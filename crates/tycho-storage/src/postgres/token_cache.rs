@@ -225,7 +225,7 @@ impl ChainTokenStore {
 
         match (candidates, ts_threshold) {
             (Some(bitmap), None) => {
-                let total = bitmap.len() as i64;
+                let total = bitmap.len();
                 let entity = bitmap
                     .iter()
                     .skip(offset)
@@ -241,7 +241,7 @@ impl ChainTokenStore {
                 limit,
             ),
             (None, None) => {
-                let total = self.tokens.len() as i64;
+                let total = self.tokens.len() as u64;
                 let entity = self
                     .tokens
                     .iter()
@@ -322,7 +322,7 @@ impl ChainTokenStore {
             }
             total += 1;
         }
-        WithTotal { entity, total: Some(total as i64) }
+        WithTotal { entity, total: Some(total as u64) }
     }
 }
 
@@ -1049,7 +1049,10 @@ mod test {
     fn test_cache_survives_a_poisoned_store_lock() {
         let cache = store_with_tokens(&[100]);
 
-        let store = cache.chains.get(&Chain::Ethereum).unwrap();
+        let store = cache
+            .chains
+            .get(&Chain::Ethereum)
+            .unwrap();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = store.write().unwrap();
             panic!("poison the token cache store lock");
@@ -1160,7 +1163,7 @@ mod benchmark {
             })
             .expect("query failed")
             .total
-            .unwrap();
+            .unwrap() as i64;
         println!("== token cache benchmark ==");
         println!("chain: {chain}");
         println!("tokens: {n_tokens}");
@@ -1318,7 +1321,7 @@ mod benchmark {
             })
             .unwrap()
             .total
-            .unwrap();
+            .unwrap() as i64;
         let n_pages = (total + page_size - 1) / page_size;
 
         let started = Instant::now();

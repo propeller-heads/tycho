@@ -262,7 +262,7 @@ impl Version {
 #[derive(Debug)]
 pub struct WithTotal<T> {
     pub entity: T,
-    pub total: Option<i64>,
+    pub total: Option<u64>,
 }
 
 /// Store and retrieve protocol related structs.

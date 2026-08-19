@@ -215,7 +215,7 @@ impl PostgresGateway {
             .count()
             .get_result::<i64>(conn)
             .await
-            .map_err(PostgresError::from)?;
+            .map_err(PostgresError::from)? as u64;
 
         // Apply optional pagination when loading protocol components to ensure consistency
         if let Some(pagination) = pagination_params {
@@ -1031,7 +1031,7 @@ impl PostgresGateway {
             .count()
             .get_result::<i64>(conn)
             .await
-            .map_err(PostgresError::from)?;
+            .map_err(PostgresError::from)? as u64;
 
         if let Some(pagination) = pagination_params {
             query = query
@@ -1907,7 +1907,7 @@ impl PostgresGateway {
             .sorted()
             .collect();
 
-        let total = all_protocol_systems.len() as i64;
+        let total = all_protocol_systems.len() as u64;
         let paginated_protocol_systems = if let Some(params) = pagination_params {
             all_protocol_systems
                 .into_iter()
@@ -1968,7 +1968,7 @@ impl PostgresGateway {
             .count()
             .get_result::<i64>(conn)
             .await
-            .map_err(PostgresError::from)?;
+            .map_err(PostgresError::from)? as u64;
 
         let rows: Vec<(String, f64)> = query
             .select((pc::external_id, ct::tvl))
@@ -4031,7 +4031,7 @@ mod test {
             .await
             .expect("retrieving protocol systems failed!");
 
-        assert_eq!(res.total, Some(exp.len() as i64));
+        assert_eq!(res.total, Some(exp.len() as u64));
         assert_eq!(
             res.entity
                 .into_iter()
@@ -4056,7 +4056,7 @@ mod test {
             .await
             .expect("retrieving protocol systems failed!");
 
-        assert_eq!(res.total, Some(all.len() as i64));
+        assert_eq!(res.total, Some(all.len() as u64));
         assert_eq!(res.entity.iter().collect_vec(), exp);
     }
 

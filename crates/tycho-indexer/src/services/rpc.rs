@@ -314,7 +314,7 @@ where
         let total = match addresses {
             Some(adrs) => {
                 // If contract addresses are specified, the total count is the number of addresses
-                adrs.len() as i64
+                adrs.len() as u64
             }
             None => account_data.total.unwrap_or_default(), /* TODO: handle case where contract
                                                              * addresses are not specified */
@@ -325,7 +325,11 @@ where
                 .into_iter()
                 .map(dto::ResponseAccount::from)
                 .collect(),
-            PaginationResponse::new(pagination_params.page, pagination_params.page_size, total),
+            PaginationResponse::new(
+                pagination_params.page,
+                pagination_params.page_size,
+                total as i64,
+            ),
         ))
     }
 
@@ -649,7 +653,7 @@ where
                 PaginationResponse::new(
                     pagination_params.page,
                     pagination_params.page_size,
-                    tvl.total.unwrap_or_default(),
+                    tvl.total.unwrap_or_default() as i64,
                 ),
             )),
             Err(err) => {
@@ -724,7 +728,7 @@ where
                 &PaginationResponse::new(
                     request.pagination.page,
                     request.pagination.page_size,
-                    token_data.total.unwrap_or_default(),
+                    token_data.total.unwrap_or_default() as i64,
                 ),
             )),
             Err(err) => {
@@ -839,11 +843,11 @@ where
         {
             Ok(component_data) => {
                 let db_total = component_data.total.unwrap_or_default();
-                let total = db_total + buffered_components.len() as i64;
+                let total = db_total + buffered_components.len() as u64;
                 let mut components = component_data.entity;
 
                 // Handle adding buffered components to the response
-                let buffer_offset = pagination_params.offset() - db_total;
+                let buffer_offset = pagination_params.offset() - db_total as i64;
                 if buffer_offset > 0 {
                     // Pagination page is greater than that provided by the db query - respond with
                     // buffered data only
@@ -874,7 +878,7 @@ where
                     PaginationResponse::new(
                         pagination_params.page,
                         pagination_params.page_size,
-                        total,
+                        total as i64,
                     ),
                 ))
             }
@@ -1023,7 +1027,7 @@ where
                 request.pagination.page_size,
                 entry_points_tracing_params_data
                     .total
-                    .unwrap_or_default(),
+                    .unwrap_or_default() as i64,
             ),
         })
     }
@@ -2751,7 +2755,7 @@ mod tests {
                 move |_, _, _, _, _| {
                     let mock_response_clone = match &mock_response {
                         Ok((num, components)) => {
-                            Ok(WithTotal { entity: components.clone(), total: Some(*num) })
+                            Ok(WithTotal { entity: components.clone(), total: Some(*num as u64) })
                         }
                         Err(_) => Err(StorageError::Unexpected("Mock Error".to_string())),
                     };

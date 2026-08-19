@@ -991,7 +991,7 @@ impl PostgresGateway {
 
         // TODO: Try to reduce the duplication
         // Calculate total count based on whether pagination was used
-        let total_count = if pagination_params.is_some() {
+        let total_count: u64 = if pagination_params.is_some() {
             // If pagination was used, we need to query the total count
             use schema::account::dsl::*;
             let mut count_q = account
@@ -1032,10 +1032,10 @@ impl PostgresGateway {
             count_q
                 .get_result::<i64>(conn)
                 .await
-                .map_err(PostgresError::from)?
+                .map_err(PostgresError::from)? as u64
         } else {
             // If no pagination, use the length of the result
-            res.len() as i64
+            res.len() as u64
         };
 
         Ok(WithTotal { entity: res, total: Some(total_count) })
@@ -2201,7 +2201,7 @@ mod test {
         #[case] ids: Option<Vec<Bytes>>,
         #[case] version: Option<Version>,
         #[case] exp: Vec<Account>,
-        #[case] exp_total: i64,
+        #[case] exp_total: u64,
     ) {
         let mut conn = setup_db().await;
         setup_data(&mut conn).await;
