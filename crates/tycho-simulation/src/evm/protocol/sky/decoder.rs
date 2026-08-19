@@ -73,6 +73,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for SkyState {
                 "gem attribute {gem_address} is not among the component tokens"
             )));
         };
+        // The state's conversion factor is 10^(stable.decimals - gem.decimals);
+        // reject the inverted case up front so that unsigned subtraction cannot
+        // underflow (and, wrapping, turn the factor into a zero divisor).
+        if gem.decimals > stable.decimals {
+            return Err(InvalidSnapshotError::ValueError(format!(
+                "gem decimals ({}) exceed stable decimals ({})",
+                gem.decimals, stable.decimals
+            )));
+        }
 
         let get_fee = |name: &str| -> Result<U256, InvalidSnapshotError> {
             match kind {
@@ -309,6 +318,19 @@ mod tests {
     async fn unknown_component_type_errors() {
         let snap = snapshot(PSM_ID, "mystery", USDC, vec![DAI, USDC], true);
         let result = decode(snap, &all_tokens()).await;
+        assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
+    }
+
+    #[tokio::test]
+    async fn gem_decimals_above_stable_decimals_errors() {
+        // Same PSM snapshot, but with the tokens' decimals inverted (6-dec
+        // stable, 18-dec gem): the conversion factor would underflow.
+        let tokens = [token(DAI, "DAI", 6), token(USDC, "USDC", 18)]
+            .into_iter()
+            .map(|t| (t.address.clone(), t))
+            .collect();
+        let snap = snapshot(PSM_ID, "psm", USDC, vec![DAI, USDC], true);
+        let result = decode(snap, &tokens).await;
         assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
     }
 

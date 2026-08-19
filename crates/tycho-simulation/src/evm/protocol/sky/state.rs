@@ -98,6 +98,8 @@ impl SkyState {
     }
 
     /// 10^(stable.decimals - gem.decimals); 1 for the converter's 18/18 pair.
+    /// The decoder rejects components with gem.decimals > stable.decimals, so
+    /// the subtraction cannot underflow.
     fn conversion_factor(&self) -> U256 {
         U256::from(10).pow(U256::from(self.stable.decimals - self.gem.decimals))
     }
