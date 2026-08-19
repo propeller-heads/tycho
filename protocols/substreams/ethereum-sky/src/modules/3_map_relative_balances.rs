@@ -48,6 +48,11 @@ pub fn map_relative_balances(
         )?);
     }
     if block.number == config.wrapper_creation_block {
+        // The wrapper is stateless — its liquidity IS the PSM's, so its balances
+        // mirror the PSM's inventory. The DAI side is relabelled as USDS because
+        // the wrapper converts DAI<->USDS 1:1 in-flight via the joins (sellGem's
+        // DAI payout is converted to USDS, buyGem's USDS input to DAI), so the
+        // PSM's DAI balance is exactly the USDS the wrapper can pay out.
         balance_deltas.extend(seed_deltas(
             &block,
             &config.wrapper_creation_tx,

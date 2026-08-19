@@ -17,7 +17,13 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64};
+use crate::evm::{
+    protocol::{
+        safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
+        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+    },
+    query_pool_swap::is_within_tolerance,
+};
 
 const WAD: u128 = 1_000_000_000_000_000_000;
 /// Sentinel for `tin`/`tout` disabling the respective swap direction (DssLitePsm.HALTED).
@@ -126,9 +132,9 @@ impl SkyState {
         if self.tin == HALTED {
             return Err(SimulationError::RecoverableError("sell gem is halted".to_string()));
         }
-        let stable_wad = gem_in * self.conversion_factor();
-        let fee = stable_wad * self.tin / U256::from(WAD);
-        Ok(stable_wad - fee)
+        let stable_wad = safe_mul_u256(gem_in, self.conversion_factor())?;
+        let fee = safe_mul_u256(stable_wad, self.tin)? / U256::from(WAD);
+        safe_sub_u256(stable_wad, fee)
     }
 
     /// `buyGem` output: the largest gem amount whose cost (incl. `tout`) fits in
@@ -138,7 +144,9 @@ impl SkyState {
             return Err(SimulationError::RecoverableError("buy gem is halted".to_string()));
         }
         let wad = U256::from(WAD);
-        Ok(stable_in * wad / (self.conversion_factor() * (wad + self.tout)))
+        // The divisor cannot be zero: a power of ten times at least `wad`.
+        Ok(safe_mul_u256(stable_in, wad)? /
+            safe_mul_u256(self.conversion_factor(), safe_add_u256(wad, self.tout)?)?)
     }
 
     fn apply_component_balance_updates(&mut self, balances: &Balances) {
@@ -298,7 +306,10 @@ impl ProtocolSim for SkyState {
                 Some(escrows) => self.stable_balance.min(escrows.dai),
                 None => self.stable_balance,
             };
-            let max_in = max_out * wad / (self.conversion_factor() * (wad - self.tin));
+            let max_in = safe_div_u256(
+                safe_mul_u256(max_out, wad)?,
+                safe_mul_u256(self.conversion_factor(), safe_sub_u256(wad, self.tin)?)?,
+            )?;
             Ok((u256_to_biguint(max_in), u256_to_biguint(self.stable_out(max_in)?)))
         } else {
             if self.tout == HALTED {
@@ -313,7 +324,10 @@ impl ProtocolSim for SkyState {
             // Bounded by the pocket's gem inventory; for the wrapper additionally by
             // the USDS join escrow the full stable input is burned through.
             let max_out = self.gem_balance;
-            let max_in = max_out * self.conversion_factor() * (wad + self.tout) / wad;
+            let max_in = safe_mul_u256(
+                safe_mul_u256(max_out, self.conversion_factor())?,
+                safe_add_u256(wad, self.tout)?,
+            )? / wad;
             if let Some(escrows) = &self.escrows {
                 if escrows.usds < max_in {
                     return Ok((
@@ -397,7 +411,7 @@ impl ProtocolSim for SkyState {
             || PoolSwap::new(BigUint::from(0u8), BigUint::from(0u8), self.clone_box(), None);
 
         match params.swap_constraint() {
-            SwapConstraint::TradeLimitPrice { limit, tolerance, .. } => {
+            SwapConstraint::TradeLimitPrice { limit, .. } => {
                 // Zero limits cover both empty inventory and a HALTED direction.
                 let (max_in, _) =
                     self.get_limits(token_in.address.clone(), token_out.address.clone())?;
@@ -413,7 +427,7 @@ impl ProtocolSim for SkyState {
                     1.0 / (1.0 + Self::fee_f64(self.tout))
                 };
                 let limit = price_f64(limit, token_in.decimals, token_out.decimals);
-                if execution < limit && !within_tolerance(execution, limit, *tolerance) {
+                if execution < limit {
                     return Ok(zero_swap());
                 }
                 // `get_amount_out` is only needed for the post-swap state; its
@@ -424,7 +438,7 @@ impl ProtocolSim for SkyState {
             SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
                 let target = price_f64(target, token_in.decimals, token_out.decimals);
                 let spot = self.spot_price(token_in, token_out)?;
-                if within_tolerance(spot, target, *tolerance) {
+                if is_within_tolerance(spot, target, *tolerance) {
                     return Ok(zero_swap());
                 }
                 Err(SimulationError::InvalidInput(
@@ -443,10 +457,6 @@ fn price_f64(price: &Price, in_decimals: u32, out_decimals: u32) -> f64 {
 
 fn to_f64(amount: &BigUint, decimals: u32) -> f64 {
     amount.to_f64().unwrap_or(f64::MAX) / 10f64.powi(decimals as i32)
-}
-
-fn within_tolerance(value: f64, target: f64, tolerance: f64) -> bool {
-    (value - target).abs() / target <= tolerance
 }
 
 #[cfg(test)]
@@ -878,6 +888,23 @@ mod tests {
                 SwapConstraint::TradeLimitPrice {
                     limit: usdc_dai_price(999_500_000_000_000_000), // 0.9995
                     tolerance: 0.0001,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .unwrap();
+        assert_eq!(swap.amount_in(), &BigUint::from(0u8));
+        assert_eq!(swap.amount_out(), &BigUint::from(0u8));
+
+        // The limit is a hard floor: even a generous tolerance must not admit
+        // an execution price below it.
+        let swap = state
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                usdc(),
+                dai(),
+                SwapConstraint::TradeLimitPrice {
+                    limit: usdc_dai_price(999_500_000_000_000_000), // 0.9995
+                    tolerance: 0.01,
                     min_amount_in: None,
                     max_amount_in: None,
                 },
