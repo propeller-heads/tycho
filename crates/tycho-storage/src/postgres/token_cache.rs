@@ -1619,6 +1619,75 @@ mod serial_db_test {
         })
         .await;
     }
+
+    #[tokio::test]
+    async fn test_serial_db_refresh_covers_tokens_first_traded_after_load() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let mut addresses = setup(&mut conn).await;
+            let sql_gateway = PostgresGateway::from_connection(&mut conn).await;
+            let cache = TokenCache::from_connection(&mut conn, &[Chain::Ethereum])
+                .await
+                .unwrap();
+
+            // A token discovered and traded after the initial load, both written
+            // by "another process" — the rpc topology. One tick must pick up the
+            // token (token poll) and its trade (balance poll).
+            let chain_id: i64 = schema::chain::table
+                .select(schema::chain::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            let late_hex = "00000000000000000000000000000000000000cc";
+            let (_, late_id) =
+                db_fixtures::insert_token(&mut conn, chain_id, late_hex, "LATE", 18, Some(100))
+                    .await;
+            let tx_id: i64 = schema::transaction::table
+                .filter(schema::transaction::hash.eq(Bytes::from_str(TX_HASH_1).unwrap()))
+                .select(schema::transaction::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            let component_id: i64 = schema::protocol_component::table
+                .select(schema::protocol_component::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            db_fixtures::insert_component_balance(
+                &mut conn,
+                Balance::from(700u64.to_be_bytes().to_vec()),
+                Bytes::zero(32),
+                700.0,
+                late_id,
+                tx_id,
+                component_id,
+                None,
+            )
+            .await;
+
+            cache.refresh(&mut conn).await.unwrap();
+
+            let late_address = Bytes::from_str(late_hex).unwrap();
+            let traded_late = TokenQuery {
+                chain: Chain::Ethereum,
+                addresses: Some(vec![late_address.clone()]),
+                quality_range: QualityRange::None(),
+                last_traded_ts_threshold: Some(db_fixtures::yesterday_midnight()),
+                pagination: None,
+            };
+            assert_eq!(
+                cache.query_tokens(&traded_late).unwrap().total,
+                Some(1),
+                "one refresh tick must apply both the new token and its first trade"
+            );
+
+            addresses.push(late_address);
+            for query in query_matrix(&addresses) {
+                assert_equivalent(&sql_gateway, &cache, &mut conn, query).await;
+            }
+        })
+        .await;
+    }
 }
 
 /// End-to-end check of the background refresh task: spawn it the way the
