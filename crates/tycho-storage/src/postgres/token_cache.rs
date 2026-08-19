@@ -85,7 +85,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ops::Bound,
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::Duration,
 };
 
@@ -169,14 +169,19 @@ impl ChainTokenStore {
             }
             None => {
                 let idx = self.tokens.len() as u32;
-                self.idx_by_address
-                    .insert(token.address.clone(), idx);
-                self.quality_index
-                    .entry(token.quality as i32)
-                    .or_default()
-                    .insert(idx);
+                let address = token.address.clone();
+                let quality = token.quality as i32;
+                // Mutation order is a panic-tolerance invariant: positions are
+                // pushed first so no index can reference a missing position, and
+                // the address index goes last so a token only becomes reachable
+                // by address once complete. `write_recovered` relies on this.
                 self.tokens.push(Arc::new(token));
                 self.last_traded.push(NEVER_TRADED);
+                self.quality_index
+                    .entry(quality)
+                    .or_default()
+                    .insert(idx);
+                self.idx_by_address.insert(address, idx);
             }
         }
     }
@@ -469,10 +474,7 @@ impl TokenCache {
         query: &TokenQuery,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
         let store = self.store(&query.chain)?;
-        let guard = store
-            .read()
-            .expect("token cache lock poisoned");
-        Ok(guard.query(query))
+        Ok(read_recovered(store).query(query))
     }
 
     /// Inserts tokens that are not yet cached; existing entries are left untouched,
@@ -499,9 +501,7 @@ impl TokenCache {
                 error!(chain = %chain, "Token upsert for chain missing from token cache");
                 continue;
             };
-            let mut guard = store
-                .write()
-                .expect("token cache lock poisoned");
+            let mut guard = write_recovered(store);
             for token in chain_tokens {
                 guard.upsert(token.clone(), overwrite);
             }
@@ -517,9 +517,7 @@ impl TokenCache {
             error!(chain = %chain, "Balance update for chain missing from token cache");
             return;
         };
-        let mut guard = store
-            .write()
-            .expect("token cache lock poisoned");
+        let mut guard = write_recovered(store);
         for (address, ts) in updates {
             guard.update_last_traded(address, ts);
         }
@@ -561,10 +559,7 @@ impl TokenCache {
         conn: &mut AsyncPgConnection,
         batch_size: i64,
     ) -> Result<usize, StorageError> {
-        let last_sync = *self
-            .last_sync
-            .read()
-            .expect("token cache lock poisoned");
+        let last_sync = *read_recovered(&self.last_sync);
         let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
         let chain_db_ids: Vec<i64> = self.chain_ids.keys().copied().collect();
 
@@ -609,10 +604,7 @@ impl TokenCache {
 
         // Advanced only once every batch loaded; a mid-loop failure re-reads the
         // whole window next tick, which is safe because upserts are idempotent.
-        *self
-            .last_sync
-            .write()
-            .expect("token cache lock poisoned") = max_modified_ts;
+        *write_recovered(&self.last_sync) = max_modified_ts;
         Ok(n_rows)
     }
 
@@ -635,10 +627,7 @@ impl TokenCache {
         conn: &mut AsyncPgConnection,
         batch_size: i64,
     ) -> Result<usize, StorageError> {
-        let last_sync = *self
-            .last_balance_sync
-            .read()
-            .expect("token cache lock poisoned");
+        let last_sync = *read_recovered(&self.last_balance_sync);
         let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
         let chain_db_ids: Vec<i64> = self.chain_ids.keys().copied().collect();
 
@@ -699,10 +688,7 @@ impl TokenCache {
 
         // Advanced only once every batch loaded; a mid-loop failure re-reads the
         // whole window next tick, which is safe because re-applying keeps the max.
-        *self
-            .last_balance_sync
-            .write()
-            .expect("token cache lock poisoned") = max_valid_from;
+        *write_recovered(&self.last_balance_sync) = max_valid_from;
         Ok(n_rows)
     }
 
@@ -759,6 +745,25 @@ impl TokenCache {
             last_balance_sync: RwLock::new(NaiveDateTime::default()),
         }
     }
+}
+
+/// Recovers a poisoned lock instead of propagating the panic: a writer that
+/// panicked mid-mutation cannot break positional invariants (see the mutation
+/// order in `ChainTokenStore::upsert`), so the store stays servable and the
+/// interrupted write converges through the delta refresh.
+fn read_recovered<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        error!("Token cache lock poisoned; recovering");
+        poisoned.into_inner()
+    })
+}
+
+/// See [`read_recovered`].
+fn write_recovered<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        error!("Token cache lock poisoned; recovering");
+        poisoned.into_inner()
+    })
 }
 
 fn to_model_token(orm_token: &orm::Token, address: &Address, chain: Chain) -> Token {
@@ -997,6 +1002,28 @@ mod test {
             .unwrap();
 
         assert_eq!(result_symbols(&result), ["TOK0"]);
+    }
+
+    #[test]
+    fn test_cache_survives_a_poisoned_store_lock() {
+        let cache = store_with_tokens(&[100]);
+
+        let store = cache.chains.get(&Chain::Ethereum).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.write().unwrap();
+            panic!("poison the token cache store lock");
+        }));
+        assert!(store.is_poisoned());
+
+        let total = || {
+            cache
+                .query_tokens(&base_query())
+                .unwrap()
+                .total
+        };
+        assert_eq!(total(), Some(1), "reads must survive poisoning");
+        cache.upsert_tokens(&[make_token(1, 100)]);
+        assert_eq!(total(), Some(2), "writes must survive poisoning");
     }
 
     #[test]
