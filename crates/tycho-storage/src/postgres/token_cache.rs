@@ -56,17 +56,11 @@
 //!    insert/update methods), it applies the same change to the cache. New tokens indexed by the
 //!    extractor are queryable immediately.
 //! 3. **Delta refresh** — a background task polls every minute for token rows whose `modified_ts`
-//!    changed (see [`TokenCache::refresh`]). This picks up writers in *other* processes — in
-//!    practice the `analyze-tokens` cronjob updating quality — which write-through cannot see. This
-//!    is why the `token(modified_ts)` index migration exists: without it every poll would scan the
-//!    whole token table.
-//!
-//! Known limit: the delta refresh covers the token table only, so `last_traded`
-//! converges through write-through alone. A process that serves queries without
-//! writing the balances itself keeps the timestamps from its initial load — its
-//! "recently traded" filter misses tokens whose first trade happens after
-//! startup, and the gap grows with uptime. Only enable the cache in processes
-//! that write balances until the refresh also covers balance changes.
+//!    changed and for balance rows whose `valid_from` is new (see [`TokenCache::refresh`]). This
+//!    picks up writers in *other* processes: the `analyze-tokens` cronjob updating quality, and the
+//!    indexer's token and balance writes when this process only serves queries (the `rpc` command).
+//!    This is why the `token(modified_ts)` and `component_balance_default(valid_from)` index
+//!    migrations exist: without them every poll would scan whole tables.
 //!
 //! Known limit: write-through runs while the enclosing DB transaction is still
 //! open, so on rollback the cache can run ahead of the database. This is
@@ -636,7 +630,12 @@ impl TokenCache {
                 .push((address, valid_from));
         }
         for (chain, updates) in &by_chain {
-            self.update_last_traded(chain, updates.iter().map(|(address, ts)| (address, *ts)));
+            self.update_last_traded(
+                chain,
+                updates
+                    .iter()
+                    .map(|(address, ts)| (address, *ts)),
+            );
         }
 
         *self
@@ -647,7 +646,8 @@ impl TokenCache {
     }
 
     /// Spawns a detached task calling `refresh` every `period`, so the cache picks
-    /// up token writes from other processes (e.g. the token analysis cron).
+    /// up token and balance writes from other processes (e.g. the token analysis
+    /// cron, or the indexer when this process only serves queries).
     pub fn spawn_refresh_task(self: &Arc<Self>, pool: Pool<AsyncPgConnection>, period: Duration) {
         let cache = Arc::clone(self);
         tokio::spawn(async move {
@@ -1602,11 +1602,20 @@ mod serial_db_test {
                 last_traded_ts_threshold: Some(db_fixtures::yesterday_midnight()),
                 pagination: None,
             };
-            assert_eq!(cache.query_tokens(&traded_t1).unwrap().total, Some(0));
+            assert_eq!(
+                cache
+                    .query_tokens(&traded_t1)
+                    .unwrap()
+                    .total,
+                Some(0)
+            );
 
             cache.refresh(&mut conn).await.unwrap();
             assert_eq!(
-                cache.query_tokens(&traded_t1).unwrap().total,
+                cache
+                    .query_tokens(&traded_t1)
+                    .unwrap()
+                    .total,
                 Some(1),
                 "refresh did not pick up the externally written balance"
             );
@@ -1676,7 +1685,10 @@ mod serial_db_test {
                 pagination: None,
             };
             assert_eq!(
-                cache.query_tokens(&traded_late).unwrap().total,
+                cache
+                    .query_tokens(&traded_late)
+                    .unwrap()
+                    .total,
                 Some(1),
                 "one refresh tick must apply both the new token and its first trade"
             );
