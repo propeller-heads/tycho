@@ -91,7 +91,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ops::Bound,
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -319,6 +319,14 @@ impl ChainTokenStore {
     }
 }
 
+/// A cache mutation computed by a write-through site, buffered while the
+/// enclosing DB transaction is open and applied only if it commits.
+enum CacheOp {
+    AddTokens(Vec<Token>),
+    UpsertTokens(Vec<Token>),
+    UpdateLastTraded { chain: Chain, updates: Vec<(Address, NaiveDateTime)> },
+}
+
 /// The public face of the cache: one [`ChainTokenStore`] per chain plus the
 /// bookkeeping needed to keep them in sync with the database (see the module
 /// docs for the overall design).
@@ -330,6 +338,9 @@ pub struct TokenCache {
     /// Largest `token.modified_ts` this cache has seen; `refresh` polls for rows
     /// newer than this (minus a safety overlap).
     last_sync: RwLock<NaiveDateTime>,
+    /// Open staging session: `Some` buffers write-through mutations until
+    /// `commit_staged` / `discard_staged`; `None` means mutations apply at once.
+    staged: Mutex<Option<Vec<CacheOp>>>,
 }
 
 impl TokenCache {
@@ -389,7 +400,12 @@ impl TokenCache {
             stores.insert(chain, RwLock::new(store));
         }
 
-        Ok(Self { chains: stores, chain_ids, last_sync: RwLock::new(last_sync) })
+        Ok(Self {
+            chains: stores,
+            chain_ids,
+            last_sync: RwLock::new(last_sync),
+            staged: Mutex::new(None),
+        })
     }
 
     async fn load_chain(
@@ -462,6 +478,97 @@ impl TokenCache {
             .read()
             .expect("token cache lock poisoned");
         Ok(guard.query(query))
+    }
+
+    /// Opens a staging session, so write-through mutations are buffered instead
+    /// of applied. Any buffer left behind by an earlier session is replaced.
+    pub(crate) fn begin_staging(&self) {
+        let mut staged = self
+            .staged
+            .lock()
+            .expect("token cache staging lock poisoned");
+        if staged
+            .as_ref()
+            .is_some_and(|ops| !ops.is_empty())
+        {
+            warn!("Replacing a non-empty token cache staging buffer");
+        }
+        *staged = Some(Vec::new());
+    }
+
+    /// Applies the staged mutations in the order they were buffered and closes
+    /// the session. A no-op when no session is open.
+    pub(crate) fn commit_staged(&self) {
+        let ops = self
+            .staged
+            .lock()
+            .expect("token cache staging lock poisoned")
+            .take();
+        let Some(ops) = ops else {
+            return;
+        };
+        for op in ops {
+            self.apply(op);
+        }
+    }
+
+    /// Drops the staged mutations and closes the session, leaving the cache
+    /// exactly as it was before [`TokenCache::begin_staging`].
+    pub(crate) fn discard_staged(&self) {
+        *self
+            .staged
+            .lock()
+            .expect("token cache staging lock poisoned") = None;
+    }
+
+    /// Write-through entry for token inserts.
+    pub(crate) fn write_through_add_tokens(&self, tokens: &[Token]) {
+        self.stage_or_apply(CacheOp::AddTokens(tokens.to_vec()));
+    }
+
+    /// Write-through entry for token updates.
+    pub(crate) fn write_through_upsert_tokens(&self, tokens: Vec<Token>) {
+        self.stage_or_apply(CacheOp::UpsertTokens(tokens));
+    }
+
+    /// Write-through entry for balance-derived trade timestamps.
+    pub(crate) fn write_through_update_last_traded(
+        &self,
+        chain: Chain,
+        updates: Vec<(Address, NaiveDateTime)>,
+    ) {
+        self.stage_or_apply(CacheOp::UpdateLastTraded { chain, updates });
+    }
+
+    /// Buffers `op` while a staging session is open (the write executor's
+    /// transaction, which may still roll back), applies it at once otherwise
+    /// (the direct gateway autocommits, so its data is already durable).
+    fn stage_or_apply(&self, op: CacheOp) {
+        let mut staged = self
+            .staged
+            .lock()
+            .expect("token cache staging lock poisoned");
+        match staged.as_mut() {
+            Some(ops) => ops.push(op),
+            None => {
+                // The staging lock is never held while a store lock is taken.
+                drop(staged);
+                self.apply(op);
+            }
+        }
+    }
+
+    fn apply(&self, op: CacheOp) {
+        match op {
+            CacheOp::AddTokens(tokens) => self.add_tokens(&tokens),
+            CacheOp::UpsertTokens(tokens) => self.upsert_tokens(&tokens),
+            CacheOp::UpdateLastTraded { chain, updates } => self.update_last_traded(
+                &chain,
+                updates
+                    .iter()
+                    .map(|(address, ts)| (address, *ts)),
+            ),
+        }
     }
 
     /// Inserts tokens that are not yet cached; existing entries are left untouched,
@@ -615,6 +722,7 @@ impl TokenCache {
                 .collect(),
             chain_ids: HashMap::new(),
             last_sync: RwLock::new(NaiveDateTime::default()),
+            staged: Mutex::new(None),
         }
     }
 }
@@ -638,6 +746,8 @@ fn to_model_token(orm_token: &orm::Token, address: &Address, chain: Chain) -> To
 
 #[cfg(test)]
 mod test {
+    use std::slice;
+
     use chrono::DateTime;
 
     use super::*;
@@ -862,6 +972,75 @@ mod test {
         let cache = store_with_tokens(&[100]);
         let result = cache.query_tokens(&TokenQuery { chain: Chain::Base, ..base_query() });
         assert!(matches!(result, Err(StorageError::NotFound(_, _))));
+    }
+
+    fn total_traded_since(cache: &TokenCache, threshold: Option<NaiveDateTime>) -> Option<i64> {
+        cache
+            .query_tokens(&TokenQuery { last_traded_ts_threshold: threshold, ..base_query() })
+            .unwrap()
+            .total
+    }
+
+    #[test]
+    fn test_staging_buffers_until_commit() {
+        let cache = TokenCache::new_for_tests(&[Chain::Ethereum]);
+
+        cache.begin_staging();
+        cache.write_through_add_tokens(&[make_token(0, 100)]);
+        assert_eq!(total_traded_since(&cache, None), Some(0), "staged ops must not be visible");
+
+        cache.commit_staged();
+        assert_eq!(total_traded_since(&cache, None), Some(1), "committed ops must be visible");
+    }
+
+    #[test]
+    fn test_discard_drops_staged_ops() {
+        let cache = TokenCache::new_for_tests(&[Chain::Ethereum]);
+
+        cache.begin_staging();
+        cache.write_through_add_tokens(&[make_token(0, 100)]);
+        cache.discard_staged();
+        // A commit after discard must be a no-op, mirroring the executor's failure
+        // path followed by the next write's lifecycle.
+        cache.commit_staged();
+        assert_eq!(total_traded_since(&cache, None), Some(0), "discarded ops must never apply");
+    }
+
+    #[test]
+    fn test_retry_applies_staged_ops_exactly_once_and_in_order() {
+        let cache = TokenCache::new_for_tests(&[Chain::Ethereum]);
+        let token = make_token(0, 100);
+
+        // Attempt 1 fails and is discarded; attempt 2 stages the same data and
+        // commits — the deadlock-retry lifecycle in DBCacheWriteExecutor::write.
+        cache.begin_staging();
+        cache.write_through_add_tokens(slice::from_ref(&token));
+        cache.discard_staged();
+
+        cache.begin_staging();
+        cache.write_through_add_tokens(slice::from_ref(&token));
+        cache.write_through_update_last_traded(
+            Chain::Ethereum,
+            vec![(token.address.clone(), ts(2_000))],
+        );
+        cache.commit_staged();
+
+        assert_eq!(total_traded_since(&cache, None), Some(1));
+        // The traded filter only matches if UpdateLastTraded applied after
+        // AddTokens — ops must apply in push order.
+        assert_eq!(
+            total_traded_since(&cache, Some(ts(1_000))),
+            Some(1),
+            "ops must apply in push order"
+        );
+    }
+
+    #[test]
+    fn test_write_through_applies_immediately_without_session() {
+        let cache = TokenCache::new_for_tests(&[Chain::Ethereum]);
+        // No begin_staging: the DirectGateway topology. Mutations apply at once.
+        cache.write_through_add_tokens(&[make_token(0, 100)]);
+        assert_eq!(total_traded_since(&cache, None), Some(1));
     }
 }
 
