@@ -68,11 +68,12 @@
 //! startup, and the gap grows with uptime. Only enable the cache in processes
 //! that write balances until the refresh also covers balance changes.
 //!
-//! Known limit: write-through runs while the enclosing DB transaction is still
-//! open, so on rollback the cache can run ahead of the database. This is
-//! harmless: only finalized block data reaches this path, so the cache still
-//! reflects on-chain state, and the database catches up when the write is
-//! retried or the extractor re-processes from its cursor.
+//! Write-through mutations computed inside the write executor's DB transaction
+//! are staged and applied only after the transaction commits, so a rollback —
+//! including one the process survives under in-process extractor restarts —
+//! never leaves the cache ahead of the database. Without an open staging
+//! session (the direct gateway's autocommitting calls, the delta refresh
+//! reading committed rows) mutations apply immediately.
 //!
 //! # Concurrency
 //!
