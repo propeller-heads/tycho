@@ -573,12 +573,12 @@ impl TokenCache {
 
     /// Inserts tokens that are not yet cached; existing entries are left untouched,
     /// mirroring the `ON CONFLICT DO NOTHING` insert semantics.
-    pub(crate) fn add_tokens(&self, tokens: &[Token]) {
+    fn add_tokens(&self, tokens: &[Token]) {
         self.write_tokens(tokens, false);
     }
 
     /// Inserts or overwrites tokens with the given values.
-    pub(crate) fn upsert_tokens(&self, tokens: &[Token]) {
+    fn upsert_tokens(&self, tokens: &[Token]) {
         self.write_tokens(tokens, true);
     }
 
@@ -604,7 +604,7 @@ impl TokenCache {
         }
     }
 
-    pub(crate) fn update_last_traded<'a>(
+    fn update_last_traded<'a>(
         &self,
         chain: &Chain,
         updates: impl Iterator<Item = (&'a Address, NaiveDateTime)>,

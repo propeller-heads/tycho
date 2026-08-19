@@ -371,7 +371,14 @@ impl DBCacheWriteExecutor {
         let mut res =
             Err(PostgresError(StorageError::Unexpected("default response error".to_string())));
 
+        let token_cache = self.state_gateway.token_cache.clone();
+
         while retry_count < max_retries {
+            // Each attempt gets a fresh staging session; a failed attempt's
+            // leftovers are replaced by the next begin.
+            if let Some(cache) = &token_cache {
+                cache.begin_staging();
+            }
             res = conn
                 .build_transaction()
                 .repeatable_read()
@@ -419,6 +426,13 @@ impl DBCacheWriteExecutor {
                     }
                 }
                 _ => break,
+            }
+        }
+
+        if let Some(cache) = &token_cache {
+            match &res {
+                Ok(_) => cache.commit_staged(),
+                Err(_) => cache.discard_staged(),
             }
         }
 
@@ -1281,7 +1295,167 @@ mod test_serial_db {
     use tycho_common::models::ChangeType;
 
     use super::*;
-    use crate::postgres::{db_fixtures, db_fixtures::yesterday_one_am, testing::run_against_db};
+    use crate::postgres::{
+        db_fixtures,
+        db_fixtures::yesterday_one_am,
+        testing::run_against_db,
+        token_cache::{TokenCache, TokenQuery},
+    };
+
+    #[tokio::test]
+    async fn test_serial_db_write_rollback_discards_staged_cache_ops() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let mut gateway: PostgresGateway =
+                PostgresGateway::from_connection(&mut connection).await;
+            gateway.token_cache = Some(Arc::new(
+                TokenCache::from_connection(&mut connection, &[Chain::Ethereum])
+                    .await
+                    .unwrap(),
+            ));
+            let cache = gateway.token_cache.clone().unwrap();
+
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            let handle = write_executor.run();
+
+            let token_address = Bytes::from("0xdAC17F958D2ee523a2206206994597C13D831ec7");
+            let token = models::token::Token::new(
+                &token_address,
+                "USDT",
+                6,
+                0,
+                &[Some(64), None],
+                Chain::Ethereum,
+                100,
+            );
+            // The token insert succeeds inside the transaction; the orphan
+            // transaction (its block is never written) then fails it, rolling
+            // everything back. Ops execute in message order.
+            let orphan_tx = get_sample_transaction(1);
+            let os_rx = send_write_message(
+                &tx,
+                get_sample_block(1),
+                vec![WriteOp::InsertTokens(vec![token]), WriteOp::UpsertTx(vec![orphan_tx])],
+            )
+            .await;
+            let result = os_rx
+                .await
+                .expect("Response from channel ok");
+            assert!(result.is_err(), "the write must fail on the orphan transaction");
+            handle.abort();
+
+            let cached = cache
+                .query_tokens(&TokenQuery {
+                    chain: Chain::Ethereum,
+                    addresses: Some(vec![token_address]),
+                    quality_range: QualityRange::None(),
+                    last_traded_ts_threshold: None,
+                    pagination: None,
+                })
+                .unwrap();
+            assert_eq!(
+                cached.total,
+                Some(0),
+                "a rolled-back token must not be visible in the cache"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_write_commit_applies_staged_cache_ops() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let mut gateway: PostgresGateway =
+                PostgresGateway::from_connection(&mut connection).await;
+            gateway.token_cache = Some(Arc::new(
+                TokenCache::from_connection(&mut connection, &[Chain::Ethereum])
+                    .await
+                    .unwrap(),
+            ));
+            let cache = gateway.token_cache.clone().unwrap();
+
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            let handle = write_executor.run();
+
+            let token_address = Bytes::from("0xdAC17F958D2ee523a2206206994597C13D831ec7");
+            let token = models::token::Token::new(
+                &token_address,
+                "USDT",
+                6,
+                0,
+                &[Some(64), None],
+                Chain::Ethereum,
+                100,
+            );
+            let block = get_sample_block(1);
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+            os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect("Transaction committed");
+            handle.abort();
+
+            let cached = cache
+                .query_tokens(&TokenQuery {
+                    chain: Chain::Ethereum,
+                    addresses: Some(vec![token_address]),
+                    quality_range: QualityRange::None(),
+                    last_traded_ts_threshold: None,
+                    pagination: None,
+                })
+                .unwrap();
+            assert_eq!(cached.total, Some(1), "a committed token must be visible in the cache");
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn test_write_and_flush() {

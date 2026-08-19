@@ -1172,7 +1172,7 @@ impl PostgresGateway {
         .await?;
 
         if let Some(token_cache) = &self.token_cache {
-            token_cache.add_tokens(tokens);
+            token_cache.write_through_add_tokens(tokens);
         }
 
         Ok(())
@@ -1241,7 +1241,7 @@ impl PostgresGateway {
                 .filter(|t| address_to_db_id.contains_key(&t.address))
                 .cloned()
                 .collect();
-            token_cache.upsert_tokens(&updated);
+            token_cache.write_through_upsert_tokens(updated);
         }
 
         Ok(())
@@ -1423,7 +1423,13 @@ impl PostgresGateway {
                     *entry = (*entry).max(*transaction_ts);
                 }
             }
-            token_cache.update_last_traded(chain, latest_trade.into_iter());
+            token_cache.write_through_update_last_traded(
+                *chain,
+                latest_trade
+                    .into_iter()
+                    .map(|(token_address, ts)| (token_address.clone(), ts))
+                    .collect(),
+            );
         }
 
         Ok(())
