@@ -108,6 +108,10 @@ const LOAD_BATCH_SIZE: i64 = 500_000;
 /// load batch so readers interleave with the apply loop during a bulk backfill.
 const REFRESH_BATCH_SIZE: i64 = 50_000;
 
+/// How many times the initial load tries a query before giving up. Applies both
+/// per batch and to the whole load, with exponential backoff between attempts.
+const LOAD_RETRY_ATTEMPTS: u32 = 3;
+
 /// Timestamp value for tokens that never appeared in a component balance.
 /// `i64::MIN` sorts below any real threshold, matching the SQL `EXISTS` filter
 /// which excludes such tokens.
@@ -343,11 +347,24 @@ impl TokenCache {
         pool: Pool<AsyncPgConnection>,
         chains: &[Chain],
     ) -> Result<Self, StorageError> {
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|err| StorageError::Unexpected(err.to_string()))?;
-        Self::from_connection(&mut conn, chains).await
+        let mut attempt = 0u32;
+        loop {
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+            match Self::from_connection(&mut conn, chains).await {
+                Ok(cache) => return Ok(cache),
+                Err(err) if attempt < LOAD_RETRY_ATTEMPTS - 1 => {
+                    attempt += 1;
+                    // A fresh pooled connection covers the case the batch-level
+                    // retry cannot: the connection itself died mid-load.
+                    warn!(%err, attempt, "Token cache load failed; retrying with a new connection");
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Loads the tokens of the given chains. Chains present in the `chain` table
@@ -417,16 +434,29 @@ impl TokenCache {
 
         let mut last_db_id = i64::MIN;
         loop {
-            let batch: Vec<(orm::Token, Address)> = schema::token::table
-                .inner_join(schema::account::table)
-                .filter(schema::account::chain_id.eq(chain_id))
-                .filter(schema::token::id.gt(last_db_id))
-                .order(schema::token::id.asc())
-                .limit(LOAD_BATCH_SIZE)
-                .select((orm::Token::as_select(), schema::account::address))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
+            let mut attempt = 0u32;
+            let batch: Vec<(orm::Token, Address)> = loop {
+                let result = schema::token::table
+                    .inner_join(schema::account::table)
+                    .filter(schema::account::chain_id.eq(chain_id))
+                    .filter(schema::token::id.gt(last_db_id))
+                    .order(schema::token::id.asc())
+                    .limit(LOAD_BATCH_SIZE)
+                    .select((orm::Token::as_select(), schema::account::address))
+                    .load(conn)
+                    .await;
+                match result {
+                    Ok(batch) => break batch,
+                    Err(err) if attempt < LOAD_RETRY_ATTEMPTS - 1 => {
+                        attempt += 1;
+                        // The id cursor makes a retry resume exactly where the
+                        // failed query stopped; nothing loaded is redone.
+                        warn!(%err, attempt, "Token cache load batch failed; retrying");
+                        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                    }
+                    Err(err) => return Err(PostgresError::from(err).into()),
+                }
+            };
 
             let batch_len = batch.len();
             for (orm_token, address) in batch {
@@ -442,21 +472,32 @@ impl TokenCache {
 
         // Latest balance change per token, mirroring the SQL `EXISTS` filter on
         // `component_balance_default.valid_from`.
-        let last_traded: Vec<(i64, NaiveDateTime)> = schema::component_balance_default::table
-            .inner_join(schema::protocol_component::table)
-            .filter(schema::protocol_component::chain_id.eq(chain_id))
-            .select((
-                schema::component_balance_default::token_id,
-                schema::component_balance_default::valid_from,
-            ))
-            .order_by((
-                schema::component_balance_default::token_id.asc(),
-                schema::component_balance_default::valid_from.desc(),
-            ))
-            .distinct_on(schema::component_balance_default::token_id)
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
+        let mut attempt = 0u32;
+        let last_traded: Vec<(i64, NaiveDateTime)> = loop {
+            let result = schema::component_balance_default::table
+                .inner_join(schema::protocol_component::table)
+                .filter(schema::protocol_component::chain_id.eq(chain_id))
+                .select((
+                    schema::component_balance_default::token_id,
+                    schema::component_balance_default::valid_from,
+                ))
+                .order_by((
+                    schema::component_balance_default::token_id.asc(),
+                    schema::component_balance_default::valid_from.desc(),
+                ))
+                .distinct_on(schema::component_balance_default::token_id)
+                .load(conn)
+                .await;
+            match result {
+                Ok(last_traded) => break last_traded,
+                Err(err) if attempt < LOAD_RETRY_ATTEMPTS - 1 => {
+                    attempt += 1;
+                    warn!(%err, attempt, "Token cache last traded load failed; retrying");
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+                Err(err) => return Err(PostgresError::from(err).into()),
+            }
+        };
 
         let mut max_valid_from = NaiveDateTime::default();
         for (token_db_id, valid_from) in last_traded {
