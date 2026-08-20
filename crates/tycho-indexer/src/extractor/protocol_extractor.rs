@@ -1157,20 +1157,24 @@ where
                 // A target above the sealed buffer is only legitimate when it names the
                 // block currently streaming as partials (flashblocks). Anything else
                 // violates the stream's history invariant and must stay fatal.
-                let partial_at_target = self
+                let pending_partial = self
                     .partial_block_buffer
                     .lock()
                     .await
                     .as_ref()
-                    .is_some_and(|partial| partial.block.number == block_ref.number);
-                if !partial_at_target {
-                    return Err(ExtractionError::ReorgBufferError(format!(
-                        "Revert target {} (hash {}) is above the sealed buffer with no pending partial at that height",
-                        block_ref.number, block_hash,
-                    )));
-                }
+                    .map(|partial| (partial.block.number, partial.partial_block_index));
+                let partial_index = match pending_partial {
+                    Some((number, index)) if number == block_ref.number => index,
+                    _ => {
+                        return Err(ExtractionError::ReorgBufferError(format!(
+                            "Could not find block with id `{}`! Revert target {} is above the sealed buffer with no pending partial at that height (pending partial: {:?})",
+                            block_hash, block_ref.number, pending_partial,
+                        )))
+                    }
+                };
                 warn!(
                     target_number = block_ref.number,
+                    ?partial_index,
                     "Revert target hash not in reorg buffer; target is streaming as partials, nothing to purge"
                 );
                 counter!(

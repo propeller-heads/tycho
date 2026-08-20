@@ -66,7 +66,7 @@ where
 
 /// Result of a height-aware purge. Hash match is authoritative; height is a fallback.
 #[derive(Debug)]
-pub enum PurgeOutcome<B> {
+pub(crate) enum PurgeOutcome<B> {
     /// Target hash found; purged every block strictly after it.
     HashMatch(Vec<B>),
     /// Hash not found but a block at the target height was buffered — our copy of that
@@ -226,17 +226,24 @@ where
             return Ok(PurgeOutcome::TargetAhead);
         }
 
-        let Some(idx) = self.find_index(|b| b.block().number == target_number) else {
-            // Neither hash nor height found: the target is below the oldest buffered
-            // block. Keep the exact error `purge` raises today — alerting greps it.
+        let oldest = self
+            .block_messages
+            .front()
+            .map(|b| b.block().number);
+
+        // A height match needs an in-buffer predecessor (idx >= 1) to anchor the revert
+        // message. Otherwise the target is at or below the oldest buffered block — a reorg
+        // past the revertable window, which is fatal.
+        let idx = self.find_index(|b| b.block().number == target_number);
+        let Some(idx) = idx.filter(|&i| i > 0) else {
+            error!(
+                ?target_hash,
+                target_number,
+                ?oldest,
+                "Revert target at or below the oldest buffered block; no predecessor to anchor the revert"
+            );
             return Err(StorageError::NotFound("block".into(), target_hash.to_string()));
         };
-        if idx == 0 {
-            // Purging inclusively from the oldest buffered block would empty the buffer,
-            // leaving no in-buffer predecessor to anchor the revert message. Fatal, same
-            // as a below-buffer target.
-            return Err(StorageError::NotFound("block".into(), target_hash.to_string()));
-        }
         let purged = self
             .block_messages
             .split_off(idx)
