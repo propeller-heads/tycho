@@ -10,7 +10,7 @@ use crate::encoding::{
         gas_estimator::estimate_gas_usage,
         group_swaps::group_swaps,
         strategy_encoder::strategy_validators::{
-            SequentialSwapValidator, SplitSwapValidator, SwapValidator,
+            SequentialSwapValidator, SingleSwapValidator, SplitSwapValidator, SwapValidator,
         },
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{get_token_position, percentage_to_uint24, ple_encode},
@@ -25,10 +25,13 @@ use crate::encoding::{
 /// # Fields
 /// * `swap_encoder_registry`: SwapEncoderRegistry, containing all possible swap encoders
 /// * `router_address`: Address of the router to be used to execute swaps
+/// * `single_swap_validator`: SingleSwapValidator, responsible for checking validity of the swap
+///   path
 #[derive(Clone)]
 pub(crate) struct SingleSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     router_address: Bytes,
+    single_swap_validator: SingleSwapValidator,
 }
 
 impl SingleSwapStrategyEncoder {
@@ -36,7 +39,11 @@ impl SingleSwapStrategyEncoder {
         swap_encoder_registry: SwapEncoderRegistry,
         router_address: Bytes,
     ) -> Result<Self, EncodingError> {
-        Ok(Self { swap_encoder_registry, router_address: router_address.clone() })
+        Ok(Self {
+            swap_encoder_registry,
+            router_address: router_address.clone(),
+            single_swap_validator: SingleSwapValidator,
+        })
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
@@ -66,6 +73,8 @@ impl StrategyEncoder for SingleSwapStrategyEncoder {
             }
         }
         .to_string();
+        self.single_swap_validator
+            .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
         let number_of_groups = grouped_swaps.len();

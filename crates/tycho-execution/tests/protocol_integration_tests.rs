@@ -2214,56 +2214,6 @@ fn test_single_encoding_strategy_weth_unwrap() {
 }
 
 #[test]
-fn test_sequential_encoding_strategy_wrap_added() {
-    // The solution is initially a single swap. The wrapping step is inserted automatically.
-    // Final execution flow:
-    // ETH → (wrap to WETH) → WETH → (Uniswap V2 swap) → DAI
-
-    let swap_weth_dai = Swap::new(
-        ProtocolComponent {
-            id: "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11".to_string(),
-            protocol_system: "uniswap_v2".to_string(),
-            ..Default::default()
-        },
-        default_token(weth().clone()),
-        default_token(dai().clone()),
-        BigUint::ZERO,
-    );
-    let encoder = get_tycho_router_encoder(Chain::Ethereum);
-
-    let solution = Solution::new(
-        Bytes::from_str("0x9964bff29baa37b47604f3f3f51f3b3c5149d6de").unwrap(),
-        Bytes::from_str("0x9964bff29baa37b47604f3f3f51f3b3c5149d6de").unwrap(),
-        eth(),
-        dai(),
-        BigUint::from(1_000_000_000_000_000_000_u128),
-        BigUint::from(1_000_000_000_000_000_000_u128),
-        BigUint::from(980000000000000000u128),
-        vec![swap_weth_dai],
-    );
-
-    let encoded_solution = encoder
-        .encode_solutions(vec![solution.clone()])
-        .unwrap()[0]
-        .clone();
-
-    let calldata = encode_tycho_router_call(
-        eth_chain().id(),
-        encoded_solution,
-        &solution,
-        &eth(),
-        None,
-        0,
-        Bytes::zero(20),
-        BigUint::ZERO,
-    )
-    .unwrap()
-    .data;
-    let hex_calldata = encode(&calldata);
-    write_calldata_to_file("test_sequential_encoding_strategy_wrap_added", hex_calldata.as_str());
-}
-
-#[test]
 fn test_single_encoding_strategy_ekubo_v3() {
     //   ETH ──(EKUBO V3)──> USDC
 
