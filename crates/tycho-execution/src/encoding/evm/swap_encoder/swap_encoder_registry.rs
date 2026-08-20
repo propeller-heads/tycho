@@ -240,7 +240,10 @@ impl SwapEncoderRegistry {
 
 #[cfg(test)]
 mod tests {
+    use tycho_common::models::protocol::ProtocolComponent;
+
     use super::*;
+    use crate::encoding::models::{default_token, EncodingContext, Swap};
 
     /// A single `pricelevelstream` config entry serves the whole protocol family: the bare
     /// family key resolves as an exact entry, and every `pricelevelstream:{venue}` protocol —
@@ -295,6 +298,49 @@ mod tests {
             .executor_address()
             .clone();
         assert_ne!(direct, via_router);
+    }
+
+    /// The family carries a configured venue address for FermiSwap, so a caller holding an
+    /// indexed `vm:fermiswap` component - which names only the FermiSwapper contract - can route
+    /// it through the PropAMMRouter by relabeling the swap `propammfallback:fermiswap`.
+    #[test]
+    fn test_propamm_fallback_encodes_indexed_fermiswap_component() {
+        let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors))
+            .unwrap();
+        let component = ProtocolComponent {
+            id: String::from("0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0"),
+            protocol_system: String::from("propammfallback:fermiswap"),
+            ..Default::default()
+        };
+        let weth = Bytes::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let usdc = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        let swap = Swap::new(
+            component,
+            default_token(weth.clone()),
+            default_token(usdc.clone()),
+            num_bigint::BigUint::ZERO,
+        );
+
+        let encoded = registry
+            .get_encoder("propammfallback:fermiswap")
+            .unwrap()
+            .encode_swap(
+                &swap,
+                &EncodingContext {
+                    router_address: Some(Bytes::zero(20)),
+                    group_token_in: weth,
+                    group_token_out: usdc,
+                },
+            )
+            .unwrap();
+
+        // The pAMM on the router's whitelist, not the FermiSwapper the indexed path calls.
+        assert_eq!(
+            Bytes::from(&encoded[..20]),
+            Bytes::from("0x5979458912F80B96d30D4220af8E2e4925A33320")
+        );
     }
 
     #[test]

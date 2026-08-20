@@ -255,6 +255,16 @@ the route. It resolves the same
 way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only venues
 whitelisted on the PropAMMRouter may use the prefix.
 
+`PropAMMSwapEncoder` takes the venue address from the component's `pamm_address` static attribute,
+which every price-level-stream component carries. A component without that attribute falls back to
+the `{venue}_venue_address` entry configured for the family in
+`config/protocol_specific_addresses.json`. That serves components sourced outside the price level
+stream: the indexed `vm:fermiswap` path names only the FermiSwapper contract
+(`0xb1076fE3…`), never the pAMM (`0x5979…`), so a caller routes such a swap through the
+PropAMMRouter by labeling it `propammfallback:fermiswap`. The caller must also price the Uniswap V3
+retry into `minAmountOut` — the executor passes `amountOutMin = 0`, so a `minAmountOut` derived
+from the pAMM quote makes the retry revert on slippage.
+
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 
 Angstrom's Uniswap V4 pools start every block locked. A swap against one carries a pool unlock attestation, signed by
