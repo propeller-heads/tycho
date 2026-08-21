@@ -7,7 +7,8 @@ use crate::encoding::{
     evm::{
         constants::{
             DEFAULT_EXECUTORS_JSON, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
-            PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
+            PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX, PROPAMM_ROUTER_INDEXED_PROTOCOLS,
+            PROTOCOL_SPECIFIC_CONFIG,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -83,7 +84,51 @@ impl SwapEncoderRegistry {
             self.encoders
                 .insert(protocol.to_string(), encoder);
         }
+        self.register_propamm_router_protocols(executors, protocol_specific_config)?;
         Ok(self)
+    }
+
+    /// Replaces the encoder of every protocol in `PROPAMM_ROUTER_INDEXED_PROTOCOLS` with the
+    /// generic `PropAMMSwapEncoder` on `PropAMMFallbackExecutor`, so their swaps reach the venue
+    /// through the PropAMMRouter and retry on Uniswap V3 when a stale maker quote reverts.
+    ///
+    /// Requires both the `propammfallback` executor address and the venue's address. A chain
+    /// missing either keeps the protocol's own encoder and its direct venue call, which is what
+    /// makes this safe before the executor is deployed.
+    fn register_propamm_router_protocols(
+        &mut self,
+        executors: &HashMap<String, String>,
+        protocol_specific_config: &HashMap<String, HashMap<String, String>>,
+    ) -> Result<(), EncodingError> {
+        let Some(executor_address) = executors.get(PROPAMM_FALLBACK_KEY) else {
+            return Ok(());
+        };
+        let Some(config) = protocol_specific_config.get(PROPAMM_FALLBACK_KEY) else {
+            return Ok(());
+        };
+        let executor_address = Bytes::from_str(executor_address).map_err(|_| {
+            EncodingError::FatalError(format!(
+                "Invalid executor address for protocol {PROPAMM_FALLBACK_KEY}"
+            ))
+        })?;
+
+        for protocol in PROPAMM_ROUTER_INDEXED_PROTOCOLS {
+            let venue = protocol
+                .split_once(':')
+                .map(|(_, venue)| venue)
+                .unwrap_or(protocol);
+            if !config.contains_key(&format!("{venue}_venue_address")) {
+                continue;
+            }
+            let encoder = PropAMMSwapEncoder::new(
+                executor_address.clone(),
+                self.chain,
+                Some(config.clone()),
+            )?;
+            self.encoders
+                .insert((*protocol).to_string(), Box::new(encoder));
+        }
+        Ok(())
     }
 
     /// Adds an encoder to the registry, replacing any existing encoder for the same protocol.
@@ -298,6 +343,83 @@ mod tests {
             .executor_address()
             .clone();
         assert_ne!(direct, via_router);
+    }
+
+    fn ethereum_registry() -> SwapEncoderRegistry {
+        let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
+        SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors))
+            .unwrap()
+    }
+
+    fn weth_usdc_swap(protocol_system: &str) -> Swap {
+        Swap::new(
+            ProtocolComponent {
+                id: String::from(
+                    "0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0",
+                ),
+                protocol_system: protocol_system.to_string(),
+                ..Default::default()
+            },
+            default_token(Bytes::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")),
+            default_token(Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")),
+            num_bigint::BigUint::ZERO,
+        )
+    }
+
+    fn encode(registry: &SwapEncoderRegistry, protocol_system: &str) -> Vec<u8> {
+        registry
+            .get_encoder(protocol_system)
+            .unwrap()
+            .encode_swap(
+                &weth_usdc_swap(protocol_system),
+                &EncodingContext {
+                    router_address: Some(Bytes::zero(20)),
+                    group_token_in: Bytes::from("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+                    group_token_out: Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+                },
+            )
+            .unwrap()
+    }
+
+    /// `vm:fermiswap` names the same venue the price level stream serves, so it resolves to
+    /// `PropAMMFallbackExecutor` and its swap data carries the venue the router whitelists. Its
+    /// own encoder emits 40 bytes and would call the FermiSwapper directly.
+    #[test]
+    fn test_vm_fermiswap_resolves_to_the_propamm_router() {
+        let registry = ethereum_registry();
+
+        let encoded = encode(&registry, "vm:fermiswap");
+        assert_eq!(encoded.len(), 60);
+        assert_eq!(
+            Bytes::from(&encoded[..20]),
+            Bytes::from("0x5979458912F80B96d30D4220af8E2e4925A33320")
+        );
+        assert_eq!(
+            registry
+                .get_encoder("vm:fermiswap")
+                .unwrap()
+                .executor_address(),
+            registry
+                .get_encoder(PROPAMM_FALLBACK_KEY)
+                .unwrap()
+                .executor_address()
+        );
+    }
+
+    /// Without a configured `PropAMMFallbackExecutor` there is nothing to route to, so the
+    /// protocol keeps its own encoder and its direct venue call. This is the state of every chain
+    /// where the executor is not deployed.
+    #[test]
+    fn test_vm_fermiswap_keeps_its_own_encoder_without_the_executor() {
+        let executors =
+            r#"{"ethereum": {"vm:fermiswap": "0xe8dc788818033232EF9772CB2e6622F1Ec8bc840"}}"#;
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors.to_string()))
+            .unwrap();
+
+        // 40 bytes, `token_in ++ token_out`: no venue, so the FermiSwapper is the call target.
+        assert_eq!(encode(&registry, "vm:fermiswap").len(), 40);
     }
 
     /// The family carries a configured venue address for FermiSwap, so a caller holding an

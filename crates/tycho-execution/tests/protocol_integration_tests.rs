@@ -1646,7 +1646,10 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
 
 #[test]
 fn test_single_encoding_strategy_fermiswap_weth_usdc() {
-    // WETH -> (FermiSwap) -> USDC
+    // WETH -> (the FermiSwap pAMM through the PropAMMRouter) -> USDC.
+    //
+    // `vm:fermiswap` resolves to `PropAMMFallbackExecutor`, so the amounts below are the Uniswap
+    // V3 retry price at the fork block of `FermiSwapRouterTest`, where the venue is stale.
     let token_in = weth();
     let token_out = usdc();
 
@@ -1668,8 +1671,8 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         token_in,
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from(2_114_000_000_u64),
-        BigUint::from(2071720000u64),
+        BigUint::from(1_872_190_012_u64),
+        BigUint::from(1_800_000_000_u64),
         vec![swap],
     );
 

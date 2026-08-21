@@ -106,10 +106,14 @@ contract FermiSwapExecutorTest is TestUtils, Constants {
 }
 
 contract FermiSwapRouterTest is TychoRouterTestSetup {
+    /// Block at which the venue's oracle lane is stale, so a direct call reverts `StaleUpdate`
+    /// and the PropAMMRouter's Uniswap V3 retry is what delivers tokenOut.
     function getForkBlock() public pure override returns (uint256) {
-        return 25143884;
+        return 25682938;
     }
 
+    /// `vm:fermiswap` resolves to `PropAMMFallbackExecutor`, so a route on an indexed component
+    /// reaches the venue through the PropAMMRouter.
     function testSingleSwap() public {
         uint256 amountIn = 1 ether;
         bytes memory callData = loadCallDataFromFile(

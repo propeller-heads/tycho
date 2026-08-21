@@ -258,12 +258,24 @@ whitelisted on the PropAMMRouter may use the prefix.
 `PropAMMSwapEncoder` takes the venue address from the component's `pamm_address` static attribute,
 which every price-level-stream component carries. A component without that attribute falls back to
 the `{venue}_venue_address` entry configured for the family in
-`config/protocol_specific_addresses.json`. That serves components sourced outside the price level
-stream: the indexed `vm:fermiswap` path names only the FermiSwapper contract
-(`0xb1076fE3…`), never the pAMM (`0x5979…`), so a caller routes such a swap through the
-PropAMMRouter by labeling it `propammfallback:fermiswap`. The caller must also price the Uniswap V3
-retry into `minAmountOut` — the executor passes `amountOutMin = 0`, so a `minAmountOut` derived
-from the pAMM quote makes the retry revert on slippage.
+`config/protocol_specific_addresses.json`.
+
+That entry is what lets protocols outside the price level stream reach the router.
+`PROPAMM_ROUTER_INDEXED_PROTOCOLS` (`evm/constants.rs`) lists them — currently `vm:fermiswap`,
+whose components describe the same pAMM but name only the FermiSwapper contract (`0xb1076fE3…`),
+never the venue (`0x5979…`). `SwapEncoderRegistry::register_propamm_router_protocols` replaces each
+listed protocol's encoder with `PropAMMSwapEncoder` on `PropAMMFallbackExecutor`, so `vm:fermiswap`
+swaps reach the venue through the PropAMMRouter by default.
+
+The replacement needs both the `propammfallback` executor address and the venue address. A chain
+missing either keeps the protocol's own encoder (`FermiSwapEncoder`, calling the FermiSwapper
+directly), which is why this is safe on chains where the executor is not deployed.
+`executes_via_propamm_router` covers these protocols in the gas estimator alongside the
+`propammfallback:` prefix.
+
+`minAmountOut` stays whatever the caller sets. The executor passes `amountOutMin = 0`, so the
+route-level `minAmountOut` is the only price check: a value priced off the pAMM quote reverts on
+slippage when the Uniswap V3 retry fills instead of the venue.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 
