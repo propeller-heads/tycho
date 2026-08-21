@@ -169,7 +169,7 @@ Configurable via `EXTRACTION_WORKER_THREADS` (default 2) and `MAIN_WORKER_THREAD
 |---|---|
 | `index` | Run all extractors from `extractors.yaml` + HTTP/WS server |
 | `run` | Run a single extractor (testing / debugging) |
-| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) |
+| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) and `--revive-traded-days <N>` (default 1: re-check quality-5 tokens traded within N days; Bad keeps 5) |
 | `rpc` | HTTP RPC server only (no extractors) |
 
 ### Feature flags

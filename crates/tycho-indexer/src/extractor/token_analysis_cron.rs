@@ -1,5 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 
+use chrono::NaiveDateTime;
 use futures03::{future::try_join_all, FutureExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
@@ -7,7 +8,7 @@ use tycho_common::{
     models::{
         blockchain::BlockTag,
         protocol::QualityRange,
-        token::{Token, TokenOwnerStore, TokenQuality},
+        token::{Token, TokenOwnerStore, TokenQuality, TransferCost, TransferTax},
         Chain, PaginationParams,
     },
     storage::ProtocolGateway,
@@ -23,6 +24,38 @@ pub async fn analyze_tokens(
     rpc: &EthereumRpcClient,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
 ) -> anyhow::Result<()> {
+    // Skip tokens that failed previously and ones we already analyzed successfully
+    run_analysis_pass(&analyze_args, rpc, gw.clone(), QualityRange::new(6, 10), None, true).await?;
+
+    if analyze_args.revive_traded_days > 0 {
+        // Quality 5 is a dead end: the pass above never retries it. Re-check quality-5
+        // tokens that traded recently — their behavior may have changed since they were
+        // damned (e.g. launch transfer restrictions lifted). A Bad verdict keeps them
+        // at 5 instead of demoting further.
+        let traded_since = chrono::Utc::now().naive_utc() -
+            chrono::Duration::days(analyze_args.revive_traded_days as i64);
+        run_analysis_pass(
+            &analyze_args,
+            rpc,
+            gw,
+            QualityRange::new(5, 5),
+            Some(traded_since),
+            false,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn run_analysis_pass(
+    analyze_args: &AnalyzeTokenArgs,
+    rpc: &EthereumRpcClient,
+    gw: Arc<dyn ProtocolGateway + Send + Sync>,
+    quality_range: QualityRange,
+    traded_since: Option<NaiveDateTime>,
+    demote_on_bad: bool,
+) -> anyhow::Result<()> {
     let mut tokens = Vec::new();
     let mut page = 0;
     let page_size = analyze_args.fetch_batch_size as i64;
@@ -33,9 +66,8 @@ pub async fn analyze_tokens(
             &(gw.get_tokens(
                 analyze_args.chain,
                 None,
-                // Skip tokens that failed previously and ones we already analyzed successfully
-                QualityRange::new(6, 10),
-                None,
+                quality_range.clone(),
+                traded_since,
                 Some(&pagination_params),
             )
             .await?
@@ -52,6 +84,7 @@ pub async fn analyze_tokens(
                     sem.clone(),
                     gw.clone(),
                     analyze_args.settlement_contract,
+                    demote_on_bad,
                 )
                 .boxed()
             })
@@ -59,7 +92,13 @@ pub async fn analyze_tokens(
 
         _ = try_join_all(tasks).await?;
         let duration = Instant::now().duration_since(start);
-        info!(processed = tokens.len(), page = page, duration = duration.as_secs(), "Progress");
+        info!(
+            processed = tokens.len(),
+            page = page,
+            duration = duration.as_secs(),
+            demote_on_bad,
+            "Progress"
+        );
 
         page += 1;
         if tokens.len() < (page_size as usize) {
@@ -77,6 +116,7 @@ async fn analyze_batch(
     sem: Arc<Semaphore>,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
     settlement_contract: alloy::primitives::Address,
+    demote_on_bad: bool,
 ) -> anyhow::Result<()> {
     let _guard = sem.acquire().await?;
     let addresses = tokens
@@ -154,26 +194,7 @@ async fn analyze_batch(
             }
         };
 
-        match token_quality {
-            TokenQuality::Good => {
-                t.quality = 100;
-            }
-            TokenQuality::Bad { reason } => {
-                debug!(?t.address, ?reason, "Token quality detected as bad!");
-                // Remove 1 to the quality for each attempt. If it fails 5 times we won't try again.
-                t.quality -= 1;
-            }
-        }
-
-        // If it's a fee token, set quality to 50
-        if tax.is_some_and(|tax_value| tax_value > 0) {
-            t.quality = 50;
-        }
-
-        t.tax = tax.unwrap_or(0);
-        t.gas = gas
-            .map(|g| vec![Some(g)])
-            .unwrap_or_else(Vec::new);
+        apply_analysis(t, token_quality, gas, tax, demote_on_bad);
     }
 
     if !tokens.is_empty() {
@@ -182,9 +203,46 @@ async fn analyze_batch(
     Ok(())
 }
 
+/// Applies an analysis verdict to the token's quality, gas and tax fields.
+///
+/// Good tokens go to 100 and fee tokens to 50. A Bad verdict lowers quality by one so the
+/// token eventually leaves the 6–10 retry window — except when `demote_on_bad` is false
+/// (revive pass): the token already sits at quality 5 and stays there.
+fn apply_analysis(
+    t: &mut Token,
+    token_quality: TokenQuality,
+    gas: Option<TransferCost>,
+    tax: Option<TransferTax>,
+    demote_on_bad: bool,
+) {
+    match token_quality {
+        TokenQuality::Good => {
+            t.quality = 100;
+        }
+        TokenQuality::Bad { reason } => {
+            debug!(?t.address, ?reason, "Token quality detected as bad!");
+            // Remove 1 to the quality for each attempt. If it fails 5 times we won't try again.
+            if demote_on_bad {
+                t.quality -= 1;
+            }
+        }
+    }
+
+    // If it's a fee token, set quality to 50
+    if tax.is_some_and(|tax_value| tax_value > 0) {
+        t.quality = 50;
+    }
+
+    t.tax = tax.unwrap_or(0);
+    t.gas = gas
+        .map(|g| vec![Some(g)])
+        .unwrap_or_else(Vec::new);
+}
+
 #[cfg(test)]
 mod test {
     use chrono::NaiveDateTime;
+    use rstest::rstest;
     use tycho_common::{
         models::{protocol::ProtocolComponent, ChangeType},
         storage::WithTotal,
@@ -192,6 +250,50 @@ mod test {
 
     use super::*;
     use crate::testing;
+
+    fn test_token(quality: u32) -> Token {
+        Token::new(
+            &Bytes::from("0xe172e9b6cfbeeb5593bdce3f077356fdb33af904"),
+            "FOLD",
+            18,
+            0,
+            &[],
+            Chain::Ethereum,
+            quality,
+        )
+    }
+
+    #[rstest]
+    #[case::good_promotes(TokenQuality::Good, 8, true, 100)]
+    #[case::bad_demotes(TokenQuality::bad("transfer failed"), 8, true, 7)]
+    #[case::bad_keeps_quality_in_revive_pass(TokenQuality::bad("transfer failed"), 5, false, 5)]
+    #[case::good_promotes_in_revive_pass(TokenQuality::Good, 5, false, 100)]
+    fn test_apply_analysis_quality(
+        #[case] verdict: TokenQuality,
+        #[case] initial_quality: u32,
+        #[case] demote_on_bad: bool,
+        #[case] expected_quality: u32,
+    ) {
+        let mut t = test_token(initial_quality);
+
+        apply_analysis(&mut t, verdict, Some(30_000), Some(0), demote_on_bad);
+
+        assert_eq!(t.quality, expected_quality);
+        assert_eq!(t.gas, vec![Some(30_000)]);
+        assert_eq!(t.tax, 0);
+    }
+
+    #[rstest]
+    #[case::with_demotion(true)]
+    #[case::without_demotion(false)]
+    fn test_apply_analysis_fee_token_sets_50(#[case] demote_on_bad: bool) {
+        let mut t = test_token(5);
+
+        apply_analysis(&mut t, TokenQuality::Good, Some(30_000), Some(250), demote_on_bad);
+
+        assert_eq!(t.quality, 50);
+        assert_eq!(t.tax, 250);
+    }
 
     // requires a running ethereum node
     #[ignore = "require RPC connection"]
@@ -208,6 +310,7 @@ mod test {
             concurrency: 10,
             update_batch_size: 100,
             fetch_batch_size: 100,
+            revive_traded_days: 0,
         };
         let mut gw = testing::MockGateway::new();
         gw.expect_get_tokens()
