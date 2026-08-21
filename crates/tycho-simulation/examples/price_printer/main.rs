@@ -29,6 +29,7 @@ use tycho_simulation::{
         },
         stream::ProtocolStreamBuilder,
     },
+    price_level_stream::stream::PriceLevelStreamBuilder,
     protocol::models::Update,
     utils::{get_default_url, load_all_tokens},
 };
@@ -148,6 +149,32 @@ async fn main() {
         )
         .await
         .expect("Failed loading tokens");
+
+        let mut stream_tasks: Vec<JoinHandle<()>> = Vec::new();
+
+        // The Titan pAMM price level stream only serves Ethereum L1. It never terminates, so it
+        // forwards from its own task alongside the protocol stream's.
+        if chain == Chain::Ethereum {
+            let price_level_stream = PriceLevelStreamBuilder::new()
+                .with_known_pamms()
+                .auto_detect(true)
+                .with_tokens(all_tokens.clone())
+                .build();
+            let price_level_tx = tick_tx.clone();
+            stream_tasks.push(tokio::spawn(async move {
+                tokio::pin!(price_level_stream);
+                while let Some(update) = price_level_stream.next().await {
+                    if price_level_tx
+                        .send(update)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+
         let tvl_threshold = cli
             .tvl_threshold
             .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
@@ -162,16 +189,20 @@ async fn main() {
                 .build()
                 .await
                 .expect("Failed building protocol stream");
-        tokio::pin!(protocol_stream);
+        stream_tasks.push(tokio::spawn(async move {
+            tokio::pin!(protocol_stream);
+            while let Some(msg) = protocol_stream.next().await {
+                tick_tx
+                    .send(msg.unwrap())
+                    .await
+                    .expect("Sending tick failed!")
+            }
+        }));
 
-        // Loop through block updates
-        while let Some(msg) = protocol_stream.next().await {
-            tick_tx
-                .send(msg.unwrap())
-                .await
-                .expect("Sending tick failed!")
-        }
-        anyhow::Result::Ok(())
+        // The streams run indefinitely, so the first forwarder to end — stream closed, receiver
+        // dropped, or panic — ends message processing as a whole.
+        let (result, _index, _remaining) = select_all(stream_tasks).await;
+        result.map_err(anyhow::Error::from)
     });
 
     let terminal = ratatui::init();

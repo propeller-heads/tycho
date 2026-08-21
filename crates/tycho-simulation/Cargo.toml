@@ -108,8 +108,12 @@ tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
 
 [features]
-default = ["evm", "rfq"]
+default = ["evm", "rfq", "price-level-stream"]
 network_tests = []
+price-level-stream = [
+    "dep:async-stream",
+    "dep:tokio-tungstenite",
+]
 evm = [
     "dep:foundry-block-explorers",
     "dep:revm",

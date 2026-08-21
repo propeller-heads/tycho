@@ -266,7 +266,7 @@ contract TychoRouterForSkyTest is TychoRouterTestSetup {
         // config/test_executor_addresses.json; fails loudly if the deploy
         // order in TychoRouterTestSetup changes.
         assertEq(
-            address(skyExecutor), 0x92a6649Fdcc044DA968d94202465578a9371C7b1
+            address(skyExecutor), 0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d
         );
     }
 

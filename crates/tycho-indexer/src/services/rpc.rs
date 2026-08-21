@@ -99,7 +99,6 @@ pub struct RpcHandler<G, T> {
     // it potentially could make this slow. We should consider refactoring this and maybe use
     // generics
     pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-    token_cache: RpcCache<dto::TokensRequestBody, dto::TokensRequestResponse>,
     contract_storage_cache: RpcCache<dto::StateRequestBody, dto::StateRequestResponse>,
     protocol_state_cache:
         RpcCache<dto::ProtocolStateRequestBody, dto::ProtocolStateRequestResponse>,
@@ -133,12 +132,6 @@ where
         const HUNDRED_MB: u64 = ONE_MB * 100;
         const ONE_GB: u64 = ONE_MB * 1_024;
 
-        let token_cache = RpcCache::<dto::TokensRequestBody, dto::TokensRequestResponse>::new(
-            "token",
-            ONE_GB,
-            7 * 60,
-        );
-
         // Create contract storage cache with a weigher to limit memory usage
         let contract_storage_cache =
             RpcCache::<dto::StateRequestBody, dto::StateRequestResponse>::new(
@@ -165,7 +158,6 @@ where
         Self {
             db_gateway,
             pending_deltas,
-            token_cache,
             contract_storage_cache,
             protocol_state_cache,
             component_cache,
@@ -672,21 +664,16 @@ where
         &self,
         request: &dto::TokensRequestBody,
     ) -> Result<Arc<dto::TokensRequestResponse>, RpcError> {
+        // Unlike the other endpoints there is no response cache here: the storage
+        // layer answers token queries from memory, so a response cache would only
+        // add staleness.
         let response = self
-            .token_cache
-            .get(request.clone(), |r: dto::TokensRequestBody| async {
-                self.get_tokens_inner(r)
-                    .await
-                    .map(|res| {
-                        let last_page = res.pagination.total_pages() - 1;
-                        (res, request.pagination.page < last_page)
-                    })
-            })
+            .get_tokens_inner(request.clone())
             .await?;
 
-        trace!(n_tokens_received=?response.tokens.len(), "Retrieved tokens from DB");
+        trace!(n_tokens_received=?response.tokens.len(), "Retrieved tokens");
 
-        Ok(response)
+        Ok(Arc::new(response))
     }
 
     async fn get_tokens_inner(
@@ -2536,10 +2523,15 @@ mod tests {
             Token::new(&(WETH.parse().unwrap()), "WETH", 18, 0, &[], Chain::Ethereum, 100),
         ];
         let mut gw = MockGateway::new();
-        let mock_response = Ok(WithTotal { entity: expected.clone(), total: Some(3) });
-        // ensure the gateway is only accessed once - the second request should hit cache
+        // No response cache on this endpoint: every request reaches the gateway,
+        // which serves token queries from its own in-memory store.
+        let mock_entity = expected.clone();
         gw.expect_get_tokens()
-            .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+            .times(2)
+            .returning(move |_, _, _, _, _| {
+                let response = Ok(WithTotal { entity: mock_entity.clone(), total: Some(3) });
+                Box::pin(async move { response })
+            });
         let req_handler = RpcHandler::new(
             gw,
             None,
@@ -2574,7 +2566,7 @@ mod tests {
         assert_eq!(tokens.pagination.total, 3);
         assert_eq!(tokens.pagination.total_pages(), 2);
 
-        // Second request (should hit cache and not increase gateway access count)
+        // Second request goes to the gateway again
 
         let tokens = req_handler
             .get_tokens(&request)

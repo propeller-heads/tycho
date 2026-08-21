@@ -9,27 +9,8 @@ trailing_semicolon = false
 use_field_init_shorthand = true
 chain_width = 40
 ignore = [
-    "crates/tycho-substreams/src/pb",
+    # Abigen output. build.rs regenerates src/abi on every cargo check/build.
+    "*/src/abi",
+    "ethereum-uniswap-v4/*/src/abi",
     "crates/tycho-substreams/src/abi",
-    "ethereum-balancer-v2/src/abi",
-    "ethereum-sfraxeth/src/abi",
-    "ethereum-sfrax/src/abi",
-    "ethereum-curve/src/abi",
-    "ethereum-ring-swap-v2/src/abi",
-    "ethereum-uniswap-v2/src/abi",
-    "ethereum-uniswap-v3/src/abi",
-    "ethereum-uniswap-v3-logs-only/src/abi",
-    "ethereum-pancakeswap-v3/src/abi",
-    "ethereum-uniswap-v4/shared/src/abi",
-    "ethereum-maverick-v2/src/abi",
-    "ethereum-balancer-v3/src/abi",
-    "ethereum-liquidityparty/src/abi",
-    "base-aerodrome-v1/src/abi",
-    "base-aerodrome-slipstreams/src/abi",
-    "base-lunarbase/src/abi",
-    "ethereum-erc4626/src/abi",
-    "ethereum-sky/src/abi",
-    "ethereum-rocketpool/src/abi",
-    "unichain-velodrome/src/abi",
-    "polygon-ramses-v3/src/abi",
 ]

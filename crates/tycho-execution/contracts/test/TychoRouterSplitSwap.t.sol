@@ -179,7 +179,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // expected amount out
-            1000_000000 * 9800 / 10000, // min amount out
+            (1000_000000 * 9800) / 10000, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -257,7 +257,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             USDC_ADDR,
             1000_000000, // expected amount out
-            1000_000000 * 9800 / 10000, // min amount out
+            (1000_000000 * 9800) / 10000, // min amount out
             2,
             ALICE,
             noClientFee(),
@@ -314,7 +314,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             WETH_ADDR,
             WBTC_ADDR,
             200_000000, // expected amount out (2 WBTC)
-            200_000000 * 9800 / 10000, // min amount out
+            (200_000000 * 9800) / 10000, // min amount out
             4,
             ALICE,
             noClientFee(),
@@ -688,6 +688,36 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), 99444510);
 
         vm.stopPrank();
+    }
+
+    function testSplitSwapNativeAndWrappedBranchesIntegration() public {
+        // A split solution with parallel WETH and ETH branches feeding the same
+        // output token. The unwrap sits immediately before the WETH -> USDC swap;
+        // the encoder must not insert a bridging swap between them and the solution
+        // must execute unchanged.
+        //
+        //         ┌──[40%]── unwrap to ETH ──(USV4)──> USDC
+        //   WETH ─┤
+        //         └──[rem]── (USV2) ─────────────────> USDC
+        deal(WETH_ADDR, ALICE, 1 ether);
+        uint256 balanceBefore = IERC20(USDC_ADDR).balanceOf(ALICE);
+
+        // Approve permit2
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(PERMIT2_ADDRESS, type(uint256).max);
+        bytes memory callData =
+            loadCallDataFromFile("test_split_swap_native_and_wrapped_branches");
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+
+        uint256 balanceAfter = IERC20(USDC_ADDR).balanceOf(ALICE);
+
+        assertGe(balanceAfter - balanceBefore, 2019_058447);
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 0);
+        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(tychoRouterAddr.balance, 0);
     }
 
     function testHackedPoolTokenInjectionBlocked() public {
