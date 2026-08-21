@@ -11,8 +11,9 @@ error PropAMMFallbackExecutor__InvalidDataLength();
 /// @notice Swaps against a pAMM through Titan's PropAMMRouter, which falls back to a single-hop
 /// Uniswap V3 pool when the venue reverts.
 /// @dev Same calldata as `PropAMMExecutor`, different call target. Calling the venue directly lets
-/// a stale maker quote revert the whole route, which is why integrator simulations fail on routes
-/// that execute fine in a Titan block.
+/// a stale maker quote revert the whole route: the venue needs the maker's oracle update for the
+/// block it executes in to be on-chain, and a mined block an integrator simulates against carries
+/// none, so the venue reverts `StaleUpdate`.
 ///
 /// Only venues whitelisted on the PropAMMRouter work here; others keep using `PropAMMExecutor`.
 ///
