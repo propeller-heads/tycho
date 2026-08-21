@@ -137,6 +137,24 @@ pub fn curve_filter(component: &ComponentWithState) -> bool {
     true
 }
 
+/// Filters out Killed LiquidityParty pools
+///
+/// The Substreams module sets a `killed` dynamic attribute (`0x01`) and this
+/// filter removes such components from the stream.
+/// Attempting a swap on a killed pool will revert.
+pub fn liquidityparty_killed_pools_filter(component: &ComponentWithState) -> bool {
+    if let Some(killed) = component.state.attributes.get("killed") {
+        if killed.to_vec() == [1u8] {
+            debug!(
+                "Filtering out LiquidityParty pool {} because it is killed",
+                component.component.id
+            );
+            return false;
+        }
+    }
+    true
+}
+
 /// Parse a static attribute whose value is the UTF-8 bytes of a JSON array of strings.
 fn attr_json_list(attrs: &HashMap<String, Bytes>, key: &str) -> Option<Vec<String>> {
     let text = std::str::from_utf8(attrs.get(key)?.as_ref()).ok()?;

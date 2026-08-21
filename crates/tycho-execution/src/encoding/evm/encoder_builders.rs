@@ -57,11 +57,7 @@ impl TychoRouterEncoderBuilder {
                 get_router_address(&chain)?.clone()
             };
 
-            Ok(Box::new(TychoRouterEncoder::new(
-                chain,
-                swap_encoder_registry,
-                tycho_router_address,
-            )?))
+            Ok(Box::new(TychoRouterEncoder::new(swap_encoder_registry, tycho_router_address)?))
         } else {
             Err(EncodingError::FatalError(
                 "Please set the chain and swap encoder registry before building the encoder"

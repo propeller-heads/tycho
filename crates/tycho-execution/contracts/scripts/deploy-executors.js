@@ -31,6 +31,7 @@ const deploy_protocols = {
         "vm:fermiswap",
         "vm:bopamm",
         "rfq:metric",
+        "pricelevelstream",
     ],
     "base": [
         "uniswap_v2",
@@ -77,6 +78,12 @@ const deploy_protocols = {
         "uniswap_v3",
         "fluid_v1",
         "vm:curve",
+        "native_wrapper",
+    ],
+    "robinhood": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
         "native_wrapper",
     ],
 };

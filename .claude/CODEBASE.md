@@ -44,8 +44,8 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 | Crate | Description |
 |---|---|
-| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; `evm` module for EVM storage-based protocols, `protocol` module for custom implementations, `rfq` for request-for-quote protocols |
-| `tycho-execution` | Swap encoding and execution: Solidity TychoRouter contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
+| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; `evm` module for EVM storage-based protocols, `protocol` module for custom implementations, `rfq` for request-for-quote protocols, `price_level_stream` for the Titan pAMM price level stream |
+| `tycho-execution` | Swap encoding and execution: Solidity TychoRouterV3 contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
 
 ### Consumer SDK
 
@@ -78,7 +78,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    - `PartialBlockBuffer` accumulates sub-block messages until full-block signal arrives
    - `TokenPreProcessor` fetches metadata (symbol, decimals) via Ethereum RPC for unknown tokens
 3. `BlockChanges` inserted into `ReorgBuffer` (one per `ProtocolExtractor`)
-   - On `BlockUndoSignal`: purge blocks after reverted hash, emit revert messages — no DB rollback needed
+   - On `BlockUndoSignal`: purge blocks after the reverted hash (falling back to the target height when the hash is unknown), emit revert messages — no DB rollback needed
    - Drain to DB when `count_blocks_before(finalized_block_height) >= commit_batch_size` — only finalized blocks ever reach DB
 4. Drained blocks: `BlockChanges` → `BlockAggregatedChanges` (merge all tx-level deltas into one state per component/account)
 5. DB write via `CachedGateway` → Postgres (upsert blocks, tokens, components, state, balances); sets `db_committed_block_height` on outgoing message
@@ -109,10 +109,10 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
     - Custom protocols: update decoded state fields directly
     - VM protocols: patch EVM storage slots, code, balances in a local `SimulationDB`
 12. Consumer queries `ProtocolSim::get_amount_out` / `spot_price` to price swap routes
-13. `tycho-execution` encodes a chosen route into calldata for `TychoRouter`
+13. `tycho-execution` encodes a chosen route into calldata for `TychoRouterV3`
     - Selects the appropriate executor contract for each DEX hop
     - Constructs `SwapSequence` with per-hop amounts, tokens, and executor addresses
-14. Consumer submits the encoded transaction to the chain via `TychoRouter.swap()`
+14. Consumer submits the encoded transaction to the chain via `TychoRouterV3.swap()`
 
 ## Key Architectural Patterns
 

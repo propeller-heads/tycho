@@ -226,23 +226,20 @@ pub struct BebopApiError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BebopErrorDetail {
-    #[serde(rename = "errorCode")]
     pub error_code: u32,
     pub message: String,
-    #[serde(rename = "requestId")]
     pub request_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BebopQuotePartial {
     pub status: String,
-    #[serde(rename = "settlementAddress")]
     pub settlement_address: Bytes,
     pub tx: TxData,
-    #[serde(rename = "toSign")]
     pub to_sign: BebopOrderToSign,
-    #[serde(rename = "partialFillOffset")]
     pub partial_fill_offset: u64,
 }
 
@@ -262,18 +259,7 @@ impl BebopQuotePartial {
                         params.token_out, single.maker_token
                     )));
                 }
-                if single.taker_address != params.sender {
-                    return Err(RFQError::FatalError(format!(
-                        "Taker address mismatch: expected {}, got {}",
-                        params.sender, single.taker_address
-                    )));
-                }
-                if single.receiver != params.receiver {
-                    return Err(RFQError::FatalError(format!(
-                        "Receiver address mismatch: expected {}, got {}",
-                        params.receiver, single.receiver
-                    )));
-                }
+                self.validate_taker_and_receiver(&single.taker_address, &single.receiver, params)?;
                 let amount_in = params.amount_in.to_string();
                 if single.taker_amount != amount_in {
                     return Err(RFQError::FatalError(format!(
@@ -283,20 +269,54 @@ impl BebopQuotePartial {
                 }
             }
             BebopOrderToSign::Aggregate(aggregate) => {
-                if aggregate.taker_address != params.sender {
-                    return Err(RFQError::FatalError(format!(
-                        "Taker address mismatch: expected {}, got {}",
-                        params.sender, aggregate.taker_address
-                    )));
-                }
-                if aggregate.receiver != params.receiver {
-                    return Err(RFQError::FatalError(format!(
-                        "Receiver address mismatch: expected {}, got {}",
-                        params.receiver, aggregate.receiver
-                    )));
-                }
+                self.validate_taker_and_receiver(
+                    &aggregate.taker_address,
+                    &aggregate.receiver,
+                    params,
+                )?;
             }
         }
+        Ok(())
+    }
+
+    /// Validates the signed order's taker and receiver against the requested params.
+    ///
+    /// Depending on the API account configuration, Bebop returns orders in one of two
+    /// settlement modes:
+    /// - Settlement mode: the order settles directly on the Bebop settlement contract, so its taker
+    ///   and receiver must be the requested sender and receiver.
+    /// - Router mode: settlement is wrapped through the Bebop router contract, which is the
+    ///   transaction target (`tx.to`) and also the order's taker and receiver — it fills the order
+    ///   against itself and forwards the output to the caller. The requested sender and receiver
+    ///   only appear inside the router calldata and cannot be checked here; the executor enforces
+    ///   on-chain that only the known settlement/router contracts are called.
+    fn validate_taker_and_receiver(
+        &self,
+        taker_address: &Bytes,
+        receiver: &Bytes,
+        params: &GetAmountOutParams,
+    ) -> Result<(), RFQError> {
+        if *taker_address == self.tx.to {
+            if receiver != taker_address {
+                return Err(RFQError::FatalError(format!(
+                    "Receiver address mismatch for router-mode quote: expected {taker_address}, got {receiver}"
+                )));
+            }
+        } else {
+            if *taker_address != params.sender {
+                return Err(RFQError::FatalError(format!(
+                    "Taker address mismatch: expected {}, got {taker_address}",
+                    params.sender
+                )));
+            }
+            if *receiver != params.receiver {
+                return Err(RFQError::FatalError(format!(
+                    "Receiver address mismatch: expected {}, got {receiver}",
+                    params.receiver
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -727,6 +747,62 @@ mod tests {
             let params = params();
             let err = quote.validate(&params).unwrap_err();
             assert!(format!("{err:?}").contains("Receiver address mismatch"));
+        }
+
+        const BEBOP_ROUTER: &str = "0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A";
+
+        fn make_router_mode(quote: &mut BebopQuotePartial) {
+            quote.tx.to = hex_to_bytes(BEBOP_ROUTER);
+            match quote.to_sign {
+                BebopOrderToSign::Single(ref mut single) => {
+                    single.taker_address = hex_to_bytes(BEBOP_ROUTER);
+                    single.receiver = hex_to_bytes(BEBOP_ROUTER);
+                }
+                BebopOrderToSign::Aggregate(ref mut agg) => {
+                    agg.taker_address = hex_to_bytes(BEBOP_ROUTER);
+                    agg.receiver = hex_to_bytes(BEBOP_ROUTER);
+                }
+            }
+        }
+
+        #[test]
+        fn test_validate_single_router_mode_success() {
+            let mut quote = quote_partial_single();
+            make_router_mode(&mut quote);
+            let params = params();
+            assert!(quote.validate(&params).is_ok());
+        }
+
+        #[test]
+        fn test_validate_aggregate_router_mode_success() {
+            let mut quote = quote_partial_aggregate();
+            make_router_mode(&mut quote);
+            let params = params();
+            assert!(quote.validate(&params).is_ok());
+        }
+
+        #[test]
+        fn test_validate_single_router_mode_receiver_mismatch() {
+            let mut quote = quote_partial_single();
+            make_router_mode(&mut quote);
+            if let BebopOrderToSign::Single(ref mut single) = quote.to_sign {
+                single.receiver = hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd");
+            }
+            let params = params();
+            let err = quote.validate(&params).unwrap_err();
+            assert!(format!("{err:?}").contains("Receiver address mismatch for router-mode quote"));
+        }
+
+        #[test]
+        fn test_validate_single_taker_neither_sender_nor_tx_to() {
+            let mut quote = quote_partial_single();
+            make_router_mode(&mut quote);
+            if let BebopOrderToSign::Single(ref mut single) = quote.to_sign {
+                single.taker_address = hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd");
+            }
+            let params = params();
+            let err = quote.validate(&params).unwrap_err();
+            assert!(format!("{err:?}").contains("Taker address mismatch"));
         }
     }
 }

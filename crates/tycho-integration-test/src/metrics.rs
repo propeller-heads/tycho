@@ -44,6 +44,17 @@ pub fn initialize_metrics() {
         "tycho_integration_simulation_execution_reverts_total",
         "Total number of reverted execution simulations"
     );
+    describe_counter!(
+        "tycho_integration_execution_stale_quotes_total",
+        "Price level stream executions skipped because the quoted block was not built by Titan \
+         or the pAMM's oracle update did not land on-chain (freshness-guard revert; expected \
+         outcome)"
+    );
+    describe_counter!(
+        "tycho_integration_price_level_target_block_misses_total",
+        "Price level stream updates dropped because the RPC did not serve the quoted target \
+         block within the poll window"
+    );
     describe_histogram!(
         "tycho_integration_simulation_execution_slippage_ratio",
         "Slippage ratio between simulated and actual execution amounts"
@@ -155,6 +166,16 @@ pub fn record_simulation_execution_revert(protocol: &str, error_category: &str) 
     .increment(1);
 }
 
+/// Record a price level stream execution that was skipped because the pAMM's oracle lane was not
+/// stamped for the quoted block (the designed outcome when Titan did not build that block).
+pub fn record_execution_stale_quote(protocol: &str) {
+    counter!(
+        "tycho_integration_execution_stale_quotes_total",
+        "protocol" => protocol.to_string(),
+    )
+    .increment(1);
+}
+
 /// Record a failed execution simulation
 pub fn record_simulation_execution_failure(protocol: &str, error_category: &str) {
     counter!(
@@ -210,6 +231,23 @@ pub fn record_protocol_sync_state_skipped(protocol: &str) {
         "protocol" => protocol.to_string()
     )
     .set(7.0);
+}
+
+/// Explicitly mark a protocol as Ready.
+///
+/// Used for streams that carry no `SynchronizerState` (the price level stream), whose liveness
+/// is derived from update receipt instead; the counterpart of [`mark_protocol_stale`].
+pub fn mark_protocol_ready(protocol: &str) {
+    gauge!(
+        "tycho_integration_protocol_sync_state",
+        "protocol" => protocol.to_string()
+    )
+    .set(2.0); // 2 = Ready
+}
+
+/// Record a price level stream update dropped because the RPC never served its target block.
+pub fn record_price_level_target_block_miss() {
+    counter!("tycho_integration_price_level_target_block_misses_total").increment(1);
 }
 
 /// Explicitly mark a protocol as stale when no update has been received within the expected window.

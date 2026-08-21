@@ -18,13 +18,13 @@ contract LiquidityPartyExecutor is IExecutor {
         // Perform the swap. Tokens have already been sent to the pool by the Dispatcher.
         // slither-disable-next-line unused-return
         pool.swap(
-            address(0), // payer address is unused with PREFUNDING
+            address(this), // pool requires msg.sender == payer for PREFUNDING
             Funding.PREFUNDING,
             receiver,
             indexIn,
             indexOut,
             amountIn,
-            0, // no limit price
+            0, // no minimum output: checked by router
             0, // no deadline
             false, // no unwrap
             "" // no callback data
@@ -71,6 +71,7 @@ contract LiquidityPartyExecutor is IExecutor {
             uint8 indexOut
         )
     {
+        require(data.length == 62, "LiqP executor: invalid data length");
         pool = IPartyPool(address(bytes20(data[0:20])));
         tokenIn = address(bytes20(data[20:40]));
         tokenOut = address(bytes20(data[40:60]));
@@ -92,10 +93,6 @@ library Funding {
 }
 
 interface IPartyPool {
-    /// @notice Protocol fee ledger accessor. Returns tokens owed (raw uint token units) from this pool as protocol fees
-    ///         that have not yet been transferred out.
-    function allProtocolFeesOwed() external view returns (uint256[] memory);
-
     /// @notice Swap input token inputTokenIndex -> token outputTokenIndex. Payer must approve token inputTokenIndex.
     /// @dev This function transfers the exact gross input (including fee) from payer and sends the computed output to receiver.
     ///      Non-standard tokens (fee-on-transfer, rebasers) are rejected via balance checks.
@@ -105,7 +102,7 @@ interface IPartyPool {
     /// @param inputTokenIndex index of input asset
     /// @param outputTokenIndex index of output asset
     /// @param maxAmountIn maximum amount of token inputTokenIndex (uint256) to transfer in (inclusive of fees)
-    /// @param limitPrice maximum acceptable marginal price (64.64 fixed point). Pass 0 to ignore.
+    /// @param minAmountOut minimum output tokens to receive; reverts if not met (0 = disabled)
     /// @param deadline timestamp after which the transaction will revert. Pass 0 to ignore.
     /// @param cbData callback data if fundingSelector is of the callback type.
     /// @return amountIn actual input used (uint256), amountOut actual output sent (uint256), inFee fee taken from the input (uint256)
@@ -116,7 +113,7 @@ interface IPartyPool {
         uint256 inputTokenIndex,
         uint256 outputTokenIndex,
         uint256 maxAmountIn,
-        int128 limitPrice,
+        uint256 minAmountOut,
         uint256 deadline,
         bool unwrap,
         bytes memory cbData

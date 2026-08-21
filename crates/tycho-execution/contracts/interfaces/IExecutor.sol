@@ -32,7 +32,7 @@ interface IExecutor {
      *
      * @param data The encoded swap data.
      * @return transferType The transfer type for this executor (None, ProtocolWillDebit, Transfer or TransferNativeInExecutor).
-     * @return receiver The address that should receive the pre swap tokens (usually a pool or the TychoRouter - depending on the protocol).
+     * @return receiver The address that should receive the pre swap tokens (usually a pool or the TychoRouterV3 - depending on the protocol).
      * @return tokenIn The address of the input token to transfer.
      * @return tokenOut The address of the output token.
      * @return outputToRouter Whether the protocol sends output to msg.sender

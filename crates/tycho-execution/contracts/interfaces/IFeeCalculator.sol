@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.26;
 
-import {FeeRecipient} from "../lib/FeeStructs.sol";
+import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 
 /**
  * @notice Per-client custom fee configuration
@@ -18,41 +18,36 @@ struct CustomFees {
 
 interface IFeeCalculator {
     /**
-     * @notice Calculates fees from the swap output amount
-     * @dev Called from TychoRouter. Does not perform any accounting.
-     *      Router fee parameters are retrieved from contract storage based on the user address.
-     *      Client fee parameters are passed as function arguments.
-     * @param amountIn The amount before fee deduction
-     * @param client The client address to look up custom router fees for and to receive fees
-     * @param clientFeeBps Client fee in basis points
-     * @return amountOut The amount remaining after all fee deductions
-     * @return feeRecipients Array of (address, feeAmount) tuples for fee distribution
+     * @notice Calculates all fees and slippage surplus from swap output
+     * @dev Called from TychoRouterV3. Does not perform any accounting.
+     *      Handles both regular fees and positive slippage surplus
+     *      in a single call. When positive slippage capture is
+     *      enabled, the full surplus is assigned to the router;
+     *      otherwise the surplus stays in the swap output.
+     *      Router fee parameters are retrieved from contract storage
+     *      based on the client address; client fee parameters are
+     *      passed as function arguments.
+     * @param feeInput Struct containing all fee calculation inputs
+     * @return feeRecipients Two recipients: [router, client]. Amounts
+     *         are zero when there is nothing to capture (no fees, no
+     *         surplus, or capture disabled).
      */
-    function calculateFee(uint256 amountIn, address client, uint16 clientFeeBps)
-        external
-        view
-        returns (uint256 amountOut, FeeRecipient[] memory feeRecipients);
+    function calculateFee(
+        FeeInput memory feeInput
+    ) external view returns (FeeRecipient[] memory feeRecipients);
 
     /**
-     * @dev Returns the effective router fee on output amount for a specific client
+     * @notice Whether the router must receive swap output before forwarding
+     * @dev Covers: slippage enabled, fees > 0, or any future condition.
+     * @param clientFeeBps Client fee in fee units (100_000_000 = 100%)
      * @param client The client address to check
-     * @return The fee in basis points (custom if set, otherwise default)
+     * @return True if funds must pass through the router after the
+     *         final swap instead of going directly to the receiver
      */
-    function getEffectiveRouterFeeOnOutput(address client)
-        external
-        view
-        returns (uint16);
-
-    /**
-     * @dev Returns the effective router fee on output for a specific client in the internal
-     *      8-decimal fee unit scale (100_000_000 = 100%).
-     * @param client The client address to check
-     * @return The fee in fee units (custom if set, otherwise default)
-     */
-    function getEffectiveRouterFeeOnOutputScaled(address client)
-        external
-        view
-        returns (uint32);
+    function mustOutputThroughRouter(
+        uint32 clientFeeBps,
+        address client
+    ) external view returns (bool);
 
     /**
      * @notice Returns a page of clients with custom fee overrides and their current settings
@@ -61,7 +56,10 @@ interface IFeeCalculator {
      * @return clients Addresses of clients with at least one custom fee
      * @return fees Custom fee configuration for each client (parallel array)
      */
-    function getAllClientFees(uint256 start, uint256 count)
+    function getAllClientFees(
+        uint256 start,
+        uint256 count
+    )
         external
         view
         returns (address[] memory clients, CustomFees[] memory fees);

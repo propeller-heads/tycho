@@ -308,9 +308,9 @@ mod tests {
         let usdt = Bytes::from("0xdAC17F958D2ee523a2206206994597C13D831ec7");
 
         // Must match SIGNED_EXCLUSIVE_SWAP_ADDRESS in EkuboV3Executor.sol.
-        let extension_hex = "0x5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+        let extension_hex = "0x55b703eed01b35641963da2fb2e14885993605a3";
         let extension_addr =
-            Address::from_str("0x5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e").unwrap();
+            Address::from_str("0x55b703eed01b35641963da2fb2e14885993605a3").unwrap();
 
         // Concentrated pool, tick_spacing = 100 (0x80000064).
         let pool_type_config = 0x8000_0064_u32;

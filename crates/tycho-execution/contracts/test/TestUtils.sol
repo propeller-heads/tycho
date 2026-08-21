@@ -19,7 +19,7 @@ contract TestUtils is Test {
                 parts.length >= 2
                     && keccak256(bytes(parts[0])) == keccak256(bytes(testName))
             ) {
-                return vm.parseBytes(parts[1]);
+                return vm.parseBytes(string.concat("0x", parts[1]));
             }
         }
 

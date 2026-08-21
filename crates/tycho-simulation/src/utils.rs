@@ -82,8 +82,8 @@ pub async fn load_all_tokens(
     let rpc_client = HttpRPCClient::new(rpc_url.as_str(), rpc_options)
         .map_err(|err| map_rpc_error(err, "Failed to create Tycho RPC client"))?;
 
-    // Chain specific defaults for special case chains. Otherwise defaults to 42 days.
-    let default_min_days = HashMap::from([(Chain::Base, 1_u64), (Chain::Unichain, 14_u64)]);
+    // Chain specific defaults for special case chains. Otherwise defaults to 14 days.
+    let default_min_days = HashMap::from([(Chain::Base, 1_u64), (Chain::Ethereum, 30_u64)]);
 
     #[allow(clippy::mutable_key_type)]
     let min_q = min_quality.or(Some(100));

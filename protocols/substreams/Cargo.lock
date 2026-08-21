@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-ekubo-v3"
-version = "0.1.2"
+version = "0.2.2"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -1274,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v2"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",

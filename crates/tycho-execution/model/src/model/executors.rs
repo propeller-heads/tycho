@@ -43,6 +43,7 @@ pub enum Executor {
     AerodromeV1,
     LiquidityParty,
     LunarBase,
+    PropAMM,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -63,7 +64,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 11] = [
+    pub const VARIANTS: [Executor; 12] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -75,6 +76,7 @@ impl Executor {
         Executor::AerodromeV1,
         Executor::LiquidityParty,
         Executor::LunarBase,
+        Executor::PropAMM,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -335,6 +337,26 @@ impl Executor {
                     output_to_router: false,
                 })
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
+            Self::PropAMM => Ok(TransferData {
+                transfer_type: TransferType::Transfer,
+                receiver: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?,
+                token_in: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                token_out: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                output_to_router: false,
+            }),
         }
     }
 
@@ -623,6 +645,25 @@ impl Executor {
                 // the actual swap logic doesn't matter
                 Ok(())
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
+            Self::PropAMM => {
+                let pamm = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if pamm.is_sender_controlled() {
+                    // if the sender controls the pAMM,
+                    // the actual swap logic doesn't matter
+                    Ok(())
+                } else {
+                    Err(Error::Ignore {
+                        reason: "price level stream pAMM not sender controlled. not low hanging fruit. would require simulating real pAMM".into(),
+                    })
+                }
+            }
         }
     }
 
@@ -658,6 +699,7 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
             Self::LunarBase => unimplemented!(),
+            Self::PropAMM => unimplemented!(),
         }
     }
 
@@ -685,6 +727,9 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
             Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
+            Self::PropAMM => {
+                unimplemented!("PropAMM doesn't use callbacks")
+            }
         }
     }
 
@@ -745,6 +790,14 @@ impl Executor {
             )?,
             // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L37
             Self::LunarBase => Address::Router,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
+            Self::PropAMM => params.request(
+                ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                // trying more variants might find some very obscure bugs
+                // in the future but slows down simulation a lot
+                // and currently is ignored anyway
+                Address::SENDER_CONTROLLED,
+            )?,
         })
     }
 }

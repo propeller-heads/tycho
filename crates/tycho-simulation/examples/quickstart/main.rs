@@ -663,17 +663,6 @@ fn create_solution(
     // Prepare data to encode. First we need to create a swap object
     let simple_swap = Swap::new(component, sell_token.clone(), buy_token.clone(), gas_usage);
 
-    // Compute a minimum amount out
-    //
-    // # ⚠️ Important Responsibility Note
-    // For maximum security, in production code, this minimum amount out should be computed
-    // from a third-party source.
-    let slippage = 0.0025; // 0.25% slippage
-    let bps = BigUint::from(10_000u32);
-    let slippage_percent = BigUint::from((slippage * 10000.0) as u32);
-    let multiplier = &bps - slippage_percent;
-    let min_amount_out = (expected_amount * &multiplier) / &bps;
-
     // For native ETH we use TransferFrom (payable singleSwap);
     // for ERC20s we use Permit2.
     let is_native = sell_token.address == *ROUTER_ETH_ADDRESS || sell_token.address.is_zero();
@@ -683,6 +672,9 @@ fn create_solution(
         UserTransferType::TransferFromPermit2
     };
 
+    // 0.25% below the quote
+    let min_amount_out = &expected_amount * BigUint::from(9975u64) / BigUint::from(10_000u64);
+
     // Then we create a solution object with the previous swap
     Solution::new(
         user_address.clone(),
@@ -690,6 +682,7 @@ fn create_solution(
         sell_token.address,
         buy_token.address,
         sell_amount,
+        expected_amount,
         min_amount_out,
         vec![simple_swap],
     )
@@ -707,7 +700,8 @@ fn create_solution(
 /// This function is intended as **an illustrative example only**.
 /// **Users must implement their own encoding logic** to ensure:
 /// - Full control of parameters passed to the router.
-/// - Proper validation and setting of critical inputs such as `minAmountOut`.
+/// - Proper validation and setting of critical inputs such as `expectedAmountOut` and
+///   `minAmountOut`.
 fn encode_tycho_router_call(
     chain_id: u64,
     encoded_solution: EncodedSolution,
@@ -716,6 +710,7 @@ fn encode_tycho_router_call(
     signer: PrivateKeySigner,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
+    let amount_out = biguint_to_u256(solution.expected_amount_out());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
     let given_token = convert_to_router_token(Address::from_slice(solution.token_in()));
     let checked_token = convert_to_router_token(Address::from_slice(solution.token_out()));
@@ -732,6 +727,7 @@ fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
+            amount_out,
             min_amount_out,
             receiver,
             client_fee_params,
@@ -755,6 +751,7 @@ fn encode_tycho_router_call(
             given_amount,
             given_token,
             checked_token,
+            amount_out,
             min_amount_out,
             receiver,
             client_fee_params,
