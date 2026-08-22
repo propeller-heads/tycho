@@ -25,7 +25,15 @@ pub async fn analyze_tokens(
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
 ) -> anyhow::Result<()> {
     // Skip tokens that failed previously and ones we already analyzed successfully
-    run_analysis_pass(&analyze_args, rpc, gw.clone(), QualityRange::new(6, 10), None, true).await?;
+    run_analysis_pass(
+        &analyze_args,
+        rpc,
+        gw.clone(),
+        QualityRange::new(6, 10),
+        None,
+        AnalysisPass::Retry,
+    )
+    .await?;
 
     if analyze_args.recovery_lookback_days > 0 {
         // Quality 5 is the analysis floor: the pass above never revisits it. Re-check
@@ -40,12 +48,21 @@ pub async fn analyze_tokens(
             gw,
             QualityRange::new(5, 5),
             Some(traded_since),
-            false,
+            AnalysisPass::Recovery,
         )
         .await?;
     }
 
     Ok(())
+}
+
+/// The retry pass demotes on a Bad verdict so tokens eventually leave the 6–10 retry
+/// window. The recovery pass re-checks floored (quality-5) tokens, which stay at the
+/// floor on Bad.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AnalysisPass {
+    Retry,
+    Recovery,
 }
 
 async fn run_analysis_pass(
@@ -54,7 +71,7 @@ async fn run_analysis_pass(
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
     quality_range: QualityRange,
     traded_since: Option<NaiveDateTime>,
-    demote_on_bad: bool,
+    pass: AnalysisPass,
 ) -> anyhow::Result<()> {
     let mut tokens = Vec::new();
     let mut page = 0;
@@ -84,7 +101,7 @@ async fn run_analysis_pass(
                     sem.clone(),
                     gw.clone(),
                     analyze_args.settlement_contract,
-                    demote_on_bad,
+                    pass,
                 )
                 .boxed()
             })
@@ -96,7 +113,7 @@ async fn run_analysis_pass(
             processed = tokens.len(),
             page = page,
             duration = duration.as_secs(),
-            demote_on_bad,
+            ?pass,
             "Progress"
         );
 
@@ -116,7 +133,7 @@ async fn analyze_batch(
     sem: Arc<Semaphore>,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
     settlement_contract: alloy::primitives::Address,
-    demote_on_bad: bool,
+    pass: AnalysisPass,
 ) -> anyhow::Result<()> {
     let _guard = sem.acquire().await?;
     let addresses = tokens
@@ -194,7 +211,7 @@ async fn analyze_batch(
             }
         };
 
-        apply_analysis(t, token_quality, gas, tax, demote_on_bad);
+        apply_analysis(t, token_quality, gas, tax, pass);
     }
 
     if !tokens.is_empty() {
@@ -205,15 +222,15 @@ async fn analyze_batch(
 
 /// Applies an analysis verdict to the token's quality, gas and tax fields.
 ///
-/// Good tokens go to 100 and fee tokens to 50. A Bad verdict lowers quality by one so the
-/// token eventually leaves the 6–10 retry window — except when `demote_on_bad` is false
-/// (recovery pass): the token already sits at quality 5 and stays there.
+/// Good tokens go to 100 and fee tokens to 50. A Bad verdict lowers quality by one in the
+/// retry pass so the token eventually leaves the 6–10 retry window; the recovery pass
+/// keeps quality-5 tokens at the floor.
 fn apply_analysis(
     t: &mut Token,
     token_quality: TokenQuality,
     gas: Option<TransferCost>,
     tax: Option<TransferTax>,
-    demote_on_bad: bool,
+    pass: AnalysisPass,
 ) {
     match token_quality {
         TokenQuality::Good => {
@@ -221,9 +238,11 @@ fn apply_analysis(
         }
         TokenQuality::Bad { reason } => {
             debug!(?t.address, ?reason, "Token quality detected as bad!");
-            // Remove 1 to the quality for each attempt. If it fails 5 times we won't try again.
-            if demote_on_bad {
-                t.quality -= 1;
+            match pass {
+                // Remove 1 per attempt; after 5 failures the token leaves the retry window.
+                AnalysisPass::Retry => t.quality -= 1,
+                // Already at the quality-5 floor.
+                AnalysisPass::Recovery => {}
             }
         }
     }
@@ -264,19 +283,24 @@ mod test {
     }
 
     #[rstest]
-    #[case::good_promotes(TokenQuality::Good, 8, true, 100)]
-    #[case::bad_demotes(TokenQuality::bad("transfer failed"), 8, true, 7)]
-    #[case::bad_keeps_quality_in_recovery_pass(TokenQuality::bad("transfer failed"), 5, false, 5)]
-    #[case::good_promotes_in_recovery_pass(TokenQuality::Good, 5, false, 100)]
+    #[case::good_promotes(TokenQuality::Good, 8, AnalysisPass::Retry, 100)]
+    #[case::bad_demotes(TokenQuality::bad("transfer failed"), 8, AnalysisPass::Retry, 7)]
+    #[case::bad_keeps_quality_in_recovery_pass(
+        TokenQuality::bad("transfer failed"),
+        5,
+        AnalysisPass::Recovery,
+        5
+    )]
+    #[case::good_promotes_in_recovery_pass(TokenQuality::Good, 5, AnalysisPass::Recovery, 100)]
     fn test_apply_analysis_quality(
         #[case] verdict: TokenQuality,
         #[case] initial_quality: u32,
-        #[case] demote_on_bad: bool,
+        #[case] pass: AnalysisPass,
         #[case] expected_quality: u32,
     ) {
         let mut t = test_token(initial_quality);
 
-        apply_analysis(&mut t, verdict, Some(30_000), Some(0), demote_on_bad);
+        apply_analysis(&mut t, verdict, Some(30_000), Some(0), pass);
 
         assert_eq!(t.quality, expected_quality);
         assert_eq!(t.gas, vec![Some(30_000)]);
@@ -284,12 +308,12 @@ mod test {
     }
 
     #[rstest]
-    #[case::with_demotion(true)]
-    #[case::without_demotion(false)]
-    fn test_apply_analysis_fee_token_sets_50(#[case] demote_on_bad: bool) {
+    #[case::retry_pass(AnalysisPass::Retry)]
+    #[case::recovery_pass(AnalysisPass::Recovery)]
+    fn test_apply_analysis_fee_token_sets_50(#[case] pass: AnalysisPass) {
         let mut t = test_token(5);
 
-        apply_analysis(&mut t, TokenQuality::Good, Some(30_000), Some(250), demote_on_bad);
+        apply_analysis(&mut t, TokenQuality::Good, Some(30_000), Some(250), pass);
 
         assert_eq!(t.quality, 50);
         assert_eq!(t.tax, 250);
