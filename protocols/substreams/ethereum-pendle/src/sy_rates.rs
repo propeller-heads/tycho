@@ -44,8 +44,12 @@ impl RefreshParams {
     }
 
     /// Whether this block is one the SY rates are read on.
+    // `u64::is_multiple_of` reads better and is what a modern clippy asks for, but it stabilised
+    // in 1.87 and this package builds on the 1.83 pin in `rust-toolchain.toml`. `parse` rejects a
+    // zero interval, so the remainder cannot divide by zero.
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn should_refresh(&self, block_number: u64) -> bool {
-        block_number.is_multiple_of(self.sy_rate_refresh_blocks)
+        block_number % self.sy_rate_refresh_blocks == 0
     }
 }
 
