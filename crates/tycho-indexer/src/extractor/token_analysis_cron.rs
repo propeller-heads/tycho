@@ -27,13 +27,13 @@ pub async fn analyze_tokens(
     // Skip tokens that failed previously and ones we already analyzed successfully
     run_analysis_pass(&analyze_args, rpc, gw.clone(), QualityRange::new(6, 10), None, true).await?;
 
-    if analyze_args.revive_traded_days > 0 {
-        // Quality 5 is a dead end: the pass above never retries it. Re-check quality-5
-        // tokens that traded recently — their behavior may have changed since they were
-        // damned (e.g. launch transfer restrictions lifted). A Bad verdict keeps them
-        // at 5 instead of demoting further.
+    if analyze_args.recovery_lookback_days > 0 {
+        // Quality 5 is the analysis floor: the pass above never revisits it. Re-check
+        // floored tokens that traded recently — their behavior may have changed since
+        // analysis gave up (e.g. launch transfer restrictions lifted). A Bad verdict
+        // keeps them at 5 instead of demoting further.
         let traded_since = chrono::Utc::now().naive_utc() -
-            chrono::Duration::days(analyze_args.revive_traded_days as i64);
+            chrono::Duration::days(analyze_args.recovery_lookback_days as i64);
         run_analysis_pass(
             &analyze_args,
             rpc,
@@ -207,7 +207,7 @@ async fn analyze_batch(
 ///
 /// Good tokens go to 100 and fee tokens to 50. A Bad verdict lowers quality by one so the
 /// token eventually leaves the 6–10 retry window — except when `demote_on_bad` is false
-/// (revive pass): the token already sits at quality 5 and stays there.
+/// (recovery pass): the token already sits at quality 5 and stays there.
 fn apply_analysis(
     t: &mut Token,
     token_quality: TokenQuality,
@@ -266,8 +266,8 @@ mod test {
     #[rstest]
     #[case::good_promotes(TokenQuality::Good, 8, true, 100)]
     #[case::bad_demotes(TokenQuality::bad("transfer failed"), 8, true, 7)]
-    #[case::bad_keeps_quality_in_revive_pass(TokenQuality::bad("transfer failed"), 5, false, 5)]
-    #[case::good_promotes_in_revive_pass(TokenQuality::Good, 5, false, 100)]
+    #[case::bad_keeps_quality_in_recovery_pass(TokenQuality::bad("transfer failed"), 5, false, 5)]
+    #[case::good_promotes_in_recovery_pass(TokenQuality::Good, 5, false, 100)]
     fn test_apply_analysis_quality(
         #[case] verdict: TokenQuality,
         #[case] initial_quality: u32,
@@ -310,7 +310,7 @@ mod test {
             concurrency: 10,
             update_batch_size: 100,
             fetch_batch_size: 100,
-            revive_traded_days: 0,
+            recovery_lookback_days: 0,
         };
         let mut gw = testing::MockGateway::new();
         gw.expect_get_tokens()
