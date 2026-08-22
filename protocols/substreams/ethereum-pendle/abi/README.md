@@ -39,6 +39,7 @@ Topic hashes confirmed by decoding real logs (`eth_getLogs` via `https://eth.drp
 | `Mint` | `0xb4c03061…accb` | same |
 | `Burn` | `0x4cf25bc1…5f90` | same |
 | `UpdateImpliedRate` | `0x5c0e21d5…f83e1` | same |
+| `NewInterestIndex` | `0x71475f2f…703d` | YT `0x04b7fa1e…3a95`, block 25807775; `topics[1]` equals `pyIndexStored()` at the same block |
 
 Parameter types and `indexed` flags come from the verified sources on Blockscout:
 `PendleMarketFactory` `0x27b1dAcd…0784`, `PendleMarketFactoryV3` `0x1A6fCc85…2D52`,
