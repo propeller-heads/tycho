@@ -1,0 +1,22 @@
+[
+  {
+    "type": "event",
+    "name": "NewInterestIndex",
+    "anonymous": false,
+    "inputs": [{ "name": "newIndex", "type": "uint256", "indexed": true }]
+  },
+  {
+    "type": "function",
+    "name": "pyIndexStored",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "pyIndexCurrent",
+    "stateMutability": "nonpayable",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  }
+]

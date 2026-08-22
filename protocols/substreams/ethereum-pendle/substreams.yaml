@@ -1,0 +1,87 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_pendle"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_pendle.wasm
+
+network: mainnet
+
+# initialBlock is the deployment block of the original market factory (0x27b1dAcd…0784);
+# the four later factories are all deployed after it.
+modules:
+  - name: map_market_components
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  # One SY backs several markets, so map_market_components re-emits it per market. This store
+  # only records first sight; its deltas are what map_protocol_components filters on.
+  - name: store_sy_seen
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_market_components
+
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - map: map_market_components
+      - store: store_sy_seen
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_protocol_components
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_relative_component_balance
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_component_balance
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - map: map_relative_component_balance
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
