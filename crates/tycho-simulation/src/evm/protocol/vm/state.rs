@@ -1078,7 +1078,7 @@ mod tests {
 
     use super::*;
     use crate::evm::{
-        engine_db::{create_engine, SHARED_TYCHO_DB},
+        engine_db::create_engine,
         protocol::vm::{
             constants::{BALANCER_V2, ERC20_PROXY_BYTECODE},
             state_builder::EVMPoolStateBuilder,
@@ -1126,7 +1126,9 @@ mod tests {
         let accounts: Vec<AccountUpdate> = serde_json::from_value(data["accounts"].clone())
             .expect("Expected accounts to match AccountUpdate structure");
 
-        let db = SHARED_TYCHO_DB.clone();
+        // The process-wide `SHARED_TYCHO_DB` holds a single current-block header, so tests
+        // sharing it race; a fresh database keeps each pool independent.
+        let db = PreCachedDB::new().expect("failed to create test database");
         let engine: SimulationEngine<_> = create_engine(db.clone(), false).unwrap();
 
         let block = BlockHeader {
@@ -1211,17 +1213,13 @@ mod tests {
             .balance_owner(Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap())
             .adapter_contract_bytecode(Bytecode::new_raw(BALANCER_V2.into()))
             .stateless_contracts(stateless_contracts)
-            .build(SHARED_TYCHO_DB.clone())
+            .build(db)
             .await
             .expect("Failed to build pool state")
     }
 
     #[tokio::test]
     async fn test_init() {
-        // Clear DB from this test to prevent interference from other tests
-        SHARED_TYCHO_DB
-            .clear()
-            .expect("Failed to cleared SHARED TX");
         let pool_state = setup_pool_state().await;
 
         let expected_capabilities = vec![

@@ -1,6 +1,6 @@
 use num_bigint::BigUint;
 
-use super::group_swaps::group_swaps;
+use super::{constants::PRICE_LEVEL_STREAM_PREFIX, group_swaps::group_swaps};
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
 
 /// Default gas usage for an ERC-20 `transferFrom` or `transfer`. Used as fallback when the token
@@ -27,11 +27,22 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "vm:balancer_v3",
 ];
 
-/// Protocols where the router-to-pool input transfer is skipped (funds are sent directly without
-/// an intermediate router hop). The input transfer cost is therefore not double-counted — it is
-/// only charged once, on the first hop or when the optimized path applies.
+/// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent
+/// directly without an intermediate router hop). The input transfer cost is therefore not
+/// double-counted — it is only charged once, on the first hop or when the optimized path applies.
+///
+/// This list is incomplete on its own: whole protocol families can qualify too. Use
+/// [`optimizable_transfer_in`] for the full classification.
 pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
     &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
+/// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
+/// `fundsExpectedAddress` is the venue itself, so the whole `pricelevelstream:` family qualifies.
+pub fn optimizable_transfer_in(protocol_system: &str) -> bool {
+    PROTOCOLS_OPTIMIZABLE_TRANSFER_IN.contains(&protocol_system) ||
+        protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+}
 
 /// ProtocolWillDebit: the router must `approve(protocol)` before swapping.
 /// The protocol's `transferFrom` is inside `swap()` and already in the gas computation of
@@ -179,8 +190,7 @@ fn estimate_transfer_overhead(
     // - Protocols that can have an optimizable transfer in should not be included here either
     //   because the extra transfer is skipped but only if the strategy is not Split
     if !PROTOCOLS_CALLBACK.contains(&protocol_system) &&
-        (!PROTOCOLS_OPTIMIZABLE_TRANSFER_IN.contains(&protocol_system) ||
-            *strategy == Strategy::Split)
+        (!optimizable_transfer_in(protocol_system) || *strategy == Strategy::Split)
     {
         overhead += transfer_token_gas(token_in);
     }
@@ -258,6 +268,21 @@ mod tests {
         // input transfer                            0  ← optimizable, skip router→pool hop
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER, fee path adds it
+        assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_single_price_level_stream_pamm() {
+        // Push-payment pAMMs are funded directly (fundsExpectedAddress is the venue), so like
+        // uniswap_v2 the router-to-pool input transfer is skipped — for every venue under the
+        // prefix.
+        let solution = make_solution(vec![make_swap("pricelevelstream:fermiswap")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← push-payment, funds sent directly
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
         assert_eq!(gas, BigUint::from(200_000u64));
     }
 

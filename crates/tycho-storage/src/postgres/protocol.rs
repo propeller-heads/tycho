@@ -969,6 +969,21 @@ impl PostgresGateway {
         pagination_params: Option<&PaginationParams>,
         conn: &mut AsyncPgConnection,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
+        if let Some(token_cache) = &self.token_cache {
+            return token_cache.query_tokens(&super::token_cache::TokenQuery {
+                chain,
+                addresses: addresses.map(|addrs| {
+                    addrs
+                        .iter()
+                        .map(|addr| (*addr).clone())
+                        .collect()
+                }),
+                quality_range: quality_filter,
+                last_traded_ts_threshold,
+                pagination: pagination_params.cloned(),
+            });
+        }
+
         use super::schema::{account::dsl::*, token::dsl::*};
         let chain_db_id = self.get_chain_id(&chain)?;
 
@@ -1156,6 +1171,10 @@ impl PostgresGateway {
         .instrument(debug_span!("insert_tokens", count = token_count))
         .await?;
 
+        if let Some(token_cache) = &self.token_cache {
+            token_cache.add_tokens(tokens);
+        }
+
         Ok(())
     }
 
@@ -1213,6 +1232,18 @@ impl PostgresGateway {
         }
         .instrument(debug_span!("update_token_rows"))
         .await?;
+
+        if let Some(token_cache) = &self.token_cache {
+            // Only tokens present in the DB were updated above; the cache mirrors the
+            // DB, so restrict the write-through to those as well.
+            let updated: Vec<Token> = tokens
+                .iter()
+                .filter(|t| address_to_db_id.contains_key(&t.address))
+                .cloned()
+                .collect();
+            token_cache.upsert_tokens(&updated);
+        }
+
         Ok(())
     }
 
@@ -1379,6 +1410,22 @@ impl PostgresGateway {
             .instrument(debug_span!("insert_component_balances", archive_count = to_archive.len()))
             .await?;
         }
+
+        if let Some(token_cache) = &self.token_cache {
+            let mut latest_trade: HashMap<&Address, NaiveDateTime> = HashMap::new();
+            for component_balance in component_balances {
+                if let Some((_, _, transaction_ts)) =
+                    transaction_ids_and_ts.get(&component_balance.modify_tx)
+                {
+                    let entry = latest_trade
+                        .entry(&component_balance.token)
+                        .or_insert(*transaction_ts);
+                    *entry = (*entry).max(*transaction_ts);
+                }
+            }
+            token_cache.update_last_traded(chain, latest_trade.into_iter());
+        }
+
         Ok(())
     }
 

@@ -5,7 +5,10 @@ use tycho_common::{models::Chain, Bytes};
 use crate::encoding::{
     errors::EncodingError,
     evm::{
-        constants::{DEFAULT_EXECUTORS_JSON, PROTOCOL_SPECIFIC_CONFIG},
+        constants::{
+            DEFAULT_EXECUTORS_JSON, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
+            PROTOCOL_SPECIFIC_CONFIG,
+        },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
@@ -14,7 +17,7 @@ use crate::encoding::{
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder,
+            metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
             uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
@@ -90,9 +93,22 @@ impl SwapEncoderRegistry {
         self
     }
 
+    /// Returns the encoder registered for `protocol_system`.
+    ///
+    /// Price-level-stream protocols (`pricelevelstream:{venue}`) without an exact entry fall
+    /// back to the family entry registered under `pricelevelstream`, so a single configured
+    /// executor address serves every pAMM — including auto-detected, address-named ones.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
-        self.encoders.get(protocol_system)
+        if let Some(encoder) = self.encoders.get(protocol_system) {
+            return Some(encoder);
+        }
+        if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
+            return self
+                .encoders
+                .get(PRICE_LEVEL_STREAM_KEY);
+        }
+        None
     }
 
     fn create_encoder(
@@ -197,6 +213,13 @@ impl SwapEncoderRegistry {
             "etherfi" => {
                 Ok(Box::new(EtherfiSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            // All pAMMs following the standard IPropAMM interface share one generic encoder /
+            // executor; the concrete venue is identified by the component, not the encoder. The
+            // bare family key serves every venue via the `get_encoder` fallback; venue-specific
+            // `pricelevelstream:{venue}` entries override it per venue.
+            pls if pls == PRICE_LEVEL_STREAM_KEY || pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+                Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             _ => Err(EncodingError::FatalError(format!(
                 "Unknown protocol system: {}",
                 protocol_system
@@ -208,6 +231,31 @@ impl SwapEncoderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single `pricelevelstream` config entry serves the whole protocol family: the bare
+    /// family key resolves as an exact entry, and every `pricelevelstream:{venue}` protocol —
+    /// including auto-detected, address-named venues no config could enumerate — resolves to it
+    /// through the fallback.
+    #[test]
+    fn test_price_level_stream_protocols_route_to_generic_encoder() {
+        let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors))
+            .unwrap();
+
+        for protocol in [
+            PRICE_LEVEL_STREAM_KEY,
+            "pricelevelstream:fermiswap",
+            "pricelevelstream:kipseli",
+            "pricelevelstream:0x2222222222222222222222222222222222222222",
+        ] {
+            assert!(registry.get_encoder(protocol).is_some(), "no encoder resolved for {protocol}");
+        }
+        // The fallback is scoped to the price-level-stream prefix.
+        assert!(registry
+            .get_encoder("unknown_protocol")
+            .is_none());
+    }
 
     #[test]
     fn test_default_encoders_build_for_every_configured_chain() {

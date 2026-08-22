@@ -24,3 +24,6 @@ tycho-common = { workspace = true }
 tycho-execution = { workspace = true }
 tycho-simulation = { workspace = true, features = ["evm"] }
 tycho-test = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
