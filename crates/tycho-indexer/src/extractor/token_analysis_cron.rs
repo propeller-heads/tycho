@@ -73,14 +73,15 @@ async fn run_analysis_pass(
     traded_since: Option<NaiveDateTime>,
     pass: AnalysisPass,
 ) -> anyhow::Result<()> {
+    // Fetch every matching token before analyzing: analysis promotes tokens out of the
+    // quality filter, which shifts OFFSET pages and would skip rows mid-run.
     let mut tokens = Vec::new();
     let mut page = 0;
     let page_size = analyze_args.fetch_batch_size as i64;
     loop {
-        let start = Instant::now();
         let pagination_params = PaginationParams::new(page, page_size);
-        tokens.clone_from(
-            &(gw.get_tokens(
+        let page_tokens = gw
+            .get_tokens(
                 analyze_args.chain,
                 None,
                 quality_range.clone(),
@@ -88,42 +89,63 @@ async fn run_analysis_pass(
                 Some(&pagination_params),
             )
             .await?
-            .entity),
-        );
-        let sem = Arc::new(Semaphore::new(analyze_args.concurrency));
-        let tasks = tokens
-            .chunks(analyze_args.update_batch_size)
-            .map(|chunk| {
-                analyze_batch(
-                    analyze_args.chain,
-                    rpc,
-                    chunk.to_vec(),
-                    sem.clone(),
-                    gw.clone(),
-                    analyze_args.settlement_contract,
-                    pass,
-                )
-                .boxed()
-            })
-            .collect::<Vec<_>>();
-
-        _ = try_join_all(tasks).await?;
-        let duration = Instant::now().duration_since(start);
-        info!(
-            processed = tokens.len(),
-            page = page,
-            duration = duration.as_secs(),
-            ?pass,
-            "Progress"
-        );
-
+            .entity;
+        let page_len = page_tokens.len();
+        tokens.extend(page_tokens);
         page += 1;
-        if tokens.len() < (page_size as usize) {
+        if page_len < (page_size as usize) {
             break;
         }
     }
+    info!(matched = tokens.len(), ?pass, "Starting analysis pass");
+
+    let start = Instant::now();
+    let sem = Arc::new(Semaphore::new(analyze_args.concurrency));
+    let tasks = tokens
+        .chunks(analyze_args.update_batch_size)
+        .map(|chunk| {
+            analyze_batch(
+                analyze_args.chain,
+                rpc,
+                chunk.to_vec(),
+                sem.clone(),
+                gw.clone(),
+                analyze_args.settlement_contract,
+                pass,
+            )
+            .boxed()
+        })
+        .collect::<Vec<_>>();
+
+    let outcomes = try_join_all(tasks).await?;
+    let mut totals = PassOutcome::default();
+    for outcome in outcomes {
+        totals.promoted += outcome.promoted;
+        totals.demoted += outcome.demoted;
+        totals.unchanged += outcome.unchanged;
+        totals.failed += outcome.failed;
+    }
+    let duration = Instant::now().duration_since(start);
+    info!(
+        ?pass,
+        analyzed = tokens.len(),
+        promoted = totals.promoted,
+        demoted = totals.demoted,
+        unchanged = totals.unchanged,
+        failed = totals.failed,
+        duration = duration.as_secs(),
+        "Analysis pass complete"
+    );
 
     Ok(())
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct PassOutcome {
+    promoted: usize,
+    demoted: usize,
+    unchanged: usize,
+    failed: usize,
 }
 
 async fn analyze_batch(
@@ -134,7 +156,7 @@ async fn analyze_batch(
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
     settlement_contract: alloy::primitives::Address,
     pass: AnalysisPass,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PassOutcome> {
     let _guard = sem.acquire().await?;
     let addresses = tokens
         .iter()
@@ -198,26 +220,36 @@ async fn analyze_batch(
         Arc::new(TokenOwnerStore::new(liquidity_token_owners)),
         settlement_contract,
     );
+    let mut outcome = PassOutcome::default();
     for t in tokens.iter_mut() {
         debug!(?t.address, "Analyzing token");
         let (token_quality, gas, tax) = match analyzer
             .analyze(t.address.clone(), BlockTag::Latest)
             .await
         {
-            Ok(t) => t,
+            Ok(res) => res,
             Err(error) => {
                 warn!(?error, "Token quality detection failed");
+                outcome.failed += 1;
                 continue;
             }
         };
 
+        let quality_before = t.quality;
         apply_analysis(t, token_quality, gas, tax, pass);
+        if t.quality > quality_before {
+            outcome.promoted += 1;
+        } else if t.quality < quality_before {
+            outcome.demoted += 1;
+        } else {
+            outcome.unchanged += 1;
+        }
     }
 
     if !tokens.is_empty() {
         gw.update_tokens(&tokens).await?;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 /// Applies an analysis verdict to the token's quality, gas and tax fields.
@@ -261,6 +293,7 @@ fn apply_analysis(
 #[cfg(test)]
 mod test {
     use chrono::NaiveDateTime;
+    use mockall::Sequence;
     use rstest::rstest;
     use tycho_common::{
         models::{protocol::ProtocolComponent, ChangeType},
@@ -280,6 +313,10 @@ mod test {
             Chain::Ethereum,
             quality,
         )
+    }
+
+    fn test_token_at(address: &str, quality: u32) -> Token {
+        Token::new(&Bytes::from(address), "TEST", 18, 0, &[], Chain::Ethereum, quality)
     }
 
     #[rstest]
@@ -322,6 +359,113 @@ mod test {
 
         assert_eq!(t.quality, 50);
         assert_eq!(t.tax, 250);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_pass_fetches_all_pages_before_analyzing() {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let args = AnalyzeTokenArgs {
+            chain: Chain::Ethereum,
+            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            concurrency: 1,
+            update_batch_size: 2,
+            fetch_batch_size: 2,
+            recovery_lookback_days: 0,
+        };
+        let mut seq = Sequence::new();
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async {
+                    Ok(WithTotal {
+                        entity: vec![
+                            test_token_at("0x0000000000000000000000000000000000000001", 8),
+                            test_token_at("0x0000000000000000000000000000000000000002", 8),
+                        ],
+                        total: Some(2),
+                    })
+                })
+            });
+        gw.expect_get_tokens()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(2) }) })
+            });
+        gw.expect_get_token_owners()
+            .returning(|_, _, _| Box::pin(async { Ok(HashMap::new()) }));
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        analyze_tokens(args, &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+    }
+
+    fn outcome_test_gateway() -> testing::MockGateway {
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_token_owners()
+            .returning(|_, _, _| Box::pin(async { Ok(HashMap::new()) }));
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+        gw
+    }
+
+    async fn run_outcome_batch(pass: AnalysisPass, initial_quality: u32) -> PassOutcome {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let tokens = vec![
+            test_token_at("0x0000000000000000000000000000000000000001", initial_quality),
+            test_token_at("0x0000000000000000000000000000000000000002", initial_quality),
+        ];
+        analyze_batch(
+            Chain::Ethereum,
+            &rpc,
+            tokens,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(outcome_test_gateway()),
+            "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            pass,
+        )
+        .await
+        .expect("analyze batch failed")
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_retry_pass_counts_demotions() {
+        // No owner in the store -> analyzer returns Bad without RPC -> retry pass demotes.
+        let outcome = run_outcome_batch(AnalysisPass::Retry, 8).await;
+        assert_eq!(outcome, PassOutcome { demoted: 2, ..Default::default() });
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_recovery_pass_counts_unchanged() {
+        let outcome = run_outcome_batch(AnalysisPass::Recovery, 5).await;
+        assert_eq!(outcome, PassOutcome { unchanged: 2, ..Default::default() });
     }
 
     // requires a running ethereum node
