@@ -416,6 +416,66 @@ mod test {
             .expect("analyze tokens failed");
     }
 
+    fn wiring_args(recovery_lookback_days: u32) -> AnalyzeTokenArgs {
+        AnalyzeTokenArgs {
+            chain: Chain::Ethereum,
+            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            concurrency: 1,
+            update_batch_size: 10,
+            fetch_batch_size: 10,
+            recovery_lookback_days,
+        }
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_analyze_tokens_runs_recovery_pass_after_retry_pass() {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let mut seq = Sequence::new();
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .withf(|_, _, quality, traded_since, _| {
+                quality.min == Some(6) && quality.max == Some(10) && traded_since.is_none()
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_get_tokens()
+            .withf(|_, _, quality, traded_since, _| {
+                quality.min == Some(5) && quality.max == Some(5) && traded_since.is_some()
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        analyze_tokens(wiring_args(1), &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_recovery_pass_disabled_at_zero() {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .withf(|_, _, quality, traded_since, _| {
+                quality.min == Some(6) && quality.max == Some(10) && traded_since.is_none()
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        analyze_tokens(wiring_args(0), &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+    }
+
     fn outcome_test_gateway() -> testing::MockGateway {
         let mut gw = testing::MockGateway::new();
         gw.expect_get_token_owners()
