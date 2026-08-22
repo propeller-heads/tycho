@@ -100,10 +100,14 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    the revert), or above the buffer. Nonfatal hash-miss fallbacks log a warning and increment `extractor_revert_hash_miss`.
 2. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
-3. Previous attribute values are restored from the buffer, then the DB. Attributes created
-   inside the reverted range, and attributes of components with no state in either place,
-   revert as deletions instead — with a warning and the `extractor_revert_component_not_found`
-   counter. A missing component is expected when it is younger than the finality horizon.
+3. `handle_revert` first waits for any in-flight DB commit task, so a miss in the buffer and
+   the DB proves that no prior state exists. Previous attribute values are then restored from
+   the buffer, then the DB. Attributes created inside the reverted range, and attributes of
+   components with no state in either place, revert as deletions instead — with a warning and
+   the `extractor_revert_component_not_found` counter. Its `cause` label separates
+   `young_component` (creation still buffered — expected below the finality horizon) from
+   `unknown_component` (no creation anywhere — an upstream bug, e.g. a Creation marked as an
+   Update).
 4. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted state
    is always on the canonical chain.
 
