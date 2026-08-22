@@ -34,10 +34,17 @@ impl TokenClass {
 /// itself, so it must never be treated as `10^sy_decimals`.
 const RATE_ONE: u64 = 1_000_000_000_000_000_000;
 
-/// Relative tolerance for matching a probe against a prediction, as a reciprocal: a prediction
-/// is accepted when it is within 1/1e6 of the observed value. Loose enough to absorb the
-/// contracts' own rounding, tight enough that the two predictions never both match unless they
-/// are arithmetically identical.
+/// Relative tolerance for matching a probe against a prediction, as a reciprocal: a prediction is
+/// accepted when it is within 1/1e6 of the observed value.
+///
+/// The bound is set by the spread the SYs charge on entry, not by rounding. Swept over the 46 live
+/// SYs at one block, every `previewRedeem` probe matches its prediction to the unit, and the
+/// `previewDeposit` probes that do not split in two: one or two wei where the SY converts through
+/// the wrapped protocol's own floor-divide first, and seven SYs taking a real 1e-7 to 1e-6 haircut
+/// on entry. Those seven are what a wei-level tolerance would drop. It stays far under a haircut
+/// large enough to mean the SY is doing something else entirely (0.5% on `0x457904b5...59d6`), so
+/// a token matching neither closed form is still excluded rather than rounded into the nearer
+/// class, and the two predictions never both match unless they are arithmetically identical.
 const TOLERANCE_RECIPROCAL: u64 = 1_000_000;
 
 pub fn pow10(exponent: u32) -> BigInt {
@@ -125,15 +132,18 @@ mod tests {
     /// module's own constants. That matters: predictions derived from `RATE_ONE` would agree
     /// with a wrongly-scaled `RATE_ONE` and the tests would pass while every quote was wrong.
     ///
-    /// SY-wstETH `0xcbc72d92...c0bc` -- 18-decimal SY over 18-decimal stETH.
+    /// Every fixture within one module is a single-block snapshot: the rate and the previews
+    /// must come from the same block, or the rate accrues between reads and the prediction is
+    /// compared against a probe taken under a different rate.
+    ///
+    /// SY-wstETH `0xcbc72d92...c0bc` at block 25803485 -- 18-decimal SY over 18-decimal stETH.
     mod wsteth_sy {
         pub const SY_DECIMALS: u32 = 18;
         pub const ASSET_DECIMALS: u32 = 18;
         pub const EXCHANGE_RATE: u64 = 1_242_190_142_783_145_750;
         /// `previewDeposit(wstETH, 1e18)` -- the SY's own wrapper token, taken at par.
         pub const DEPOSIT_WSTETH: u64 = 1_000_000_000_000_000_000;
-        /// `previewDeposit(stETH, 1e18)` -- the accounting asset, converted at the rate. One wei
-        /// above the exact quotient, which is why the match is relative rather than equal.
+        /// `previewDeposit(stETH, 1e18)` -- the accounting asset, converted at the rate.
         pub const DEPOSIT_STETH: u64 = 805_029_733_821_172_431;
         /// `previewRedeem(1e18)` to stETH.
         pub const REDEEM_STETH: u64 = 1_242_190_142_783_145_750;
@@ -141,8 +151,8 @@ mod tests {
         pub const REDEEM_WSTETH: u64 = 1_000_000_000_000_000_000;
     }
 
-    /// SY `0x457904b5...59d6` -- 18-decimal SY over 6-decimal USDC. The decimal gap lives in the
-    /// rate, which is why the rate is ~1.12e6 rather than ~1.12e18.
+    /// SY `0x457904b5...59d6` at block 25813586 -- 18-decimal SY over 6-decimal USDC. The
+    /// decimal gap lives in the rate, which is why the rate is ~1.12e6 rather than ~1.12e18.
     mod usdc_sy {
         pub const SY_DECIMALS: u32 = 18;
         pub const ASSET_DECIMALS: u32 = 6;
@@ -155,17 +165,17 @@ mod tests {
         pub const REDEEM_USDC: u64 = 1_115_911;
     }
 
-    /// SY `0x9f30507c...a920` -- 18-decimal SY over an 18-decimal asset that also redeems to
-    /// 6-decimal USDC. The only live shape where the exit token's decimals differ from the
-    /// accounting asset's, so it is the only fixture that exercises the redeem rescale.
+    /// SY-siUSD `0x9f30507c...a920` at block 25810474 -- 18-decimal SY over an 18-decimal asset
+    /// that also redeems to 6-decimal USDC. The only live shape where the exit token's decimals
+    /// differ from the accounting asset's, so it is the only fixture that exercises the redeem
+    /// rescale.
     mod cross_decimal_sy {
         pub const SY_DECIMALS: u32 = 18;
         pub const ASSET_DECIMALS: u32 = 18;
         pub const USDC_DECIMALS: u32 = 6;
         pub const EXCHANGE_RATE: u64 = 1_084_785_195_710_495_612;
-        /// `previewRedeem(1e18)` to USDC. One unit above the exact quotient -- a relative gap of
-        /// 9.2e-7, just inside the tolerance.
-        pub const REDEEM_USDC: u64 = 1_084_786;
+        /// `previewRedeem(1e18)` to USDC.
+        pub const REDEEM_USDC: u64 = 1_084_785;
     }
 
     /// A real wrapper taken at par, where the two predictions are far apart -- the only case in
