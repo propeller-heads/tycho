@@ -308,12 +308,17 @@ mod test {
     }
 
     #[rstest]
-    #[case::retry_pass(AnalysisPass::Retry)]
-    #[case::recovery_pass(AnalysisPass::Recovery)]
-    fn test_apply_analysis_fee_token_sets_50(#[case] pass: AnalysisPass) {
+    #[case::good_in_retry_pass(TokenQuality::Good, AnalysisPass::Retry)]
+    #[case::good_in_recovery_pass(TokenQuality::Good, AnalysisPass::Recovery)]
+    #[case::bad_in_retry_pass(TokenQuality::bad("transfer failed"), AnalysisPass::Retry)]
+    #[case::bad_in_recovery_pass(TokenQuality::bad("transfer failed"), AnalysisPass::Recovery)]
+    fn test_apply_analysis_fee_token_sets_50(
+        #[case] verdict: TokenQuality,
+        #[case] pass: AnalysisPass,
+    ) {
         let mut t = test_token(5);
 
-        apply_analysis(&mut t, TokenQuality::Good, Some(30_000), Some(250), pass);
+        apply_analysis(&mut t, verdict, Some(30_000), Some(250), pass);
 
         assert_eq!(t.quality, 50);
         assert_eq!(t.tax, 250);
