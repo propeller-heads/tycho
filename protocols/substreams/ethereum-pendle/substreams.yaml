@@ -57,7 +57,7 @@ modules:
     inputs:
       - map: map_protocol_components
 
-  - name: map_reserve_deltas
+  - name: map_relative_component_balance
     kind: map
     initialBlock: 16032059
     inputs:
@@ -66,17 +66,7 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockBalanceDeltas
 
-  # Separate from store_balances: reserves are not the market's ERC-20 balances, since totalSy
-  # excludes donated excess that skim() later sweeps.
-  - name: store_market_reserves
-    kind: store
-    initialBlock: 16032059
-    updatePolicy: add
-    valueType: bigint
-    inputs:
-      - map: map_reserve_deltas
-
-  - name: map_relative_component_balance
+  - name: map_reserve_deltas
     kind: map
     initialBlock: 16032059
     inputs:
@@ -92,6 +82,16 @@ modules:
     valueType: bigint
     inputs:
       - map: map_relative_component_balance
+
+  # Separate from store_balances: reserves are not the market's ERC-20 balances, since totalSy
+  # excludes donated excess that skim() later sweeps.
+  - name: store_market_reserves
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_reserve_deltas
 
   - name: map_protocol_changes
     kind: map

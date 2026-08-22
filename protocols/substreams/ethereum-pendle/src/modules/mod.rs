@@ -1,13 +1,39 @@
-//! One substreams handler per file.
+//! One substreams handler per file, prefixed with its stage in the module graph.
+//!
+//! A module at stage N reads only from stages below it, so modules sharing a stage are
+//! independent and run in parallel. The manifest lists them in the same order.
+
+// Stage 1
+#[path = "1_map_market_components.rs"]
 mod map_market_components;
-mod map_protocol_changes;
-mod map_protocol_components;
-mod map_relative_component_balance;
-mod map_reserve_deltas;
-mod store_balances;
-mod store_market_reserves;
-mod store_protocol_components;
+
+// Stage 2
+#[path = "2_store_sy_seen.rs"]
 mod store_sy_seen;
+
+// Stage 3
+#[path = "3_map_protocol_components.rs"]
+mod map_protocol_components;
+
+// Stage 4
+#[path = "4_store_protocol_components.rs"]
+mod store_protocol_components;
+
+// Stage 5
+#[path = "5_map_relative_component_balance.rs"]
+mod map_relative_component_balance;
+#[path = "5_map_reserve_deltas.rs"]
+mod map_reserve_deltas;
+
+// Stage 6
+#[path = "6_store_balances.rs"]
+mod store_balances;
+#[path = "6_store_market_reserves.rs"]
+mod store_market_reserves;
+
+// Stage 7
+#[path = "7_map_protocol_changes.rs"]
+mod map_protocol_changes;
 
 pub use map_market_components::map_market_components;
 pub use map_protocol_changes::map_protocol_changes;
