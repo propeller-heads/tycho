@@ -1115,6 +1115,26 @@ where
             return Ok(None);
         }
 
+        // The commit task drains blocks from the buffer before its DB write lands. Wait for
+        // it, so a miss in the buffer and the DB below proves that no prior state exists.
+        {
+            let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
+            if let Some(pending_commit) = commit_handle_guard.take() {
+                match pending_commit
+                    .instrument(info_span!("await_previous_commit"))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => return Err(err),
+                    Err(join_err) => {
+                        return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
+                            "Failed to join database commit task: {join_err}"
+                        ))))
+                    }
+                }
+            }
+        }
+
         // Send revert to DCI plugin.
         // DCI reverts are hash-only: they have no height fallback and would fail on the
         // hash-miss paths handled below. Safe today because DCI cannot run on
@@ -4494,6 +4514,168 @@ mod test {
             "Expected reserve in deleted_attributes, got: {:?}",
             ghost_delta.deleted_attributes
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_revert_waits_for_pending_commit() {
+        use std::sync::atomic::AtomicBool;
+
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
+            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
+        };
+
+        let committed = Arc::new(AtomicBool::new(false));
+        let committed_reader = committed.clone();
+
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .returning(|_, _, _| Ok(()));
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // The DB sees `pool_x` only after the pending commit finishes.
+        gw.expect_get_protocol_states()
+            .returning(move |_| {
+                if committed_reader.load(Ordering::SeqCst) {
+                    Ok(vec![ProtocolComponentState::new(
+                        "pool_x",
+                        HashMap::from([("tick".to_string(), Bytes::from(100_u64).lpad(32, 0))]),
+                        HashMap::new(),
+                    )])
+                } else {
+                    Ok(Vec::new())
+                }
+            });
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: create `pool_x` with `tick`.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    changes: vec![TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(1, 0)),
+                        component_changes: vec![PbProtocolComponent {
+                            id: "pool_x".to_string(),
+                            change: PbChangeType::Creation.into(),
+                            protocol_type: Some(ProtocolType {
+                                name: "pt_1".to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        entity_changes: vec![EntityChanges {
+                            component_id: "pool_x".to_string(),
+                            attributes: vec![Attribute {
+                                name: "tick".to_string(),
+                                value: Bytes::from(100_u64).lpad(32, 0).to_vec(),
+                                change: PbChangeType::Creation.into(),
+                            }],
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Block 2: finality height 2 drains block 1 and spawns the commit task.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(2)), ..Default::default() },
+                Some("cursor@2"),
+                Some(2),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Block 3: update `tick`. Finality height stays 2, so no drain.
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(3)),
+                    changes: vec![TransactionChanges {
+                        tx: Some(pb_fixtures::pb_transactions(3, 0)),
+                        entity_changes: vec![EntityChanges {
+                            component_id: "pool_x".to_string(),
+                            attributes: vec![Attribute {
+                                name: "tick".to_string(),
+                                value: Bytes::from(200_u64).lpad(32, 0).to_vec(),
+                                change: PbChangeType::Update.into(),
+                            }],
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Some("cursor@3"),
+                Some(2),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Replace the finished commit handle with a slow in-flight commit.
+        let fake_flag = committed.clone();
+        let fake_commit = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            fake_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .instrument(tracing::info_span!("fake_commit"));
+        if let Some(real_commit) = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .replace(fake_commit)
+        {
+            real_commit.await.unwrap().unwrap();
+        }
+
+        // Revert to block 2. `tick`'s prior value only exists in the pending commit.
+        let revert_msg = extractor
+            .handle_revert(BlockUndoSignal {
+                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
+                last_valid_cursor: "cursor@2".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            pool_x_delta
+                .updated_attributes
+                .get("tick"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "revert must restore the committed prior value, not delete the attribute"
+        );
+        assert!(pool_x_delta
+            .deleted_attributes
+            .is_empty());
     }
 }
 
