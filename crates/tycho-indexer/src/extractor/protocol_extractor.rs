@@ -854,6 +854,38 @@ where
     }
 }
 
+/// Classifies a revert lookup miss. "young_component" means the component's creation is still
+/// in the reorg buffer, so it is younger than the finality horizon — expected, no prior state
+/// can exist. "unknown_component" means no creation explains the miss — unexpected, e.g. an
+/// integration marked a Creation as an Update.
+fn revert_miss_cause(
+    reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+    component_id: &str,
+) -> &'static str {
+    let creation_is_buffered = reorg_buffer
+        .get_block_range(None, None)
+        .map(|mut blocks| {
+            blocks.any(|entry| {
+                entry
+                    .block_update()
+                    .txs_with_update
+                    .iter()
+                    .any(|tx| {
+                        tx.protocol_components
+                            .get(component_id)
+                            .is_some_and(|component| component.change == ChangeType::Creation)
+                    })
+            })
+        })
+        .unwrap_or(false);
+
+    if creation_is_buffered {
+        "young_component"
+    } else {
+        "unknown_component"
+    }
+}
+
 #[async_trait]
 impl<G, T, E> Extractor for ProtocolExtractor<G, T, E>
 where
@@ -1523,8 +1555,10 @@ where
                 // horizon, or an upstream module mis-marked its attributes. Either way no
                 // previous value exists, so the revert deletes the attributes. Substreams
                 // output is external input — this must never be fatal.
+                let cause = revert_miss_cause(&reorg_buffer, &component_id);
                 warn!(
                     component_id = component_id.as_str(),
+                    cause,
                     "Component not found in buffer or DB during revert; \
                      reverting its attributes as deletions"
                 );
@@ -1532,6 +1566,7 @@ where
                     "extractor_revert_component_not_found",
                     "extractor" => self.name.clone(),
                     "chain" => self.chain.to_string(),
+                    "cause" => cause,
                 )
                 .increment(1);
             }
@@ -4582,7 +4617,9 @@ mod test {
                             component_id: "pool_x".to_string(),
                             attributes: vec![Attribute {
                                 name: "tick".to_string(),
-                                value: Bytes::from(100_u64).lpad(32, 0).to_vec(),
+                                value: Bytes::from(100_u64)
+                                    .lpad(32, 0)
+                                    .to_vec(),
                                 change: PbChangeType::Creation.into(),
                             }],
                         }],
@@ -4619,7 +4656,9 @@ mod test {
                             component_id: "pool_x".to_string(),
                             attributes: vec![Attribute {
                                 name: "tick".to_string(),
-                                value: Bytes::from(200_u64).lpad(32, 0).to_vec(),
+                                value: Bytes::from(200_u64)
+                                    .lpad(32, 0)
+                                    .to_vec(),
                                 change: PbChangeType::Update.into(),
                             }],
                         }],
@@ -4676,6 +4715,172 @@ mod test {
         assert!(pool_x_delta
             .deleted_attributes
             .is_empty());
+    }
+
+    #[test]
+    fn test_revert_component_not_found_counter_cause_label() {
+        use ::tycho_protobuf::pb::tycho::evm::v1::{
+            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
+        };
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let mut gw = MockExtractorGateway::new();
+                gw.expect_ensure_protocol_types()
+                    .times(1)
+                    .returning(|_| Ok(()));
+                gw.expect_get_cursor()
+                    .times(1)
+                    .returning(|| Ok(("cursor".into(), Bytes::default())));
+                gw.expect_get_block()
+                    .times(1)
+                    .returning(|_| Ok(Block::default()));
+                gw.expect_advance()
+                    .times(0)
+                    .returning(|_, _, _| Ok(()));
+                gw.expect_get_contracts()
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_protocol_states()
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_components_balances()
+                    .returning(|_| Ok(HashMap::new()));
+                gw.expect_get_account_balances()
+                    .returning(|_| Ok(HashMap::new()));
+
+                let extractor = create_extractor(gw).await;
+
+                // Block 1: empty anchor.
+                extractor
+                    .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                        PbBlockChanges {
+                            block: Some(pb_fixtures::pb_blocks(1)),
+                            ..Default::default()
+                        },
+                        Some("cursor@1"),
+                        Some(1),
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                // Block 2: create `pool_y` without attributes. Stays in the buffer (finality
+                // height 1), so `pool_y` is younger than the finality horizon.
+                extractor
+                    .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                        PbBlockChanges {
+                            block: Some(pb_fixtures::pb_blocks(2)),
+                            changes: vec![TransactionChanges {
+                                tx: Some(pb_fixtures::pb_transactions(2, 0)),
+                                component_changes: vec![PbProtocolComponent {
+                                    id: "pool_y".to_string(),
+                                    change: PbChangeType::Creation.into(),
+                                    protocol_type: Some(ProtocolType {
+                                        name: "pt_1".to_string(),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
+                        Some("cursor@2"),
+                        Some(1),
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                // Block 3: `fee` update on buffered `pool_y`; `rate` update on `pool_z`, which
+                // no creation explains anywhere.
+                extractor
+                    .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                        PbBlockChanges {
+                            block: Some(pb_fixtures::pb_blocks(3)),
+                            changes: vec![TransactionChanges {
+                                tx: Some(pb_fixtures::pb_transactions(3, 0)),
+                                entity_changes: vec![
+                                    EntityChanges {
+                                        component_id: "pool_y".to_string(),
+                                        attributes: vec![Attribute {
+                                            name: "fee".to_string(),
+                                            value: Bytes::from(30_u64).lpad(32, 0).to_vec(),
+                                            change: PbChangeType::Update.into(),
+                                        }],
+                                    },
+                                    EntityChanges {
+                                        component_id: "pool_z".to_string(),
+                                        attributes: vec![Attribute {
+                                            name: "rate".to_string(),
+                                            value: Bytes::from(7_u64).lpad(32, 0).to_vec(),
+                                            change: PbChangeType::Update.into(),
+                                        }],
+                                    },
+                                ],
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
+                        Some("cursor@3"),
+                        Some(1),
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                extractor
+                    .handle_revert(BlockUndoSignal {
+                        last_valid_block: Some(BlockRef {
+                            id: format!("0x{:0>64x}", 2_u64),
+                            number: 2,
+                        }),
+                        last_valid_cursor: "cursor@2".into(),
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+            })
+        });
+
+        let cause_counts: HashMap<String, u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(ck, _, _, _)| ck.key().name() == "extractor_revert_component_not_found")
+            .map(|(ck, _, _, value)| {
+                let cause = ck
+                    .key()
+                    .labels()
+                    .find(|l| l.key() == "cause")
+                    .map(|l| l.value().to_string())
+                    .unwrap_or_default();
+                let count = match value {
+                    DebugValue::Counter(v) => v,
+                    _ => 0,
+                };
+                (cause, count)
+            })
+            .collect();
+
+        assert_eq!(
+            cause_counts.get("young_component"),
+            Some(&1),
+            "pool_y creation is buffered, its miss is the expected cause"
+        );
+        assert_eq!(
+            cause_counts.get("unknown_component"),
+            Some(&1),
+            "pool_z has no creation anywhere, its miss is the unexpected cause"
+        );
     }
 }
 
