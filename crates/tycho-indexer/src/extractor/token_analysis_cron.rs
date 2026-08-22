@@ -287,7 +287,7 @@ fn apply_analysis(
     t.tax = tax.unwrap_or(0);
     t.gas = gas
         .map(|g| vec![Some(g)])
-        .unwrap_or_else(Vec::new);
+        .unwrap_or_default();
 }
 
 #[cfg(test)]
