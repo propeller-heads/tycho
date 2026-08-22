@@ -19,6 +19,8 @@ pub const PY_INDEX_CURRENT: &str = "py_index_current";
 pub const SY_EXCHANGE_RATE: &str = "sy_exchange_rate";
 /// Attribute set when this block's `exchangeRate()` read did not resolve.
 pub const SY_RATE_STALE: &str = "sy_rate_stale";
+/// Attribute holding the timestamp the state was refreshed at.
+pub const BLOCK_TIMESTAMP: &str = "block_timestamp";
 
 /// How often the SY exchange rates are re-read.
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +68,15 @@ pub fn py_index_current(stored: Option<BigInt>, rate: &BigInt) -> BigInt {
 /// Encodes the stale marker as the single byte the simulation reads it back as.
 pub fn stale_flag(stale: bool) -> Vec<u8> {
     vec![u8::from(stale)]
+}
+
+/// Encodes a block timestamp as the fixed-width big-endian value the simulation decodes.
+///
+/// The curve depends on `block.timestamp` through `rateScalar`, `rateAnchor` and `feeRate`, so a
+/// quote is only valid for the timestamp it was computed for. Fixed at 8 bytes rather than
+/// minimally encoded: a decoder reading it as a `u64` must not have to guess the width.
+pub fn block_timestamp(seconds: u64) -> Vec<u8> {
+    seconds.to_be_bytes().to_vec()
 }
 
 #[cfg(test)]
@@ -128,6 +139,18 @@ mod tests {
     fn an_unknown_stored_index_falls_back_to_the_rate() {
         let rate = BigInt::from(1_095_830_i64);
         assert_eq!(py_index_current(None, &rate), rate);
+    }
+
+    /// Fixed width, including for a timestamp whose leading bytes are zero — a decoder that has
+    /// to guess the width is a decoder that eventually guesses wrong.
+    #[test]
+    fn the_block_timestamp_is_always_eight_bytes() {
+        assert_eq!(block_timestamp(1830124800).len(), 8);
+        assert_eq!(block_timestamp(0), vec![0; 8]);
+        assert_eq!(
+            block_timestamp(1669201235),
+            vec![0x00, 0x00, 0x00, 0x00, 0x63, 0x7d, 0xfd, 0x53]
+        );
     }
 
     #[test]

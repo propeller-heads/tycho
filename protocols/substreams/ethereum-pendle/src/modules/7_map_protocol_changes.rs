@@ -19,8 +19,8 @@ use crate::{
     },
     registry::{live_markets, MarketEntry},
     sy_rates::{
-        py_index_current, stale_flag, RefreshParams, PY_INDEX_CURRENT, SY_EXCHANGE_RATE,
-        SY_RATE_STALE,
+        block_timestamp, py_index_current, stale_flag, RefreshParams, BLOCK_TIMESTAMP,
+        PY_INDEX_CURRENT, SY_EXCHANGE_RATE, SY_RATE_STALE,
     },
 };
 
@@ -101,7 +101,7 @@ pub fn map_protocol_changes(
     }
 
     for (tx, change) in
-        refresh_sy_rates(&block, &refresh, &registry_store, &py_index_store, &components_store)
+        refresh_live_state(&block, &refresh, &registry_store, &py_index_store, &components_store)
     {
         transaction_changes
             .entry(tx.index)
@@ -175,11 +175,17 @@ fn absolute_state_changes(
     changes
 }
 
-/// Re-reads every live SY's `exchangeRate()` and republishes the PY index it implies.
+/// Republishes the state that moves without a Pendle event: the PY index and the clock.
 ///
-/// The rate has no event stream, so this is the one place the package reads chain state per
-/// block rather than per market lifetime. It is one batched `eth_call` for the whole protocol:
-/// the live markets are deduped down to their SYs first, and one SY backs several expiries.
+/// The SY exchange rate has no event stream, so this is the one place the package reads chain
+/// state per block rather than per market lifetime. It is one batched `eth_call` for the whole
+/// protocol: the live markets are deduped down to their SYs first, and one SY backs several
+/// expiries.
+///
+/// `block_timestamp` rides along because the curve depends on it through `rateScalar`,
+/// `rateAnchor` and `feeRate` — a quote is only valid for the timestamp it was computed for, and
+/// a market that has not traded for a day would otherwise be quoted on a day-old clock. Emission
+/// stops at expiry, which `live_markets` already decides.
 ///
 /// A rate that does not resolve — a paused SY, a wrapped protocol reverting — leaves
 /// `py_index_current` untouched at its previous value and raises `sy_rate_stale` instead of
@@ -189,7 +195,7 @@ fn absolute_state_changes(
 /// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
 /// fabricated hash would be persisted as though it were real. The last transaction is a genuine
 /// one and orders the refresh after everything that actually happened in the block.
-fn refresh_sy_rates(
+fn refresh_live_state(
     block: &eth::Block,
     params: &RefreshParams,
     registry_store: &StoreGetString,
@@ -211,13 +217,17 @@ fn refresh_sy_rates(
     let anchor: Transaction = anchor.into();
 
     let rates = read_exchange_rates(&markets);
+    let timestamp = block_timestamp(block.timestamp_seconds());
     let mut changes = Vec::new();
 
     for market in &markets {
         let rate = rates
             .get(&market.sy)
             .and_then(Option::as_ref);
-        let mut attributes = vec![state_attribute(SY_RATE_STALE, stale_flag(rate.is_none()))];
+        let mut attributes = vec![
+            state_attribute(BLOCK_TIMESTAMP, timestamp.clone()),
+            state_attribute(SY_RATE_STALE, stale_flag(rate.is_none())),
+        ];
         if let Some(rate) = rate {
             let stored = py_index_store.get_last(py_index_key(&market.id));
             attributes.push(state_attribute(
@@ -235,7 +245,10 @@ fn refresh_sy_rates(
         if !components_store.has_last(sy) {
             continue;
         }
-        let mut attributes = vec![state_attribute(SY_RATE_STALE, stale_flag(rate.is_none()))];
+        let mut attributes = vec![
+            state_attribute(BLOCK_TIMESTAMP, timestamp.clone()),
+            state_attribute(SY_RATE_STALE, stale_flag(rate.is_none())),
+        ];
         if let Some(rate) = rate {
             attributes.push(state_attribute(SY_EXCHANGE_RATE, rate.to_signed_bytes_be()));
         }
