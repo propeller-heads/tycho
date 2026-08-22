@@ -49,6 +49,17 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
 
+  # Every market ever created, under one key. Refreshing the PY index has to enumerate the live
+  # markets on blocks where no Pendle log arrived, and a key-addressed store cannot be walked —
+  # so the set is a value, not a range of keys. See src/registry.rs.
+  - name: store_market_registry
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
   - name: store_protocol_components
     kind: store
     initialBlock: 16032059
@@ -75,6 +86,18 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockBalanceDeltas
 
+  # pyIndexStored per market: seeded by an eth_call at creation, then advanced by the yield
+  # token's NewInterestIndex. It has to be carried, since refresh blocks have no such event.
+  - name: store_py_index
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+
   - name: store_balances
     kind: store
     initialBlock: 16032059
@@ -97,6 +120,7 @@ modules:
     kind: map
     initialBlock: 16032059
     inputs:
+      - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
       - map: map_relative_component_balance
@@ -106,5 +130,14 @@ modules:
       - store: store_market_reserves
         mode: deltas
       - store: store_protocol_components
+      - store: store_market_registry
+      - store: store_py_index
     output:
       type: proto:tycho.evm.v1.BlockChanges
+
+# sy_rate_refresh_blocks: how often SY.exchangeRate() is re-read. Live indexing wants 1. A
+# backfill from the 2023 genesis block issues one batched eth_call per refresh block, which is
+# the dominant cost of a historical sync, so raise it there — one refresh per ~50 blocks (~10
+# minutes) bounds the index error to well under the swap fee.
+params:
+  map_protocol_changes: "sy_rate_refresh_blocks=1"

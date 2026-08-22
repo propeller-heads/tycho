@@ -16,6 +16,8 @@ mod store_sy_seen;
 mod map_protocol_components;
 
 // Stage 4
+#[path = "4_store_market_registry.rs"]
+mod store_market_registry;
 #[path = "4_store_protocol_components.rs"]
 mod store_protocol_components;
 
@@ -24,6 +26,8 @@ mod store_protocol_components;
 mod map_relative_component_balance;
 #[path = "5_map_reserve_deltas.rs"]
 mod map_reserve_deltas;
+#[path = "5_store_py_index.rs"]
+mod store_py_index;
 
 // Stage 6
 #[path = "6_store_balances.rs"]
@@ -41,6 +45,8 @@ pub use map_protocol_components::map_protocol_components;
 pub use map_relative_component_balance::map_relative_component_balance;
 pub use map_reserve_deltas::map_reserve_deltas;
 pub use store_balances::store_balances;
+pub use store_market_registry::store_market_registry;
 pub use store_market_reserves::store_market_reserves;
 pub use store_protocol_components::store_protocol_components;
+pub use store_py_index::store_py_index;
 pub use store_sy_seen::store_sy_seen;

@@ -1,24 +1,33 @@
 use anyhow::Result;
 use itertools::Itertools;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use substreams::{
+    log,
     pb::substreams::StoreDeltas,
-    store::{StoreGet, StoreGetRaw},
+    scalar::BigInt,
+    store::{StoreGet, StoreGetBigInt, StoreGetRaw, StoreGetString},
 };
-use substreams_ethereum::pb::eth::v2 as eth;
+use substreams_ethereum::{pb::eth::v2 as eth, rpc::RpcBatch};
 use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
 
 use crate::{
-    keys::{contract_id, market_by_yt_key, market_tokens_key},
+    abi::pendle_sy,
+    keys::{contract_id, market_by_yt_key, market_tokens_key, py_index_key, MARKET_REGISTRY},
     market_state::{
         last_ln_implied_rate, py_index_stored, LAST_LN_IMPLIED_RATE, PY_INDEX_STORED, TOTAL_PT,
         TOTAL_SY,
+    },
+    registry::{live_markets, MarketEntry},
+    sy_rates::{
+        py_index_current, stale_flag, RefreshParams, PY_INDEX_CURRENT, SY_EXCHANGE_RATE,
+        SY_RATE_STALE,
     },
 };
 
 /// Joins new components, market state and balance changes into the per-transaction output.
 #[substreams::handlers::map]
 pub fn map_protocol_changes(
+    params: String,
     block: eth::Block,
     new_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
@@ -26,7 +35,10 @@ pub fn map_protocol_changes(
     reserve_deltas: BlockBalanceDeltas,
     reserve_store: StoreDeltas,
     components_store: StoreGetRaw,
+    registry_store: StoreGetString,
+    py_index_store: StoreGetBigInt,
 ) -> Result<BlockChanges, substreams::errors::Error> {
+    let refresh = RefreshParams::parse(&params)?;
     let mut transaction_changes: HashMap<u64, TransactionChangesBuilder> = HashMap::new();
 
     for tx_components in &new_components.tx_components {
@@ -39,6 +51,15 @@ pub fn map_protocol_changes(
             .or_insert_with(|| TransactionChangesBuilder::new(tx));
         for component in &tx_components.components {
             builder.add_protocol_component(component);
+            // The creation-time `pyIndexStored()` read lands here rather than in the component's
+            // static attributes: it is state, and it changes on the yield token's next interest
+            // event.
+            if let Some(index) = py_index_store.get_last(py_index_key(&component.id)) {
+                builder.add_entity_change(&EntityChanges {
+                    component_id: component.id.clone(),
+                    attributes: vec![state_attribute(PY_INDEX_STORED, index.to_signed_bytes_be())],
+                });
+            }
         }
     }
 
@@ -73,6 +94,15 @@ pub fn map_protocol_changes(
     }
 
     for (tx, change) in absolute_state_changes(&block, &components_store) {
+        transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx))
+            .add_entity_change(&change);
+    }
+
+    for (tx, change) in
+        refresh_sy_rates(&block, &refresh, &registry_store, &py_index_store, &components_store)
+    {
         transaction_changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx))
@@ -143,6 +173,111 @@ fn absolute_state_changes(
         }
     }
     changes
+}
+
+/// Re-reads every live SY's `exchangeRate()` and republishes the PY index it implies.
+///
+/// The rate has no event stream, so this is the one place the package reads chain state per
+/// block rather than per market lifetime. It is one batched `eth_call` for the whole protocol:
+/// the live markets are deduped down to their SYs first, and one SY backs several expiries.
+///
+/// A rate that does not resolve — a paused SY, a wrapped protocol reverting — leaves
+/// `py_index_current` untouched at its previous value and raises `sy_rate_stale` instead of
+/// publishing a guess.
+///
+/// The changes are anchored to the block's last transaction. Every `EntityChanges` reaches the
+/// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
+/// fabricated hash would be persisted as though it were real. The last transaction is a genuine
+/// one and orders the refresh after everything that actually happened in the block.
+fn refresh_sy_rates(
+    block: &eth::Block,
+    params: &RefreshParams,
+    registry_store: &StoreGetString,
+    py_index_store: &StoreGetBigInt,
+    components_store: &StoreGetRaw,
+) -> Vec<(Transaction, EntityChanges)> {
+    if !params.should_refresh(block.number) {
+        return vec![];
+    }
+    let Some(registry) = registry_store.get_last(MARKET_REGISTRY) else { return vec![] };
+    let markets = live_markets(&registry, block.timestamp_seconds());
+    if markets.is_empty() {
+        return vec![];
+    }
+    let Some(anchor) = block.transactions().last() else {
+        log::info!("block {} holds no transactions, skipping the SY rate refresh", block.number);
+        return vec![];
+    };
+    let anchor: Transaction = anchor.into();
+
+    let rates = read_exchange_rates(&markets);
+    let mut changes = Vec::new();
+
+    for market in &markets {
+        let rate = rates
+            .get(&market.sy)
+            .and_then(Option::as_ref);
+        let mut attributes = vec![state_attribute(SY_RATE_STALE, stale_flag(rate.is_none()))];
+        if let Some(rate) = rate {
+            let stored = py_index_store.get_last(py_index_key(&market.id));
+            attributes.push(state_attribute(
+                PY_INDEX_CURRENT,
+                py_index_current(stored, rate).to_signed_bytes_be(),
+            ));
+        }
+        changes
+            .push((anchor.clone(), EntityChanges { component_id: market.id.clone(), attributes }));
+    }
+
+    // Not every SY is a component: one whose conversions neither closed form explains contributes
+    // no wrap edges, and emitting state for it would be state on a component that never existed.
+    for (sy, rate) in &rates {
+        if !components_store.has_last(sy) {
+            continue;
+        }
+        let mut attributes = vec![state_attribute(SY_RATE_STALE, stale_flag(rate.is_none()))];
+        if let Some(rate) = rate {
+            attributes.push(state_attribute(SY_EXCHANGE_RATE, rate.to_signed_bytes_be()));
+        }
+        changes.push((anchor.clone(), EntityChanges { component_id: sy.clone(), attributes }));
+    }
+
+    changes
+}
+
+/// Reads `exchangeRate()` for the SY behind each live market, deduped, in one batch.
+///
+/// Every SY in the input appears in the result; the value is `None` where the call failed.
+fn read_exchange_rates(markets: &[MarketEntry]) -> BTreeMap<String, Option<BigInt>> {
+    let mut sy_ids: Vec<&String> = Vec::new();
+    for market in markets {
+        if !sy_ids.contains(&&market.sy) {
+            sy_ids.push(&market.sy);
+        }
+    }
+
+    let mut batch = RpcBatch::new();
+    for sy in &sy_ids {
+        let address = hex::decode(sy.trim_start_matches("0x"))
+            .unwrap_or_else(|_| panic!("registry holds a non-hex SY id {sy}"));
+        batch = batch.add(pendle_sy::functions::ExchangeRate {}, address);
+    }
+    let responses = batch
+        .execute()
+        .map(|r| r.responses)
+        .unwrap_or_default();
+
+    let mut rates = BTreeMap::new();
+    for (index, sy) in sy_ids.into_iter().enumerate() {
+        let rate = responses
+            .get(index)
+            .and_then(RpcBatch::decode::<_, pendle_sy::functions::ExchangeRate>);
+        if rate.is_none() {
+            log::info!("SY {} did not answer exchangeRate(), marking it stale", sy);
+        }
+        rates.insert(sy.clone(), rate);
+    }
+    rates
 }
 
 /// Returns a market's SY and PT addresses, or `None` if the id names something that is not a

@@ -17,3 +17,15 @@ pub fn market_by_yt_key(yt_address: &[u8]) -> String {
 pub fn contract_id(address: &[u8]) -> String {
     format!("0x{}", hex::encode(address))
 }
+
+/// The single key under which `store_market_registry` keeps every market it has seen.
+///
+/// Substreams stores are key-addressed and cannot be enumerated — `StoreGet` offers only
+/// `get_at` / `get_last` / `get_first` on one key — so the set of markets has to live as a
+/// *value* rather than as a range of keys. See `crate::registry`.
+pub const MARKET_REGISTRY: &str = "markets";
+
+/// Key under which a market's last known `pyIndexStored` is kept, given its component id.
+pub fn py_index_key(component_id: &str) -> String {
+    format!("py_index:{component_id}")
+}
