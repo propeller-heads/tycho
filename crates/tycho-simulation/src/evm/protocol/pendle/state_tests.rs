@@ -249,6 +249,52 @@ fn an_untradeable_pair_reports_no_depth_rather_than_failing() {
     );
 }
 
+/// The spot price is quote-per-base, and it is answered from the buying side.
+///
+/// SY-wstETH accepts WETH as a deposit but does not redeem to it. Pricing SY in WETH is therefore
+/// only answerable by asking what WETH buys; asking what selling SY yields in WETH has no answer,
+/// and quoting that direction is what failed the range test.
+#[test]
+fn spot_price_is_answered_from_the_buying_side() {
+    let sy = token(SY, 18);
+    let steth = token(STETH, 18);
+
+    // 1 SY is worth ~1.2419 stETH at this index, so buying one costs about that much.
+    let price = wsteth_sy()
+        .spot_price(&sy, &steth)
+        .unwrap();
+    assert!((price - 1.241884).abs() < 1e-6, "{price}");
+
+    // And the inverse direction is the reciprocal.
+    let inverse = wsteth_sy()
+        .spot_price(&steth, &sy)
+        .unwrap();
+    assert!((inverse - 1.0 / 1.241884).abs() < 1e-6, "{inverse}");
+}
+
+/// A deposit-only token still prices, because the price is asked from the direction that exists.
+#[test]
+fn a_deposit_only_token_still_prices() {
+    let weth = token("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 18);
+    let sy = token(SY, 18);
+    let mut state = wsteth_sy();
+    // WETH goes in but never comes out, which is how the wstETH SY really behaves.
+    if let PendleState::Sy(inner) = &mut state {
+        inner
+            .tokens_in
+            .insert(weth.address.clone(), TokenClass::IndexRate);
+        inner.tokens_out.remove(&weth.address);
+    }
+
+    let price = state.spot_price(&sy, &weth).unwrap();
+    assert!(price > 0.0, "a deposit-only token should still price the SY");
+
+    // Selling SY for it remains unquotable, and says so.
+    assert!(state
+        .get_amount_out(BigUint::from(1_000_000_000_000_000_000u64), &sy, &weth)
+        .is_err());
+}
+
 /// The reported maximum is quotable, and past it the quote fails rather than returning a number the
 /// swap would revert on.
 #[test]

@@ -301,21 +301,29 @@ impl ProtocolSim for PendleState {
         }
     }
 
+    /// The amount of `quote` needed to buy one unit of `base`.
+    ///
+    /// Quoted by **spending `quote` to buy `base`**, which is what the trait asks for. That
+    /// direction matters here beyond arithmetic: an SY's entry and exit token lists are not the
+    /// same set. SY-wstETH accepts WETH as a deposit but will not redeem to it, so pricing SY in
+    /// WETH is answerable only from the buying side — asking what selling SY yields in WETH has no
+    /// answer at all.
+    ///
+    /// Priced off a real trade rather than a closed form, so the number agrees with what a caller
+    /// would actually get, fee included. One whole unit of `quote` is small against every live
+    /// market's depth.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        // Priced off a small trade rather than a closed form, so the number a caller sees agrees
-        // with what they would actually get. One whole unit of `base` is small against every live
-        // market's depth.
-        let one = BigUint::from(10u32).pow(base.decimals);
-        let out = self.get_amount_out(one.clone(), base, quote)?;
-        let scale_in = 10f64.powi(base.decimals as i32);
-        let scale_out = 10f64.powi(quote.decimals as i32);
-        let amount_out = biguint_to_f64(&out.amount);
-        if amount_out == 0.0 {
-            return Err(SimulationError::FatalError(
-                "spot price is zero: the pair is not quotable at one unit".to_string(),
-            ));
+        let one_quote = BigUint::from(10u32).pow(quote.decimals);
+        let bought = self.get_amount_out(one_quote, quote, base)?;
+        let base_out = biguint_to_f64(&bought.amount) / 10f64.powi(base.decimals as i32);
+        if base_out == 0.0 {
+            return Err(SimulationError::FatalError(format!(
+                "one unit of {} buys no {}, so there is no spot price",
+                quote.address, base.address
+            )));
         }
-        Ok((biguint_to_f64(&one) / scale_in) / (amount_out / scale_out))
+        // One unit of quote bought `base_out` base, so one base costs `1 / base_out` quote.
+        Ok(1.0 / base_out)
     }
 
     fn get_amount_out(
