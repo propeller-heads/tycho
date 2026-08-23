@@ -45,6 +45,9 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "rfq:metric",
     "erc4626",
     "ring_swap_v2",
+    // Router V4 and the SY both pull the input via `transferFrom`, so the router approves before
+    // swapping on every Pendle edge.
+    "pendle",
 ];
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra

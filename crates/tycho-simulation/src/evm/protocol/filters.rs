@@ -178,6 +178,46 @@ fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
     })
 }
 
+/// Drops Pendle components that cannot be quoted.
+///
+/// An expired market never trades again, and an SY the indexer could not classify in either
+/// direction contributes no wrap edges. Both would otherwise be decoded and then fail on every
+/// call, which is noise rather than information.
+pub fn pendle_filter(component: &ComponentWithState) -> bool {
+    match component
+        .component
+        .protocol_type_name
+        .as_str()
+    {
+        "pendle_market" => {
+            let Some(expiry) = component
+                .component
+                .static_attributes
+                .get("expiry")
+            else {
+                return false;
+            };
+            let expiry = expiry.iter().fold(0u64, |acc, byte| {
+                acc.saturating_mul(256)
+                    .saturating_add(*byte as u64)
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            expiry > now
+        }
+        "pendle_sy" => component
+            .component
+            .static_attributes
+            .keys()
+            .any(|name| {
+                name.starts_with("token_in_class_") || name.starts_with("token_out_class_")
+            }),
+        _ => true,
+    }
+}
+
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
     const UNSUPPORTED_POOLS: [&str; 4] = [
         "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
