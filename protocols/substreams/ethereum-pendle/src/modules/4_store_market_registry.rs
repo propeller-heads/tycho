@@ -40,10 +40,21 @@ pub fn store_market_registry(
             let expiry = component
                 .get_attribute_value("expiry")
                 .unwrap_or_else(|| panic!("market {} has no expiry", component.id));
+            let factory = component
+                .get_attribute_value("factory")
+                .unwrap_or_else(|| panic!("market {} has no factory", component.id));
+            let at_creation = component
+                .get_attribute_value("ln_fee_rate_root_at_creation")
+                .unwrap_or_else(|| {
+                    panic!("market {} has no ln_fee_rate_root_at_creation", component.id)
+                });
             let entry = MarketEntry {
                 id: component.id.clone(),
                 sy: contract_id(&sy),
                 expiry: BigInt::from_signed_bytes_be(&expiry).to_u64(),
+                factory: hex::encode(&factory),
+                ln_fee_rate_root_at_creation: BigInt::from_signed_bytes_be(&at_creation)
+                    .to_string(),
             };
             store.append(0, MARKET_REGISTRY, entry.encode());
         }

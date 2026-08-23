@@ -14,3 +14,10 @@ pub const MARKET_FACTORIES_V3_PLUS: [[u8; 20]; 4] = [
 
 pub const PENDLE_MARKET: &str = "pendle_market";
 pub const PENDLE_SY: &str = "pendle_sy";
+
+/// Pendle Router V4, the execution entry point this integration quotes and swaps through.
+///
+/// The fee override is keyed by the *calling* router, so a market's effective fee is only
+/// well-defined relative to one. Every override for any other router is irrelevant here and is
+/// ignored rather than applied to a quote that will not use it.
+pub const ROUTER_V4: [u8; 20] = hex!("888888888889758f76e7103c6cbf23abbf58f946");

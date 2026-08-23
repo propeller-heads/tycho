@@ -44,6 +44,9 @@ struct MarketCreation {
     market: Vec<u8>,
     scalar_root: BigInt,
     initial_anchor: BigInt,
+    /// The rate the market was deployed with. The original factory does not put it in the event,
+    /// so it is zero there and the fee has to come from `getMarketConfig` instead.
+    ln_fee_rate_root: BigInt,
 }
 
 fn decode_creation(log: &eth::Log) -> Option<MarketCreation> {
@@ -55,6 +58,7 @@ fn decode_creation(log: &eth::Log) -> Option<MarketCreation> {
             market: event.market,
             scalar_root: event.scalar_root,
             initial_anchor: event.initial_anchor,
+            ln_fee_rate_root: BigInt::zero(),
         });
     }
     if MARKET_FACTORIES_V3_PLUS.contains(&address) {
@@ -64,6 +68,7 @@ fn decode_creation(log: &eth::Log) -> Option<MarketCreation> {
             market: event.market,
             scalar_root: event.scalar_root,
             initial_anchor: event.initial_anchor,
+            ln_fee_rate_root: event.ln_fee_rate_root,
         });
     }
     None
@@ -120,6 +125,12 @@ fn build_components(creation: &MarketCreation) -> Vec<ProtocolComponent> {
             ),
             ("expiry", expiry.to_signed_bytes_be()),
             ("factory", creation.factory.clone()),
+            (
+                "ln_fee_rate_root_at_creation",
+                creation
+                    .ln_fee_rate_root
+                    .to_signed_bytes_be(),
+            ),
             ("sy_address", sy_address.clone()),
             ("pt_address", pt_address),
             ("yt_address", yt_address),

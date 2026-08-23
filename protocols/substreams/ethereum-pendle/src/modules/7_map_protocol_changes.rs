@@ -12,6 +12,7 @@ use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
 
 use crate::{
     abi::pendle_sy,
+    fees::{fan_out, fee_scope, read_market_fees, LN_FEE_RATE_ROOT, RESERVE_FEE_PERCENT},
     keys::{contract_id, market_by_yt_key, market_tokens_key, py_index_key, MARKET_REGISTRY},
     market_state::{
         last_ln_implied_rate, py_index_stored, LAST_LN_IMPLIED_RATE, PY_INDEX_STORED, TOTAL_PT,
@@ -109,6 +110,13 @@ pub fn map_protocol_changes(
             .add_entity_change(&change);
     }
 
+    for (tx, change) in fee_changes(&block, &new_components, &registry_store) {
+        transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx))
+            .add_entity_change(&change);
+    }
+
     for (_, (tx, balances)) in aggregate_balances_changes(balance_store, deltas) {
         let builder = transaction_changes
             .entry(tx.index)
@@ -195,6 +203,103 @@ fn absolute_state_changes(
 /// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
 /// fabricated hash would be persisted as though it were real. The last transaction is a genuine
 /// one and orders the refresh after everything that actually happened in the block.
+/// Re-reads the fee of every market a fee event moved, plus every market created this block.
+///
+/// The fee is configuration, not market state: `readState()` fetches it from the factory on every
+/// call, and the override is keyed by the calling router. It changes rarely and never silently —
+/// each generation announces it — so it is read on those events rather than on every block.
+///
+/// Only the *scope* is decoded from the event; the value is read back from the factory. Each
+/// generation resolves its fee differently (see `crate::fees`), and re-deriving that in Rust is
+/// how a fee ends up subtly wrong for one factory.
+///
+/// Unlike the SY refresh, these changes are anchored to the transaction that actually caused
+/// them: the creation, or the fee event.
+fn fee_changes(
+    block: &eth::Block,
+    new_components: &BlockTransactionProtocolComponents,
+    registry_store: &StoreGetString,
+) -> Vec<(Transaction, EntityChanges)> {
+    let Some(registry) = registry_store.get_last(MARKET_REGISTRY) else { return vec![] };
+    let markets = live_markets(&registry, block.timestamp_seconds());
+    if markets.is_empty() {
+        return vec![];
+    }
+
+    // A market can be hit twice in one block — created, then caught by a factory-wide event. The
+    // later transaction is the one whose state should stand, and the fee is read once either way.
+    let mut targets: Vec<(Transaction, &MarketEntry)> = Vec::new();
+
+    for tx_components in &new_components.tx_components {
+        let Some(tx) = tx_components.tx.as_ref() else { continue };
+        for component in &tx_components.components {
+            let Some(entry) = markets
+                .iter()
+                .find(|m| m.id == component.id)
+            else {
+                continue;
+            };
+            targets.push((tx.clone(), entry));
+        }
+    }
+
+    for tx in block.transactions() {
+        for log in tx.logs_with_calls().map(|(log, _)| log) {
+            let Some(scope) = fee_scope(log) else { continue };
+            let transaction: Transaction = tx.into();
+            for entry in fan_out(&scope, &markets) {
+                targets.push((transaction.clone(), entry));
+            }
+        }
+    }
+
+    let mut deduped: Vec<(Transaction, &MarketEntry)> = Vec::new();
+    for (tx, entry) in targets {
+        match deduped
+            .iter_mut()
+            .find(|(_, existing)| existing.id == entry.id)
+        {
+            Some(slot) if slot.0.index <= tx.index => slot.0 = tx,
+            Some(_) => {}
+            None => deduped.push((tx, entry)),
+        }
+    }
+    if deduped.is_empty() {
+        return vec![];
+    }
+
+    let entries: Vec<MarketEntry> = deduped
+        .iter()
+        .map(|(_, entry)| (*entry).clone())
+        .collect();
+    read_market_fees(&entries)
+        .into_iter()
+        .filter_map(|(id, fee)| {
+            let (tx, _) = deduped
+                .iter()
+                .find(|(_, e)| e.id == id)?;
+            Some((
+                tx.clone(),
+                EntityChanges {
+                    component_id: id,
+                    attributes: vec![
+                        state_attribute(
+                            LN_FEE_RATE_ROOT,
+                            fee.ln_fee_rate_root
+                                .to_signed_bytes_be(),
+                        ),
+                        state_attribute(
+                            RESERVE_FEE_PERCENT,
+                            fee.reserve_fee_percent
+                                .to_signed_bytes_be(),
+                        ),
+                    ],
+                },
+            ))
+        })
+        .collect()
+}
+
 fn refresh_live_state(
     block: &eth::Block,
     params: &RefreshParams,
