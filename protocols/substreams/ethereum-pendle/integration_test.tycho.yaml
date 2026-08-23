@@ -1,0 +1,109 @@
+substreams_yaml_path: ./substreams.yaml
+# No adapter contract: Pendle is a native (Rust) integration, so there is no VM SwapAdapter to
+# build. The simulation lands in PR 2.
+skip_balance_check: false
+protocol_type_names:
+  - "pendle_market"
+  - "pendle_sy"
+protocol_system: "pendle"
+tests:
+  # The range starts at the package's initialBlock rather than at the swaps, and it has to.
+  # map_protocol_changes republishes the PY index, the clock and the SY balances for every live
+  # market on every refresh block, reading the live set from store_market_registry — and that store
+  # is prepared from initialBlock regardless of where the test range starts. A range that began
+  # after the creations would therefore emit state for components this test's fresh database never
+  # saw created, which the indexing docs call an error.
+  #
+  # 16032059 is the original factory's deployment block; the first four markets are created between
+  # 16032202 and 16032230. Pendle's first mainnet swap is at 16067529, and by 16072689 four
+  # separate markets have traded, which is what makes the upper bound worth reaching.
+  - name: test_market_creation_and_swaps
+    start_block: 16032059
+    stop_block: 16072700
+    expected_components:
+      # A market and the SY behind it, created in the same transaction. This market is the first
+      # to trade on mainnet (block 16069013) and trades 40 more times before the range ends, so
+      # the reserve replay, the implied rate and the balances are all exercised, not just creation.
+      - id: "0x7b246b8dbc2a640bf2d8221890cee8327fc23917"
+        tokens:
+          - "0xd393d1ddd6b8811a86d925f5e14014282581bc04" # SY-aUSDC
+          - "0x5fe30ac5cb1abb0e44cdffb2916c254aeb368650" # PT
+          - "0xc5cd692e9b4622ab8cdb57c83a0f99f874a169cd" # YT
+        static_attributes:
+          scalar_root: "0x0181cd70b593dc0000"
+          initial_anchor: "0x0e06ba4b4ee1f600"
+          expiry: "0x6424d100"
+          factory: "0x27b1dacd74688af24a64bd3c9c1b143118740784"
+          ln_fee_rate_root_at_creation: "0x00"
+          sy_address: "0xd393d1ddd6b8811a86d925f5e14014282581bc04"
+          pt_address: "0x5fe30ac5cb1abb0e44cdffb2916c254aeb368650"
+          yt_address: "0xc5cd692e9b4622ab8cdb57c83a0f99f874a169cd"
+          sy_decimals: "0x12"
+          asset_decimals: "0x12"
+        creation_tx: "0x6edb7e8dd09fa0e9ccd4b7195d514d51e03d91e9c05147fac6e458cc6b63bf01"
+        # No quoting yet: `pendle` is not registered in protocols/testing's
+        # register_decoder_for_protocol, because the native simulation is PR 2.
+        skip_simulation: true
+        # No executor yet: the swap encoder and PendleExecutor are PR 3.
+        skip_execution: true
+
+      # The SY of the market above. One token in and out, both one_to_one — the simplest wrap
+      # edge, and the case where a silent 1:1 assumption would be indistinguishable from a correct
+      # classification, so it pins the classifier's output shape.
+      - id: "0xd393d1ddd6b8811a86d925f5e14014282581bc04"
+        tokens:
+          - "0xd393d1ddd6b8811a86d925f5e14014282581bc04" # SY
+          - "0x3175df0976dfa876431c2e9ee6bc45b65d3473cc" # the accounting asset
+        static_attributes:
+          asset_address: "0x3175df0976dfa876431c2e9ee6bc45b65d3473cc"
+          asset_decimals: "0x12"
+          sy_decimals: "0x12"
+          token_in_class_0x3175df0976dfa876431c2e9ee6bc45b65d3473cc: "0x6f6e655f746f5f6f6e65"
+          token_out_class_0x3175df0976dfa876431c2e9ee6bc45b65d3473cc: "0x6f6e655f746f5f6f6e65"
+        creation_tx: "0x6edb7e8dd09fa0e9ccd4b7195d514d51e03d91e9c05147fac6e458cc6b63bf01"
+        skip_simulation: true
+        skip_execution: true
+
+      # A second market, on a different SY, that also trades inside the range (16072670 onward).
+      # Two markets with real swaps is what the brief asks the range to contain.
+      - id: "0x54e28e62ea9e8d755dc6e74674eabe2abfdb004e"
+        tokens:
+          - "0xcbc72d92b2dc8187414f6734718563898740c0bc" # SY-wstETH
+          - "0xcf44e8402a99db82d2acccc4d9354657be2121db" # PT
+          - "0xa53ad7e3a87546cca450992d54d517c3c939c2bf" # YT
+        static_attributes:
+          scalar_root: "0x01b3c335a2bb440000"
+          initial_anchor: "0x0e2979273c640000"
+          expiry: "0x6424d100"
+          factory: "0x27b1dacd74688af24a64bd3c9c1b143118740784"
+          ln_fee_rate_root_at_creation: "0x00"
+          sy_address: "0xcbc72d92b2dc8187414f6734718563898740c0bc"
+          pt_address: "0xcf44e8402a99db82d2acccc4d9354657be2121db"
+          yt_address: "0xa53ad7e3a87546cca450992d54d517c3c939c2bf"
+          sy_decimals: "0x12"
+          asset_decimals: "0x12"
+        creation_tx: "0x952d4c25142e16032afd36d6be525aeed374517ec0942a7e879221db6ef3e032"
+        skip_simulation: true
+        skip_execution: true
+
+      # SY-wstETH: three quotable entry tokens across both classes, and the one component whose
+      # balances forced the switch from transfer-derived to read balances — it holds stETH, which
+      # rebases without emitting Transfer. Its balance check is the regression test for that.
+      - id: "0xcbc72d92b2dc8187414f6734718563898740c0bc"
+        tokens:
+          - "0xcbc72d92b2dc8187414f6734718563898740c0bc" # SY
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" # WETH
+          - "0xae7ab96520de3a18e5e111b5eaab095312d7fe84" # stETH, the accounting asset
+          - "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0" # wstETH
+        static_attributes:
+          asset_address: "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
+          asset_decimals: "0x12"
+          sy_decimals: "0x12"
+          token_in_class_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2: "0x696e6465785f72617465"
+          token_in_class_0xae7ab96520de3a18e5e111b5eaab095312d7fe84: "0x696e6465785f72617465"
+          token_in_class_0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0: "0x6f6e655f746f5f6f6e65"
+          token_out_class_0xae7ab96520de3a18e5e111b5eaab095312d7fe84: "0x696e6465785f72617465"
+          token_out_class_0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0: "0x6f6e655f746f5f6f6e65"
+        creation_tx: "0x952d4c25142e16032afd36d6be525aeed374517ec0942a7e879221db6ef3e032"
+        skip_simulation: true
+        skip_execution: true
