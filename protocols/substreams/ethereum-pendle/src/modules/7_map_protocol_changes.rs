@@ -192,26 +192,6 @@ fn absolute_state_changes(
     changes
 }
 
-/// Republishes the state that moves without a Pendle event: the PY index and the clock.
-///
-/// The SY exchange rate has no event stream, so this is the one place the package reads chain
-/// state per block rather than per market lifetime. It is one batched `eth_call` for the whole
-/// protocol: the live markets are deduped down to their SYs first, and one SY backs several
-/// expiries.
-///
-/// `block_timestamp` rides along because the curve depends on it through `rateScalar`,
-/// `rateAnchor` and `feeRate` — a quote is only valid for the timestamp it was computed for, and
-/// a market that has not traded for a day would otherwise be quoted on a day-old clock. Emission
-/// stops at expiry, which `live_markets` already decides.
-///
-/// A rate that does not resolve — a paused SY, a wrapped protocol reverting — leaves
-/// `py_index_current` untouched at its previous value and raises `sy_rate_stale` instead of
-/// publishing a guess.
-///
-/// The changes are anchored to the block's last transaction. Every `EntityChanges` reaches the
-/// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
-/// fabricated hash would be persisted as though it were real. The last transaction is a genuine
-/// one and orders the refresh after everything that actually happened in the block.
 /// Reads each SY component's real token balances, rather than accumulating them from transfers.
 ///
 /// A share-based token moves a holder's balance on rebase without emitting `Transfer`, so no
@@ -387,6 +367,26 @@ fn fee_changes(
         .collect()
 }
 
+/// Republishes the state that moves without a Pendle event: the PY index and the clock.
+///
+/// The SY exchange rate has no event stream, so this is the one place the package reads chain
+/// state per block rather than per market lifetime. It is one batched `eth_call` for the whole
+/// protocol: the live markets are deduped down to their SYs first, and one SY backs several
+/// expiries.
+///
+/// `block_timestamp` rides along because the curve depends on it through `rateScalar`,
+/// `rateAnchor` and `feeRate` — a quote is only valid for the timestamp it was computed for, and
+/// a market that has not traded for a day would otherwise be quoted on a day-old clock. Emission
+/// stops at expiry, which `live_markets` already decides.
+///
+/// A rate that does not resolve — a paused SY, a wrapped protocol reverting — leaves
+/// `py_index_current` untouched at its previous value and raises `sy_rate_stale` instead of
+/// publishing a guess.
+///
+/// The changes are anchored to the block's last transaction. Every `EntityChanges` reaches the
+/// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
+/// fabricated hash would be persisted as though it were real. The last transaction is a genuine
+/// one and orders the refresh after everything that actually happened in the block.
 fn refresh_live_state(
     block: &eth::Block,
     params: &RefreshParams,
