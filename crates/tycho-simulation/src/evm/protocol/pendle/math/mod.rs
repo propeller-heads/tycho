@@ -5,5 +5,6 @@
 
 pub mod errors;
 pub mod log_exp_math;
+pub mod market;
 pub mod pmath;
 pub mod sy_utils;

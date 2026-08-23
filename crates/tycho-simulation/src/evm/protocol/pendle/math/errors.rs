@@ -22,6 +22,23 @@ pub enum PendleError {
     Overflow { operation: &'static str },
     /// Division by zero.
     DivisionByZero { operation: &'static str },
+
+    // The market's own failure modes. Each mirrors a custom error in `Errors.sol`, and the names
+    // are kept so a reader can match a quote failure against the revert the contract would give.
+    /// `blockTime >= expiry`. The market no longer trades; PT redeems through the YT instead.
+    MarketExpired { expiry: u64, block_time: u64 },
+    /// More PT was asked of the market than it holds.
+    MarketInsufficientPtForTrade { total_pt: String, required: String },
+    /// The trade would push the PT proportion past 96%.
+    MarketProportionTooHigh { proportion: String, max: String },
+    /// The post-trade exchange rate would fall below par, which PT may never do.
+    MarketExchangeRateBelowOne { rate: String },
+    /// An empty market: nothing to price against.
+    MarketZeroTotalPtOrTotalAsset { total_pt: String, total_asset: String },
+    /// A proportion of exactly one, where the logit is undefined.
+    MarketProportionMustNotEqualOne,
+    /// `rateScalar` at or below zero, which only happens past expiry.
+    MarketRateScalarBelowZero { rate_scalar: String },
 }
 
 impl fmt::Display for PendleError {
@@ -46,6 +63,31 @@ impl fmt::Display for PendleError {
             }
             PendleError::DivisionByZero { operation } => {
                 write!(f, "{operation} divided by zero")
+            }
+            PendleError::MarketExpired { expiry, block_time } => write!(
+                f,
+                "market expired at {expiry} and the quote is for {block_time}; PT redeems through \
+                 the yield token from here, it does not trade"
+            ),
+            PendleError::MarketInsufficientPtForTrade { total_pt, required } => {
+                write!(f, "market holds {total_pt} PT but the trade needs {required}")
+            }
+            PendleError::MarketProportionTooHigh { proportion, max } => {
+                write!(f, "trade would take the PT proportion to {proportion}, past the {max} cap")
+            }
+            PendleError::MarketExchangeRateBelowOne { rate } => write!(
+                f,
+                "trade would put the exchange rate at {rate}, below par; PT cannot be priced above \
+                 its redemption value"
+            ),
+            PendleError::MarketZeroTotalPtOrTotalAsset { total_pt, total_asset } => {
+                write!(f, "market is empty: totalPt {total_pt}, totalAsset {total_asset}")
+            }
+            PendleError::MarketProportionMustNotEqualOne => {
+                write!(f, "a PT proportion of exactly one has no defined logit")
+            }
+            PendleError::MarketRateScalarBelowZero { rate_scalar } => {
+                write!(f, "rateScalar {rate_scalar} is not positive")
             }
         }
     }

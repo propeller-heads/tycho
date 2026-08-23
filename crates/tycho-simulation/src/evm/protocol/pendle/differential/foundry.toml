@@ -2,5 +2,8 @@
 test = "test"
 out = "out"
 libs = ["lib"]
+# The fixture rows concatenate every field of a market state, which exhausts the stack without it.
+via_ir = true
+optimizer = true
 # The fixtures the Rust tests assert against are written here.
 fs_permissions = [{ access = "read-write", path = "../tests/fixtures" }]
