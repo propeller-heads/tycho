@@ -1,0 +1,6 @@
+[profile.default]
+test = "test"
+out = "out"
+libs = ["lib"]
+# The fixtures the Rust tests assert against are written here.
+fs_permissions = [{ access = "read-write", path = "../tests/fixtures" }]

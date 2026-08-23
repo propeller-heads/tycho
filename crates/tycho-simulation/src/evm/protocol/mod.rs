@@ -13,6 +13,7 @@ pub mod fluid;
 pub mod lunarbase;
 pub mod native_wrapper;
 pub mod pancakeswap_v2;
+pub mod pendle;
 pub mod ramses_v3;
 pub mod ring_swap_v2;
 pub mod rocketpool;
