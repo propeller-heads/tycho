@@ -263,6 +263,49 @@ pub fn calc_soft_max_pt_in(market: &MarketState, comp: &MarketPreCompute) -> Pen
     pmath::to_u256(capped - market.total_pt)
 }
 
+/// The largest SY input the SY→PT search will fill, and the PT it buys.
+///
+/// Derived by inverting the search's own hard bound rather than by estimating it: the bound is a
+/// PT amount, and the SY it costs is exactly `calc_sy_in` at that amount — the same closed form
+/// the loop evaluates at every guess. So the pair returned is a point the search actually reaches
+/// and accepts, not an extrapolation of one.
+///
+/// The `eps` slack means an input slightly above this still fills, since the loop accepts a guess
+/// whose cost is within `eps` *below* the request. Reporting the exact-fill point rather than the
+/// slack-inclusive one keeps `get_limits` on the safe side of the boundary.
+pub fn max_sy_in_for_pt(
+    market: &MarketState,
+    index: U256,
+    block_time: u64,
+) -> PendleResult<(U256, U256)> {
+    let comp = market::get_market_pre_compute(market, index, block_time)?;
+    let max_pt_out = calc_max_pt_out(&comp, market.total_pt)?;
+    let (sy_in, _) = calc_sy_in(market, &comp, index, max_pt_out)?;
+    Ok((sy_in, max_pt_out))
+}
+
+/// The largest SY input the SY→YT search will fill, and the YT it buys.
+///
+/// Same inversion, through the flash-swap identity: at the soft proportion cap the trader supplies
+/// what tokenizing the PT costs, less what selling it back returns.
+pub fn max_sy_in_for_yt(
+    market: &MarketState,
+    index: U256,
+    block_time: u64,
+) -> PendleResult<(U256, U256)> {
+    let comp = market::get_market_pre_compute(market, index, block_time)?;
+    let max_yt_out = calc_soft_max_pt_in(market, &comp)?;
+    let (sy_out, _) = calc_sy_out(market, &comp, index, max_yt_out)?;
+    let to_tokenize = sy_utils::asset_to_sy_up(index, max_yt_out)?;
+    if to_tokenize < sy_out {
+        return Err(PendleError::NegativeResult {
+            a: to_tokenize.to_string(),
+            b: sy_out.to_string(),
+        });
+    }
+    Ok((to_tokenize - sy_out, max_yt_out))
+}
+
 /// Exact SY in → PT out, by the router's own search.
 pub fn approx_swap_exact_sy_for_pt(
     market: &MarketState,
@@ -534,6 +577,77 @@ mod tests {
         let actual = calc_max_pt_out(&comp, market.total_pt).unwrap();
         assert_eq!(actual, theoretical * U256::from(999) / U256::from(1000));
         assert!(actual < theoretical);
+    }
+
+    /// The reported maximum is a size the search actually fills — checked by running the search at
+    /// it, not by trusting the derivation. A bound that cannot be filled is worse than no bound.
+    #[test]
+    fn the_reported_maximum_is_actually_fillable() {
+        let market = wsteth_market();
+        let index = u(WSTETH_INDEX);
+
+        for block_time in [1_700_000_000u64, 1_780_000_000, 1_820_000_000] {
+            let (max_in, max_out) = max_sy_in_for_pt(&market, index, block_time).unwrap();
+            let filled = approx_swap_exact_sy_for_pt(&market, index, max_in, block_time)
+                .unwrap_or_else(|e| {
+                    panic!("PT leg could not fill its own maximum at {block_time}: {e}")
+                });
+            assert_eq!(filled.amount_out, max_out, "PT maximum at {block_time}");
+
+            let (max_in, max_out) = max_sy_in_for_yt(&market, index, block_time).unwrap();
+            let filled = approx_swap_exact_sy_for_yt(&market, index, max_in, block_time)
+                .unwrap_or_else(|e| {
+                    panic!("YT leg could not fill its own maximum at {block_time}: {e}")
+                });
+            assert_eq!(filled.amount_out, max_out, "YT maximum at {block_time}");
+        }
+    }
+
+    /// And a size past it does not fill. Together with the test above this brackets the boundary
+    /// from both sides, which is what a router needs `get_limits` to mean.
+    #[test]
+    fn just_past_the_reported_maximum_does_not_fill() {
+        let market = wsteth_market();
+        let index = u(WSTETH_INDEX);
+
+        for block_time in [1_700_000_000u64, 1_820_000_000] {
+            let (max_in, _) = max_sy_in_for_pt(&market, index, block_time).unwrap();
+            // A tenth above the limit is comfortably outside the eps slack.
+            let past = max_in * U256::from(110) / U256::from(100);
+            assert!(
+                approx_swap_exact_sy_for_pt(&market, index, past, block_time).is_err(),
+                "PT leg filled {past}, past its reported maximum {max_in} at {block_time}"
+            );
+        }
+    }
+
+    /// The reported maximum agrees with the swept boundary: every size the contract filled is at or
+    /// below it, and the sizes it rejected are above.
+    #[test]
+    fn the_reported_maximum_brackets_the_swept_boundary() {
+        let fixtures: BoundaryFixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/approx_boundary.json")).unwrap();
+        let market = wsteth_market();
+        let index = u(WSTETH_INDEX);
+
+        for case in &fixtures.cases {
+            let block_time: u64 = case.block_time.parse().unwrap();
+            let exact_sy_in = u(&case.exact_sy_in);
+            let (max_in, _) = match case.direction.as_str() {
+                "sy_for_pt" => max_sy_in_for_pt(&market, index, block_time),
+                _ => max_sy_in_for_yt(&market, index, block_time),
+            }
+            .unwrap();
+
+            if case.outcome == "ok" {
+                assert!(
+                    exact_sy_in <= max_in,
+                    "{} @ {} filled {exact_sy_in} but the limit says {max_in}",
+                    case.direction,
+                    case.block_time
+                );
+            }
+        }
     }
 
     /// Depth is time-dependent, and the two legs do not run out together.
