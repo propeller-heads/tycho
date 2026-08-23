@@ -303,6 +303,43 @@ fn a_deposit_only_token_still_prices() {
         .is_err());
 }
 
+/// Gas is charged per direction and per SY class, not per leg.
+///
+/// The exact-SY-in directions run the router's approximation loop on chain and cost meaningfully
+/// more than their exact-PT counterparts — 40% more for PT, 27% for YT, measured. Charging one
+/// figure to both directions would misprice the cheaper one badly enough to move routing decisions.
+#[test]
+fn gas_reflects_the_direction_and_the_wrap_class() {
+    let state = wsteth_market(1_700_000_000);
+    let amount = BigUint::from(1_000_000_000_000_000_000u64);
+
+    let gas = |a: &str, b: &str| {
+        state
+            .get_amount_out(amount.clone(), &token(a, 18), &token(b, 18))
+            .unwrap()
+            .gas
+    };
+
+    // Buying is dearer than selling on both legs.
+    assert!(gas(SY, PT) > gas(PT, SY));
+    assert!(gas(SY, YT) > gas(YT, SY));
+    // And the YT legs cost more than the PT legs, since they tokenize or redeem PY on top.
+    assert!(gas(SY, YT) > gas(SY, PT));
+    assert!(gas(YT, SY) > gas(PT, SY));
+
+    // A plain wrapper is the cheapest edge; reading through to a wrapped protocol is not.
+    let one_to_one = wsteth_sy()
+        .get_amount_out(amount.clone(), &token(WSTETH, 18), &token(SY, 18))
+        .unwrap()
+        .gas;
+    let index_rate = wsteth_sy()
+        .get_amount_out(amount.clone(), &token(STETH, 18), &token(SY, 18))
+        .unwrap()
+        .gas;
+    assert!(index_rate > one_to_one);
+    assert!(one_to_one < gas(PT, SY), "a wrap should be cheaper than a market swap");
+}
+
 /// Redeeming is capped by what the SY holds; depositing is not.
 ///
 /// The two directions of a wrap edge are not symmetric. An SY mints new shares against whatever it

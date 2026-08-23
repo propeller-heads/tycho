@@ -42,11 +42,40 @@ use super::math::{
 };
 use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64};
 
-/// Gas for a swap routed through Router V4. Measured from the PR 3 fork tests; the PT and YT legs
-/// differ because the YT legs tokenize or redeem PY on top of the market swap.
-const GAS_PT_LEG: u64 = 320_000;
-const GAS_YT_LEG: u64 = 440_000;
-const GAS_SY_WRAP: u64 = 180_000;
+/// Gas for a swap routed through Router V4.
+///
+/// Measured per edge on a mainnet fork at block 25 800 000 against the wstETH market, each edge in
+/// its own test on a fresh fork, then rounded up by roughly a tenth. The headroom is deliberate and
+/// asymmetric in its consequences: under-estimating makes a router pick a route that costs more
+/// than it was quoted, while over-estimating only makes Pendle look slightly worse than it is.
+///
+/// The two directions of a leg are **not** one number. Buying PT costs 40% more than selling it,
+/// and buying YT 27% more than selling it, because the exact-SY-in directions run the router's
+/// approximation loop on chain. Charging the dearer figure to both would misprice the cheaper
+/// direction badly enough to change routing decisions.
+///
+/// | Edge | Measured | Charged |
+/// |---|---|---|
+/// | SY to PT | 299,736 | 330,000 |
+/// | PT to SY | 214,123 | 235,000 |
+/// | SY to YT | 385,413 | 425,000 |
+/// | YT to SY | 304,325 | 335,000 |
+/// | wrap, `one_to_one` | 80,206 / 77,603 | 90,000 |
+const GAS_SY_FOR_PT: u64 = 330_000;
+const GAS_PT_FOR_SY: u64 = 235_000;
+const GAS_SY_FOR_YT: u64 = 425_000;
+const GAS_YT_FOR_SY: u64 = 335_000;
+
+/// A `one_to_one` wrap is the cheapest case there is: the SY takes the token and mints, and does
+/// nothing else.
+const GAS_WRAP_ONE_TO_ONE: u64 = 90_000;
+
+/// An `index_rate` wrap reads through to whatever protocol the SY wraps — an ERC-4626 vault, a
+/// staking contract — and costs whatever that costs. **No `index_rate` SY has been measured**, so
+/// this keeps the original conservative figure rather than extrapolating from the wrapper case.
+/// The class is known at quote time, so the two are charged separately instead of averaging a
+/// measured number with a guess.
+const GAS_WRAP_INDEX_RATE: u64 = 180_000;
 
 /// How an SY converts a given token, as classified at component creation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,8 +206,8 @@ impl PendleMarketState {
         to: MarketToken,
     ) -> Result<(U256, u64), PendleError> {
         match (from, to) {
-            (MarketToken::Pt, MarketToken::Sy) => Ok((self.pt_for_sy(amount_in)?, GAS_PT_LEG)),
-            (MarketToken::Yt, MarketToken::Sy) => Ok((self.yt_for_sy(amount_in)?, GAS_YT_LEG)),
+            (MarketToken::Pt, MarketToken::Sy) => Ok((self.pt_for_sy(amount_in)?, GAS_PT_FOR_SY)),
+            (MarketToken::Yt, MarketToken::Sy) => Ok((self.yt_for_sy(amount_in)?, GAS_YT_FOR_SY)),
             (MarketToken::Sy, MarketToken::Pt) => Ok((
                 approx::approx_swap_exact_sy_for_pt(
                     &self.market,
@@ -187,7 +216,7 @@ impl PendleMarketState {
                     self.block_timestamp,
                 )?
                 .amount_out,
-                GAS_PT_LEG,
+                GAS_SY_FOR_PT,
             )),
             (MarketToken::Sy, MarketToken::Yt) => Ok((
                 approx::approx_swap_exact_sy_for_yt(
@@ -197,7 +226,7 @@ impl PendleMarketState {
                     self.block_timestamp,
                 )?
                 .amount_out,
-                GAS_YT_LEG,
+                GAS_SY_FOR_YT,
             )),
             _ => unreachable!("unsupported pair is rejected before reaching here"),
         }
@@ -366,7 +395,11 @@ impl ProtocolSim for PendleState {
                     Direction::Deposit => token_in.decimals,
                     Direction::Redeem => token_out.decimals,
                 };
-                (state.convert(amount, class, direction, token_decimals)?, GAS_SY_WRAP)
+                let gas = match class {
+                    TokenClass::OneToOne => GAS_WRAP_ONE_TO_ONE,
+                    TokenClass::IndexRate => GAS_WRAP_INDEX_RATE,
+                };
+                (state.convert(amount, class, direction, token_decimals)?, gas)
             }
         };
 
