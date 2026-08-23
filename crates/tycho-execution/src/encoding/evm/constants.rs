@@ -126,6 +126,17 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set
 });
 
+/// Protocol system prefix carried by components sourced from the pAMM price level stream. The
+/// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
+/// auto-detected pAMMs, the venue address (e.g. `pricelevelstream:0x5979…`); every such protocol
+/// maps to the generic `PropAMMSwapEncoder`.
+pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
+
+/// The executor-config key serving the whole price-level-stream protocol family: any
+/// `pricelevelstream:{venue}` protocol without an exact entry of its own falls back to this one,
+/// so a single configured executor address covers every pAMM, including auto-detected ones.
+pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -77,7 +77,7 @@ ekubo_sdk = { version = "3", features = ["evm", "serde"] }
 evm_ekubo_sdk = { version = "0.6.5", features = ["serde"] }
 
 # rfq
-alloy-chains = "0.2.18"
+alloy-chains = "0.2.37"
 async-stream = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 hex-literal = { workspace = true }
@@ -108,8 +108,12 @@ tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
 
 [features]
-default = ["evm", "rfq"]
+default = ["evm", "rfq", "price-level-stream"]
 network_tests = []
+price-level-stream = [
+    "dep:async-stream",
+    "dep:tokio-tungstenite",
+]
 evm = [
     "dep:foundry-block-explorers",
     "dep:revm",

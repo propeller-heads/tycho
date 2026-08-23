@@ -92,14 +92,17 @@ any earlier split's calculation.
 
 <summary>Example Solution</summary>
 
-The following diagram shows a swap from ETH to DAI through USDC. ETH arrives in the router and is wrapped to WETH. The
-solution then splits between three (WETH, USDC) pools and finally swaps from USDC to DAI on one pool.
+The following diagram shows a swap from ETH to DAI through USDC. The first swap wraps ETH to WETH on the
+`native_wrapper` component. The solution then splits between three (WETH, USDC) pools and finally swaps from USDC to DAI
+on one pool.
 
 <figure><img src="../../../.gitbook/assets/split (1).svg" alt=""><figcaption><p>Diagram of an example solution</p></figcaption></figure>
 
 The `Solution` object for the given scenario would look as follows:
 
-<pre class="language-rust"><code class="lang-rust">swap_a = Swap::new(pool_a, weth_token.clone(), usdc_token.clone(), gas_a)
+<pre class="language-rust"><code class="lang-rust">swap_wrap = Swap::new(native_wrapper, eth_token, weth_token.clone(), gas_wrap);
+    // split defaults to 0 — wraps the full ETH amount
+swap_a = Swap::new(pool_a, weth_token.clone(), usdc_token.clone(), gas_a)
     .with_split(0.3); // 30% of WETH amount
 swap_b = Swap::new(pool_b, weth_token.clone(), usdc_token.clone(), gas_b)
     .with_split(0.3); // 30% of WETH amount
@@ -111,12 +114,12 @@ swap_d = Swap::new(pool_d, usdc_token, dai_token, gas_d);
 <strong>let solution = Solution::new(
 </strong>    user_address.clone(),
     user_address,
-    eth_address,       // token_in (ETH — encoder auto-wraps to WETH)
+    eth_address,       // token_in
     dai_address,       // token_out
     sell_amount,       // amount_in
     amount_out,        // quoted output, becomes expectedAmountOut
     min_amount_out,    // 0.25% below the quote, becomes minAmountOut
-    vec![swap_a, swap_b, swap_c, swap_d],
+    vec![swap_wrap, swap_a, swap_b, swap_c, swap_d],
 );
 </code></pre>
 
@@ -296,7 +299,12 @@ that surplus beyond your quote reaches the receiver. Amounts between `minAmountO
 
 #### Native Tokens <a href="#native-tokens" id="native-tokens"></a>
 
-The encoder automatically bridges ETH↔WETH gaps anywhere in the swap path — at the start, end, or between swaps — using a dedicated WETH executor. Set `token_in` and `token_out` to the tokens the user actually holds and expects to receive, and the encoder inserts wrap/unwrap steps as needed. This works with protocols like Uniswap V4 that accept native ETH directly, with no extra configuration required.
+ETH and WETH are separate tokens in a solution, and the encoder does not convert between them for you.
+Wherever your route goes from one to the other, add a swap on the `native_wrapper` protocol. The Tycho
+stream injects a `native_wrapper` component on every chain, so you route through it like through any
+other pool, and a dedicated WETH executor runs the swap.
+
+Your swaps must connect `token_in` to `token_out`, so a missing wrap swap is rejected at validation.
 
 #### Client Fee Signature <a href="#client-fee-signature" id="client-fee-signature"></a>
 

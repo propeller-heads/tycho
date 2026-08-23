@@ -517,3 +517,96 @@ fn test_evm_split_swap_strategy_with_fees() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_split_swap_strategy_with_fees", hex_calldata.as_str());
 }
+
+#[test]
+fn test_evm_split_swap_native_and_wrapped_branches() {
+    // A split solution with parallel WETH and ETH branches feeding the same output
+    // token. Swap 1 (unwrap, WETH -> ETH) sits immediately before swap 2 (WETH -> USDC),
+    // even though the two are unrelated parallel branches of the same WETH input, not a
+    // sequential chain. The encoder must not insert a wrap swap between them; the
+    // solution below is already complete and must encode/execute unchanged.
+    //
+    //         ┌──[40%]── unwrap to ETH ──(USV4)──> USDC
+    //   WETH ─┤
+    //         └──[rem]── (USV2) ─────────────────> USDC
+
+    let weth = weth();
+    let eth = eth();
+    let usdc = usdc();
+
+    // 40% of the WETH input, unwrapped to native ETH via the native_wrapper component.
+    let swap_weth_eth_unwrap = Swap::new(
+        ProtocolComponent { protocol_system: "native_wrapper".to_string(), ..Default::default() },
+        default_token(weth.clone()),
+        default_token(eth.clone()),
+        BigUint::ZERO,
+    )
+    .with_split(0.4f64);
+
+    // Remainder of the WETH input, swapped directly for USDC.
+    let swap_weth_usdc_v2 = Swap::new(
+        ProtocolComponent {
+            id: "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc".to_string(), // USDC-WETH USV2
+            protocol_system: "uniswap_v2".to_string(),
+            ..Default::default()
+        },
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+
+    let pool_fee_usdc_eth = Bytes::from(BigInt::from(3000).to_signed_bytes_be());
+    let tick_spacing_usdc_eth = Bytes::from(BigInt::from(60).to_signed_bytes_be());
+    let mut static_attributes_usdc_eth: HashMap<String, Bytes> = HashMap::new();
+    static_attributes_usdc_eth.insert("key_lp_fee".into(), pool_fee_usdc_eth);
+    static_attributes_usdc_eth.insert("tick_spacing".into(), tick_spacing_usdc_eth);
+
+    let swap_eth_usdc_v4 = Swap::new(
+        ProtocolComponent {
+            id: "0xdce6394339af00981949f5f3baf27e3610c76326a700af57e4b3e3ae4977f78d".to_string(),
+            protocol_system: "uniswap_v4".to_string(),
+            static_attributes: static_attributes_usdc_eth,
+            ..Default::default()
+        },
+        default_token(eth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        usdc,
+        BigUint::from_str("1_000000000000000000").unwrap(), // 1 WETH
+        BigUint::from_str("2019_058447").unwrap(),
+        BigUint::from_str("1978_677278").unwrap(), // 2% below expected
+        // Order matters: the unwrap must sit immediately before the WETH->USDC swap to
+        // reproduce the mismatched-adjacency bug described above.
+        vec![swap_weth_eth_unwrap, swap_weth_usdc_v2, swap_eth_usdc_v4],
+    )
+    .with_user_transfer_type(UserTransferType::TransferFromPermit2);
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth,
+        Some(get_signer()),
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_split_swap_native_and_wrapped_branches", hex_calldata.as_str());
+}

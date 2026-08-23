@@ -280,8 +280,8 @@ impl RFQClient for BebopClient {
 
         Box::pin(async_stream::stream! {
             let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
-            let mut reconnect_attempts = 0;
-            const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+            let mut consecutive_failures = 0;
+            const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
             loop {
                 let request = Request::builder()
@@ -300,19 +300,18 @@ impl RFQClient for BebopClient {
                 let (ws_stream, _) = match connect_async_with_config(request, None, false).await {
                     Ok(connection) => {
                         info!("Successfully connected to Bebop WebSocket");
-                        reconnect_attempts = 0; // Reset counter on successful connection
                         connection
                     },
                     Err(e) => {
-                        reconnect_attempts += 1;
-                        error!("Failed to connect to Bebop WebSocket (attempt {}): {}", reconnect_attempts, e);
+                        consecutive_failures += 1;
+                        error!("Failed to connect to Bebop WebSocket (consecutive failure {}): {}", consecutive_failures, e);
 
-                        if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                            yield Err(RFQError::ConnectionError(format!("Failed to connect after {MAX_RECONNECT_ATTEMPTS} attempts: {e}")));
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                            yield Err(RFQError::ConnectionError(format!("Failed to connect after {MAX_CONSECUTIVE_FAILURES} consecutive failures: {e}")));
                             return;
                         }
 
-                        let backoff_duration = Duration::from_secs(2_u64.pow(reconnect_attempts.min(5)));
+                        let backoff_duration = Duration::from_secs(2_u64.pow(consecutive_failures.min(5)));
                         info!("Retrying connection in {} seconds...", backoff_duration.as_secs());
                         sleep(backoff_duration).await;
                         continue;
@@ -327,6 +326,10 @@ impl RFQClient for BebopClient {
                         Ok(Message::Binary(data)) => {
                             match BebopPricingUpdate::decode(&data[..]) {
                                 Ok(protobuf_update) => {
+                                    // A completed handshake says nothing about whether the
+                                    // connection works, so only pricing data clears the counter.
+                                    consecutive_failures = 0;
+
                                     let mut new_components = HashMap::new();
 
                                     // Process all pairs directly from protobuf
@@ -418,8 +421,11 @@ impl RFQClient for BebopClient {
                                 }
                             }
                         }
-                        Ok(Message::Close(_)) => {
-                            info!("WebSocket connection closed by server");
+                        Ok(Message::Close(frame)) => {
+                            match frame {
+                                Some(frame) => warn!("WebSocket closed by server: {frame}"),
+                                None => warn!("WebSocket closed by server without a close frame"),
+                            }
                             break;
                         }
                         Err(e) => {
@@ -430,15 +436,16 @@ impl RFQClient for BebopClient {
                     }
                 }
 
-                // If we're here, the message loop exited - always attempt to reconnect
-                reconnect_attempts += 1;
-                if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                    yield Err(RFQError::ConnectionError(format!("Connection failed after {MAX_RECONNECT_ATTEMPTS} attempts")));
+                // If we're here, the message loop exited - always attempt to reconnect.
+                // Pricing data resets this, so it only grows while the feed stays unusable.
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    yield Err(RFQError::ConnectionError(format!("No pricing data received after {MAX_CONSECUTIVE_FAILURES} consecutive failures")));
                     return;
                 }
 
-                let backoff_duration = Duration::from_secs(2_u64.pow(reconnect_attempts.min(5)));
-                info!("Reconnecting in {} seconds (attempt {})...", backoff_duration.as_secs(), reconnect_attempts);
+                let backoff_duration = Duration::from_secs(2_u64.pow(consecutive_failures.min(5)));
+                info!("Reconnecting in {} seconds (consecutive failure {})...", backoff_duration.as_secs(), consecutive_failures);
                 sleep(backoff_duration).await;
                 // Continue to the next iteration of the main loop
             }
