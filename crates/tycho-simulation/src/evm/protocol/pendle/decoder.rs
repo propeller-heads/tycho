@@ -9,6 +9,7 @@
 
 use std::{collections::HashMap, str::FromStr};
 
+use alloy::primitives::U256;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
@@ -170,8 +171,19 @@ fn decode_sy(snapshot: ComponentWithState) -> Result<PendleSyState, InvalidSnaps
         )));
     }
 
+    // What the SY holds is what it can pay out when redeeming, so the balances are state the
+    // quote depends on, not bookkeeping.
+    let token_balances = snapshot
+        .state
+        .balances
+        .iter()
+        .map(|(token, balance)| (token.clone(), U256::from_be_slice(balance)))
+        .collect();
+
     Ok(PendleSyState {
         sy_address,
+        token_balances,
+        component_id: snapshot.component.id.clone(),
         exchange_rate,
         rate_stale,
         sy_decimals,

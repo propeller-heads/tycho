@@ -70,6 +70,12 @@ fn wsteth_sy() -> PendleState {
             (Bytes::from_str(WSTETH).unwrap(), TokenClass::OneToOne),
             (Bytes::from_str(STETH).unwrap(), TokenClass::IndexRate),
         ]),
+        // What the SY actually custodies, which is all it can redeem.
+        token_balances: HashMap::from([
+            (Bytes::from_str(WSTETH).unwrap(), u("546768952998816380")),
+            (Bytes::from_str(STETH).unwrap(), u("4")),
+        ]),
+        component_id: SY.to_string(),
     })
 }
 
@@ -83,6 +89,8 @@ fn reusd_sy() -> PendleState {
         asset_decimals: 6,
         tokens_in: HashMap::from([(Bytes::from_str(STETH).unwrap(), TokenClass::IndexRate)]),
         tokens_out: HashMap::from([(Bytes::from_str(STETH).unwrap(), TokenClass::IndexRate)]),
+        token_balances: HashMap::new(),
+        component_id: SY.to_string(),
     })
 }
 
@@ -293,6 +301,35 @@ fn a_deposit_only_token_still_prices() {
     assert!(state
         .get_amount_out(BigUint::from(1_000_000_000_000_000_000u64), &sy, &weth)
         .is_err());
+}
+
+/// Redeeming is capped by what the SY holds; depositing is not.
+///
+/// The two directions of a wrap edge are not symmetric. An SY mints new shares against whatever it
+/// forwards on, so a deposit has no reserve to exhaust — but it can only pay out what it has. The
+/// wstETH SY holds 4 wei of stETH at the indexed block, and that is the whole redeem depth.
+#[test]
+fn redeeming_is_bounded_by_holdings_and_depositing_is_not() {
+    let sy = Bytes::from_str(SY).unwrap();
+    let wsteth = Bytes::from_str(WSTETH).unwrap();
+    let steth = Bytes::from_str(STETH).unwrap();
+
+    let (_, redeem_out) = wsteth_sy()
+        .get_limits(sy.clone(), steth.clone())
+        .unwrap();
+    assert_eq!(redeem_out, BigUint::from(4u32), "redeem depth is the SY's own stETH balance");
+
+    let (_, wsteth_out) = wsteth_sy()
+        .get_limits(sy.clone(), wsteth.clone())
+        .unwrap();
+    assert_eq!(wsteth_out, BigUint::from(546_768_952_998_816_380u64));
+
+    // Depositing is unbounded, and reported as the soft limit rather than a U256 sentinel that
+    // would overflow the first multiplication a router did with it.
+    let (deposit_in, _) = wsteth_sy()
+        .get_limits(wsteth, sy)
+        .unwrap();
+    assert_eq!(deposit_in, BigUint::from(u128::MAX));
 }
 
 /// The reported maximum is quotable, and past it the quote fails rather than returning a number the

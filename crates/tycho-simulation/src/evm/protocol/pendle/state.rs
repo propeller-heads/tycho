@@ -96,6 +96,11 @@ pub struct PendleSyState {
     pub tokens_in: HashMap<Bytes, TokenClass>,
     /// Exit tokens and how each converts.
     pub tokens_out: HashMap<Bytes, TokenClass>,
+    /// What the SY actually holds, per token, as of the indexed block. Redeeming cannot pay out
+    /// more than this; depositing is not bounded by it, since the SY mints new shares.
+    pub token_balances: HashMap<Bytes, U256>,
+    /// This component's id, used to find its own balances in a delta.
+    pub component_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,17 +438,21 @@ impl ProtocolSim for PendleState {
                 let Some((class, direction)) = state.class(&sell_token, &buy_token) else {
                     return Ok(no_depth());
                 };
-                // Wrapping is a constant-rate edge with no reserve behind it, so there is no
-                // protocol-imposed cap to report. `U256::MAX` would overflow the conversion, so
-                // the bound is the largest input whose output still fits.
-                let max_in = state.max_wrappable(class, direction)?;
-                let token_decimals = match direction {
-                    // Only used to rescale, and both sides are already in raw units here.
-                    Direction::Deposit => state.sy_decimals,
-                    Direction::Redeem => state.sy_decimals,
-                };
-                let max_out = state.convert(max_in, class, direction, token_decimals)?;
-                Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
+                // Redeeming is capped by what the SY holds of the token being paid out, so that
+                // bound lives on the output side and is converted back into an input amount.
+                // Depositing has no reserve behind it at all.
+                match direction {
+                    Direction::Deposit => {
+                        let max_in = unbounded_soft_limit();
+                        let max_out = state.convert(max_in, class, direction, state.sy_decimals)?;
+                        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
+                    }
+                    Direction::Redeem => {
+                        let max_out = state.held(&buy_token);
+                        let max_in = state.sy_for_exit(max_out, class, state.sy_decimals)?;
+                        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
+                    }
+                }
             }
         }
     }
@@ -452,11 +461,25 @@ impl ProtocolSim for PendleState {
         &mut self,
         delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
-        _balances: &Balances,
+        balances: &Balances,
     ) -> Result<(), TransitionError> {
         match self {
             PendleState::Market(state) => state.apply(&delta),
-            PendleState::Sy(state) => state.apply(&delta),
+            PendleState::Sy(state) => {
+                // The SY's redeem depth is its own holdings, so balance updates matter as much as
+                // attribute ones here.
+                if let Some(held) = balances
+                    .component_balances
+                    .get(&state.component_id)
+                {
+                    for (token, balance) in held {
+                        state
+                            .token_balances
+                            .insert(token.clone(), U256::from_be_slice(balance));
+                    }
+                }
+                state.apply(&delta)
+            }
         }
     }
 
@@ -504,21 +527,32 @@ impl PendleMarketState {
 }
 
 impl PendleSyState {
-    /// The largest input whose conversion still fits in 256 bits.
+    /// What the SY holds of `token`, which is all it can pay out when redeeming.
     ///
-    /// The wrap edges have no reserve, so there is no protocol cap to report — but the trait wants
-    /// a number, and an unbounded sentinel would overflow the first multiplication a caller made
-    /// with it.
-    fn max_wrappable(&self, class: TokenClass, direction: Direction) -> Result<U256, PendleError> {
-        let divisor = match (class, direction) {
-            (TokenClass::IndexRate, Direction::Deposit) => pmath::one(),
-            (TokenClass::IndexRate, Direction::Redeem) => self.exchange_rate,
-            (TokenClass::OneToOne, _) => U256::from(1),
-        };
-        if divisor.is_zero() {
-            return Err(PendleError::DivisionByZero { operation: "max_wrappable" });
+    /// An unknown balance falls back to the soft limit rather than to zero: reporting no depth for
+    /// a token the SY genuinely wraps would hide a real edge, whereas an optimistic bound only
+    /// costs a failed quote at the top of the range.
+    fn held(&self, token: &Bytes) -> U256 {
+        self.token_balances
+            .get(token)
+            .copied()
+            .unwrap_or_else(unbounded_soft_limit)
+    }
+
+    /// How much SY it takes to redeem `exit_amount` of an exit token — the inverse of `convert`.
+    fn sy_for_exit(
+        &self,
+        exit_amount: U256,
+        class: TokenClass,
+        token_decimals: u32,
+    ) -> Result<U256, PendleError> {
+        match class {
+            TokenClass::OneToOne => rescale(exit_amount, token_decimals, self.sy_decimals),
+            TokenClass::IndexRate => {
+                let as_asset = rescale(exit_amount, token_decimals, self.asset_decimals)?;
+                sy_utils::asset_to_sy(self.exchange_rate, as_asset)
+            }
         }
-        Ok(U256::MAX / divisor.max(U256::from(1)))
     }
 }
 
@@ -542,6 +576,13 @@ fn unquotable_pair(token_in: &Token, token_out: &Token) -> SimulationError {
          no closed form is known",
         token_in.address, token_out.address
     ))
+}
+
+/// The soft limit this repo uses for an edge with no reserve behind it, matching
+/// `native_wrapper`. Large enough not to constrain any real trade, small enough that a caller can
+/// multiply by it without overflowing.
+fn unbounded_soft_limit() -> U256 {
+    U256::from(u128::MAX)
 }
 
 /// What `get_limits` reports for a pair this component cannot trade.
