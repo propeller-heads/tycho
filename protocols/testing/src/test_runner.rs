@@ -1178,6 +1178,12 @@ impl TestRunner {
                 .map(|perm| (perm[0], perm[1]))
                 .collect();
 
+            // A component need not be a complete graph over its tokens. Pendle markets hold SY, PT
+            // and YT but PT against YT is not a swap; an SY's entry and exit token lists are not
+            // even the same set. Those pairs report zero depth, which is an answer, not a fault —
+            // so they are skipped here and the component is judged on whether *any* pair traded.
+            let mut simulated_any_direction = false;
+
             for (token_in, token_out) in &swap_directions {
                 let (max_input, max_output) = state
                     .get_limits(token_in.address.clone(), token_out.address.clone())
@@ -1198,12 +1204,17 @@ impl TestRunner {
                     let thousand = BigUint::from(1000u32);
                     let amount_in = (&max_input * &percentage_biguint) / &thousand;
 
-                    // Skip if amount is zero
+                    // Zero depth means this direction is not tradeable. Skip it rather than
+                    // failing: the check that a component is not silently untested lives after the
+                    // loop, where it can tell "this pair is not an edge" from "nothing works".
                     if amount_in.is_zero() {
-                        return Err(miette!(
-                                "Amount in multiplied by percentage {percentage} is zero for pool {id}."
-                            ));
+                        debug!(
+                            "[{id}] No depth for {} -> {}, skipping",
+                            token_in.symbol, token_out.symbol
+                        );
+                        continue;
                     }
+                    simulated_any_direction = true;
 
                     let amount_out_result = state
                             .get_amount_out(amount_in.clone(), token_in, token_out)
@@ -1268,6 +1279,18 @@ impl TestRunner {
                         },
                     );
                 }
+            }
+
+            // The guard the zero-amount error used to provide: an integration that reports no
+            // depth anywhere would otherwise pass this suite having simulated nothing at all.
+            // Judged per component rather than per pair, so a protocol whose components are not
+            // complete graphs is still held to having *something* tradeable.
+            if !simulated_any_direction {
+                return Err(miette!(
+                    "Component {id} reported zero depth in every direction, so nothing was \
+                     simulated. Either get_limits is wrong or the component should be filtered \
+                     out of the stream."
+                ));
             }
         }
 
