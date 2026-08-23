@@ -37,7 +37,7 @@ fn percentage_decimals() -> I256 {
 }
 
 /// The market's tradeable state, in the contract's own units.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MarketState {
     /// PT reserve, in asset units.
     pub total_pt: I256,

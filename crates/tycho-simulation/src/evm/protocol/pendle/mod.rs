@@ -4,4 +4,7 @@
 //! AMM) and `pendle_sy` (the ERC-5115 wrapper). See `NOTICE.md` for the provenance of the ported
 //! math.
 
+mod decoder;
+mod errors;
 pub mod math;
+pub mod state;
