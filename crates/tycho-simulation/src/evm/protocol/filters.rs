@@ -178,44 +178,26 @@ fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
     })
 }
 
-/// Drops Pendle components that cannot be quoted.
+/// Drops Pendle SY components with no quotable conversion in either direction.
 ///
-/// An expired market never trades again, and an SY the indexer could not classify in either
-/// direction contributes no wrap edges. Both would otherwise be decoded and then fail on every
-/// call, which is noise rather than information.
+/// An SY the indexer could not classify contributes no wrap edges at all, so it would decode and
+/// then fail on every call. Whether a token is quotable is fixed at component creation, which is
+/// what makes it a filter rather than a runtime check.
+///
+/// Expired markets are deliberately **not** filtered here. Expiry is state, not configuration: it
+/// depends on the block being quoted, and a filter only sees the component. Testing it against
+/// wall-clock time would drop live markets during a historical replay and keep dead ones in a
+/// snapshot of the past. `PendleState` handles it instead — every edge errors and `get_limits`
+/// reports zero depth once `block_timestamp >= expiry`.
 pub fn pendle_filter(component: &ComponentWithState) -> bool {
-    match component
-        .component
-        .protocol_type_name
-        .as_str()
-    {
-        "pendle_market" => {
-            let Some(expiry) = component
-                .component
-                .static_attributes
-                .get("expiry")
-            else {
-                return false;
-            };
-            let expiry = expiry.iter().fold(0u64, |acc, byte| {
-                acc.saturating_mul(256)
-                    .saturating_add(*byte as u64)
-            });
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs())
-                .unwrap_or(0);
-            expiry > now
-        }
-        "pendle_sy" => component
-            .component
-            .static_attributes
-            .keys()
-            .any(|name| {
-                name.starts_with("token_in_class_") || name.starts_with("token_out_class_")
-            }),
-        _ => true,
+    if component.component.protocol_type_name != "pendle_sy" {
+        return true;
     }
+    component
+        .component
+        .static_attributes
+        .keys()
+        .any(|name| name.starts_with("token_in_class_") || name.starts_with("token_out_class_"))
 }
 
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
