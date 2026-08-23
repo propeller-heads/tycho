@@ -197,6 +197,58 @@ fn each_direction_reports_its_own_depth() {
     assert!(yt_for_sy > BigUint::from(0u32));
 }
 
+/// Enumerating a component's pairs is a question, not a request. A pair the component does not
+/// trade reports zero depth; only an actual swap request is wrong enough to fail.
+///
+/// The integration test walks every pair of a component's three tokens, PT↔YT included, and an
+/// error there fails the whole run.
+#[test]
+fn an_untradeable_pair_reports_no_depth_rather_than_failing() {
+    let state = wsteth_market(1_700_000_000);
+    let pt = Bytes::from_str(PT).unwrap();
+    let yt = Bytes::from_str(YT).unwrap();
+    let stranger = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+    let zero = (BigUint::from(0u32), BigUint::from(0u32));
+
+    assert_eq!(
+        state
+            .get_limits(pt.clone(), yt.clone())
+            .unwrap(),
+        zero
+    );
+    assert_eq!(
+        state
+            .get_limits(yt.clone(), pt.clone())
+            .unwrap(),
+        zero
+    );
+    assert_eq!(
+        state
+            .get_limits(pt.clone(), pt.clone())
+            .unwrap(),
+        zero
+    );
+    assert_eq!(
+        state
+            .get_limits(stranger, pt.clone())
+            .unwrap(),
+        zero
+    );
+
+    // But a swap request for the same pair still refuses, loudly.
+    assert!(state
+        .get_amount_out(BigUint::from(1_000_000_000_000_000_000u64), &token(PT, 18), &token(YT, 18))
+        .is_err());
+
+    // The SY component answers the same way for a token it does not wrap.
+    assert_eq!(
+        wsteth_sy()
+            .get_limits(Bytes::from_str(WSTETH).unwrap(), Bytes::from_str(PT).unwrap())
+            .unwrap(),
+        zero
+    );
+}
+
 /// The reported maximum is quotable, and past it the quote fails rather than returning a number the
 /// swap would revert on.
 #[test]

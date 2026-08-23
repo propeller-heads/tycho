@@ -371,6 +371,11 @@ impl ProtocolSim for PendleState {
     /// legs by the same cap mapped through the flash-swap identity. The SY→PT and SY→YT bounds are
     /// obtained by inverting the router's own search bound, so the reported input is one the search
     /// actually fills.
+    ///
+    /// A pair this component does not trade — PT against YT, or a token that is not one of its
+    /// three — reports **zero depth rather than an error**. A caller enumerating the pairs of a
+    /// component is asking a question, and "none" is the answer; only an actual swap request is
+    /// wrong enough to fail. The integration test enumerates every pair, PT↔YT included.
     fn get_limits(
         &self,
         sell_token: Bytes,
@@ -380,14 +385,12 @@ impl ProtocolSim for PendleState {
             PendleState::Market(state) => {
                 if state.expired() {
                     // Dead, not merely empty. Zero depth in both directions.
-                    return Ok((BigUint::from(0u32), BigUint::from(0u32)));
+                    return Ok(no_depth());
                 }
-                let from = state
-                    .role(&sell_token)
-                    .ok_or_else(|| unknown_limit_pair(&sell_token, &buy_token))?;
-                let to = state
-                    .role(&buy_token)
-                    .ok_or_else(|| unknown_limit_pair(&sell_token, &buy_token))?;
+                let (Some(from), Some(to)) = (state.role(&sell_token), state.role(&buy_token))
+                else {
+                    return Ok(no_depth());
+                };
 
                 let (max_in, max_out) = match (from, to) {
                     (MarketToken::Sy, MarketToken::Pt) => approx::max_sy_in_for_pt(
@@ -413,14 +416,15 @@ impl ProtocolSim for PendleState {
                         let max_yt_in = state.max_pt_out()?;
                         (max_yt_in, state.yt_for_sy(max_yt_in)?)
                     }
-                    _ => return Err(unknown_limit_pair(&sell_token, &buy_token)),
+                    // PT against YT, or either against itself: not an edge of this market.
+                    _ => return Ok(no_depth()),
                 };
                 Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
             }
             PendleState::Sy(state) => {
-                let (class, direction) = state
-                    .class(&sell_token, &buy_token)
-                    .ok_or_else(|| unknown_limit_pair(&sell_token, &buy_token))?;
+                let Some((class, direction)) = state.class(&sell_token, &buy_token) else {
+                    return Ok(no_depth());
+                };
                 // Wrapping is a constant-rate edge with no reserve behind it, so there is no
                 // protocol-imposed cap to report. `U256::MAX` would overflow the conversion, so
                 // the bound is the largest input whose output still fits.
@@ -532,8 +536,9 @@ fn unquotable_pair(token_in: &Token, token_out: &Token) -> SimulationError {
     ))
 }
 
-fn unknown_limit_pair(sell: &Bytes, buy: &Bytes) -> SimulationError {
-    SimulationError::FatalError(format!("{sell} -> {buy} is not an edge of this Pendle component"))
+/// What `get_limits` reports for a pair this component cannot trade.
+fn no_depth() -> (BigUint, BigUint) {
+    (BigUint::from(0u32), BigUint::from(0u32))
 }
 
 /// Reads an attribute as a big-endian unsigned integer.
