@@ -6,15 +6,20 @@ protocol_type_names:
   - "pendle_market"
   - "pendle_sy"
 protocol_system: "pendle"
+# Each test is packed with every module's `initialBlock` rewritten to that test's `start_block`
+# (`protocols/testing/src/utils.rs:229`), so a range is self-contained: `store_market_registry` and
+# `store_protocol_components` both start empty at `start_block`. That is what makes a range away
+# from the package's own `initialBlock` safe — `map_protocol_changes` republishes state for every
+# live market it finds in the registry, and the registry only ever holds markets the range itself
+# created, so it can never emit state for a component this test's fresh database has not seen.
+#
+# Two ranges, because Pendle has two incompatible factory generations and each is only reachable in
+# its own era: the original factory in 2022, the current one in 2026.
 tests:
-  # The range starts at the package's initialBlock rather than at the swaps, and it has to.
-  # map_protocol_changes republishes the PY index, the clock and the SY balances for every live
-  # market on every refresh block, reading the live set from store_market_registry — and that store
-  # is prepared from initialBlock regardless of where the test range starts. A range that began
-  # after the creations would therefore emit state for components this test's fresh database never
-  # saw created, which the indexing docs call an error.
+  # The original factory (`0x27b1dacd…`), whose `CreateNewMarket` carries no `lnFeeRateRoot` and
+  # whose fee config is keyed by router alone.
   #
-  # 16032059 is the original factory's deployment block; the first four markets are created between
+  # 16032059 is that factory's deployment block; the first four markets are created between
   # 16032202 and 16032230. Pendle's first mainnet swap is at 16067529, and by 16072689 four
   # separate markets have traded, which is what makes the upper bound worth reaching.
   - name: test_market_creation_and_swaps
@@ -105,5 +110,105 @@ tests:
           token_out_class_0xae7ab96520de3a18e5e111b5eaab095312d7fe84: "0x696e6465785f72617465"
           token_out_class_0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0: "0x6f6e655f746f5f6f6e65"
         creation_tx: "0x952d4c25142e16032afd36d6be525aeed374517ec0942a7e879221db6ef3e032"
+        skip_simulation: true
+        skip_execution: true
+
+  # The current factory (`0x6d247b1c…`, generation V6), whose `CreateNewMarket` carries a real
+  # `lnFeeRateRoot` and whose fee overrides are keyed by (market, router). Nothing about that
+  # generation is reachable from the 2022 range, and it is where new liquidity appears.
+  #
+  # The window opens just before the first of four V6 creations (25722461, 25732091, 25739771,
+  # 25745800) and closes after both listed markets have traded: `0x47ad2cd1…` from block 25734488
+  # onwards, `0x1f34887b…` at 25752719 and 25754469.
+  #
+  # Every value below is re-derived from chain by `scripts/expected_components.py`, which reads
+  # the creation log and the SY at the creation block exactly as `map_market_components` does.
+  - name: test_v6_market_creation_and_swaps
+    start_block: 25722400
+    stop_block: 25755000
+    expected_components:
+      # sUSDe market, expiring 22 Dec 2026. `ln_fee_rate_root_at_creation` is non-zero here — the
+      # field the original factory's event does not carry at all, so this is the only fixture that
+      # pins the V3+ event layout.
+      - id: "0x47ad2cd1dd15739a7a035b9d3b7828d916fef77e"
+        tokens:
+          - "0xbf98480425a29197e5d99d003017f63a1e595d02" # SY-sUSDe
+          - "0xb195b618ea52b77cb2a58846f452f59f8dfa9390" # PT
+          - "0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44" # YT
+        static_attributes:
+          scalar_root: "0x031f51c83cacb8954e"
+          initial_anchor: "0x0e27e0ab4a78ef42"
+          expiry: "0x6b077680"
+          factory: "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f"
+          ln_fee_rate_root_at_creation: "0x0f98ff9ef0555e"
+          sy_address: "0xbf98480425a29197e5d99d003017f63a1e595d02"
+          pt_address: "0xb195b618ea52b77cb2a58846f452f59f8dfa9390"
+          yt_address: "0x89e6e5f7c3a60e7d6347f054051a29a272f4ce44"
+          sy_decimals: "0x12"
+          asset_decimals: "0x12"
+        creation_tx: "0xdd5bb2843b595874435f1355050d543c35da13b4fbd9c4aeccc74256edba725e"
+        skip_simulation: true
+        skip_execution: true
+
+      # SY-sUSDe: it takes its accounting asset USDe at the index rate and sUSDe itself 1:1, but
+      # redeems only to sUSDe — an SY whose entry and exit sets differ, which neither 2022 fixture
+      # exercises.
+      - id: "0xbf98480425a29197e5d99d003017f63a1e595d02"
+        tokens:
+          - "0xbf98480425a29197e5d99d003017f63a1e595d02" # SY
+          - "0x4c9edd5852cd905f086c759e8383e09bff1e68b3" # USDe, the accounting asset
+          - "0x9d39a5de30e57443bff2a8307a4256c8797a3497" # sUSDe
+        static_attributes:
+          asset_address: "0x4c9edd5852cd905f086c759e8383e09bff1e68b3"
+          asset_decimals: "0x12"
+          sy_decimals: "0x12"
+          token_in_class_0x4c9edd5852cd905f086c759e8383e09bff1e68b3: "0x696e6465785f72617465"
+          token_in_class_0x9d39a5de30e57443bff2a8307a4256c8797a3497: "0x6f6e655f746f5f6f6e65"
+          token_out_class_0x9d39a5de30e57443bff2a8307a4256c8797a3497: "0x6f6e655f746f5f6f6e65"
+        creation_tx: "0xdd5bb2843b595874435f1355050d543c35da13b4fbd9c4aeccc74256edba725e"
+        skip_simulation: true
+        skip_execution: true
+
+      # A second V6 market that also trades in range, on a different SY.
+      - id: "0x1f34887b270bfaf56cf7973572654874c8ed740e"
+        tokens:
+          - "0x9f30507c264cc6eb5be35b18ff9ad7b4539aa920" # SY
+          - "0xe3cdf5b8d7aedfc9f768dbdcc334146fae989188" # PT
+          - "0x30aa5125e9f3d958911b180e1bbc83d7086e6a7e" # YT
+        static_attributes:
+          scalar_root: "0x02b12767a9e7d65290"
+          initial_anchor: "0x0e1d4a337b4859ae"
+          expiry: "0x6ad95200"
+          factory: "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f"
+          ln_fee_rate_root_at_creation: "0x13d6f6647fd546"
+          sy_address: "0x9f30507c264cc6eb5be35b18ff9ad7b4539aa920"
+          pt_address: "0xe3cdf5b8d7aedfc9f768dbdcc334146fae989188"
+          yt_address: "0x30aa5125e9f3d958911b180e1bbc83d7086e6a7e"
+          sy_decimals: "0x12"
+          asset_decimals: "0x12"
+        creation_tx: "0x35c6a24f0c9214a3809d03b539eec5ad314617c5c812c1a53750bb13e1a45131"
+        skip_simulation: true
+        skip_execution: true
+
+      # This SY is the decimal-gap case the 2022 fixtures cannot produce: it quotes USDC, which
+      # has 6 decimals, against an 18-decimal SY and an 18-decimal accounting asset. A conversion
+      # that dropped the rescale would still look right on every 18/18 component above.
+      - id: "0x9f30507c264cc6eb5be35b18ff9ad7b4539aa920"
+        tokens:
+          - "0x9f30507c264cc6eb5be35b18ff9ad7b4539aa920" # SY
+          - "0x48f9e38f3070ad8945dfeae3fa70987722e3d89c" # the accounting asset
+          - "0xdbdc1ef57537e34680b898e1febd3d68c7389bcb"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC, 6 decimals
+        static_attributes:
+          asset_address: "0x48f9e38f3070ad8945dfeae3fa70987722e3d89c"
+          asset_decimals: "0x12"
+          sy_decimals: "0x12"
+          token_in_class_0x48f9e38f3070ad8945dfeae3fa70987722e3d89c: "0x696e6465785f72617465"
+          token_in_class_0xdbdc1ef57537e34680b898e1febd3d68c7389bcb: "0x6f6e655f746f5f6f6e65"
+          token_in_class_0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48: "0x696e6465785f72617465"
+          token_out_class_0x48f9e38f3070ad8945dfeae3fa70987722e3d89c: "0x696e6465785f72617465"
+          token_out_class_0xdbdc1ef57537e34680b898e1febd3d68c7389bcb: "0x6f6e655f746f5f6f6e65"
+          token_out_class_0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48: "0x696e6465785f72617465"
+        creation_tx: "0x35c6a24f0c9214a3809d03b539eec5ad314617c5c812c1a53750bb13e1a45131"
         skip_simulation: true
         skip_execution: true

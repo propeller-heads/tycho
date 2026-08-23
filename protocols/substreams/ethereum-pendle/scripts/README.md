@@ -48,3 +48,19 @@ against each `getTokensOut` entry, classifying each `(SY, token)` pair as `one_t
 `index_rate` or `other` — the same three-way decision `src/sy.rs` makes at component creation.
 
 Writes `redeem_classes.json` and prints the class histogram quoted in the PR.
+
+## `expected_components.py <market> <creation_block>`
+
+Regenerates one market's block of `integration_test.tycho.yaml` from chain, so the fixture is
+reproducible rather than something a reviewer has to take on trust. Reads the factory's
+`CreateNewMarket` log for `scalar_root` / `initial_anchor` / `ln_fee_rate_root_at_creation` (both
+event layouts), the market's `readTokens` and `expiry`, and the SY's decimals, asset and token
+lists — every call at the creation block, which is the block the Substreams `eth_call`s run at.
+Each `getTokensIn` / `getTokensOut` entry is then classified from a one-unit probe by the same
+rule as `src/sy.rs`, tolerance included.
+
+Checked against the committed 2022 fixture, which it reproduces field for field:
+
+```
+$ python3 expected_components.py 0x7b246b8dbc2a640bf2d8221890cee8327fc23917 16032202
+```
