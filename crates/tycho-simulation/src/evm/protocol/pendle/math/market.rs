@@ -28,7 +28,7 @@ use super::{
 const IMPLIED_RATE_TIME: u64 = 365 * 86_400;
 
 /// The proportion cap: PT may not exceed 96% of the pool, measured in asset units.
-fn max_market_proportion() -> I256 {
+pub fn max_market_proportion() -> I256 {
     i_one() * I256::try_from(96).unwrap() / I256::try_from(100).unwrap()
 }
 
@@ -108,7 +108,7 @@ pub fn get_market_pre_compute(
         rate_scalar,
         time_to_expiry,
     )?;
-    let fee_rate = get_exchange_rate_from_implied_rate(market.ln_fee_rate_root, time_to_expiry)?;
+    let fee_rate = exchange_rate_from_implied_rate(market.ln_fee_rate_root, time_to_expiry)?;
 
     Ok(MarketPreCompute { rate_scalar, total_asset, rate_anchor, fee_rate })
 }
@@ -208,8 +208,7 @@ fn get_rate_anchor(
     rate_scalar: I256,
     time_to_expiry: u64,
 ) -> PendleResult<I256> {
-    let new_exchange_rate =
-        get_exchange_rate_from_implied_rate(last_ln_implied_rate, time_to_expiry)?;
+    let new_exchange_rate = exchange_rate_from_implied_rate(last_ln_implied_rate, time_to_expiry)?;
     if new_exchange_rate < i_one() {
         return Err(PendleError::MarketExchangeRateBelowOne { rate: new_exchange_rate.to_string() });
     }
@@ -239,8 +238,8 @@ pub fn get_ln_implied_rate(
     Ok(scaled / U256::from(time_to_expiry))
 }
 
-/// `E = e^(r·t)`.
-fn get_exchange_rate_from_implied_rate(
+/// `E = e^(r·t)`. Public because the router's estimator needs the same conversion.
+pub fn exchange_rate_from_implied_rate(
     ln_implied_rate: U256,
     time_to_expiry: u64,
 ) -> PendleResult<I256> {

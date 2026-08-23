@@ -116,6 +116,48 @@ pub fn to_u256(x: I256) -> PendleResult<U256> {
     Ok(x.into_raw())
 }
 
+/// `a * (1 + factor)`.
+pub fn tweak_up(a: U256, factor: U256) -> PendleResult<U256> {
+    mul_down(a, one() + factor)
+}
+
+/// `a * (1 - factor)`.
+pub fn tweak_down(a: U256, factor: U256) -> PendleResult<U256> {
+    mul_down(a, one() - factor)
+}
+
+pub fn clamp(x: U256, lower: U256, upper: U256) -> U256 {
+    if x < lower {
+        lower
+    } else if x > upper {
+        upper
+    } else {
+        x
+    }
+}
+
+/// `min(a + b, bound)`, saturating rather than overflowing.
+pub fn add_with_upper_bound(a: U256, b: U256, bound: U256) -> U256 {
+    match a.checked_add(b) {
+        Some(sum) => sum.min(bound),
+        None => bound,
+    }
+}
+
+/// `max(a - b, bound)`, flooring rather than underflowing.
+pub fn sub_with_lower_bound(a: U256, b: U256, bound: U256) -> U256 {
+    if b > a {
+        bound
+    } else {
+        (a - b).max(bound)
+    }
+}
+
+/// `a >= b * (1 - eps) && a <= b * (1 + eps)`: the two-sided acceptance test.
+pub fn is_a_approx_b(a: U256, b: U256, eps: U256) -> PendleResult<bool> {
+    Ok(mul_down(b, one() - eps)? <= a && a <= mul_down(b, one() + eps)?)
+}
+
 /// `a <= b && a >= b * (1 - eps)`: the acceptance test the router's approximation loop uses.
 pub fn is_a_smaller_approx_b(a: U256, b: U256, eps: U256) -> PendleResult<bool> {
     Ok(a <= b && a >= mul_down(b, one() - eps)?)

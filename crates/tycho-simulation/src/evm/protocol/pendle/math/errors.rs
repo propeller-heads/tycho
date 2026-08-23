@@ -39,6 +39,17 @@ pub enum PendleError {
     MarketProportionMustNotEqualOne,
     /// `rateScalar` at or below zero, which only happens past expiry.
     MarketRateScalarBelowZero { rate_scalar: String },
+
+    // The router's approximation, which is what actually executes the exact-SY-in directions.
+    /// The search ran its whole budget without landing inside `eps`.
+    ApproxExhausted { iterations: usize },
+    /// The search walked down to its hard lower bound and still needed less.
+    ApproxRangeUnderflow,
+    /// The search walked up to its hard upper bound and still needed more — the trade is past
+    /// what the market can absorb.
+    ApproxRangeOverflow,
+    /// The search range inverted, which means the bounds were built wrong.
+    ApproxInvalidBounds { lower: String, upper: String },
 }
 
 impl fmt::Display for PendleError {
@@ -88,6 +99,24 @@ impl fmt::Display for PendleError {
             }
             PendleError::MarketRateScalarBelowZero { rate_scalar } => {
                 write!(f, "rateScalar {rate_scalar} is not positive")
+            }
+            PendleError::ApproxExhausted { iterations } => write!(
+                f,
+                "the approximation did not converge within {iterations} iterations; the contract \
+                 reverts with \"Slippage: APPROX_EXHAUSTED\""
+            ),
+            PendleError::ApproxRangeUnderflow => write!(
+                f,
+                "the approximation ran below its lower bound; the trade is smaller than the market \
+                 can price"
+            ),
+            PendleError::ApproxRangeOverflow => write!(
+                f,
+                "the approximation ran past its upper bound; the trade is larger than the market \
+                 can absorb"
+            ),
+            PendleError::ApproxInvalidBounds { lower, upper } => {
+                write!(f, "approximation bounds are inverted: [{lower}, {upper}]")
             }
         }
     }

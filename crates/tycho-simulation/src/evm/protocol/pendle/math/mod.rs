@@ -3,6 +3,7 @@
 //! Provenance and licensing: see `../NOTICE.md`. The port is deliberately literal — a quote has to
 //! agree with the contract bit for bit, including where each division truncates.
 
+pub mod approx;
 pub mod errors;
 pub mod log_exp_math;
 pub mod market;
