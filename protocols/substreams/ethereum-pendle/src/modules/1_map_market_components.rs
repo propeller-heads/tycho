@@ -10,6 +10,7 @@ use tycho_substreams::{abi::erc20, prelude::*};
 use crate::{
     abi::{pendle_market, pendle_market_factory, pendle_market_factory_v1, pendle_sy},
     consts::{MARKET_FACTORIES_V3_PLUS, MARKET_FACTORY_V1, PENDLE_MARKET, PENDLE_SY},
+    keys::contract_id,
     sy::{classify_deposit, classify_redeem, pow10, TokenClass},
 };
 
@@ -108,7 +109,12 @@ fn build_components(creation: &MarketCreation) -> Vec<ProtocolComponent> {
         return vec![];
     };
 
-    let market = ProtocolComponent::at_contract(&creation.market)
+    // `new` rather than `at_contract`: the latter also lists the address in the component's
+    // `contracts`, which makes the indexer resolve it to a stored Account. Pendle is a native
+    // integration and never emits contract changes, so no such Account is ever written — and an
+    // SY typically predates the market that first references it, so it is not created inside any
+    // sane indexing range either. The id is identical between the two constructors.
+    let market = ProtocolComponent::new(&contract_id(&creation.market))
         .with_tokens(&[sy_address.clone(), pt_address.clone(), yt_address.clone()])
         .with_attributes(&[
             (
@@ -198,7 +204,7 @@ impl SyProfile {
             ));
         }
 
-        ProtocolComponent::at_contract(&self.address)
+        ProtocolComponent::new(&contract_id(&self.address))
             .with_tokens(&tokens)
             .with_attributes(&attributes)
             .as_swap_type(PENDLE_SY, ImplementationType::Custom)

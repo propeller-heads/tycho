@@ -13,7 +13,7 @@ pub fn market_by_yt_key(yt_address: &[u8]) -> String {
     format!("yt:0x{}", hex::encode(yt_address))
 }
 
-/// Component id of a contract, matching `ProtocolComponent::at_contract`.
+/// Component id of a contract: the address, hex-encoded and `0x`-prefixed.
 pub fn contract_id(address: &[u8]) -> String {
     format!("0x{}", hex::encode(address))
 }
