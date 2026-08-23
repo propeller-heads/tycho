@@ -8,7 +8,7 @@ use substreams::{
     store::{StoreGet, StoreGetBigInt, StoreGetRaw, StoreGetString},
 };
 use substreams_ethereum::{pb::eth::v2 as eth, rpc::RpcBatch};
-use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
+use tycho_substreams::{abi::erc20, balances::aggregate_balances_changes, prelude::*};
 
 use crate::{
     abi::pendle_sy,
@@ -128,6 +128,15 @@ pub fn map_protocol_changes(
         }
     }
 
+    // After the transfer-derived balances, so the read value wins for an SY holding a rebasing
+    // token.
+    for (tx, change) in sy_balances(&block, &refresh, &registry_store, &components_store) {
+        transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx))
+            .add_balance_change(&change);
+    }
+
     Ok(BlockChanges {
         block: Some((&block).into()),
         changes: transaction_changes
@@ -203,6 +212,84 @@ fn absolute_state_changes(
 /// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
 /// fabricated hash would be persisted as though it were real. The last transaction is a genuine
 /// one and orders the refresh after everything that actually happened in the block.
+/// Reads each SY component's real token balances, rather than accumulating them from transfers.
+///
+/// A share-based token moves a holder's balance on rebase without emitting `Transfer`, so no
+/// event-derived accounting can follow it. The wstETH SY holds **stETH**, and the drift is real
+/// and measured: at block 16032658 the transfer-derived balance was `0` where the node reported
+/// `4` wei. Economically nothing, but the indexer reconciles balances against `balanceOf` for
+/// exact equality, so it is a mismatch.
+///
+/// Markets are deliberately left on the transfer path. A market custodies only SY shares and PT,
+/// neither of which rebases, so transfers are exact there and cost no RPC.
+///
+/// Costs one `balanceOf` per (SY component, declared token) per refresh block — around 90 calls
+/// against the ~60 the rate refresh already makes. `sy_rate_refresh_blocks` throttles both.
+fn sy_balances(
+    block: &eth::Block,
+    params: &RefreshParams,
+    registry_store: &StoreGetString,
+    components_store: &StoreGetRaw,
+) -> Vec<(Transaction, BalanceChange)> {
+    if !params.should_refresh(block.number) {
+        return vec![];
+    }
+    let Some(registry) = registry_store.get_last(MARKET_REGISTRY) else { return vec![] };
+    let markets = live_markets(&registry, block.timestamp_seconds());
+    let Some(anchor) = block.transactions().last() else { return vec![] };
+    let anchor: Transaction = anchor.into();
+
+    let mut holdings: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+    for sy in markets.iter().map(|market| &market.sy) {
+        if holdings
+            .iter()
+            .any(|(id, _, _)| id == sy)
+        {
+            continue;
+        }
+        let Some(tokens) = components_store.get_last(sy) else { continue };
+        let tokens: Vec<Vec<u8>> = serde_sibor::from_bytes(&tokens)
+            .expect("deserializing component tokens from the component store");
+        let address = hex::decode(sy.trim_start_matches("0x"))
+            .expect("registry holds a non-hex SY component id");
+        for token in tokens {
+            holdings.push((sy.clone(), address.clone(), token));
+        }
+    }
+    if holdings.is_empty() {
+        return vec![];
+    }
+
+    let mut batch = RpcBatch::new();
+    for (_, owner, token) in &holdings {
+        batch = batch.add(erc20::functions::BalanceOf { owner: owner.clone() }, token.clone());
+    }
+    let responses = batch
+        .execute()
+        .map(|r| r.responses)
+        .unwrap_or_default();
+
+    let mut changes = Vec::new();
+    for ((component_id, _, token), response) in holdings
+        .into_iter()
+        .zip(responses.iter())
+    {
+        let Some(balance) = RpcBatch::decode::<_, erc20::functions::BalanceOf>(response) else {
+            log::info!("SY {} did not answer balanceOf, leaving the balance stale", component_id);
+            continue;
+        };
+        changes.push((
+            anchor.clone(),
+            BalanceChange {
+                token,
+                balance: balance.to_signed_bytes_be(),
+                component_id: component_id.into_bytes(),
+            },
+        ));
+    }
+    changes
+}
+
 /// Re-reads the fee of every market a fee event moved, plus every market created this block.
 ///
 /// The fee is configuration, not market state: `readState()` fetches it from the factory on every
