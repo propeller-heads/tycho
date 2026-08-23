@@ -46,9 +46,7 @@ tests:
           sy_decimals: "0x12"
           asset_decimals: "0x12"
         creation_tx: "0x6edb7e8dd09fa0e9ccd4b7195d514d51e03d91e9c05147fac6e458cc6b63bf01"
-        # No quoting yet: `pendle` is not registered in protocols/testing's
-        # register_decoder_for_protocol, because the native simulation is PR 2.
-        skip_simulation: true
+        skip_simulation: false
         # No executor yet: the swap encoder and PendleExecutor are PR 3.
         skip_execution: true
 
@@ -66,7 +64,7 @@ tests:
           token_in_class_0x3175df0976dfa876431c2e9ee6bc45b65d3473cc: "0x6f6e655f746f5f6f6e65"
           token_out_class_0x3175df0976dfa876431c2e9ee6bc45b65d3473cc: "0x6f6e655f746f5f6f6e65"
         creation_tx: "0x6edb7e8dd09fa0e9ccd4b7195d514d51e03d91e9c05147fac6e458cc6b63bf01"
-        skip_simulation: true
+        skip_simulation: false
         skip_execution: true
 
       # A second market, on a different SY, that also trades inside the range (16072670 onward).
@@ -88,7 +86,7 @@ tests:
           sy_decimals: "0x12"
           asset_decimals: "0x12"
         creation_tx: "0x952d4c25142e16032afd36d6be525aeed374517ec0942a7e879221db6ef3e032"
-        skip_simulation: true
+        skip_simulation: false
         skip_execution: true
 
       # SY-wstETH: three quotable entry tokens across both classes, and the one component whose
@@ -110,7 +108,7 @@ tests:
           token_out_class_0xae7ab96520de3a18e5e111b5eaab095312d7fe84: "0x696e6465785f72617465"
           token_out_class_0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0: "0x6f6e655f746f5f6f6e65"
         creation_tx: "0x952d4c25142e16032afd36d6be525aeed374517ec0942a7e879221db6ef3e032"
-        skip_simulation: true
+        skip_simulation: false
         skip_execution: true
 
   # The current factory (`0x6d247b1c…`, generation V6), whose `CreateNewMarket` carries a real
