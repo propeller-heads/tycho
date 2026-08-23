@@ -212,3 +212,62 @@ tests:
         creation_tx: "0x35c6a24f0c9214a3809d03b539eec5ad314617c5c812c1a53750bb13e1a45131"
         skip_simulation: true
         skip_execution: true
+
+  # The brief's reference instance: the wstETH market expiring 30 Dec 2027, created by the
+  # original factory at block 17363218 and still live today. Its first swaps land at 17379452 and
+  # 17379784, with four more by 17386182.
+  #
+  # This is the one range whose expectations can be checked against a number nobody here produced:
+  # the brief quotes `scalarRoot = 86364560000000000000` (0x04ae8c8dbdaee90000) and
+  # `expiry = 1830124800` (0x6d157d00) for this market, and names its SY, PT and YT.
+  #
+  # It is also the case where the fee cannot come from the creation event — the original factory
+  # emits none, so `ln_fee_rate_root_at_creation` is zero here and the brief's
+  # `lnFeeRateRoot = 499875041000000` has to be read back from `getMarketConfig`. That value lands
+  # as state rather than a static attribute, so this fixture cannot assert it; `scripts/
+  # verify_event_replay.py` covers the state side for this same market.
+  - name: test_reference_market_creation_and_swaps
+    start_block: 17363200
+    stop_block: 17387000
+    expected_components:
+      - id: "0x34280882267ffa6383b363e278b027be083bbe3b"
+        tokens:
+          - "0xcbc72d92b2dc8187414f6734718563898740c0bc" # SY-wstETH
+          - "0xb253eff1104802b97ac7e3ac9fdd73aece295a2c" # PT
+          - "0x04b7fa1e727d7290d6e24fa9b426d0c940283a95" # YT
+        static_attributes:
+          scalar_root: "0x04ae8c8dbdaee90000" # 86364560000000000000
+          initial_anchor: "0x11839fc78c98c000"
+          expiry: "0x6d157d00" # 1830124800, 30 Dec 2027
+          factory: "0x27b1dacd74688af24a64bd3c9c1b143118740784"
+          ln_fee_rate_root_at_creation: "0x00"
+          sy_address: "0xcbc72d92b2dc8187414f6734718563898740c0bc"
+          pt_address: "0xb253eff1104802b97ac7e3ac9fdd73aece295a2c"
+          yt_address: "0x04b7fa1e727d7290d6e24fa9b426d0c940283a95"
+          sy_decimals: "0x12"
+          asset_decimals: "0x12"
+        creation_tx: "0xf5022404495cff175a5b4c45864e372f0fa2344cc8aa14298987e4ccdf6e5daa"
+        skip_simulation: true
+        skip_execution: true
+
+      # The same SY the 2022 range already covers, profiled 1.3M blocks later: stETH is still the
+      # accounting asset and the three entry tokens still classify the same way. A classification
+      # that drifted with the exchange rate would show up as a diff here and nowhere else.
+      - id: "0xcbc72d92b2dc8187414f6734718563898740c0bc"
+        tokens:
+          - "0xcbc72d92b2dc8187414f6734718563898740c0bc" # SY
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" # WETH
+          - "0xae7ab96520de3a18e5e111b5eaab095312d7fe84" # stETH, the accounting asset
+          - "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0" # wstETH
+        static_attributes:
+          asset_address: "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
+          asset_decimals: "0x12"
+          sy_decimals: "0x12"
+          token_in_class_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2: "0x696e6465785f72617465"
+          token_in_class_0xae7ab96520de3a18e5e111b5eaab095312d7fe84: "0x696e6465785f72617465"
+          token_in_class_0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0: "0x6f6e655f746f5f6f6e65"
+          token_out_class_0xae7ab96520de3a18e5e111b5eaab095312d7fe84: "0x696e6465785f72617465"
+          token_out_class_0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0: "0x6f6e655f746f5f6f6e65"
+        creation_tx: "0xf5022404495cff175a5b4c45864e372f0fa2344cc8aa14298987e4ccdf6e5daa"
+        skip_simulation: true
+        skip_execution: true
