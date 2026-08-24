@@ -51,6 +51,11 @@ fn validate_chain(chain: Chain) -> Result<u64, RFQError> {
 
 /// Client for the Biconomy RFQ API.
 ///
+/// The API key selects the served lane: firm quotes carry that key's minimum remaining
+/// validity, and the levels book is filtered by the same floor, so simulation prices the lane
+/// the key actually executes on. Each consumer applies for their own key and sizes the lane
+/// with Biconomy directly; key, URL and poll interval are all builder configuration.
+///
 /// Unlike Bebop's push-based WebSocket feed, the Biconomy API exposes a plain HTTP levels
 /// endpoint, so `stream()` polls the chain-batch `/v1/levels?chainId=` once per interval (all
 /// configured pairs in one request) and converts every poll into the same absolute
