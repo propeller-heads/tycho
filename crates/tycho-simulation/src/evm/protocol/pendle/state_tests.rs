@@ -20,11 +20,18 @@ fn token(address: &str, decimals: u32) -> Token {
     )
 }
 
+// The reference market's three tokens, as `readTokens()` on `0x34280882...` returns them. Copied
+// from a chain read rather than from the brief's truncated addresses, so the set is checkable.
 const SY: &str = "0xcbc72d92b2dc8187414f6734718563898740c0bc";
-const PT: &str = "0xcf44e8402a99db82d2acccc4d9354657be2121db";
-const YT: &str = "0xa53ad7e3a87546cca450992d54d517c3c939c2bf";
+const PT: &str = "0xb253eff1104802b97ac7e3ac9fdd73aece295a2c";
+const YT: &str = "0x04b7fa1e727d7290d6e24fa9b426d0c940283a95";
 const WSTETH: &str = "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0";
 const STETH: &str = "0xae7ab96520de3a18e5e111b5eaab095312d7fe84";
+
+// Placeholders for the decimal-axis fixture below. Deliberately not real addresses: that fixture
+// tests a shape, and borrowing a live token's address would assert decimals it does not have.
+const SIX_DECIMAL_SY: &str = "0x2222222222222222222222222222222222222222";
+const SIX_DECIMAL_TOKEN: &str = "0x3333333333333333333333333333333333333333";
 
 fn s(value: &str) -> I256 {
     I256::from_dec_str(value).unwrap()
@@ -81,19 +88,28 @@ fn wsteth_sy() -> PendleState {
     })
 }
 
-/// The decimal axis: SY 18, accounting asset 6, index carrying the 1e12 gap.
-fn reusd_sy() -> PendleState {
+/// The decimal axis: SY 18, accounting asset 6, the index carrying the 1e12 gap.
+///
+/// The index is a real reUSD-market reading; the addresses are placeholders, so this asserts the
+/// shape without claiming to be any particular wrapper.
+fn six_decimal_asset_sy() -> PendleState {
     PendleState::Sy(PendleSyState {
-        sy_address: Bytes::from_str(SY).unwrap(),
+        sy_address: Bytes::from_str(SIX_DECIMAL_SY).unwrap(),
         exchange_rate: u("1095830"),
         rate_sampled_at: 1_700_000_000,
         head_timestamp: 1_700_000_000,
         sy_decimals: 18,
         asset_decimals: 6,
-        tokens_in: HashMap::from([(Bytes::from_str(STETH).unwrap(), TokenClass::IndexRate)]),
-        tokens_out: HashMap::from([(Bytes::from_str(STETH).unwrap(), TokenClass::IndexRate)]),
+        tokens_in: HashMap::from([(
+            Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap(),
+            TokenClass::IndexRate,
+        )]),
+        tokens_out: HashMap::from([(
+            Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap(),
+            TokenClass::IndexRate,
+        )]),
         token_balances: HashMap::new(),
-        component_id: SY.to_string(),
+        component_id: SIX_DECIMAL_SY.to_string(),
     })
 }
 
@@ -446,12 +462,12 @@ fn a_redemption_draws_down_the_wrapper_and_a_deposit_does_not_refill_it() {
 /// hard bound on a wrapper that has no such bound recorded.
 #[test]
 fn a_redemption_does_not_invent_a_balance_that_was_never_indexed() {
-    let state = reusd_sy();
+    let state = six_decimal_asset_sy();
     let after = quote_after(
         &state,
         BigUint::from(1_000_000_000_000_000_000u64),
-        &token(SY, 18),
-        &token(STETH, 6),
+        &token(SIX_DECIMAL_SY, 18),
+        &token(SIX_DECIMAL_TOKEN, 6),
     );
     let PendleState::Sy(after) = &after else { unreachable!() };
     assert!(after.token_balances.is_empty(), "an unindexed balance must stay unindexed");
@@ -709,8 +725,8 @@ fn an_index_rate_wrap_uses_the_exchange_rate() {
 #[test]
 fn the_index_carries_the_decimal_gap_through_the_quote() {
     let one_sy = BigUint::from(1_000_000_000_000_000_000u64);
-    let out = reusd_sy()
-        .get_amount_out(one_sy, &token(SY, 18), &token(STETH, 6))
+    let out = six_decimal_asset_sy()
+        .get_amount_out(one_sy, &token(SIX_DECIMAL_SY, 18), &token(SIX_DECIMAL_TOKEN, 6))
         .unwrap();
     assert_eq!(out.amount, BigUint::from(1_095_830u32));
 }
