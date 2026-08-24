@@ -35,7 +35,7 @@ fn u(value: &str) -> U256 {
 }
 
 /// The brief's reference market.
-fn wsteth_market(block_timestamp: u64) -> PendleState {
+fn wsteth_market(rate_sampled_at: u64) -> PendleState {
     PendleState::Market(PendleMarketState {
         market: MarketState {
             total_pt: s("83658000000000000000"),
@@ -47,7 +47,8 @@ fn wsteth_market(block_timestamp: u64) -> PendleState {
             last_ln_implied_rate: u("20211000000000000"),
         },
         py_index: u("1241884000000000000"),
-        block_timestamp,
+        rate_sampled_at,
+        head_timestamp: rate_sampled_at,
         sy_address: Bytes::from_str(SY).unwrap(),
         pt_address: Bytes::from_str(PT).unwrap(),
         yt_address: Bytes::from_str(YT).unwrap(),
@@ -59,7 +60,8 @@ fn wsteth_sy() -> PendleState {
     PendleState::Sy(PendleSyState {
         sy_address: Bytes::from_str(SY).unwrap(),
         exchange_rate: u("1241884000000000000"),
-        rate_stale: false,
+        rate_sampled_at: 1_700_000_000,
+        head_timestamp: 1_700_000_000,
         sy_decimals: 18,
         asset_decimals: 18,
         tokens_in: HashMap::from([
@@ -84,7 +86,8 @@ fn reusd_sy() -> PendleState {
     PendleState::Sy(PendleSyState {
         sy_address: Bytes::from_str(SY).unwrap(),
         exchange_rate: u("1095830"),
-        rate_stale: false,
+        rate_sampled_at: 1_700_000_000,
+        head_timestamp: 1_700_000_000,
         sy_decimals: 18,
         asset_decimals: 6,
         tokens_in: HashMap::from([(Bytes::from_str(STETH).unwrap(), TokenClass::IndexRate)]),
@@ -92,6 +95,73 @@ fn reusd_sy() -> PendleState {
         token_balances: HashMap::new(),
         component_id: SY.to_string(),
     })
+}
+
+/// Moves the chain head past the block the rates were read at, leaving the state itself intact.
+fn head_moved_on(state: PendleState) -> PendleState {
+    match state {
+        PendleState::Market(mut market) => {
+            market.head_timestamp = market.rate_sampled_at + 12;
+            PendleState::Market(market)
+        }
+        PendleState::Sy(mut sy) => {
+            sy.head_timestamp = sy.rate_sampled_at + 12;
+            PendleState::Sy(sy)
+        }
+    }
+}
+
+/// A market whose rate predates the head cannot be quoted exactly, so it is not quoted at all.
+///
+/// Recoverable, unlike expiry: the next refresh re-pairs the rate with the head.
+#[test]
+fn a_market_whose_rate_predates_the_head_refuses_to_quote() {
+    let state = head_moved_on(wsteth_market(1_700_000_000));
+    let amount = BigUint::from(1_000_000_000_000_000_000u64);
+
+    let error = state
+        .get_amount_out(amount, &token(SY, 18), &token(PT, 18))
+        .expect_err("a stale rate must not be quoted");
+    let SimulationError::RecoverableError(message) = error else {
+        panic!("a stale rate is recoverable, not fatal")
+    };
+    assert!(message.contains("1700000000"), "{message}");
+    assert!(message.contains("1700000012"), "{message}");
+}
+
+/// The wrapper is held to the same standard: its rate dates the conversion.
+#[test]
+fn a_wrapper_whose_rate_predates_the_head_refuses_to_quote() {
+    let state = head_moved_on(wsteth_sy());
+    let amount = BigUint::from(1_000_000_000_000_000_000u64);
+
+    let error = state
+        .get_amount_out(amount, &token(STETH, 18), &token(SY, 18))
+        .expect_err("a stale rate must not be quoted");
+    assert!(matches!(error, SimulationError::RecoverableError(_)), "{error:?}");
+}
+
+/// Reported as no depth rather than an error, so a router skips it the way it skips an expired
+/// market instead of treating a routine gap as a failure.
+#[test]
+fn a_market_that_cannot_quote_exactly_reports_no_depth() {
+    let state = head_moved_on(wsteth_market(1_700_000_000));
+    let limits = state
+        .get_limits(Bytes::from_str(SY).unwrap(), Bytes::from_str(PT).unwrap())
+        .unwrap();
+    assert_eq!(limits, (BigUint::from(0u32), BigUint::from(0u32)));
+}
+
+/// A head *behind* the sample is not staleness — a snapshot can carry a reading newer than the
+/// header it decoded against — and must not refuse.
+#[test]
+fn a_head_behind_the_sample_still_quotes() {
+    let PendleState::Market(mut market) = wsteth_market(1_700_000_000) else { unreachable!() };
+    market.head_timestamp = market.rate_sampled_at - 12;
+    let state = PendleState::Market(market);
+    state
+        .get_amount_out(BigUint::from(1_000_000_000_000_000_000u64), &token(SY, 18), &token(PT, 18))
+        .expect("a sample newer than the head is still exact");
 }
 
 /// The brief's central property: the same state at two timestamps quotes differently, because the
@@ -465,6 +535,7 @@ fn a_delta_updates_the_state() {
     let delta = ProtocolStateDelta {
         component_id: "market".to_string(),
         updated_attributes: HashMap::from([
+            ("rate_sampled_at".to_string(), Bytes::from(1_800_000_000u64.to_be_bytes().to_vec())),
             ("block_timestamp".to_string(), Bytes::from(1_800_000_000u64.to_be_bytes().to_vec())),
             (
                 "total_pt".to_string(),
@@ -481,6 +552,7 @@ fn a_delta_updates_the_state() {
         .delta_transition(delta, &HashMap::new(), &Balances::default())
         .unwrap();
     let PendleState::Market(updated) = state else { panic!("expected a market") };
-    assert_eq!(updated.block_timestamp, 1_800_000_000);
+    assert_eq!(updated.rate_sampled_at, 1_800_000_000);
+    assert_eq!(updated.head_timestamp, 1_800_000_000);
     assert_eq!(updated.market.total_pt, s("90000000000000000000"));
 }

@@ -57,7 +57,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PendleState {
             .as_str()
         {
             MARKET_TYPE => decode_market(snapshot, block).map(PendleState::Market),
-            SY_TYPE => decode_sy(snapshot).map(PendleState::Sy),
+            SY_TYPE => decode_sy(snapshot, block).map(PendleState::Sy),
             other => Err(InvalidSnapshotError::ValueError(format!(
                 "unknown Pendle protocol type {other}"
             ))),
@@ -96,11 +96,12 @@ fn decode_market(
         )
     })?;
 
-    // Prefer the indexer's own clock over the block header: it is emitted for every live market on
-    // every refresh block, whereas the header only reflects blocks where this component changed.
-    let block_timestamp = attribute_u256(state, "block_timestamp")
-        .map(|value| value.saturating_to::<u64>())
-        .unwrap_or(block.timestamp);
+    // When `py_index` above was read. Required rather than defaulting to the header: the refresh
+    // emits the two together, and a header fallback would date a rate by a block it was not read
+    // at, which is precisely the claim the exactness guard exists to check.
+    let rate_sampled_at = attribute_u256(state, "rate_sampled_at")
+        .ok_or_else(|| missing("rate_sampled_at"))?
+        .saturating_to::<u64>();
 
     Ok(PendleMarketState {
         market: MarketState {
@@ -113,7 +114,8 @@ fn decode_market(
             last_ln_implied_rate,
         },
         py_index,
-        block_timestamp,
+        rate_sampled_at,
+        head_timestamp: block.timestamp,
         sy_address: address(
             statics
                 .get("sy_address")
@@ -135,7 +137,10 @@ fn decode_market(
     })
 }
 
-fn decode_sy(snapshot: ComponentWithState) -> Result<PendleSyState, InvalidSnapshotError> {
+fn decode_sy(
+    snapshot: ComponentWithState,
+    block: BlockHeader,
+) -> Result<PendleSyState, InvalidSnapshotError> {
     let statics = &snapshot.component.static_attributes;
     let state = &snapshot.state.attributes;
 
@@ -157,9 +162,11 @@ fn decode_sy(snapshot: ComponentWithState) -> Result<PendleSyState, InvalidSnaps
             "sy_exchange_rate is zero, which no live SY reports".to_string(),
         ));
     }
-    let rate_stale = state
-        .get("sy_rate_stale")
-        .is_some_and(|raw| raw.iter().any(|byte| *byte != 0));
+    // Dates the rate above, and is emitted with it. Required for the same reason it is on a
+    // market: a wrapper quote is only exact at the block its rate was read at.
+    let rate_sampled_at = attribute_u256(state, "rate_sampled_at")
+        .ok_or_else(|| missing("rate_sampled_at"))?
+        .saturating_to::<u64>();
 
     // One attribute per quotable token, named for the direction and the token. A token the indexer
     // could not classify has no attribute here and is simply not quotable.
@@ -185,7 +192,8 @@ fn decode_sy(snapshot: ComponentWithState) -> Result<PendleSyState, InvalidSnaps
         token_balances,
         component_id: snapshot.component.id.clone(),
         exchange_rate,
-        rate_stale,
+        rate_sampled_at,
+        head_timestamp: block.timestamp,
         sy_decimals,
         asset_decimals,
         tokens_in,

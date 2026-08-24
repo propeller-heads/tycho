@@ -34,11 +34,14 @@ use tycho_common::{
     Bytes,
 };
 
-use super::math::{
-    approx,
-    errors::PendleError,
-    market::{self, MarketState},
-    pmath, sy_utils,
+use super::{
+    clock,
+    math::{
+        approx,
+        errors::PendleError,
+        market::{self, MarketState},
+        pmath, sy_utils,
+    },
 };
 use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64};
 
@@ -100,11 +103,15 @@ impl TokenClass {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendleMarketState {
     pub market: MarketState,
-    /// `max(pyIndexStored, SY.exchangeRate())` as of the indexed block.
+    /// `max(pyIndexStored, SY.exchangeRate())` as of [`Self::rate_sampled_at`].
     pub py_index: U256,
-    /// The clock the quote is computed against. Carried explicitly rather than taken from the
-    /// decoder, because the curve moves with it even when nothing trades.
-    pub block_timestamp: u64,
+    /// The block timestamp at which `py_index` was read. Also the clock a quote runs on: it is
+    /// the one moment for which the rate and the curve describe the same state.
+    pub rate_sampled_at: u64,
+    /// The chain head as the stream last reported it, injected by the decoder rather than emitted
+    /// by the Substreams package. Only ever compared against `rate_sampled_at`, to tell whether
+    /// this state still answers for the current block.
+    pub head_timestamp: u64,
     pub sy_address: Bytes,
     pub pt_address: Bytes,
     pub yt_address: Bytes,
@@ -114,10 +121,12 @@ pub struct PendleMarketState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendleSyState {
     pub sy_address: Bytes,
-    /// Accounting-asset units per SY, as of the indexed block.
+    /// Accounting-asset units per SY, as of `rate_sampled_at`.
     pub exchange_rate: U256,
-    /// Set when the block's `exchangeRate()` read did not resolve, so the rate above is stale.
-    pub rate_stale: bool,
+    /// The block timestamp at which `exchange_rate` was read.
+    pub rate_sampled_at: u64,
+    /// The chain head as the stream last reported it. See [`PendleMarketState::head_timestamp`].
+    pub head_timestamp: u64,
     pub sy_decimals: u32,
     pub asset_decimals: u32,
     /// Entry tokens and how each converts. A token absent here is one the indexer could not
@@ -153,14 +162,14 @@ impl PendleMarketState {
     }
 
     fn expired(&self) -> bool {
-        market::is_expired(self.market.expiry, self.block_timestamp)
+        market::is_expired(self.market.expiry, self.quote_time())
     }
 
     fn guard_live(&self) -> Result<(), SimulationError> {
         if self.expired() {
             return Err(PendleError::MarketExpired {
                 expiry: self.market.expiry,
-                block_time: self.block_timestamp,
+                block_time: self.quote_time(),
             }
             .into());
         }
@@ -173,7 +182,7 @@ impl PendleMarketState {
             &self.market,
             self.py_index,
             -pmath::to_i256(pt_in)?,
-            self.block_timestamp,
+            self.quote_time(),
         )?;
         pmath::to_u256(trade.net_sy_to_account)
     }
@@ -183,8 +192,7 @@ impl PendleMarketState {
     /// Redeeming `n` YT needs `n` PT, so the borrowed leg is exactly the YT amount. What the
     /// trader keeps is the redemption proceeds less what repaying the borrow costs.
     fn yt_for_sy(&self, yt_in: U256) -> Result<U256, PendleError> {
-        let comp =
-            market::get_market_pre_compute(&self.market, self.py_index, self.block_timestamp)?;
+        let comp = market::get_market_pre_compute(&self.market, self.py_index, self.quote_time())?;
         let trade = market::calc_trade(&self.market, &comp, self.py_index, pmath::to_i256(yt_in)?)?;
         // Buying the PT back costs this much SY.
         let sy_to_repay = pmath::to_u256(-trade.net_sy_to_account)?;
@@ -213,7 +221,7 @@ impl PendleMarketState {
                     &self.market,
                     self.py_index,
                     amount_in,
-                    self.block_timestamp,
+                    self.quote_time(),
                 )?
                 .amount_out,
                 GAS_SY_FOR_PT,
@@ -223,7 +231,7 @@ impl PendleMarketState {
                     &self.market,
                     self.py_index,
                     amount_in,
-                    self.block_timestamp,
+                    self.quote_time(),
                 )?
                 .amount_out,
                 GAS_SY_FOR_YT,
@@ -322,7 +330,7 @@ impl ProtocolSim for PendleState {
                 let Ok(comp) = market::get_market_pre_compute(
                     &state.market,
                     state.py_index,
-                    state.block_timestamp,
+                    state.quote_time(),
                 ) else {
                     return 0.0;
                 };
@@ -374,6 +382,7 @@ impl ProtocolSim for PendleState {
         let (out, gas) = match self {
             PendleState::Market(state) => {
                 state.guard_live()?;
+                state.guard_current()?;
                 let from = state
                     .role(&token_in.address)
                     .ok_or_else(|| unknown_pair(token_in, token_out))?;
@@ -388,6 +397,7 @@ impl ProtocolSim for PendleState {
                 state.amount_out(amount, from, to)?
             }
             PendleState::Sy(state) => {
+                state.guard_current()?;
                 let (class, direction) = state
                     .class(&token_in.address, &token_out.address)
                     .ok_or_else(|| unquotable_pair(token_in, token_out))?;
@@ -433,22 +443,24 @@ impl ProtocolSim for PendleState {
                     // Dead, not merely empty. Zero depth in both directions.
                     return Ok(no_depth());
                 }
+                // A bound this state cannot quote against is not a bound. Reported as no depth
+                // rather than an error, so a router skips the market the way it skips an expired
+                // one instead of treating a routine gap as a failure.
+                if !state.is_current() {
+                    return Ok(no_depth());
+                }
                 let (Some(from), Some(to)) = (state.role(&sell_token), state.role(&buy_token))
                 else {
                     return Ok(no_depth());
                 };
 
                 let (max_in, max_out) = match (from, to) {
-                    (MarketToken::Sy, MarketToken::Pt) => approx::max_sy_in_for_pt(
-                        &state.market,
-                        state.py_index,
-                        state.block_timestamp,
-                    )?,
-                    (MarketToken::Sy, MarketToken::Yt) => approx::max_sy_in_for_yt(
-                        &state.market,
-                        state.py_index,
-                        state.block_timestamp,
-                    )?,
+                    (MarketToken::Sy, MarketToken::Pt) => {
+                        approx::max_sy_in_for_pt(&state.market, state.py_index, state.quote_time())?
+                    }
+                    (MarketToken::Sy, MarketToken::Yt) => {
+                        approx::max_sy_in_for_yt(&state.market, state.py_index, state.quote_time())?
+                    }
                     // Selling PT hands PT *to* the market, so the 96% proportion cap binds.
                     (MarketToken::Pt, MarketToken::Sy) => {
                         let max_pt_in = state.max_pt_in()?;
@@ -544,22 +556,60 @@ impl ProtocolSim for PendleState {
 }
 
 impl PendleMarketState {
+    /// The timestamp this market's quotes are evaluated at: the block its rate was read at.
+    ///
+    /// Not the chain head. Evaluating the curve at the head while holding a rate from an earlier
+    /// block would pair two different moments — see [`super::clock`].
+    pub fn quote_time(&self) -> u64 {
+        self.rate_sampled_at
+    }
+
+    /// Whether this state still answers for the current block.
+    pub fn is_current(&self) -> bool {
+        clock::is_current(self.rate_sampled_at, self.head_timestamp)
+    }
+
+    fn guard_current(&self) -> Result<(), SimulationError> {
+        if !self.is_current() {
+            return Err(SimulationError::RecoverableError(format!(
+                "Pendle market rate was read at {} but the chain head is {}; only a quote at the \
+                 sampled block is exact",
+                self.rate_sampled_at, self.head_timestamp
+            )));
+        }
+        Ok(())
+    }
+
     /// The most PT the market will absorb, from the 96% proportion cap.
     fn max_pt_in(&self) -> Result<U256, PendleError> {
-        let comp =
-            market::get_market_pre_compute(&self.market, self.py_index, self.block_timestamp)?;
+        let comp = market::get_market_pre_compute(&self.market, self.py_index, self.quote_time())?;
         approx::calc_soft_max_pt_in(&self.market, &comp)
     }
 
     /// The most PT the market will send out, from the exchange-rate floor.
     fn max_pt_out(&self) -> Result<U256, PendleError> {
-        let comp =
-            market::get_market_pre_compute(&self.market, self.py_index, self.block_timestamp)?;
+        let comp = market::get_market_pre_compute(&self.market, self.py_index, self.quote_time())?;
         approx::calc_max_pt_out(&comp, self.market.total_pt)
     }
 }
 
 impl PendleSyState {
+    /// Whether this wrapper still answers for the current block.
+    pub fn is_current(&self) -> bool {
+        clock::is_current(self.rate_sampled_at, self.head_timestamp)
+    }
+
+    fn guard_current(&self) -> Result<(), SimulationError> {
+        if !self.is_current() {
+            return Err(SimulationError::RecoverableError(format!(
+                "Pendle SY rate was read at {} but the chain head is {}; only a quote at the \
+                 sampled block is exact",
+                self.rate_sampled_at, self.head_timestamp
+            )));
+        }
+        Ok(())
+    }
+
     /// What the SY holds of `token`, which is all it can pay out when redeeming.
     ///
     /// An unknown balance falls back to the soft limit rather than to zero: reporting no depth for
@@ -670,8 +720,12 @@ impl PendleMarketState {
         if let Some(value) = attribute_u256(attributes, "py_index_current") {
             self.py_index = value;
         }
+        if let Some(value) = attribute_u256(attributes, "rate_sampled_at") {
+            self.rate_sampled_at = value.saturating_to();
+        }
+        // Injected by the decoder from the block header, not emitted by the Substreams package.
         if let Some(value) = attribute_u256(attributes, "block_timestamp") {
-            self.block_timestamp = value.saturating_to();
+            self.head_timestamp = value.saturating_to();
         }
         Ok(())
     }
@@ -687,8 +741,11 @@ impl PendleSyState {
         if let Some(value) = attribute_u256(attributes, "sy_exchange_rate") {
             self.exchange_rate = value;
         }
-        if let Some(value) = attributes.get("sy_rate_stale") {
-            self.rate_stale = value.iter().any(|byte| *byte != 0);
+        if let Some(value) = attribute_u256(attributes, "rate_sampled_at") {
+            self.rate_sampled_at = value.saturating_to();
+        }
+        if let Some(value) = attribute_u256(attributes, "block_timestamp") {
+            self.head_timestamp = value.saturating_to();
         }
         Ok(())
     }
