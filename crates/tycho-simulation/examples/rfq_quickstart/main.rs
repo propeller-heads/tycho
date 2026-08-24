@@ -132,10 +132,10 @@ async fn main() {
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
     let biconomy_propamm_key = env::var("BICONOMY_PROPAMM_API_KEY").ok();
-    if bebop_key.is_none()
-        && (hashflow_user.is_none() || hashflow_key.is_none())
-        && (liquorice_user.is_none() || liquorice_key.is_none())
-        && biconomy_propamm_key.is_none()
+    if bebop_key.is_none() &&
+        (hashflow_user.is_none() || hashflow_key.is_none()) &&
+        (liquorice_user.is_none() || liquorice_key.is_none()) &&
+        biconomy_propamm_key.is_none()
     {
         if cli.run_pamm_protocols {
             println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
@@ -918,9 +918,9 @@ pub fn encode_input(selector: &str, mut encoded_args: Vec<u8>) -> Vec<u8> {
     // Remove extra prefix if present (32 bytes for dynamic data)
     // Alloy encoding is including a prefix for dynamic data indicating the offset or length
     // but at this point we don't want that
-    if encoded_args.len() > 32
-        && encoded_args[..32]
-            == [0u8; 31]
+    if encoded_args.len() > 32 &&
+        encoded_args[..32] ==
+            [0u8; 31]
                 .into_iter()
                 .chain([32].to_vec())
                 .collect::<Vec<u8>>()

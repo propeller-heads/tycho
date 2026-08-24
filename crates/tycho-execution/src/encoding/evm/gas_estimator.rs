@@ -133,8 +133,8 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     if let Some(last_group) = swap_groups.last() {
         let last_swap = &last_group.swaps[last_group.swaps.len() - 1];
         let protocol: &str = &last_swap.component().protocol_system;
-        let final_swap_output_to_router = (ROUTER_FEES_ACTIVE || strategy == Strategy::Split)
-            && !PROTOCOLS_OUTPUT_TO_ROUTER.contains(&protocol);
+        let final_swap_output_to_router = (ROUTER_FEES_ACTIVE || strategy == Strategy::Split) &&
+            !PROTOCOLS_OUTPUT_TO_ROUTER.contains(&protocol);
         if final_swap_output_to_router {
             total_gas += transfer_token_gas(last_swap.token_out());
         }
