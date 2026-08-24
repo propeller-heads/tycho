@@ -27,6 +27,24 @@ use crate::protocol::{
 const MARKET_TYPE: &str = "pendle_market";
 const SY_TYPE: &str = "pendle_sy";
 
+const ATTR_SCALAR_ROOT: &str = "scalar_root";
+const ATTR_EXPIRY: &str = "expiry";
+const ATTR_SY_ADDRESS: &str = "sy_address";
+const ATTR_PT_ADDRESS: &str = "pt_address";
+const ATTR_YT_ADDRESS: &str = "yt_address";
+const ATTR_TOTAL_PT: &str = "total_pt";
+const ATTR_TOTAL_SY: &str = "total_sy";
+const ATTR_LAST_LN_IMPLIED_RATE: &str = "last_ln_implied_rate";
+const ATTR_LN_FEE_RATE_ROOT: &str = "ln_fee_rate_root";
+const ATTR_RESERVE_FEE_PERCENT: &str = "reserve_fee_percent";
+const ATTR_PY_INDEX_CURRENT: &str = "py_index_current";
+const ATTR_RATE_SAMPLED_AT: &str = "rate_sampled_at";
+const ATTR_SY_DECIMALS: &str = "sy_decimals";
+const ATTR_ASSET_DECIMALS: &str = "asset_decimals";
+const ATTR_SY_EXCHANGE_RATE: &str = "sy_exchange_rate";
+const ATTR_TOKEN_IN_CLASS_PREFIX: &str = "token_in_class_0x";
+const ATTR_TOKEN_OUT_CLASS_PREFIX: &str = "token_out_class_0x";
+
 fn missing(name: &str) -> InvalidSnapshotError {
     InvalidSnapshotError::MissingAttribute(name.to_string())
 }
@@ -73,34 +91,34 @@ fn decode_market(
     let state = &snapshot.state.attributes;
 
     let scalar_root =
-        attribute_i256(statics, "scalar_root").ok_or_else(|| missing("scalar_root"))?;
-    let expiry = attribute_u256(statics, "expiry")
-        .ok_or_else(|| missing("expiry"))?
+        attribute_i256(statics, ATTR_SCALAR_ROOT).ok_or_else(|| missing(ATTR_SCALAR_ROOT))?;
+    let expiry = attribute_u256(statics, ATTR_EXPIRY)
+        .ok_or_else(|| missing(ATTR_EXPIRY))?
         .saturating_to::<u64>();
 
-    let total_pt = attribute_i256(state, "total_pt").ok_or_else(|| missing("total_pt"))?;
-    let total_sy = attribute_i256(state, "total_sy").ok_or_else(|| missing("total_sy"))?;
-    let last_ln_implied_rate = attribute_u256(state, "last_ln_implied_rate")
-        .ok_or_else(|| missing("last_ln_implied_rate"))?;
-    let ln_fee_rate_root =
-        attribute_u256(state, "ln_fee_rate_root").ok_or_else(|| missing("ln_fee_rate_root"))?;
-    let reserve_fee_percent = attribute_u256(state, "reserve_fee_percent")
-        .ok_or_else(|| missing("reserve_fee_percent"))?;
+    let total_pt = attribute_i256(state, ATTR_TOTAL_PT).ok_or_else(|| missing(ATTR_TOTAL_PT))?;
+    let total_sy = attribute_i256(state, ATTR_TOTAL_SY).ok_or_else(|| missing(ATTR_TOTAL_SY))?;
+    let last_ln_implied_rate = attribute_u256(state, ATTR_LAST_LN_IMPLIED_RATE)
+        .ok_or_else(|| missing(ATTR_LAST_LN_IMPLIED_RATE))?;
+    let ln_fee_rate_root = attribute_u256(state, ATTR_LN_FEE_RATE_ROOT)
+        .ok_or_else(|| missing(ATTR_LN_FEE_RATE_ROOT))?;
+    let reserve_fee_percent = attribute_u256(state, ATTR_RESERVE_FEE_PERCENT)
+        .ok_or_else(|| missing(ATTR_RESERVE_FEE_PERCENT))?;
 
     // The live index, not the stored one. `py_index_stored` is a floor that drifts below the rate
     // the contract will actually use, so quoting off it is quietly wrong between interactions.
-    let py_index = attribute_u256(state, "py_index_current").ok_or_else(|| {
-        InvalidSnapshotError::MissingAttribute(
-            "py_index_current (py_index_stored alone is a stale floor and must not be substituted)"
-                .to_string(),
-        )
+    let py_index = attribute_u256(state, ATTR_PY_INDEX_CURRENT).ok_or_else(|| {
+        InvalidSnapshotError::MissingAttribute(format!(
+            "{ATTR_PY_INDEX_CURRENT} (py_index_stored alone is a stale floor and must not be \
+                 substituted)"
+        ))
     })?;
 
     // When `py_index` above was read. Required rather than defaulting to the header: the refresh
     // emits the two together, and a header fallback would date a rate by a block it was not read
     // at, which is precisely the claim the exactness guard exists to check.
-    let rate_sampled_at = attribute_u256(state, "rate_sampled_at")
-        .ok_or_else(|| missing("rate_sampled_at"))?
+    let rate_sampled_at = attribute_u256(state, ATTR_RATE_SAMPLED_AT)
+        .ok_or_else(|| missing(ATTR_RATE_SAMPLED_AT))?
         .saturating_to::<u64>();
 
     Ok(PendleMarketState {
@@ -118,21 +136,21 @@ fn decode_market(
         head_timestamp: block.timestamp,
         sy_address: address(
             statics
-                .get("sy_address")
-                .ok_or_else(|| missing("sy_address"))?,
-            "sy_address",
+                .get(ATTR_SY_ADDRESS)
+                .ok_or_else(|| missing(ATTR_SY_ADDRESS))?,
+            ATTR_SY_ADDRESS,
         )?,
         pt_address: address(
             statics
-                .get("pt_address")
-                .ok_or_else(|| missing("pt_address"))?,
-            "pt_address",
+                .get(ATTR_PT_ADDRESS)
+                .ok_or_else(|| missing(ATTR_PT_ADDRESS))?,
+            ATTR_PT_ADDRESS,
         )?,
         yt_address: address(
             statics
-                .get("yt_address")
-                .ok_or_else(|| missing("yt_address"))?,
-            "yt_address",
+                .get(ATTR_YT_ADDRESS)
+                .ok_or_else(|| missing(ATTR_YT_ADDRESS))?,
+            ATTR_YT_ADDRESS,
         )?,
     })
 }
@@ -148,30 +166,30 @@ fn decode_sy(
         InvalidSnapshotError::ValueError(format!("SY component id is not an address: {e}"))
     })?;
 
-    let sy_decimals = attribute_u256(statics, "sy_decimals")
-        .ok_or_else(|| missing("sy_decimals"))?
+    let sy_decimals = attribute_u256(statics, ATTR_SY_DECIMALS)
+        .ok_or_else(|| missing(ATTR_SY_DECIMALS))?
         .saturating_to::<u32>();
-    let asset_decimals = attribute_u256(statics, "asset_decimals")
-        .ok_or_else(|| missing("asset_decimals"))?
+    let asset_decimals = attribute_u256(statics, ATTR_ASSET_DECIMALS)
+        .ok_or_else(|| missing(ATTR_ASSET_DECIMALS))?
         .saturating_to::<u32>();
 
-    let exchange_rate =
-        attribute_u256(state, "sy_exchange_rate").ok_or_else(|| missing("sy_exchange_rate"))?;
+    let exchange_rate = attribute_u256(state, ATTR_SY_EXCHANGE_RATE)
+        .ok_or_else(|| missing(ATTR_SY_EXCHANGE_RATE))?;
     if exchange_rate.is_zero() {
-        return Err(InvalidSnapshotError::ValueError(
-            "sy_exchange_rate is zero, which no live SY reports".to_string(),
-        ));
+        return Err(InvalidSnapshotError::ValueError(format!(
+            "{ATTR_SY_EXCHANGE_RATE} is zero, which no live SY reports"
+        )));
     }
     // Dates the rate above, and is emitted with it. Required for the same reason it is on a
     // market: a wrapper quote is only exact at the block its rate was read at.
-    let rate_sampled_at = attribute_u256(state, "rate_sampled_at")
-        .ok_or_else(|| missing("rate_sampled_at"))?
+    let rate_sampled_at = attribute_u256(state, ATTR_RATE_SAMPLED_AT)
+        .ok_or_else(|| missing(ATTR_RATE_SAMPLED_AT))?
         .saturating_to::<u64>();
 
     // One attribute per quotable token, named for the direction and the token. A token the indexer
     // could not classify has no attribute here and is simply not quotable.
-    let tokens_in = token_classes(statics, "token_in_class_0x")?;
-    let tokens_out = token_classes(statics, "token_out_class_0x")?;
+    let tokens_in = token_classes(statics, ATTR_TOKEN_IN_CLASS_PREFIX)?;
+    let tokens_out = token_classes(statics, ATTR_TOKEN_OUT_CLASS_PREFIX)?;
     if tokens_in.is_empty() && tokens_out.is_empty() {
         return Err(InvalidSnapshotError::ValueError(format!(
             "SY {sy_address} declares no quotable tokens in either direction"
