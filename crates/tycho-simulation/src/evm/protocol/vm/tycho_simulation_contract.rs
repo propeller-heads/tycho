@@ -142,6 +142,7 @@ where
             gas_limit: None,
             transient_storage,
             block_overrides,
+            gas_price: None,
         };
 
         let sim_result = self.simulate(params)?;

@@ -8,10 +8,10 @@ use std::fmt::Debug;
 
 use alloy::{
     core::sol,
-    primitives::{Address as AlloyAddress, U256},
+    primitives::{Address as AlloyAddress, Keccak256, U256},
     sol_types::SolCall,
 };
-use revm::{state::AccountInfo, DatabaseRef};
+use revm::{primitives::KECCAK_EMPTY, state::AccountInfo, DatabaseRef};
 use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::{
@@ -21,7 +21,7 @@ use crate::evm::{
             adapter::{build_pool, detect_eth_variant, CurveVariant, ProbingResults, RawPoolState},
             math::Pool,
         },
-        vm::utils::get_code_for_contract,
+        vm::{constants::MAX_BALANCE, utils::get_code_for_contract},
     },
     simulation::{SimulationEngine, SimulationParameters},
 };
@@ -308,8 +308,14 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    // Read the providers the way the swap will: they answer a quote and a swap differently, and
+    // both the sender and the gas price have to say "swap" for that to hold.
     let res = engine
-        .simulate(&params(*pool, STORED_RATES_SELECTOR.to_vec()))
+        .simulate(&SimulationParameters {
+            caller: execution_sender(engine, pool)?,
+            gas_price: Some(EXECUTION_GAS_PRICE),
+            ..params(*pool, STORED_RATES_SELECTOR.to_vec())
+        })
         .ok()?;
     let out = res.result.as_ref();
     if out.len() < n_coins * 32 {
@@ -429,6 +435,49 @@ where
     }
 }
 
+/// Gas price presented to rate providers, in wei. Any plausible value works; it only has to be
+/// clear of zero.
+const EXECUTION_GAS_PRICE: u128 = 1_000_000_000;
+
+/// Sender to present to `pool`'s rate providers as `tx.origin`, funded so revm can charge it
+/// `gas_limit * gas_price`.
+///
+/// `stored_rates()` forwards to the pool's rate providers, the one Curve read that reaches
+/// attacker-supplied code. Providers on NG pools have been found branching on
+/// `(tx.origin == <marker>) || (tx.gasprice == 0)` to inflate the rate they report to quotes, and
+/// reading as the zero address with a zero gas price matches both markers.
+///
+/// Derived per pool and per block (`keccak256(pool ++ block_hash)`) rather than fixed: a constant
+/// would sit in the open and cost a provider nothing to add to its markers, whereas this cannot be
+/// enumerated ahead of the block. Returns `None` if the sender cannot be seeded, which leaves the
+/// rates unread rather than read from a context providers can pick out.
+fn execution_sender<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    pool: &AlloyAddress,
+) -> Option<AlloyAddress>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let mut hasher = Keccak256::new();
+    hasher.update(pool.as_slice());
+    if let Some(block) = engine.state.get_current_block() {
+        hasher.update(block.hash.as_ref());
+    }
+    let sender = AlloyAddress::from_slice(&hasher.finalize()[12..]);
+
+    engine
+        .state
+        .init_account(
+            sender,
+            AccountInfo { balance: *MAX_BALANCE, nonce: 0, code_hash: KECCAK_EMPTY, code: None },
+            None,
+            true,
+        )
+        .ok()?;
+    Some(sender)
+}
+
 fn params(to: AlloyAddress, data: Vec<u8>) -> SimulationParameters {
     SimulationParameters {
         caller: AlloyAddress::ZERO,
@@ -439,6 +488,7 @@ fn params(to: AlloyAddress, data: Vec<u8>) -> SimulationParameters {
         gas_limit: None,
         transient_storage: None,
         block_overrides: None,
+        gas_price: None,
     }
 }
 
@@ -472,7 +522,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::str::FromStr;
+    use std::{collections::HashMap, str::FromStr};
 
     use alloy::sol;
     use tycho_client::feed::BlockHeader;
@@ -480,16 +530,121 @@ mod test {
     use super::*;
     use crate::evm::{
         engine_db::{
+            create_engine,
             simulation_db::SimulationDB,
+            tycho_db::PreCachedDB,
             utils::{get_client, get_runtime},
         },
         simulation::SimulationEngine,
+        tycho_models::{AccountUpdate, Chain, ChangeType},
     };
 
     sol! {
         function get_dy_stable(int128 i, int128 j, uint256 dx) external view returns (uint256);
         function coins(uint256 i) external view returns (address);
         function decimals() external view returns (uint8);
+    }
+
+    /// Runtime bytecode of a rate provider that behaves like the toxic providers deployed against
+    /// Curve NG pools: it branches on `tx.origin == 0 || tx.gasprice == 0` and reports a different
+    /// value to callers that look like an off-chain quote than it does to a swap.
+    ///
+    /// ```text
+    /// ORIGIN ISZERO GASPRICE ISZERO OR PUSH1 0x11 JUMPI
+    ///   PUSH2 0xBEEF PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN   // swap-like caller
+    /// JUMPDEST
+    ///   PUSH2 0xDEAD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN   // quote-like caller
+    /// ```
+    const TOXIC_PROVIDER_RUNTIME: &[u8] = &[
+        0x32, 0x15, 0x3a, 0x15, 0x17, 0x60, 0x11, 0x57, 0x61, 0xbe, 0xef, 0x5f, 0x52, 0x60, 0x20,
+        0x5f, 0xf3, 0x5b, 0x61, 0xde, 0xad, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3,
+    ];
+    const SWAP_BRANCH: u64 = 0xbeef;
+    const QUOTE_BRANCH: u64 = 0xdead;
+
+    /// `stored_rates` must be read as a transaction would, otherwise a toxic rate provider hands
+    /// the hybrid an inflated rate and every quote off that pool is wrong.
+    #[test]
+    fn stored_rates_are_read_as_the_swap_would_see_them() {
+        let pool = AlloyAddress::from_slice(&[0x11u8; 20]);
+        let db = PreCachedDB::new().expect("db");
+        db.update(
+            vec![AccountUpdate {
+                address: pool,
+                chain: Chain::Ethereum,
+                slots: HashMap::new(),
+                balance: Some(U256::ZERO),
+                code: Some(TOXIC_PROVIDER_RUNTIME.to_vec()),
+                change: ChangeType::Creation,
+            }],
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )
+        .expect("seed the mock pool");
+        // Built exactly as the decoder builds it, so the test covers the production path.
+        let engine = create_engine(db, false).expect("engine");
+
+        let rates = read_stored_rates(&engine, &pool, 1).expect("rates must decode");
+
+        assert_eq!(
+            rates[0],
+            Some(U256::from(SWAP_BRANCH)),
+            "provider took its quote branch ({QUOTE_BRANCH:#x}): stored_rates is still read in a \
+             context a toxic provider can tell apart from a swap"
+        );
+    }
+
+    /// A live pool from the toxic campaign: its rate providers answer a quote and a swap
+    /// differently, so what we read has to match the swap. Pinned to a block where the providers
+    /// were armed; `quote_like` is what this code read before the fix.
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn stored_rates_on_a_toxic_pool_match_the_swap() {
+        let pool = alloy::primitives::address!("509c6c89fbf48b968b52c8069607c729464c78b6");
+        let mut db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
+        db.set_block(Some(BlockHeader {
+            number: 25_723_040,
+            timestamp: 1_786_346_171,
+            ..Default::default()
+        }));
+        let engine = create_engine(db, false).unwrap();
+
+        let read = read_stored_rates(&engine, &pool, 2).expect("rates must decode");
+        let quote_like = engine
+            .simulate(&params(pool, STORED_RATES_SELECTOR.to_vec()))
+            .map(|res| {
+                let out = res.result.to_vec();
+                (0..2)
+                    .map(|i| U256::from_be_slice(&out[i * 32..(i + 1) * 32]))
+                    .collect::<Vec<_>>()
+            })
+            .expect("quote-like read must succeed");
+
+        // What a swap gets, captured on-chain at the pinned block.
+        assert_eq!(
+            read,
+            vec![
+                Some(U256::from(999_900_210_000_000_000_000_000_000_000u128)),
+                Some(U256::from(999_274_730_000_000_000_000_000_000_000u128)),
+            ],
+        );
+        assert_ne!(
+            read.iter()
+                .map(|rate| rate.unwrap())
+                .collect::<Vec<_>>(),
+            quote_like,
+            "the pool served the same rates to both contexts: it is no longer armed, so this test \
+             cannot prove anything"
+        );
+    }
+
+    /// Every read other than the rate providers keeps the previous context, so the change stays
+    /// confined to the one call that reaches attacker-supplied code.
+    #[test]
+    fn other_reads_keep_the_default_context() {
+        let default = params(AlloyAddress::ZERO, Vec::new());
+
+        assert_eq!(default.caller, AlloyAddress::ZERO);
+        assert_eq!(default.gas_price, None);
     }
 
     const ETH_PLACEHOLDER: AlloyAddress =

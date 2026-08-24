@@ -108,6 +108,7 @@ where
         let tx_env = TxEnv {
             caller: params.caller,
             gas_limit: params.gas_limit.unwrap_or(8_000_000),
+            gas_price: params.gas_price.unwrap_or(0),
             kind: TxKind::Call(params.to),
             value: params.value,
             data: Bytes::copy_from_slice(&params.data),
@@ -399,6 +400,14 @@ pub struct SimulationParameters {
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     /// Per-call block context overrides.
     pub block_overrides: Option<BlockEnvOverrides>,
+    /// Gas price reported to the callee by the `GASPRICE` opcode. `None` means zero.
+    ///
+    /// A zero gas price is a reliable tell that a call is an off-chain simulation rather than a
+    /// transaction, and contracts have been found reading state differently when they detect it.
+    /// Set a transaction-like price when the callee must not be able to make that distinction;
+    /// [`caller`](Self::caller) then needs a balance covering `gas_limit * gas_price`, as it would
+    /// on chain.
+    pub gas_price: Option<u128>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -640,6 +649,7 @@ mod tests {
             gas_limit: None,
             transient_storage: None,
             block_overrides: Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+            gas_price: None,
         };
 
         let engine = SimulationEngine::new(state, false);
@@ -697,6 +707,7 @@ mod tests {
             gas_limit: None,
             transient_storage: None,
             block_overrides: None,
+            gas_price: None,
         };
         let mut eng = SimulationEngine::new(state, true);
 
@@ -839,6 +850,7 @@ mod tests {
             gas_limit: None,
             transient_storage: None,
             block_overrides: None,
+            gas_price: None,
         };
 
         let mut eng = SimulationEngine::new(state, false);

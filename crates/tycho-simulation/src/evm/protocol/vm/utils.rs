@@ -540,6 +540,7 @@ where
             gas_limit: None,
             transient_storage: None,
             block_overrides: None,
+            gas_price: None,
         })
         .map_err(|e| SimulationError::FatalError(format!("stateless call failed: {e}")))?;
     let address = Address::abi_decode(res.result.as_ref())
