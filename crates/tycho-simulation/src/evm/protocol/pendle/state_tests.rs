@@ -201,6 +201,31 @@ fn an_expired_market_quotes_nothing() {
     }
 }
 
+/// A market whose rate stopped resolving before it expired is still expired.
+///
+/// The rate's own clock froze below `expiry` and would say the market is alive forever. The head
+/// is what knows better, and expiry is the verdict that gets reported — dead is not a gap the
+/// next refresh closes.
+#[test]
+fn a_market_the_head_outlived_is_expired_even_with_a_frozen_rate() {
+    let PendleState::Market(mut market) = wsteth_market(1_830_124_788) else { unreachable!() };
+    market.head_timestamp = 1_830_124_800;
+    let state = PendleState::Market(market);
+
+    let error = state
+        .get_amount_out(BigUint::from(1_000_000_000_000_000_000u64), &token(SY, 18), &token(PT, 18))
+        .expect_err("an expired market must not quote");
+    let SimulationError::FatalError(message) = error else {
+        panic!("expiry should be fatal, not retryable")
+    };
+    assert!(message.contains("expired"), "{message}");
+
+    let limits = state
+        .get_limits(Bytes::from_str(SY).unwrap(), Bytes::from_str(PT).unwrap())
+        .unwrap();
+    assert_eq!(limits, (BigUint::from(0u32), BigUint::from(0u32)));
+}
+
 /// And reports no depth rather than a stale bound.
 #[test]
 fn an_expired_market_has_no_depth() {

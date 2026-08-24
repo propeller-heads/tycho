@@ -162,14 +162,14 @@ impl PendleMarketState {
     }
 
     fn expired(&self) -> bool {
-        market::is_expired(self.market.expiry, self.quote_time())
+        market::is_expired(self.market.expiry, self.latest_known_time())
     }
 
     fn guard_live(&self) -> Result<(), SimulationError> {
         if self.expired() {
             return Err(PendleError::MarketExpired {
                 expiry: self.market.expiry,
-                block_time: self.quote_time(),
+                block_time: self.latest_known_time(),
             }
             .into());
         }
@@ -567,6 +567,18 @@ impl PendleMarketState {
     /// Whether this state still answers for the current block.
     pub fn is_current(&self) -> bool {
         clock::is_current(self.rate_sampled_at, self.head_timestamp)
+    }
+
+    /// The latest moment this state has evidence of, from either clock.
+    ///
+    /// Expiry is judged against this rather than against [`Self::quote_time`], which is the rate's
+    /// own date. A rate that stopped resolving before the market expired would otherwise leave
+    /// `quote_time` frozen below `expiry` and the market never seen to die. The head is a real
+    /// chain timestamp, so taking the later of the two can only move the verdict up to where the
+    /// chain already is — never past it, and never onto a market that still trades.
+    fn latest_known_time(&self) -> u64 {
+        self.rate_sampled_at
+            .max(self.head_timestamp)
     }
 
     fn guard_current(&self) -> Result<(), SimulationError> {
