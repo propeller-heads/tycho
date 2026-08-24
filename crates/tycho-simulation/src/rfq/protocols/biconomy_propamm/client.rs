@@ -685,7 +685,13 @@ mod tests {
         let client = BiconomyClient::new(
             Chain::Base,
             vec![(weth(), usdc())],
-            crate::rfq::constants::DEFAULT_BICONOMY_PROPAMM_API_URL.to_string(),
+            // Same env override the production config honors, so CI can point at staging.
+            std::env::var("BICONOMY_PROPAMM_API_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| {
+                    crate::rfq::constants::DEFAULT_BICONOMY_PROPAMM_API_URL.to_string()
+                }),
             Duration::from_millis(1000),
             Duration::from_secs(10),
             Some(api_key),
