@@ -45,7 +45,7 @@ impl BiconomyClientBuilder {
 
     /// Set the directed (token_in, token_out) pairs to poll levels for.
     ///
-    /// PropAMM ladders are one-directional; add the reverse pair too if both directions are
+    /// Biconomy ladders are one-directional; add the reverse pair too if both directions are
     /// needed.
     pub fn pairs(mut self, pairs: Vec<(Bytes, Bytes)>) -> Self {
         self.pairs = pairs;
@@ -58,7 +58,7 @@ impl BiconomyClientBuilder {
         self
     }
 
-    /// Override the PropAMM API base url (defaults to the BICONOMY_PROPAMM_API_URL env var).
+    /// Override the Biconomy API base url (defaults to the BICONOMY_PROPAMM_API_URL env var).
     pub fn base_url(mut self, base_url: String) -> Self {
         self.base_url = base_url;
         self

@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {TransferManager} from "../TransferManager.sol";
 
-/// @notice Minimal surface of Biconomy PropAMM's venue adapter (deployed per
+/// @notice Minimal surface of Biconomy Biconomy's venue adapter (deployed per
 ///         chain; the executor takes the address as a constructor argument).
 ///         One call commits the maker-signed price ladders and fills per
 ///         maker leg. Struct layouts mirror the adapter exactly; field order
@@ -42,13 +42,13 @@ interface IBiconomyAdapter {
 }
 
 /// @title BiconomyExecutor
-/// @notice Executor for Biconomy PropAMM streaming-maker RFQ swaps
+/// @notice Executor for Biconomy Biconomy streaming-maker RFQ swaps
 ///         (rfq:biconomy_propamm)
 /// @dev The Rust swap encoder requests a binding firm quote immediately
 ///      before encoding (quotes are valid for seconds; superseded ladders
 ///      revert on-chain rather than filling stale) and re-shapes the quote's
 ///      settlement calls into abi.encode(tokenIn, tokenOut, commitData,
-///      legs). The only external target is the immutable PropAMM adapter,
+///      legs). The only external target is the immutable Biconomy adapter,
 ///      called through a typed interface - no raw calldata forwarding, so
 ///      there is no selector spoofing surface.
 /// @dev The adapter pulls exactly amountIn from msg.sender and reverts if
@@ -64,7 +64,7 @@ contract BiconomyExecutor is IExecutor {
     ///      empty array tail: 6 * 32 = 192 bytes.
     uint256 private constant _MIN_DATA_LENGTH = 192;
 
-    /// @notice The PropAMM venue adapter contract address
+    /// @notice The Biconomy venue adapter contract address
     address public immutable biconomyAdapter;
 
     constructor(address biconomyAdapter_) {
@@ -86,7 +86,7 @@ contract BiconomyExecutor is IExecutor {
         return msg.sender;
     }
 
-    /// @notice Executes a swap through the PropAMM adapter
+    /// @notice Executes a swap through the Biconomy adapter
     /// @param amountIn The amount of input token to swap; must equal the
     ///        quoted amount baked into the encoded legs
     /// @param data abi.encode(tokenIn, tokenOut, commitData, legs) produced

@@ -22,7 +22,8 @@ use crate::{
         errors::RFQError,
         models::TimestampHeader,
         protocols::biconomy_propamm::models::{
-            parse_biguint, BiconomyFirmQuoteResponse, BiconomyLevelsResponse,
+            parse_biguint, BiconomyChainLevelsResponse, BiconomyFirmQuoteResponse,
+            BiconomyLevelsResponse,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -37,29 +38,30 @@ fn bytes_to_address_string(address: &Bytes) -> Result<String, RFQError> {
     Ok(Address::from_slice(address).to_checksum(None))
 }
 
-/// Validates that PropAMM supports the chain and returns its numeric chain id.
+/// Validates that Biconomy supports the chain and returns its numeric chain id.
 ///
-/// Base and BSC mainnet. The PropAMM API also serves Base Sepolia (chain id 84532), but
+/// Base and BSC mainnet. The Biconomy API also serves Base Sepolia (chain id 84532), but
 /// tycho-common has no built-in testnet chain, so testnets are not wired up.
 fn validate_chain(chain: Chain) -> Result<u64, RFQError> {
     match chain {
         Chain::Base | Chain::Bsc => Ok(chain.id()),
-        _ => Err(RFQError::FatalError(format!("Unsupported chain for PropAMM: {chain:?}"))),
+        _ => Err(RFQError::FatalError(format!("Unsupported chain for Biconomy: {chain:?}"))),
     }
 }
 
-/// Client for the PropAMM RFQ API.
+/// Client for the Biconomy RFQ API.
 ///
-/// Unlike Bebop's push-based WebSocket feed, PropAMM exposes a plain HTTP levels endpoint, so
-/// `stream()` polls `/v1/levels` for each configured pair at a fixed interval and converts every
-/// poll into the same absolute `StateSyncMessage` snapshot shape Bebop emits from its WS.
+/// Unlike Bebop's push-based WebSocket feed, the Biconomy API exposes a plain HTTP levels
+/// endpoint, so `stream()` polls the chain-batch `/v1/levels?chainId=` once per interval (all
+/// configured pairs in one request) and converts every poll into the same absolute
+/// `StateSyncMessage` snapshot shape Bebop emits from its WS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BiconomyClient {
     chain: Chain,
     chain_id: u64,
     levels_endpoint: String,
     firm_quote_endpoint: String,
-    // Directed (token_in, token_out) pairs to poll levels for. PropAMM ladders are
+    // Directed (token_in, token_out) pairs to poll levels for. Biconomy ladders are
     // one-directional; poll the reverse pair separately if both directions are needed.
     pairs: Vec<(Bytes, Bytes)>,
     poll_interval: Duration,
@@ -96,10 +98,19 @@ impl BiconomyClient {
         })
     }
 
-    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    // Every Biconomy endpoint requires the key; failing here beats an opaque 401. Kept out of
+    // construction so deserialized clients (the key is never serialized) still build.
+    fn apply_auth(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, RFQError> {
         match &self.api_key {
-            Some(key) => request.header("x-api-key", key),
-            None => request,
+            Some(key) => Ok(request.header("x-api-key", key)),
+            None => Err(RFQError::FatalError(
+                "api_key is required for the Biconomy RFQ API; set it via \
+                 BiconomyClientBuilder::api_key"
+                    .to_string(),
+            )),
         }
     }
 
@@ -117,31 +128,24 @@ impl BiconomyClient {
         format!("{}", keccak256(pair_str.as_bytes()))
     }
 
-    async fn fetch_levels(
-        &self,
-        token_in: &Bytes,
-        token_out: &Bytes,
-    ) -> Result<BiconomyLevelsResponse, RFQError> {
+    /// Fetches every direction this chain quotes in one request (`/v1/levels?chainId=`).
+    async fn fetch_chain_levels(&self) -> Result<BiconomyChainLevelsResponse, RFQError> {
         let response = self
             .apply_auth(
                 self.http_client()
                     .get(&self.levels_endpoint),
-            )
-            .query(&[
-                ("chainId", self.chain_id.to_string()),
-                ("tokenIn", bytes_to_address_string(token_in)?),
-                ("tokenOut", bytes_to_address_string(token_out)?),
-            ])
+            )?
+            .query(&[("chainId", self.chain_id.to_string())])
             .header("accept", "application/json")
             .send()
             .await
             .map_err(|e| {
-                RFQError::ConnectionError(format!("Failed to fetch PropAMM levels: {e}"))
+                RFQError::ConnectionError(format!("Failed to fetch Biconomy levels: {e}"))
             })?;
 
         if !response.status().is_success() {
             return Err(RFQError::ConnectionError(format!(
-                "PropAMM levels HTTP error {}: {}",
+                "Biconomy levels HTTP error {}: {}",
                 response.status(),
                 response
                     .text()
@@ -151,7 +155,7 @@ impl BiconomyClient {
         }
 
         response.json().await.map_err(|e| {
-            RFQError::ParsingError(format!("Failed to parse PropAMM levels response: {e}"))
+            RFQError::ParsingError(format!("Failed to parse Biconomy levels response: {e}"))
         })
     }
 
@@ -201,7 +205,7 @@ impl BiconomyClient {
         ComponentWithState {
             state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
-            // PropAMM levels carry no USD normalization data, so no TVL is reported.
+            // Biconomy levels carry no USD normalization data, so no TVL is reported.
             component_tvl: None,
             entrypoints: vec![],
         }
@@ -226,7 +230,7 @@ impl BiconomyClient {
                 ))
             })?;
 
-        // Provider-specific opaque attributes. IMPORTANT PropAMM rule: `valid_until` is a hard
+        // Provider-specific opaque attributes. IMPORTANT Biconomy rule: `valid_until` is a hard
         // on-chain deadline. Consumers must refetch a firm quote immediately before broadcast
         // and never replay a stale response.
         let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
@@ -266,7 +270,7 @@ impl RFQClient for BiconomyClient {
             let mut ticker = interval(client.poll_interval);
 
             info!(
-                "Starting PropAMM polling every {} ms for {} pairs",
+                "Starting Biconomy polling every {} ms for {} pairs",
                 client.poll_interval.as_millis(),
                 client.pairs.len()
             );
@@ -278,35 +282,37 @@ impl RFQClient for BiconomyClient {
                 // the freshest one is used; if every fetch fails the wall clock is the fallback.
                 let mut latest_as_of: Option<u64> = None;
 
-                for (token_in, token_out) in &client.pairs {
-                    let levels = match client.fetch_levels(token_in, token_out).await {
-                        Ok(levels) => levels,
-                        Err(e) => {
-                            warn!(
-                                "Failed to fetch PropAMM levels for {token_in} -> {token_out}: {e}"
-                            );
-                            continue;
-                        }
-                    };
+                // One batch poll covers every configured pair. A failed poll keeps the
+                // previous snapshot instead of emitting an empty book: fetch failure and
+                // empty liquidity stay distinguishable.
+                let chain_levels = match client.fetch_chain_levels().await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        warn!("Failed to fetch Biconomy levels for chain {}: {e}", client.chain_id);
+                        continue;
+                    }
+                };
+                if chain_levels.chain_id != client.chain_id {
+                    warn!(
+                        "Biconomy levels chain id mismatch: expected {}, got {}. Skipping poll.",
+                        client.chain_id, chain_levels.chain_id
+                    );
+                    continue;
+                }
+                latest_as_of = Some(latest_as_of.unwrap_or(0).max(chain_levels.as_of));
 
-                    if levels.chain_id != client.chain_id {
-                        warn!(
-                            "PropAMM levels chain id mismatch: expected {}, got {}. Skipping.",
-                            client.chain_id, levels.chain_id
-                        );
+                for (token_in, token_out) in &client.pairs {
+                    // Pairs missing from the response or without maker liquidity are dropped,
+                    // so they show up in removed_components just like Bebop's TVL-filtered
+                    // empty books.
+                    let Some(entry) = chain_levels
+                        .pairs
+                        .iter()
+                        .find(|p| &p.token_in == token_in && &p.token_out == token_out)
+                    else {
                         continue;
-                    }
-                    if &levels.token_in != token_in || &levels.token_out != token_out {
-                        warn!(
-                            "PropAMM levels pair mismatch: requested {token_in} -> {token_out}, \
-                             got {} -> {}. Skipping.",
-                            levels.token_in, levels.token_out
-                        );
-                        continue;
-                    }
-                    // Pairs without any maker liquidity are dropped, so they show up in
-                    // removed_components just like Bebop's TVL-filtered empty books.
-                    if levels
+                    };
+                    if entry
                         .makers
                         .iter()
                         .all(|maker| maker.levels.is_empty())
@@ -314,7 +320,14 @@ impl RFQClient for BiconomyClient {
                         continue;
                     }
 
-                    latest_as_of = Some(latest_as_of.unwrap_or(0).max(levels.as_of));
+                    let levels = BiconomyLevelsResponse {
+                        chain_id: chain_levels.chain_id,
+                        token_in: entry.token_in.clone(),
+                        token_out: entry.token_out.clone(),
+                        merged: entry.merged.clone(),
+                        makers: entry.makers.clone(),
+                        as_of: chain_levels.as_of,
+                    };
                     let component_id = Self::component_id(token_in, token_out);
                     let component_with_state =
                         client.create_component_with_state(component_id.clone(), &levels);
@@ -351,7 +364,7 @@ impl RFQClient for BiconomyClient {
 
     /// Fetches a binding firm quote from `GET /v1/firm-quote`.
     ///
-    /// IMPORTANT PropAMM rule: the returned quote is single-use and expires hard at
+    /// IMPORTANT Biconomy rule: the returned quote is single-use and expires hard at
     /// `valid_until`. Consumers must refetch a firm quote immediately before broadcasting the
     /// settlement transaction and must never replay a stale response.
     async fn request_binding_quote(
@@ -362,7 +375,7 @@ impl RFQClient for BiconomyClient {
             .apply_auth(
                 self.http_client()
                     .get(&self.firm_quote_endpoint),
-            )
+            )?
             .query(&[
                 ("chainId", self.chain_id.to_string()),
                 ("tokenIn", bytes_to_address_string(&params.token_in)?),
@@ -376,17 +389,19 @@ impl RFQClient for BiconomyClient {
             .await
             .map_err(|_| {
                 RFQError::ConnectionError(format!(
-                    "PropAMM firm quote request timed out after {} seconds",
+                    "Biconomy firm quote request timed out after {} seconds",
                     self.quote_timeout.as_secs()
                 ))
             })?
             .map_err(|e| {
-                RFQError::ConnectionError(format!("Failed to send PropAMM firm quote request: {e}"))
+                RFQError::ConnectionError(format!(
+                    "Failed to send Biconomy firm quote request: {e}"
+                ))
             })?;
 
         if !response.status().is_success() {
             return Err(RFQError::QuoteNotFound(format!(
-                "PropAMM firm quote HTTP error {}: {}",
+                "Biconomy firm quote HTTP error {}: {}",
                 response.status(),
                 response
                     .text()
@@ -399,7 +414,7 @@ impl RFQClient for BiconomyClient {
             .json::<BiconomyFirmQuoteResponse>()
             .await
             .map_err(|e| {
-                RFQError::ParsingError(format!("Failed to parse PropAMM firm quote response: {e}"))
+                RFQError::ParsingError(format!("Failed to parse Biconomy firm quote response: {e}"))
             })?;
 
         Self::process_firm_quote_response(quote, params, self.chain_id)
@@ -436,7 +451,7 @@ mod tests {
             base_url.to_string(),
             Duration::from_millis(50),
             Duration::from_secs(5),
-            None,
+            Some("test-api-key".to_string()),
         )
         .unwrap()
     }
@@ -588,9 +603,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_polling_stream_emits_snapshots() {
-        let addr =
-            create_json_server("src/rfq/protocols/biconomy_propamm/test_responses/levels.json")
-                .await;
+        let addr = create_json_server(
+            "src/rfq/protocols/biconomy_propamm/test_responses/chain_levels.json",
+        )
+        .await;
         let client = test_client(&format!("http://127.0.0.1:{}", addr.port()));
 
         let mut stream = client.stream();
@@ -671,10 +687,15 @@ mod tests {
         )
         .expect("client");
 
-        let levels = client
-            .fetch_levels(&weth(), &usdc())
+        let chain_levels = client
+            .fetch_chain_levels()
             .await
             .expect("levels request failed");
+        let levels = chain_levels
+            .pairs
+            .iter()
+            .find(|p| p.token_in == weth() && p.token_out == usdc())
+            .expect("WETH/USDC missing from the chain book");
         assert!(!levels.makers.is_empty(), "no live makers for WETH/USDC");
         eprintln!(
             "levels OK: {} makers, first ladder {} levels",

@@ -25,7 +25,7 @@ use crate::encoding::{
 };
 
 sol! {
-    /// Structs mirror the deployed PropAMM contracts exactly (SwapTypes.sol in
+    /// Structs mirror the deployed Biconomy contracts exactly (SwapTypes.sol in
     /// propamm-protocol, and the vendored copies in BiconomyExecutor.sol);
     /// field order is load-bearing for abi decoding.
     struct Level {
@@ -64,7 +64,7 @@ sol! {
         bool isDelegatecall;
     }
 
-    /// PropAMM settlement entrypoint - the single call a firm quote returns
+    /// Biconomy settlement entrypoint - the single call a firm quote returns
     /// (selector 0x1eada922). Only used for decoding.
     function swap(SwapParams params, Step[] steps) returns (uint256 delivered);
 
@@ -85,25 +85,25 @@ sol! {
     function sweepBalance(address token, address receiver, uint256 minAmount);
 }
 
-/// One settlement call of a PropAMM firm quote, mirroring the JSON shape
-/// (`{to, value, data}`) that tycho-simulation's PropAMM client packs into the
+/// One settlement call of a Biconomy firm quote, mirroring the JSON shape
+/// (`{to, value, data}`) that tycho-simulation's Biconomy client packs into the
 /// `calls` quote attribute.
 #[derive(Debug, Deserialize)]
 struct BiconomyCall {
-    /// Call target: the PropAMM settlement contract. Raw calldata is never
+    /// Call target: the Biconomy settlement contract. Raw calldata is never
     /// forwarded on-chain - execution goes through the typed adapter call in
     /// BiconomyExecutor - but step targets are validated against it.
     to: Bytes,
-    /// Native value as a decimal string; PropAMM settlement is ERC20-only.
+    /// Native value as a decimal string; Biconomy settlement is ERC20-only.
     #[allow(dead_code)]
     value: String,
     data: Bytes,
 }
 
-/// Encodes a swap on PropAMM (streaming-maker RFQ) through the given executor
+/// Encodes a swap on Biconomy (streaming-maker RFQ) through the given executor
 /// address.
 ///
-/// A PropAMM firm quote returns exactly one settlement `swap()` call whose
+/// A Biconomy firm quote returns exactly one settlement `swap()` call whose
 /// step list carries the price commit, the input transfer and one
 /// `fillFromAnchor` per maker leg. Raw calldata is never forwarded on-chain:
 /// this encoder decodes the settlement call, re-derives a typed payload from
@@ -135,11 +135,11 @@ impl SwapEncoder for BiconomySwapEncoder {
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         // Base and BSC mainnet, mirroring the tycho-simulation client. The
-        // PropAMM adapter also exists on Base Sepolia, but tycho-common has no
+        // Biconomy adapter also exists on Base Sepolia, but tycho-common has no
         // built-in testnet chain, so testnets are not wired up.
         if chain != Chain::Base && chain != Chain::Bsc {
             return Err(EncodingError::FatalError(
-                "PropAMM swaps are only supported on Base and BSC".to_string(),
+                "Biconomy swaps are only supported on Base and BSC".to_string(),
             ));
         }
         let (runtime_handle, runtime) = create_encoding_runtime()?;
@@ -158,7 +158,7 @@ impl SwapEncoder for BiconomySwapEncoder {
             .protocol_state()
             .as_ref()
             .ok_or_else(|| {
-                EncodingError::FatalError("protocol_state is required for PropAMM".to_string())
+                EncodingError::FatalError("protocol_state is required for Biconomy".to_string())
             })?;
         let indicatively_priced_state = protocol_state
             .as_indicatively_priced()
@@ -169,13 +169,13 @@ impl SwapEncoder for BiconomySwapEncoder {
             .estimated_amount_in()
             .clone()
             .ok_or(EncodingError::FatalError(
-                "Estimated amount in is mandatory for a PropAMM swap".to_string(),
+                "Estimated amount in is mandatory for a Biconomy swap".to_string(),
             ))?;
         let router_address = encoding_context
             .router_address
             .clone()
             .ok_or(EncodingError::FatalError(
-                "The router address is needed to perform a PropAMM swap".to_string(),
+                "The router address is needed to perform a Biconomy swap".to_string(),
             ))?;
 
         let params = GetAmountOutParams {
@@ -193,20 +193,20 @@ impl SwapEncoder for BiconomySwapEncoder {
             })
         })??;
 
-        // PropAMM firm quotes expire hard at valid_until (enforced on-chain),
+        // Biconomy firm quotes expire hard at valid_until (enforced on-chain),
         // so refuse to encode a payload that can only revert.
         let valid_until_bytes = signed_quote
             .quote_attributes
             .get("valid_until")
             .ok_or(EncodingError::FatalError(
-                "PropAMM quote must have a valid_until attribute".to_string(),
+                "Biconomy quote must have a valid_until attribute".to_string(),
             ))?;
         let valid_until: [u8; 8] = valid_until_bytes
             .as_ref()
             .try_into()
             .map_err(|_| {
                 EncodingError::FatalError(
-                    "PropAMM valid_until attribute must be 8 big-endian bytes".to_string(),
+                    "Biconomy valid_until attribute must be 8 big-endian bytes".to_string(),
                 )
             })?;
         let valid_until = u64::from_be_bytes(valid_until);
@@ -216,7 +216,7 @@ impl SwapEncoder for BiconomySwapEncoder {
             .as_secs();
         if valid_until <= now {
             return Err(EncodingError::RecoverableError(format!(
-                "PropAMM firm quote expired at {valid_until} (now {now}): firm quotes are \
+                "Biconomy firm quote expired at {valid_until} (now {now}): firm quotes are \
                  single-use and short-lived, re-encode to fetch a fresh quote"
             )));
         }
@@ -225,17 +225,17 @@ impl SwapEncoder for BiconomySwapEncoder {
             .quote_attributes
             .get("calls")
             .ok_or(EncodingError::FatalError(
-                "PropAMM quote must have a calls attribute".to_string(),
+                "Biconomy quote must have a calls attribute".to_string(),
             ))?;
         let calls: Vec<BiconomyCall> = serde_json::from_slice(calls_json).map_err(|e| {
-            EncodingError::FatalError(format!("Failed to parse PropAMM quote calls: {e}"))
+            EncodingError::FatalError(format!("Failed to parse Biconomy quote calls: {e}"))
         })?;
 
         // A firm quote is exactly one settlement `swap()` call. Anything else
         // means the API changed shape - refuse to encode rather than guess.
         if calls.len() != 1 {
             return Err(EncodingError::FatalError(format!(
-                "PropAMM firm quote must contain exactly one settlement call, got {}",
+                "Biconomy firm quote must contain exactly one settlement call, got {}",
                 calls.len()
             )));
         }
@@ -243,17 +243,19 @@ impl SwapEncoder for BiconomySwapEncoder {
         let call_data: &[u8] = settlement_call.data.as_ref();
         if call_data.len() < 4 || call_data[..4] != swapCall::SELECTOR[..] {
             return Err(EncodingError::FatalError(
-                "PropAMM firm quote call is not settlement swap(); the API may have changed, \
+                "Biconomy firm quote call is not settlement swap(); the API may have changed, \
                  refusing to encode"
                     .to_string(),
             ));
         }
         let settlement = swapCall::abi_decode(call_data).map_err(|e| {
-            EncodingError::FatalError(format!("Failed to decode PropAMM settlement swap call: {e}"))
+            EncodingError::FatalError(format!(
+                "Failed to decode Biconomy settlement swap call: {e}"
+            ))
         })?;
         if settlement.params.tokenIn != token_in || settlement.params.tokenOut != token_out {
             return Err(EncodingError::FatalError(format!(
-                "PropAMM settlement pair {}/{} does not match the swap {token_in}/{token_out}",
+                "Biconomy settlement pair {}/{} does not match the swap {token_in}/{token_out}",
                 settlement.params.tokenIn, settlement.params.tokenOut
             )));
         }
@@ -268,7 +270,7 @@ impl SwapEncoder for BiconomySwapEncoder {
             let step_data: &[u8] = step.data.as_ref();
             if step_data.len() < 4 {
                 return Err(EncodingError::FatalError(
-                    "PropAMM settlement step with no selector".to_string(),
+                    "Biconomy settlement step with no selector".to_string(),
                 ));
             }
             let selector: [u8; 4] = step_data[..4]
@@ -278,7 +280,7 @@ impl SwapEncoder for BiconomySwapEncoder {
                 s if s == updatePricesCall::SELECTOR => {
                     if commit.is_some() {
                         return Err(EncodingError::FatalError(
-                            "PropAMM settlement has more than one price commit step".to_string(),
+                            "Biconomy settlement has more than one price commit step".to_string(),
                         ));
                     }
                     commit = Some((step.to, step_data.to_vec()));
@@ -288,18 +290,18 @@ impl SwapEncoder for BiconomySwapEncoder {
                     // executor, and each fill must run on that same contract.
                     let Some((commit_to, _)) = &commit else {
                         return Err(EncodingError::FatalError(
-                            "PropAMM fill step before the price commit".to_string(),
+                            "Biconomy fill step before the price commit".to_string(),
                         ));
                     };
                     if step.to != *commit_to {
                         return Err(EncodingError::FatalError(format!(
-                            "PropAMM fill step targets {} instead of the anchor executor {}",
+                            "Biconomy fill step targets {} instead of the anchor executor {}",
                             step.to, commit_to
                         )));
                     }
                     let fill = fillFromAnchorCall::abi_decode(step_data).map_err(|e| {
                         EncodingError::FatalError(format!(
-                            "Failed to decode PropAMM fillFromAnchor step: {e}"
+                            "Failed to decode Biconomy fillFromAnchor step: {e}"
                         ))
                     })?;
                     // The adapter executes direct fills only; a route through a
@@ -308,7 +310,7 @@ impl SwapEncoder for BiconomySwapEncoder {
                     // fetch may pick a direct route.
                     if fill.ladder.tokenIn != token_in || fill.ladder.tokenOut != token_out {
                         return Err(EncodingError::RecoverableError(format!(
-                            "PropAMM quote routed through an intermediate pair ({}/{}); the \
+                            "Biconomy quote routed through an intermediate pair ({}/{}); the \
                              adapter executes direct fills only - refetch for a direct route",
                             fill.ladder.tokenIn, fill.ladder.tokenOut
                         )));
@@ -316,7 +318,7 @@ impl SwapEncoder for BiconomySwapEncoder {
                     legs_total = legs_total
                         .checked_add(fill.amountIn)
                         .ok_or(EncodingError::FatalError(
-                            "PropAMM fill leg amounts overflow".to_string(),
+                            "Biconomy fill leg amounts overflow".to_string(),
                         ))?;
                     legs.push(FillLeg { ladder: fill.ladder, amountIn: fill.amountIn });
                 }
@@ -326,7 +328,7 @@ impl SwapEncoder for BiconomySwapEncoder {
                     // plus the adapter's own transferFrom, so validate + skip.
                     if step.to != token_in {
                         return Err(EncodingError::FatalError(format!(
-                            "PropAMM transfer step moves {} instead of the input token",
+                            "Biconomy transfer step moves {} instead of the input token",
                             step.to
                         )));
                     }
@@ -337,14 +339,14 @@ impl SwapEncoder for BiconomySwapEncoder {
                     let expected: Address = bytes_to_address(&settlement_call.to)?;
                     if step.to != expected {
                         return Err(EncodingError::FatalError(format!(
-                            "PropAMM sweep step targets {} instead of the settlement",
+                            "Biconomy sweep step targets {} instead of the settlement",
                             step.to
                         )));
                     }
                 }
                 other => {
                     return Err(EncodingError::FatalError(format!(
-                        "Unrecognized PropAMM settlement step selector 0x{}; the API may have \
+                        "Unrecognized Biconomy settlement step selector 0x{}; the API may have \
                          changed, refusing to encode",
                         alloy::hex::encode(other)
                     )));
@@ -354,19 +356,19 @@ impl SwapEncoder for BiconomySwapEncoder {
 
         let Some((_, commit_data)) = commit else {
             return Err(EncodingError::FatalError(
-                "PropAMM settlement has no price commit step".to_string(),
+                "Biconomy settlement has no price commit step".to_string(),
             ));
         };
         if legs.is_empty() {
             return Err(EncodingError::FatalError(
-                "PropAMM firm quote contains no fillFromAnchor steps".to_string(),
+                "Biconomy firm quote contains no fillFromAnchor steps".to_string(),
             ));
         }
         // The adapter pulls exactly amountIn and reverts unless the legs
         // consume it fully, so a mismatched quote can never settle.
         if legs_total != biguint_to_u256(&signed_quote.amount_in) {
             return Err(EncodingError::FatalError(format!(
-                "PropAMM fill legs sum {legs_total} does not match the quoted amount in {}",
+                "Biconomy fill legs sum {legs_total} does not match the quoted amount in {}",
                 signed_quote.amount_in
             )));
         }
@@ -399,9 +401,9 @@ mod tests {
 
     // Selectors cross-checked against `cast sig` of the deployed contracts:
     //   swap((address,address,uint256,uint256,address),(address,uint256,bytes,bool)[])
-    //   updatePrices((address,address,address,address,(uint256,uint256)[],uint256,uint256)[],bytes[])
-    //   fillFromAnchor((address,address,address,address,(uint256,uint256)[],uint256,uint256),uint256,address)
-    //   sweepBalance(address,address,uint256)
+    //   updatePrices((address,address,address,address,(uint256,uint256)[],uint256,uint256)[],
+    // bytes[])   fillFromAnchor((address,address,address,address,(uint256,uint256)[],uint256,
+    // uint256),uint256,address)   sweepBalance(address,address,uint256)
     const SWAP_SELECTOR: [u8; 4] = [0x1e, 0xad, 0xa9, 0x22];
     const UPDATE_PRICES_SELECTOR: [u8; 4] = [0x86, 0xe9, 0x7b, 0x02];
     const FILL_SELECTOR: [u8; 4] = [0x32, 0x90, 0xf8, 0x1e];
@@ -413,8 +415,9 @@ mod tests {
 
     // abi.encode(WETH, USDC, COMMIT_DATA, [leg1, leg2]) generated with
     // `cast abi-encode
-    // "f(address,address,bytes,((address,address,address,address,(uint256,uint256)[],uint256,uint256),uint256)[])"`
-    // to cross-check alloy's params encoding against Solidity's abi.encode.
+    // "f(address,address,bytes,((address,address,address,address,(uint256,uint256)[],uint256,
+    // uint256),uint256)[])"` to cross-check alloy's params encoding against Solidity's
+    // abi.encode.
     const EXPECTED_ENCODED: &str = "0000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000002486e97b02000000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000222222222222222222222222222222222222222200000000000000000000000011111111111111111111111111111111111111110000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000000000000000000000000000000000006ff00180000000000000000000000000000000000000000000000001158e460913d00000000000000000000000000000000000000000000000000000000000006fe0bf4000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000444444444444444444444444444444444444444400000000000000000000000033333333333333333333333333333333333333330000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000006866519e00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000000000000000000000000000000000006fd91e20";
 
     const SETTLEMENT: Address = address!("aaaa00000000000000000000000000000000aaaa");

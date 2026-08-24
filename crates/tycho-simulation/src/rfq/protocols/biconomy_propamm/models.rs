@@ -36,6 +36,32 @@ pub struct BiconomyLevelsResponse {
     pub as_of: u64,
 }
 
+/// Response of `GET {base_url}/v1/levels?chainId` (batch form): every direction the chain
+/// quotes, in one request. One poll per chain replaces one poll per direction, and an HTTP
+/// error is a failed poll rather than an empty book.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BiconomyChainLevelsResponse {
+    #[serde(rename = "chainId")]
+    pub chain_id: u64,
+    #[serde(default)]
+    pub pairs: Vec<BiconomyChainPairLevels>,
+    #[serde(rename = "asOf")]
+    pub as_of: u64,
+}
+
+/// One direction inside the batch response: the single-pair shape minus the envelope fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BiconomyChainPairLevels {
+    #[serde(rename = "tokenIn")]
+    pub token_in: Bytes,
+    #[serde(rename = "tokenOut")]
+    pub token_out: Bytes,
+    #[serde(default)]
+    pub merged: Vec<BiconomyMergedLevel>,
+    #[serde(default)]
+    pub makers: Vec<BiconomyMakerLevels>,
+}
+
 /// One marginal segment of the merged cross-maker ladder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BiconomyMergedLevel {

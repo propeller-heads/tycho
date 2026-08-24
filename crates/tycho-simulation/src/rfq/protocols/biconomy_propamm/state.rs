@@ -26,7 +26,7 @@ use crate::rfq::{
     },
 };
 
-/// Indicative state of one directed PropAMM pair.
+/// Indicative state of one directed Biconomy pair.
 ///
 /// `base_token` is the pair's tokenIn and `quote_token` its tokenOut. The levels feed is
 /// one-directional: simulating the reverse direction requires the reverse pair's own component.
@@ -63,7 +63,7 @@ impl BiconomyState {
             Ok(())
         } else {
             Err(SimulationError::RecoverableError(format!(
-                "PropAMM levels are one-directional ({} -> {}). Got in={}, out={}; use the \
+                "Biconomy levels are one-directional ({} -> {}). Got in={}, out={}; use the \
                  reverse pair's component for the other direction",
                 self.base_token.address,
                 self.quote_token.address,
@@ -121,7 +121,7 @@ struct SweepResult {
 /// Marginal-merge sweep over all makers' ladders.
 ///
 /// Consumes pooled marginal segments best-price-first until `amount_in` is covered, then applies
-/// each maker's settlement rounding. PropAMM inventory contracts settle a fill at a single
+/// each maker's settlement rounding. Biconomy inventory contracts settle a fill at a single
 /// averaged price, so the delivered amount per maker follows this exact three-floor chain:
 ///
 /// 1. `total_out = sum over consumed tranches of floor(take * price / 1e18)`
@@ -134,14 +134,24 @@ fn sweep_amount_out(
     makers: &[BiconomyMakerLevels],
     amount_in: &BigUint,
 ) -> Result<SweepResult, SimulationError> {
-    let scale = biconomy_propamm_price_scale();
     let segments = expand_marginal_segments(makers)?;
+    Ok(sweep_segments(&segments, makers.len(), amount_in))
+}
+
+/// The sweep over pre-expanded segments; callers that already hold the expansion (get_limits)
+/// avoid a second one.
+fn sweep_segments(
+    segments: &[MarginalSegment],
+    maker_count: usize,
+    amount_in: &BigUint,
+) -> SweepResult {
+    let scale = biconomy_propamm_price_scale();
 
     // (amount_in_maker, total_out) accumulators per maker
-    let mut consumed_per_maker = vec![(BigUint::zero(), BigUint::zero()); makers.len()];
+    let mut consumed_per_maker = vec![(BigUint::zero(), BigUint::zero()); maker_count];
     let mut remaining = amount_in.clone();
 
-    for segment in &segments {
+    for segment in segments {
         if remaining.is_zero() {
             break;
         }
@@ -164,14 +174,7 @@ fn sweep_amount_out(
         delivered += (amount_in_maker * &avg) / &scale;
     }
 
-    Ok(SweepResult { delivered, consumed: amount_in - remaining })
-}
-
-/// Total depth in tokenIn wei across all makers' ladders.
-fn total_depth(makers: &[BiconomyMakerLevels]) -> Result<BigUint, SimulationError> {
-    Ok(expand_marginal_segments(makers)?
-        .iter()
-        .fold(BigUint::zero(), |acc, segment| acc + &segment.size))
+    SweepResult { delivered, consumed: amount_in - remaining }
 }
 
 /// Best (highest) marginal price across all makers, 1e18-scaled.
@@ -196,16 +199,22 @@ impl ProtocolSim for BiconomyState {
             SimulationError::RecoverableError("Can't convert best price to f64".into())
         })?;
         // Levels prices are 1e18-scaled tokenOut-wei per tokenIn-wei; convert to a human price.
-        let price = best
-            * 10f64
+        let price = best *
+            10f64
                 .powi(self.base_token.decimals as i32 - self.quote_token.decimals as i32 - 18i32);
 
         if base.address == self.base_token.address && quote.address == self.quote_token.address {
             Ok(price)
-        } else if base.address == self.quote_token.address
-            && quote.address == self.base_token.address
+        } else if base.address == self.quote_token.address &&
+            quote.address == self.base_token.address
         {
-            Ok(1.0 / price)
+            // Levels are one-directional signed ladders; the reverse direction has its own
+            // component with its own ladder, so an inverted price would misquote it.
+            Err(SimulationError::RecoverableError(format!(
+                "Biconomy levels are one-directional ({} -> {}); use the reverse pair's \
+                 component for the other direction",
+                self.base_token.address, self.quote_token.address
+            )))
         } else {
             Err(SimulationError::RecoverableError(format!(
                 "Invalid token addresses: {}, {}",
@@ -229,8 +238,10 @@ impl ProtocolSim for BiconomyState {
         let sweep = sweep_amount_out(&self.levels.makers, &amount_in)?;
         let res = GetAmountOutResult {
             amount: sweep.delivered,
-            gas: BigUint::from(265_000u64), // Gas estimate from PropAMM firm quotes
-            new_state: self.clone_box(),    // The state doesn't change after a swap
+            // Routing-stage estimate. Binding quotes carry the exact per-quote figure from
+            // the API's gasEstimate in quote_attributes["gas_estimate"].
+            gas: BigUint::from(265_000u64),
+            new_state: self.clone_box(), // The state doesn't change after a swap
         };
 
         if sweep.consumed < amount_in {
@@ -254,20 +265,23 @@ impl ProtocolSim for BiconomyState {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if !(sell_token == self.base_token.address && buy_token == self.quote_token.address) {
             return Err(SimulationError::RecoverableError(format!(
-                "PropAMM levels are one-directional ({} -> {}). Got sell={sell_token}, \
+                "Biconomy levels are one-directional ({} -> {}). Got sell={sell_token}, \
                  buy={buy_token}; use the reverse pair's component for the other direction",
                 self.base_token.address, self.quote_token.address
             )));
         }
 
-        let sell_limit = total_depth(&self.levels.makers)?;
+        let segments = expand_marginal_segments(&self.levels.makers)?;
+        let sell_limit = segments
+            .iter()
+            .fold(BigUint::zero(), |acc, segment| acc + &segment.size);
         if sell_limit.is_zero() {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 
-        // The buy limit applies the same settlement rounding as get_amount_out at full depth, so
-        // the advertised limit is always reachable.
-        let buy_limit = sweep_amount_out(&self.levels.makers, &sell_limit)?.delivered;
+        // The buy limit applies the same settlement rounding as get_amount_out at full depth,
+        // so the advertised limit is always reachable. One expansion serves both bounds.
+        let buy_limit = sweep_segments(&segments, self.levels.makers.len(), &sell_limit).delivered;
         Ok((sell_limit, buy_limit))
     }
 
@@ -279,7 +293,7 @@ impl ProtocolSim for BiconomyState {
     ) -> Result<(), TransitionError> {
         // RFQ updates arrive as full API snapshots, not block deltas.
         Err(TransitionError::DecodeError(
-            "PropAMM RFQ state is snapshot-based and does not support deltas".into(),
+            "Biconomy RFQ state is snapshot-based and does not support deltas".into(),
         ))
     }
 
@@ -300,9 +314,9 @@ impl ProtocolSim for BiconomyState {
             .as_any()
             .downcast_ref::<BiconomyState>()
         {
-            self.base_token == other_state.base_token
-                && self.quote_token == other_state.quote_token
-                && self.levels == other_state.levels
+            self.base_token == other_state.base_token &&
+                self.quote_token == other_state.quote_token &&
+                self.levels == other_state.levels
         } else {
             false
         }
@@ -317,7 +331,7 @@ impl ProtocolSim for BiconomyState {
 impl IndicativelyPriced for BiconomyState {
     /// Requests a binding firm quote for this pair.
     ///
-    /// IMPORTANT PropAMM rule: the firm quote expires hard at its `valid_until`. Consumers must
+    /// IMPORTANT Biconomy rule: the firm quote expires hard at its `valid_until`. Consumers must
     /// refetch immediately before broadcast and never replay a stale response.
     async fn request_signed_quote(
         &self,
@@ -528,10 +542,11 @@ mod tests {
             .unwrap();
         assert!((price - 1878.0).abs() < 1e-6);
 
-        let inverted = state
+        // Levels are one-directional; the reverse direction is its own component and its own
+        // signed ladder, so an inverted price would misquote it.
+        assert!(state
             .spot_price(&usdc(), &weth())
-            .unwrap();
-        assert!((inverted - 1.0 / 1878.0).abs() < 1e-12);
+            .is_err());
     }
 
     #[test]
