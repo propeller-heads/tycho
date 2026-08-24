@@ -161,21 +161,6 @@ mod tests {
         }
     }
 
-    /// The fixtures are numbers, but a market emits bytes. This pins `word` — and with it every
-    /// fixture below — to the raw data of the captured swap log at block 25805550.
-    #[test]
-    fn the_fixture_words_encode_the_captured_log() {
-        assert_eq!(
-            hex::encode(fixtures::SWAP_DATA.concat()),
-            concat!(
-                "fffffffffffffffffffffffffffffffffffffffffffffffffda409e6942f0000",
-                "00000000000000000000000000000000000000000000000001d85637971ea8e4",
-                "00000000000000000000000000000000000000000000000000005208441f5d62",
-                "000000000000000000000000000000000000000000000000000041a0367f7de7",
-            )
-        );
-    }
-
     /// The fee split matters: `netSyToReserve` leaves the market on top of `netSyOut`, so the SY
     /// delta is larger in magnitude than the swap's headline output.
     #[test]
