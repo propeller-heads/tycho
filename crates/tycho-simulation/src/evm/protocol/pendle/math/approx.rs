@@ -21,7 +21,7 @@ use alloy::primitives::{I256, U256};
 use super::{
     errors::{PendleError, PendleResult},
     log_exp_math,
-    market::{self, MarketPreCompute, MarketState},
+    market::{self, MarketPreCompute, MarketState, TradeResult},
     pmath::{self, i_one},
     sy_utils,
 };
@@ -169,6 +169,9 @@ pub struct ApproxResult {
     /// How many times the loop ran. Carried because it pins the search *route*, not just its
     /// destination.
     pub iterations: usize,
+    /// The market the filled trade leaves behind. The search evaluates a trade at every guess and
+    /// only one of them executes, so this is the one at the guess that was accepted.
+    pub market_after: MarketState,
 }
 
 /// The closed-form starting guess, off `lastLnImpliedRate`.
@@ -221,26 +224,26 @@ pub fn estimate_swap_exact_sy_for_yt(
     estimate_amount(market, index, block_time, amount_sy_in, true, false)
 }
 
-/// SY required to buy `net_pt_out` PT.
+/// SY required to buy `net_pt_out` PT, and the trade that would deliver it.
 fn calc_sy_in(
     market: &MarketState,
     comp: &MarketPreCompute,
     index: U256,
     net_pt_out: U256,
-) -> PendleResult<(U256, U256)> {
+) -> PendleResult<(U256, TradeResult)> {
     let trade = market::calc_trade(market, comp, index, pmath::to_i256(net_pt_out)?)?;
-    Ok((pmath::to_u256(-trade.net_sy_to_account)?, pmath::to_u256(trade.net_sy_fee)?))
+    Ok((pmath::to_u256(-trade.net_sy_to_account)?, trade))
 }
 
-/// SY received for selling `net_pt_in` PT.
+/// SY received for selling `net_pt_in` PT, and the trade that would deliver it.
 fn calc_sy_out(
     market: &MarketState,
     comp: &MarketPreCompute,
     index: U256,
     net_pt_in: U256,
-) -> PendleResult<(U256, U256)> {
+) -> PendleResult<(U256, TradeResult)> {
     let trade = market::calc_trade(market, comp, index, -pmath::to_i256(net_pt_in)?)?;
-    Ok((pmath::to_u256(trade.net_sy_to_account)?, pmath::to_u256(trade.net_sy_fee)?))
+    Ok((pmath::to_u256(trade.net_sy_to_account)?, trade))
 }
 
 /// The most PT the market will sell, bounded by the rate floor.
@@ -320,11 +323,25 @@ pub fn approx_swap_exact_sy_for_pt(
 
     for iteration in 0..state.max_iteration {
         let guess = state.cur_guess;
-        let (net_sy_in, net_sy_fee) = calc_sy_in(market, &comp, index, guess)?;
+        let (net_sy_in, trade) = calc_sy_in(market, &comp, index, guess)?;
 
         if net_sy_in <= exact_sy_in {
             if pmath::is_a_smaller_approx_b(net_sy_in, exact_sy_in, state.eps)? {
-                return Ok(ApproxResult { amount_out: guess, net_sy_fee, iterations: iteration });
+                let net_pt_to_account = pmath::to_i256(guess)?;
+                let market_after = market::apply_trade(
+                    market,
+                    &comp,
+                    index,
+                    net_pt_to_account,
+                    &trade,
+                    block_time,
+                )?;
+                return Ok(ApproxResult {
+                    amount_out: guess,
+                    net_sy_fee: pmath::to_u256(trade.net_sy_fee)?,
+                    iterations: iteration,
+                    market_after,
+                });
             }
             state.transition_up(false)?;
         } else {
@@ -353,7 +370,7 @@ pub fn approx_swap_exact_sy_for_yt(
 
     for iteration in 0..state.max_iteration {
         let guess = state.cur_guess;
-        let (net_sy_out, net_sy_fee) = calc_sy_out(market, &comp, index, guess)?;
+        let (net_sy_out, trade) = calc_sy_out(market, &comp, index, guess)?;
         let net_sy_to_tokenize_pt = sy_utils::asset_to_sy_up(index, guess)?;
         if net_sy_to_tokenize_pt < net_sy_out {
             return Err(PendleError::NegativeResult {
@@ -365,7 +382,23 @@ pub fn approx_swap_exact_sy_for_yt(
 
         if net_sy_to_pull <= exact_sy_in {
             if pmath::is_a_smaller_approx_b(net_sy_to_pull, exact_sy_in, state.eps)? {
-                return Ok(ApproxResult { amount_out: guess, net_sy_fee, iterations: iteration });
+                // The PT is sold *into* the market, so the flow is negative — the mirror of the
+                // SY→PT leg, against the same reserves.
+                let net_pt_to_account = -pmath::to_i256(guess)?;
+                let market_after = market::apply_trade(
+                    market,
+                    &comp,
+                    index,
+                    net_pt_to_account,
+                    &trade,
+                    block_time,
+                )?;
+                return Ok(ApproxResult {
+                    amount_out: guess,
+                    net_sy_fee: pmath::to_u256(trade.net_sy_fee)?,
+                    iterations: iteration,
+                    market_after,
+                });
             }
             state.transition_up(false)?;
         } else {

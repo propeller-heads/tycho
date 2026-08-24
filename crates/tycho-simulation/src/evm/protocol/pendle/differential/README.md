@@ -62,6 +62,10 @@ Each contract's doc comments carry the reasoning per case. The themes:
   record the starting estimate and the iteration count. A divergence then localises to a step, and
   the search is pinned to the same route rather than only to the same answer — two implementations
   converging differently agree on the sampled inputs and part company on the rest.
+- **The state the trade leaves behind.** Market rows also record the reserves and implied rate
+  `executeTradeCore` writes, which is what the *next* quote is priced against. It is invisible in a
+  single quote and compounds across a sequence, so a port that got it slightly wrong would pass
+  every output assertion above while mispricing every split trade.
 - **Both sides of a limit.** The approx boundary sweep records sizes that revert alongside sizes
   that fill; sweeping only what fills would leave the interesting half untested.
 - **Operands that do not divide evenly.** The `PMath` and `SYUtils` grids are built out of them on

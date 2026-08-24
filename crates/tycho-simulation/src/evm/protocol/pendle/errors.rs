@@ -50,6 +50,7 @@ impl From<PendleError> for SimulationError {
             PendleError::DivisionByZero { .. } |
             PendleError::MarketProportionMustNotEqualOne |
             PendleError::MarketRateScalarBelowZero { .. } |
+            PendleError::MarketZeroLnImpliedRate |
             PendleError::ApproxInvalidBounds { .. } => SimulationError::FatalError(message),
         }
     }

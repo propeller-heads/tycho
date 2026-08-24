@@ -18,6 +18,10 @@
 //!
 //! The YT legs are flash-swaps against the **same reserves** as the PT legs. They are quoted on the
 //! market component, and `get_limits` reports each direction's own bound rather than sharing one.
+//!
+//! Every market quote returns the state the trade would leave behind — the reserves it moves and
+//! the implied rate the next trade is anchored on — so a caller sizing or splitting a trade prices
+//! each leg against the depth the one before it left.
 
 use std::{any::Any, collections::HashMap, fmt::Debug};
 
@@ -177,23 +181,24 @@ impl PendleMarketState {
     }
 
     /// PT in → SY out. Exact: the market has this primitive.
-    fn pt_for_sy(&self, pt_in: U256) -> Result<U256, PendleError> {
-        let trade = market::execute_trade(
+    fn pt_for_sy(&self, pt_in: U256) -> Result<(U256, MarketState), PendleError> {
+        let executed = market::execute_trade(
             &self.market,
             self.py_index,
             -pmath::to_i256(pt_in)?,
             self.quote_time(),
         )?;
-        pmath::to_u256(trade.net_sy_to_account)
+        Ok((pmath::to_u256(executed.trade.net_sy_to_account)?, executed.market))
     }
 
     /// YT in → SY out. A flash-swap: borrow PT, redeem PT+YT to SY, repay the market.
     ///
     /// Redeeming `n` YT needs `n` PT, so the borrowed leg is exactly the YT amount. What the
     /// trader keeps is the redemption proceeds less what repaying the borrow costs.
-    fn yt_for_sy(&self, yt_in: U256) -> Result<U256, PendleError> {
+    fn yt_for_sy(&self, yt_in: U256) -> Result<(U256, MarketState), PendleError> {
         let comp = market::get_market_pre_compute(&self.market, self.py_index, self.quote_time())?;
-        let trade = market::calc_trade(&self.market, &comp, self.py_index, pmath::to_i256(yt_in)?)?;
+        let net_pt_to_account = pmath::to_i256(yt_in)?;
+        let trade = market::calc_trade(&self.market, &comp, self.py_index, net_pt_to_account)?;
         // Buying the PT back costs this much SY.
         let sy_to_repay = pmath::to_u256(-trade.net_sy_to_account)?;
         // Redeeming PT+YT returns the asset value of the position, converted at the index.
@@ -204,41 +209,75 @@ impl PendleMarketState {
                 b: sy_to_repay.to_string(),
             });
         }
-        Ok(redeemed - sy_to_repay)
+        // Only the borrowed PT leg touches the market. Tokenizing and redeeming PY happens on the
+        // YT contract, against reserves this component does not hold.
+        let market_after = market::apply_trade(
+            &self.market,
+            &comp,
+            self.py_index,
+            net_pt_to_account,
+            &trade,
+            self.quote_time(),
+        )?;
+        Ok((redeemed - sy_to_repay, market_after))
     }
 
+    /// One market edge, quoted: the output, its gas, and the reserves the trade leaves behind.
     fn amount_out(
         &self,
         amount_in: U256,
         from: MarketToken,
         to: MarketToken,
-    ) -> Result<(U256, u64), PendleError> {
-        match (from, to) {
-            (MarketToken::Pt, MarketToken::Sy) => Ok((self.pt_for_sy(amount_in)?, GAS_PT_FOR_SY)),
-            (MarketToken::Yt, MarketToken::Sy) => Ok((self.yt_for_sy(amount_in)?, GAS_YT_FOR_SY)),
-            (MarketToken::Sy, MarketToken::Pt) => Ok((
-                approx::approx_swap_exact_sy_for_pt(
+    ) -> Result<MarketSwap, PendleError> {
+        let (amount_out, gas, market) = match (from, to) {
+            (MarketToken::Pt, MarketToken::Sy) => {
+                let (out, market) = self.pt_for_sy(amount_in)?;
+                (out, GAS_PT_FOR_SY, market)
+            }
+            (MarketToken::Yt, MarketToken::Sy) => {
+                let (out, market) = self.yt_for_sy(amount_in)?;
+                (out, GAS_YT_FOR_SY, market)
+            }
+            (MarketToken::Sy, MarketToken::Pt) => {
+                let filled = approx::approx_swap_exact_sy_for_pt(
                     &self.market,
                     self.py_index,
                     amount_in,
                     self.quote_time(),
-                )?
-                .amount_out,
-                GAS_SY_FOR_PT,
-            )),
-            (MarketToken::Sy, MarketToken::Yt) => Ok((
-                approx::approx_swap_exact_sy_for_yt(
+                )?;
+                (filled.amount_out, GAS_SY_FOR_PT, filled.market_after)
+            }
+            (MarketToken::Sy, MarketToken::Yt) => {
+                let filled = approx::approx_swap_exact_sy_for_yt(
                     &self.market,
                     self.py_index,
                     amount_in,
                     self.quote_time(),
-                )?
-                .amount_out,
-                GAS_SY_FOR_YT,
-            )),
+                )?;
+                (filled.amount_out, GAS_SY_FOR_YT, filled.market_after)
+            }
             _ => unreachable!("unsupported pair is rejected before reaching here"),
-        }
+        };
+        Ok(MarketSwap { amount_out, gas, market })
     }
+
+    /// The same state carrying the market a trade left behind.
+    ///
+    /// The rate and the clocks come across unchanged: a swap moves reserves, it does not advance
+    /// the block or re-read the PY index, so the successor answers for the same moment as the
+    /// state it came from.
+    fn after(&self, market: MarketState) -> Self {
+        PendleMarketState { market, ..self.clone() }
+    }
+}
+
+/// What one market edge resolves to.
+struct MarketSwap {
+    amount_out: U256,
+    gas: u64,
+    /// The reserves and implied rate after the trade. A second quote against this prices at the
+    /// depth the first one left, which is what makes splitting a trade across sizes meaningful.
+    market: MarketState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,7 +418,7 @@ impl ProtocolSim for PendleState {
         }
         let amount = biguint_to_u256(&amount_in);
 
-        let (out, gas) = match self {
+        let (out, gas, new_state) = match self {
             PendleState::Market(state) => {
                 state.guard_live()?;
                 state.guard_current()?;
@@ -394,7 +433,8 @@ impl ProtocolSim for PendleState {
                 if from == to || (from != MarketToken::Sy && to != MarketToken::Sy) {
                     return Err(unknown_pair(token_in, token_out));
                 }
-                state.amount_out(amount, from, to)?
+                let swap = state.amount_out(amount, from, to)?;
+                (swap.amount_out, swap.gas, PendleState::Market(state.after(swap.market)))
             }
             PendleState::Sy(state) => {
                 state.guard_current()?;
@@ -409,14 +449,16 @@ impl ProtocolSim for PendleState {
                     TokenClass::OneToOne => GAS_WRAP_ONE_TO_ONE,
                     TokenClass::IndexRate => GAS_WRAP_INDEX_RATE,
                 };
-                (state.convert(amount, class, direction, token_decimals)?, gas)
+                let out = state.convert(amount, class, direction, token_decimals)?;
+                let after = state.after(direction, &token_out.address, out);
+                (out, gas, PendleState::Sy(after))
             }
         };
 
         Ok(GetAmountOutResult {
             amount: u256_to_biguint(out),
             gas: BigUint::from(gas),
-            new_state: self.clone_box(),
+            new_state: Box::new(new_state),
         })
     }
 
@@ -464,7 +506,7 @@ impl ProtocolSim for PendleState {
                     // Selling PT hands PT *to* the market, so the 96% proportion cap binds.
                     (MarketToken::Pt, MarketToken::Sy) => {
                         let max_pt_in = state.max_pt_in()?;
-                        (max_pt_in, state.pt_for_sy(max_pt_in)?)
+                        (max_pt_in, state.pt_for_sy(max_pt_in)?.0)
                     }
                     // Selling YT flash-*borrows* PT from the market to redeem against, so the
                     // market sends PT out and the rate floor binds — the same bound as SY→PT, not
@@ -472,7 +514,7 @@ impl ProtocolSim for PendleState {
                     // from each other, despite sharing the PT legs' reserves.
                     (MarketToken::Yt, MarketToken::Sy) => {
                         let max_yt_in = state.max_pt_out()?;
-                        (max_yt_in, state.yt_for_sy(max_yt_in)?)
+                        (max_yt_in, state.yt_for_sy(max_yt_in)?.0)
                     }
                     // PT against YT, or either against itself: not an edge of this market.
                     _ => return Ok(no_depth()),
@@ -632,6 +674,26 @@ impl PendleSyState {
             .get(token)
             .copied()
             .unwrap_or_else(unbounded_soft_limit)
+    }
+
+    /// The same wrapper with what a conversion took out of it.
+    ///
+    /// Only a redemption moves anything this component tracks: it pays `amount_out` of the exit
+    /// token out of what the SY custodies, which is exactly the bound `get_limits` reports. A
+    /// deposit is not credited back — an `index_rate` SY forwards the token into whatever it
+    /// wraps rather than holding it, so crediting it would invent depth no redemption can draw on.
+    ///
+    /// A token with no recorded balance stays absent rather than being written in: `held` reads an
+    /// absent balance as the soft limit, and inserting one would turn a missing figure into a
+    /// hard, and wrong, bound.
+    fn after(&self, direction: Direction, token_out: &Bytes, amount_out: U256) -> Self {
+        let mut next = self.clone();
+        if direction == Direction::Redeem {
+            if let Some(balance) = next.token_balances.get_mut(token_out) {
+                *balance = balance.saturating_sub(amount_out);
+            }
+        }
+        next
     }
 
     /// How much SY it takes to redeem `exit_amount` of an exit token — the inverse of `convert`.

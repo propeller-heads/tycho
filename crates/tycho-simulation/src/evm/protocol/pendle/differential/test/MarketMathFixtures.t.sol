@@ -140,8 +140,9 @@ contract MarketMathFixtures is Test {
         return n;
     }
 
-    /// One row: every pre-computed value and every output of `calcTrade`, so a divergence is
-    /// localised to a step rather than only showing up in the final amount.
+    /// One row: every pre-computed value, every output of `calcTrade`, and the market state the
+    /// trade leaves behind, so a divergence is localised to a step rather than only showing up in
+    /// the final amount.
     ///
     /// Split across three helpers because a single concatenation of this many fields exhausts the
     /// stack even with `via_ir`.
@@ -154,12 +155,14 @@ contract MarketMathFixtures is Test {
     ) internal pure returns (string memory) {
         MarketPreCompute memory comp =
             MarketMathCore.getMarketPreCompute(market, PYIndex.wrap(index), blockTime);
-        return string.concat(
+        string memory head = string.concat(
             inputsJson(label, market, index, blockTime, netPtToAccount),
             feeConfigJson(market),
-            preComputeJson(comp),
-            outputsJson(market, comp, index, netPtToAccount)
+            preComputeJson(comp)
         );
+        string memory outputs = outputsJson(market, comp, index, netPtToAccount);
+        // Last, because it mutates `market` — every field above is read from the pre-trade state.
+        return string.concat(head, outputs, stateWriteJson(market, index, blockTime, netPtToAccount));
     }
 
     function inputsJson(
@@ -212,6 +215,30 @@ contract MarketMathFixtures is Test {
             ',"net_sy_to_account":"', vm.toString(netSyToAccount),
             '","net_sy_fee":"', vm.toString(netSyFee),
             '","net_sy_to_reserve":"', vm.toString(netSyToReserve),
+            '"'
+        );
+    }
+
+    /// The state the trade leaves behind: `executeTradeCore` mutates its `MarketState` argument,
+    /// and what it writes there is what the *next* trade is priced against.
+    ///
+    /// Recorded per row rather than derived, because the reserves and the implied rate move
+    /// together and none of the three follows from the quote alone: `totalSy` moves by the
+    /// treasury's cut as well as the trader's amount, and `lastLnImpliedRate` is taken at the new
+    /// reserves but at the *trade's* anchor and scalar, not at ones recomputed from them.
+    ///
+    /// Mutates `market`, so it must be called after every field read from the pre-trade state.
+    function stateWriteJson(
+        MarketState memory market,
+        uint256 index,
+        uint256 blockTime,
+        int256 netPtToAccount
+    ) internal pure returns (string memory) {
+        MarketMathCore.executeTradeCore(market, PYIndex.wrap(index), netPtToAccount, blockTime);
+        return string.concat(
+            ',"post_total_pt":"', vm.toString(market.totalPt),
+            '","post_total_sy":"', vm.toString(market.totalSy),
+            '","post_last_ln_implied_rate":"', vm.toString(market.lastLnImpliedRate),
             '"}'
         );
     }

@@ -39,6 +39,9 @@ pub enum PendleError {
     MarketProportionMustNotEqualOne,
     /// `rateScalar` at or below zero, which only happens past expiry.
     MarketRateScalarBelowZero { rate_scalar: String },
+    /// The trade would leave the market with an implied rate of zero, which the next quote's
+    /// anchor cannot be built from.
+    MarketZeroLnImpliedRate,
 
     // The router's approximation, which is what actually executes the exact-SY-in directions.
     /// The search ran its whole budget without landing inside `eps`.
@@ -99,6 +102,9 @@ impl fmt::Display for PendleError {
             }
             PendleError::MarketRateScalarBelowZero { rate_scalar } => {
                 write!(f, "rateScalar {rate_scalar} is not positive")
+            }
+            PendleError::MarketZeroLnImpliedRate => {
+                write!(f, "the trade would leave the market with a zero implied rate")
             }
             PendleError::ApproxExhausted { iterations } => write!(
                 f,

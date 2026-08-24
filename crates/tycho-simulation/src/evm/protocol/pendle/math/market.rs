@@ -74,6 +74,16 @@ pub struct TradeResult {
     pub net_sy_to_reserve: I256,
 }
 
+/// A trade and the market it leaves behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeExecution {
+    pub trade: TradeResult,
+    /// The reserves and implied rate after the trade, which is what the *next* quote must price
+    /// against. The contract mutates its `MarketState` in place here; this returns a new one,
+    /// because the indexed state a quote reads is shared and must not move under it.
+    pub market: MarketState,
+}
+
 /// `blockTime >= expiry`, matching `MiniHelpers.isExpired`. Note the market is dead *at* expiry,
 /// not after it.
 pub fn is_expired(expiry: u64, block_time: u64) -> bool {
@@ -178,7 +188,7 @@ pub fn calc_trade(
     })
 }
 
-/// The contract's `executeTradeCore`, without the state write.
+/// The contract's `executeTradeCore`, state write included.
 ///
 /// The two checks it adds over `calc_trade` are the ones a quote must not skip: the market is dead
 /// at expiry, and it cannot hand out more PT than it holds.
@@ -187,7 +197,7 @@ pub fn execute_trade(
     index: U256,
     net_pt_to_account: I256,
     block_time: u64,
-) -> PendleResult<TradeResult> {
+) -> PendleResult<TradeExecution> {
     if is_expired(market.expiry, block_time) {
         return Err(PendleError::MarketExpired { expiry: market.expiry, block_time });
     }
@@ -198,7 +208,50 @@ pub fn execute_trade(
         });
     }
     let comp = get_market_pre_compute(market, index, block_time)?;
-    calc_trade(market, &comp, index, net_pt_to_account)
+    let trade = calc_trade(market, &comp, index, net_pt_to_account)?;
+    let market = apply_trade(market, &comp, index, net_pt_to_account, &trade, block_time)?;
+    Ok(TradeExecution { trade, market })
+}
+
+/// The contract's `_setNewMarketStateTrade`: the reserves the trade leaves behind, and the implied
+/// rate the next trade will be anchored on.
+///
+/// The anchor and the scalar are the trade's own — `comp` is *not* recomputed from the new
+/// reserves — so this has to be handed the same `MarketPreCompute` the trade was priced with.
+/// `total_asset`, on the other hand, is recomputed, because the SY reserve has moved.
+pub fn apply_trade(
+    market: &MarketState,
+    comp: &MarketPreCompute,
+    index: U256,
+    net_pt_to_account: I256,
+    trade: &TradeResult,
+    block_time: u64,
+) -> PendleResult<MarketState> {
+    if is_expired(market.expiry, block_time) {
+        return Err(PendleError::MarketExpired { expiry: market.expiry, block_time });
+    }
+    let time_to_expiry = market.expiry - block_time;
+
+    let sy_leaving = trade
+        .net_sy_to_account
+        .checked_add(trade.net_sy_to_reserve)
+        .ok_or(PendleError::Overflow { operation: "setNewMarketStateTrade" })?;
+    let total_pt = pmath::sub_no_neg(market.total_pt, net_pt_to_account)?;
+    let total_sy = pmath::sub_no_neg(market.total_sy, sy_leaving)?;
+    let total_asset = sy_utils::sy_to_asset_i(index, total_sy)?;
+
+    let last_ln_implied_rate = get_ln_implied_rate(
+        total_pt,
+        total_asset,
+        comp.rate_scalar,
+        comp.rate_anchor,
+        time_to_expiry,
+    )?;
+    if last_ln_implied_rate.is_zero() {
+        return Err(PendleError::MarketZeroLnImpliedRate);
+    }
+
+    Ok(MarketState { total_pt, total_sy, last_ln_implied_rate, ..market.clone() })
 }
 
 fn get_rate_anchor(
@@ -217,8 +270,8 @@ fn get_rate_anchor(
     Ok(new_exchange_rate - pmath::div_down_i(ln_proportion, rate_scalar)?)
 }
 
-/// The implied rate the market would carry after a trade. Not on the quote path itself, but it is
-/// what `last_ln_implied_rate` becomes, so it is here for the state transition and for tests.
+/// The implied rate the market carries after a trade — what `last_ln_implied_rate` becomes, and
+/// the input to the next trade's anchor.
 pub fn get_ln_implied_rate(
     total_pt: I256,
     total_asset: I256,
@@ -324,6 +377,9 @@ mod tests {
         net_sy_to_account: String,
         net_sy_fee: String,
         net_sy_to_reserve: String,
+        post_total_pt: String,
+        post_total_sy: String,
+        post_last_ln_implied_rate: String,
     }
 
     #[derive(Deserialize)]
@@ -456,6 +512,78 @@ mod tests {
         assert!(roots.len() >= 3, "fee root held constant across the grid");
     }
 
+    /// The state the trade leaves behind, against the same grid the quotes are checked on.
+    ///
+    /// `executeTradeCore` writes three fields, and each is wrong in its own way if guessed at.
+    /// `total_sy` moves by the treasury's cut as well as the trader's amount, which the fee rows
+    /// at both ends of the reserve split pin down. `last_ln_implied_rate` is taken at the *new*
+    /// reserves but at the trade's own anchor and scalar — recomputing those from the new reserves
+    /// gives a number that is close enough to look right and drifts with every subsequent trade.
+    #[test]
+    fn the_state_write_matches_the_contract() {
+        let fixtures: TradeFixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/market.json")).unwrap();
+        assert!(fixtures.trades.len() >= 60, "fixture grid shrank unexpectedly");
+
+        for case in &fixtures.trades {
+            let market = market_for(&case.market, case);
+            let block_time: u64 = case.block_time.parse().unwrap();
+            let label = format!(
+                "{} t={} pt={} fee={}/{}",
+                case.market,
+                case.block_time,
+                case.net_pt_to_account,
+                case.ln_fee_rate_root,
+                case.reserve_fee_percent
+            );
+
+            let after =
+                execute_trade(&market, u(&case.index), s(&case.net_pt_to_account), block_time)
+                    .unwrap_or_else(|e| panic!("trade failed for {label}: {e}"))
+                    .market;
+
+            assert_eq!(after.total_pt, s(&case.post_total_pt), "total_pt for {label}");
+            assert_eq!(after.total_sy, s(&case.post_total_sy), "total_sy for {label}");
+            assert_eq!(
+                after.last_ln_implied_rate,
+                u(&case.post_last_ln_implied_rate),
+                "last_ln_implied_rate for {label}"
+            );
+            // Everything else the trade does not touch.
+            assert_eq!(after.scalar_root, market.scalar_root, "scalar_root moved for {label}");
+            assert_eq!(after.expiry, market.expiry, "expiry moved for {label}");
+            assert_eq!(
+                after.ln_fee_rate_root, market.ln_fee_rate_root,
+                "fee root moved for {label}"
+            );
+            assert_eq!(
+                after.reserve_fee_percent, market.reserve_fee_percent,
+                "reserve split moved for {label}"
+            );
+        }
+    }
+
+    /// A trade leaves the market cheaper to trade *against* and dearer to trade *with*, which is
+    /// what price impact is. Quoting the successor state is the only way a caller sees it.
+    #[test]
+    fn a_second_trade_prices_against_the_first_one() {
+        let market = wsteth_market();
+        let index = u(WSTETH_INDEX);
+        let block_time = 1_700_000_000;
+        let pt_out = s("10000000000000000000");
+
+        let first = execute_trade(&market, index, pt_out, block_time).unwrap();
+        let second = execute_trade(&first.market, index, pt_out, block_time).unwrap();
+
+        // Buying costs SY, so both are negative and the dearer one is the more negative.
+        assert!(
+            second.trade.net_sy_to_account < first.trade.net_sy_to_account,
+            "the second buy of the same size must cost more: {} then {}",
+            first.trade.net_sy_to_account,
+            second.trade.net_sy_to_account
+        );
+    }
+
     /// The contract reverts on these, so the port must error — and with the matching reason, not
     /// merely some error.
     #[test]
@@ -563,8 +691,12 @@ mod tests {
         let index = u(WSTETH_INDEX);
         let pt_out = s("1000000000000000000");
 
-        let early = execute_trade(&market, index, pt_out, 1_700_000_000).unwrap();
-        let late = execute_trade(&market, index, pt_out, 1_820_000_000).unwrap();
+        let early = execute_trade(&market, index, pt_out, 1_700_000_000)
+            .unwrap()
+            .trade;
+        let late = execute_trade(&market, index, pt_out, 1_820_000_000)
+            .unwrap()
+            .trade;
 
         assert_ne!(
             early.net_sy_to_account, late.net_sy_to_account,

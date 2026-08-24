@@ -264,6 +264,199 @@ fn all_four_market_edges_quote() {
     assert!(yt_to_sy.amount < pt_to_sy.amount);
 }
 
+/// The successor state a quote returns, downcast back to the concrete type.
+fn quote_after(
+    state: &PendleState,
+    amount: BigUint,
+    token_in: &Token,
+    token_out: &Token,
+) -> PendleState {
+    let result = state
+        .get_amount_out(amount, token_in, token_out)
+        .expect("the edge should quote");
+    result
+        .new_state
+        .as_any()
+        .downcast_ref::<PendleState>()
+        .expect("a Pendle quote returns a Pendle state")
+        .clone()
+}
+
+fn market_of(state: &PendleState) -> &MarketState {
+    let PendleState::Market(market) = state else { panic!("expected a market state") };
+    &market.market
+}
+
+/// Every market edge moves the reserves it trades against, in the direction the trade took them.
+///
+/// The two YT legs are flash-swaps against the *same* reserves as the PT legs, and they move them
+/// the opposite way from the leg they are usually mistaken for: selling YT borrows PT out of the
+/// market, which is the same PT flow as buying it.
+#[test]
+fn every_market_edge_advances_the_reserves() {
+    let state = wsteth_market(1_700_000_000);
+    let before = market_of(&state).clone();
+    let amount = BigUint::from(1_000_000_000_000_000_000u64);
+
+    // (token in, token out, does the market end up holding more PT?)
+    let edges = [(PT, SY, true), (SY, PT, false), (YT, SY, false), (SY, YT, true)];
+
+    for (token_in, token_out, pt_arrives) in edges {
+        let after =
+            quote_after(&state, amount.clone(), &token(token_in, 18), &token(token_out, 18));
+        let after = market_of(&after);
+
+        assert_ne!(after, &before, "{token_in}->{token_out} left the reserves untouched");
+        if pt_arrives {
+            assert!(after.total_pt > before.total_pt, "{token_in}->{token_out} PT");
+            assert!(after.total_sy < before.total_sy, "{token_in}->{token_out} SY");
+        } else {
+            assert!(after.total_pt < before.total_pt, "{token_in}->{token_out} PT");
+            assert!(after.total_sy > before.total_sy, "{token_in}->{token_out} SY");
+        }
+        assert_ne!(
+            after.last_ln_implied_rate, before.last_ln_implied_rate,
+            "{token_in}->{token_out} left the implied rate stored by the last trade"
+        );
+    }
+}
+
+/// What the successor state is *for*: the second trade of the same size is priced at the depth the
+/// first one left, so a caller sizing a trade sees impact instead of a flat curve.
+#[test]
+fn a_second_quote_against_the_successor_shows_the_impact() {
+    let state = wsteth_market(1_700_000_000);
+    let sy = token(SY, 18);
+    let pt = token(PT, 18);
+    let amount = BigUint::from(10_000_000_000_000_000_000u64);
+
+    let first = state
+        .get_amount_out(amount.clone(), &sy, &pt)
+        .unwrap();
+    let after = quote_after(&state, amount.clone(), &sy, &pt);
+    let second = after
+        .get_amount_out(amount, &sy, &pt)
+        .unwrap();
+
+    assert!(
+        second.amount < first.amount,
+        "the same SY bought as much PT twice: {} then {}",
+        first.amount,
+        second.amount
+    );
+}
+
+/// A swap moves reserves; it does not advance the block or re-read the PY index. The successor
+/// therefore answers for the same moment, and is still quotable.
+#[test]
+fn a_swap_leaves_the_clocks_and_the_rate_alone() {
+    let state = wsteth_market(1_700_000_000);
+    let PendleState::Market(before) = &state else { unreachable!() };
+    let after = quote_after(
+        &state,
+        BigUint::from(1_000_000_000_000_000_000u64),
+        &token(PT, 18),
+        &token(SY, 18),
+    );
+    let PendleState::Market(after) = &after else { unreachable!() };
+
+    assert_eq!(after.py_index, before.py_index);
+    assert_eq!(after.rate_sampled_at, before.rate_sampled_at);
+    assert_eq!(after.head_timestamp, before.head_timestamp);
+    assert_eq!(after.sy_address, before.sy_address);
+    assert_eq!(after.market.expiry, before.market.expiry);
+    assert_eq!(after.market.scalar_root, before.market.scalar_root);
+}
+
+/// The reserves the router would swap against are the component's, not the quote's: a quote must
+/// leave the state it was asked of exactly as it found it.
+#[test]
+fn quoting_does_not_move_the_state_it_was_asked_of() {
+    let state = wsteth_market(1_700_000_000);
+    let before = state.clone();
+    for (token_in, token_out) in [(PT, SY), (SY, PT), (YT, SY), (SY, YT)] {
+        state
+            .get_amount_out(
+                BigUint::from(1_000_000_000_000_000_000u64),
+                &token(token_in, 18),
+                &token(token_out, 18),
+            )
+            .unwrap();
+    }
+    assert_eq!(state, before);
+}
+
+/// The successor must exist at the sizes `get_limits` reports, not only at small ones: the state
+/// write re-derives the implied rate at the *new* reserves, which is where the proportion cap
+/// binds, so a limit that quotes but cannot advance would be a limit no router could take.
+#[test]
+fn every_edge_advances_at_its_reported_limit() {
+    let state = wsteth_market(1_700_000_000);
+    let before = market_of(&state).clone();
+
+    for (token_in, token_out) in [(PT, SY), (SY, PT), (YT, SY), (SY, YT)] {
+        let (max_in, max_out) = state
+            .get_limits(Bytes::from_str(token_in).unwrap(), Bytes::from_str(token_out).unwrap())
+            .unwrap();
+        let result = state
+            .get_amount_out(max_in, &token(token_in, 18), &token(token_out, 18))
+            .unwrap_or_else(|e| panic!("{token_in}->{token_out} at its own limit: {e}"));
+        assert_eq!(result.amount, max_out, "{token_in}->{token_out}");
+
+        let after = result
+            .new_state
+            .as_any()
+            .downcast_ref::<PendleState>()
+            .expect("a Pendle quote returns a Pendle state");
+        assert_ne!(market_of(after), &before, "{token_in}->{token_out} at the limit");
+    }
+}
+
+/// Redeeming draws down what the wrapper custodies, which is the bound the next redemption is
+/// held to. Depositing does not credit it back: an `index_rate` SY forwards the token into
+/// whatever it wraps rather than holding it.
+#[test]
+fn a_redemption_draws_down_the_wrapper_and_a_deposit_does_not_refill_it() {
+    let state = wsteth_sy();
+    let wsteth = Bytes::from_str(WSTETH).unwrap();
+    let PendleState::Sy(before) = &state else { unreachable!() };
+    let held = before.token_balances[&wsteth];
+
+    let amount = BigUint::from(100_000_000_000_000_000u64);
+    let redeemed = quote_after(&state, amount.clone(), &token(SY, 18), &token(WSTETH, 18));
+    let PendleState::Sy(redeemed) = &redeemed else { unreachable!() };
+    assert_eq!(
+        redeemed.token_balances[&wsteth],
+        held - U256::from(100_000_000_000_000_000u64),
+        "a redemption must draw down the holdings it was paid out of"
+    );
+    // And the next redemption is bounded by what is left.
+    let (_, max_out) = PendleState::Sy(redeemed.clone())
+        .get_limits(Bytes::from_str(SY).unwrap(), wsteth.clone())
+        .unwrap();
+    assert_eq!(max_out, u256_to_biguint(redeemed.token_balances[&wsteth]));
+
+    let deposited = quote_after(&state, amount, &token(WSTETH, 18), &token(SY, 18));
+    let PendleState::Sy(deposited) = &deposited else { unreachable!() };
+    assert_eq!(deposited.token_balances[&wsteth], held, "a deposit must not invent depth");
+}
+
+/// A token the indexer reported no balance for stays absent rather than being written in at some
+/// number: `held` reads an absent balance as the soft limit, and a fabricated one would become a
+/// hard bound on a wrapper that has no such bound recorded.
+#[test]
+fn a_redemption_does_not_invent_a_balance_that_was_never_indexed() {
+    let state = reusd_sy();
+    let after = quote_after(
+        &state,
+        BigUint::from(1_000_000_000_000_000_000u64),
+        &token(SY, 18),
+        &token(STETH, 6),
+    );
+    let PendleState::Sy(after) = &after else { unreachable!() };
+    assert!(after.token_balances.is_empty(), "an unindexed balance must stay unindexed");
+}
+
 /// PT against YT is not a market edge: minting and redeeming PY is the yield token's business, and
 /// SY is one side of every market swap.
 #[test]
