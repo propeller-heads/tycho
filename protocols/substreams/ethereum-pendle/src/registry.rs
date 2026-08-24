@@ -84,12 +84,58 @@ impl MarketEntry {
 /// Lines that do not parse are skipped rather than failing the block: the registry is
 /// append-only and a malformed line would otherwise poison every block after it.
 pub fn live_markets(registry: &str, block_timestamp: u64) -> Vec<MarketEntry> {
+    entries(registry)
+        .filter(|entry| block_timestamp < entry.expiry)
+        .collect()
+}
+
+/// How long past its expiry a market keeps having its clock republished.
+///
+/// The republication is what tells a consumer the market is dead (see `expired_markets`), and it
+/// can only happen on a block the package refreshes state on. So the window has to be wider than
+/// the wall-clock gap between two consecutive refresh blocks: a day covers an
+/// `sy_rate_refresh_blocks` of several thousand, orders of magnitude above anything deployed.
+/// Being generous costs one attribute per expired market per refresh block; being too tight costs
+/// a market that never dies.
+pub const EXPIRY_GRACE_SECONDS: u64 = 86_400;
+
+/// Returns every market that expired within `EXPIRY_GRACE_SECONDS` before `block_timestamp`.
+///
+/// These are the markets whose clock still has to be published even though they no longer trade.
+/// A consumer decides a market is expired by comparing its `expiry` against the last timestamp it
+/// was given, and `live_markets` stops strictly below expiry by construction — so without this
+/// the last timestamp a market ever receives is one it was still alive at, and it goes on quoting
+/// off a frozen clock forever.
+pub fn expired_markets(registry: &str, block_timestamp: u64) -> Vec<MarketEntry> {
+    entries(registry)
+        .filter(|entry| {
+            entry.expiry <= block_timestamp && block_timestamp < entry.expiry + EXPIRY_GRACE_SECONDS
+        })
+        .collect()
+}
+
+/// Returns every distinct SY in the registry, in the order the markets first named them.
+///
+/// Not filtered by expiry, and deliberately so: an SY is an ERC-5115 wrapper with no maturity of
+/// its own. It goes on wrapping and unwrapping after every market that ever priced against it has
+/// expired, so its rate has to keep being refreshed for as long as it is a component. Tying that
+/// to the markets would quietly retire a wrapper that still trades.
+pub fn sy_components(registry: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for entry in entries(registry) {
+        if !seen.contains(&entry.sy) {
+            seen.push(entry.sy);
+        }
+    }
+    seen
+}
+
+/// Parses the registry, skipping lines that do not decode.
+fn entries(registry: &str) -> impl Iterator<Item = MarketEntry> + '_ {
     registry
         .split(';')
         .filter(|line| !line.is_empty())
         .filter_map(MarketEntry::decode)
-        .filter(|entry| block_timestamp < entry.expiry)
-        .collect()
 }
 
 #[cfg(test)]
@@ -131,6 +177,38 @@ mod tests {
         assert!(live_markets(&registry, 1830124800).is_empty());
     }
 
+    /// The tombstone: the first refresh at or after expiry republishes the clock, which is the
+    /// only emission a market ever gets carrying a timestamp it is dead at.
+    #[test]
+    fn the_clock_outlives_the_market() {
+        let registry = format!("{};", wsteth().encode());
+        assert!(expired_markets(&registry, 1830124799).is_empty());
+        assert_eq!(expired_markets(&registry, 1830124800), vec![wsteth()]);
+    }
+
+    /// A market is either quoted or buried, never both — the two sets partition the registry.
+    #[test]
+    fn live_and_expired_never_overlap() {
+        let registry = format!("{};", wsteth().encode());
+        for timestamp in [0, 1830124799, 1830124800, 1830124800 + EXPIRY_GRACE_SECONDS] {
+            assert!(
+                live_markets(&registry, timestamp).is_empty() ||
+                    expired_markets(&registry, timestamp).is_empty(),
+                "both sets are non-empty at {timestamp}"
+            );
+        }
+    }
+
+    /// The clock stops once the grace window closes: a consumer that has not seen the tombstone
+    /// by then was not listening at all.
+    #[test]
+    fn the_grace_window_closes() {
+        let registry = format!("{};", wsteth().encode());
+        let last = 1830124800 + EXPIRY_GRACE_SECONDS - 1;
+        assert_eq!(expired_markets(&registry, last).len(), 1);
+        assert!(expired_markets(&registry, last + 1).is_empty());
+    }
+
     /// The registry is append-only, so one bad line must not take out every later block.
     #[test]
     fn malformed_lines_are_skipped_not_fatal() {
@@ -143,6 +221,15 @@ mod tests {
     fn an_empty_registry_yields_nothing() {
         assert!(live_markets("", 0).is_empty());
         assert!(live_markets(";;", 0).is_empty());
+    }
+
+    /// One SY backs several expiries, and it outlives all of them.
+    #[test]
+    fn every_sy_is_listed_once_however_many_markets_it_backs() {
+        let second = entry("0xdead", &wsteth().sy, 2_000_000_000);
+        let third = entry("0xbeef", "0xfeed", 1_000);
+        let registry = format!("{};{};{};", wsteth().encode(), second.encode(), third.encode());
+        assert_eq!(sy_components(&registry), vec![wsteth().sy, "0xfeed".to_string()]);
     }
 
     /// The fan-out for a factory-wide fee change selects on this.

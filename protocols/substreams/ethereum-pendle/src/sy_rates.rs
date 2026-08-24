@@ -8,6 +8,12 @@
 //! That read also fires for every historical block during a backfill, which is the expensive
 //! part: Pendle's first Ethereum market dates to 2023. `sy_rate_refresh_blocks` exists to make
 //! the backfill interval a config change rather than a code change.
+//!
+//! Two clocks are published alongside it, and they are not the same clock. `rate_sampled_at`
+//! dates the rate: it is the block the rate was read at, and it stops advancing the moment a read
+//! stops resolving. `block_timestamp` dates the *look*: it advances on every refresh block
+//! regardless. A consumer holding both can tell a rate that is still current from one the chain
+//! has moved past, which one clock alone cannot express.
 
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
@@ -17,9 +23,16 @@ use substreams::scalar::BigInt;
 pub const PY_INDEX_CURRENT: &str = "py_index_current";
 /// Attribute holding an SY's `exchangeRate()` as of this block.
 pub const SY_EXCHANGE_RATE: &str = "sy_exchange_rate";
-/// Attribute set when this block's `exchangeRate()` read did not resolve.
-pub const SY_RATE_STALE: &str = "sy_rate_stale";
-/// Attribute holding the timestamp the state was refreshed at.
+/// Attribute holding the block timestamp the rate above was read at.
+///
+/// Emitted only when the read resolved. A consumer pairs a rate with the curve at the same
+/// moment, so a rate that did not arrive must not be dated as though it had.
+pub const RATE_SAMPLED_AT: &str = "rate_sampled_at";
+/// Attribute holding the timestamp of the block this component was last looked at.
+///
+/// Emitted on every refresh block whether or not the rate resolved. It is what tells a consumer
+/// the chain has moved on from the rate it holds: without it a failed read is indistinguishable
+/// from a quiet market, and stale state would go on being quoted as current.
 pub const BLOCK_TIMESTAMP: &str = "block_timestamp";
 
 /// How often the SY exchange rates are re-read.
@@ -69,17 +82,12 @@ pub fn py_index_current(stored: Option<BigInt>, rate: &BigInt) -> BigInt {
     }
 }
 
-/// Encodes the stale marker as the single byte the simulation reads it back as.
-pub fn stale_flag(stale: bool) -> Vec<u8> {
-    vec![u8::from(stale)]
-}
-
 /// Encodes a block timestamp as the fixed-width big-endian value the simulation decodes.
 ///
 /// The curve depends on `block.timestamp` through `rateScalar`, `rateAnchor` and `feeRate`, so a
 /// quote is only valid for the timestamp it was computed for. Fixed at 8 bytes rather than
 /// minimally encoded: a decoder reading it as a `u64` must not have to guess the width.
-pub fn block_timestamp(seconds: u64) -> Vec<u8> {
+pub fn encode_timestamp(seconds: u64) -> Vec<u8> {
     seconds.to_be_bytes().to_vec()
 }
 
@@ -149,17 +157,11 @@ mod tests {
     /// to guess the width is a decoder that eventually guesses wrong.
     #[test]
     fn the_block_timestamp_is_always_eight_bytes() {
-        assert_eq!(block_timestamp(1830124800).len(), 8);
-        assert_eq!(block_timestamp(0), vec![0; 8]);
+        assert_eq!(encode_timestamp(1830124800).len(), 8);
+        assert_eq!(encode_timestamp(0), vec![0; 8]);
         assert_eq!(
-            block_timestamp(1669201235),
+            encode_timestamp(1669201235),
             vec![0x00, 0x00, 0x00, 0x00, 0x63, 0x7d, 0xfd, 0x53]
         );
-    }
-
-    #[test]
-    fn the_stale_marker_is_one_byte() {
-        assert_eq!(stale_flag(true), vec![1]);
-        assert_eq!(stale_flag(false), vec![0]);
     }
 }

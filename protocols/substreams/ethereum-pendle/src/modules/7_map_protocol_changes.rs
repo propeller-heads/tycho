@@ -18,10 +18,10 @@ use crate::{
         last_ln_implied_rate, py_index_stored, LAST_LN_IMPLIED_RATE, PY_INDEX_STORED, TOTAL_PT,
         TOTAL_SY,
     },
-    registry::{live_markets, MarketEntry},
+    registry::{expired_markets, live_markets, sy_components, MarketEntry},
     sy_rates::{
-        block_timestamp, py_index_current, stale_flag, RefreshParams, BLOCK_TIMESTAMP,
-        PY_INDEX_CURRENT, SY_EXCHANGE_RATE, SY_RATE_STALE,
+        encode_timestamp, py_index_current, RefreshParams, BLOCK_TIMESTAMP, PY_INDEX_CURRENT,
+        RATE_SAMPLED_AT, SY_EXCHANGE_RATE,
     },
 };
 
@@ -203,8 +203,13 @@ fn absolute_state_changes(
 /// Markets are deliberately left on the transfer path. A market custodies only SY shares and PT,
 /// neither of which rebases, so transfers are exact there and cost no RPC.
 ///
-/// Costs one `balanceOf` per (SY component, declared token) per refresh block — around 90 calls
-/// against the ~60 the rate refresh already makes. `sy_rate_refresh_blocks` throttles both.
+/// Every SY component is read, not only those behind a live market: an SY has no maturity, so its
+/// holdings go on moving after the last market that priced against it has expired, and a wrapper
+/// quoting depth from frozen balances would report limits it cannot honour.
+///
+/// Costs one `balanceOf` per (SY component, declared token) per refresh block. Both this and the
+/// rate refresh grow with the number of SYs ever created, and `sy_rate_refresh_blocks` throttles
+/// both.
 fn sy_balances(
     block: &eth::Block,
     params: &RefreshParams,
@@ -215,19 +220,12 @@ fn sy_balances(
         return vec![];
     }
     let Some(registry) = registry_store.get_last(MARKET_REGISTRY) else { return vec![] };
-    let markets = live_markets(&registry, block.timestamp_seconds());
     let Some(anchor) = block.transactions().last() else { return vec![] };
     let anchor: Transaction = anchor.into();
 
     let mut holdings: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
-    for sy in markets.iter().map(|market| &market.sy) {
-        if holdings
-            .iter()
-            .any(|(id, _, _)| id == sy)
-        {
-            continue;
-        }
-        let Some(tokens) = components_store.get_last(sy) else { continue };
+    for sy in sy_components(&registry) {
+        let Some(tokens) = components_store.get_last(&sy) else { continue };
         let tokens: Vec<Vec<u8>> = serde_sibor::from_bytes(&tokens)
             .expect("deserializing component tokens from the component store");
         let address = hex::decode(sy.trim_start_matches("0x"))
@@ -371,17 +369,28 @@ fn fee_changes(
 ///
 /// The SY exchange rate has no event stream, so this is the one place the package reads chain
 /// state per block rather than per market lifetime. It is one batched `eth_call` for the whole
-/// protocol: the live markets are deduped down to their SYs first, and one SY backs several
-/// expiries.
+/// protocol, over the SYs rather than the markets — one SY backs several expiries.
 ///
-/// `block_timestamp` rides along because the curve depends on it through `rateScalar`,
-/// `rateAnchor` and `feeRate` — a quote is only valid for the timestamp it was computed for, and
-/// a market that has not traded for a day would otherwise be quoted on a day-old clock. Emission
-/// stops at expiry, which `live_markets` already decides.
+/// Expiry is a market's property, never its SY's: an ERC-5115 wrapper has no maturity and goes on
+/// wrapping after every market that priced against it has died. So the two are refreshed on
+/// different rules — a market's state stops at its expiry, an SY's does not stop at all.
 ///
-/// A rate that does not resolve — a paused SY, a wrapped protocol reverting — leaves
-/// `py_index_current` untouched at its previous value and raises `sy_rate_stale` instead of
-/// publishing a guess.
+/// The clocks ride along because the curve depends on time through `rateScalar`, `rateAnchor` and
+/// `feeRate` — a quote is only valid for the timestamp it was computed for, and a market that has
+/// not traded for a day would otherwise be quoted on a day-old clock.
+///
+/// A rate that does not resolve — a paused SY, a wrapped protocol reverting — leaves both
+/// `py_index_current` and `rate_sampled_at` untouched rather than publishing a guess.
+/// `block_timestamp` is still emitted, and that is the point: it advances past the rate's own
+/// date, which is how a consumer sees that what it holds is no longer current.
+///
+/// The clock outlives the market by `EXPIRY_GRACE_SECONDS`, without the rate. A market's clock is
+/// the only thing that can tell a consumer it has expired, and one that stopped being published
+/// strictly below its expiry never carries a timestamp the market is dead at — so it would go on
+/// quoting off a frozen clock forever. One window of clock past expiry says it, and both verdicts
+/// it produces — expired, and holding a rate the chain has moved past — are permanent, so nothing
+/// further is needed. No rate is read for those markets themselves — an expired market has no
+/// curve left to price — though their SY is still read, on its own account.
 ///
 /// The changes are anchored to the block's last transaction. Every `EntityChanges` reaches the
 /// indexer inside a `TransactionChanges`, but a refresh has no transaction that caused it, and a
@@ -399,7 +408,8 @@ fn refresh_live_state(
     }
     let Some(registry) = registry_store.get_last(MARKET_REGISTRY) else { return vec![] };
     let markets = live_markets(&registry, block.timestamp_seconds());
-    if markets.is_empty() {
+    let expired = expired_markets(&registry, block.timestamp_seconds());
+    if markets.is_empty() && expired.is_empty() {
         return vec![];
     }
     let Some(anchor) = block.transactions().last() else {
@@ -408,20 +418,18 @@ fn refresh_live_state(
     };
     let anchor: Transaction = anchor.into();
 
-    let rates = read_exchange_rates(&markets);
-    let timestamp = block_timestamp(block.timestamp_seconds());
+    let rates = read_exchange_rates(&rate_targets(&registry, &markets, components_store));
+    let timestamp = encode_timestamp(block.timestamp_seconds());
     let mut changes = Vec::new();
 
     for market in &markets {
         let rate = rates
             .get(&market.sy)
             .and_then(Option::as_ref);
-        let mut attributes = vec![
-            state_attribute(BLOCK_TIMESTAMP, timestamp.clone()),
-            state_attribute(SY_RATE_STALE, stale_flag(rate.is_none())),
-        ];
+        let mut attributes = vec![state_attribute(BLOCK_TIMESTAMP, timestamp.clone())];
         if let Some(rate) = rate {
             let stored = py_index_store.get_last(py_index_key(&market.id));
+            attributes.push(state_attribute(RATE_SAMPLED_AT, timestamp.clone()));
             attributes.push(state_attribute(
                 PY_INDEX_CURRENT,
                 py_index_current(stored, rate).to_signed_bytes_be(),
@@ -431,17 +439,19 @@ fn refresh_live_state(
             .push((anchor.clone(), EntityChanges { component_id: market.id.clone(), attributes }));
     }
 
+    for market in &expired {
+        changes.push((anchor.clone(), clock_only(&market.id, &timestamp)));
+    }
+
     // Not every SY is a component: one whose conversions neither closed form explains contributes
     // no wrap edges, and emitting state for it would be state on a component that never existed.
     for (sy, rate) in &rates {
         if !components_store.has_last(sy) {
             continue;
         }
-        let mut attributes = vec![
-            state_attribute(BLOCK_TIMESTAMP, timestamp.clone()),
-            state_attribute(SY_RATE_STALE, stale_flag(rate.is_none())),
-        ];
+        let mut attributes = vec![state_attribute(BLOCK_TIMESTAMP, timestamp.clone())];
         if let Some(rate) = rate {
+            attributes.push(state_attribute(RATE_SAMPLED_AT, timestamp.clone()));
             attributes.push(state_attribute(SY_EXCHANGE_RATE, rate.to_signed_bytes_be()));
         }
         changes.push((anchor.clone(), EntityChanges { component_id: sy.clone(), attributes }));
@@ -450,19 +460,43 @@ fn refresh_live_state(
     changes
 }
 
-/// Reads `exchangeRate()` for the SY behind each live market, deduped, in one batch.
+/// The SYs whose `exchangeRate()` is read this block.
 ///
-/// Every SY in the input appears in the result; the value is `None` where the call failed.
-fn read_exchange_rates(markets: &[MarketEntry]) -> BTreeMap<String, Option<BigInt>> {
-    let mut sy_ids: Vec<&String> = Vec::new();
-    for market in markets {
-        if !sy_ids.contains(&&market.sy) {
-            sy_ids.push(&market.sy);
+/// Every SY that is a component, plus the SY of every live market. The two sets overlap almost
+/// entirely but neither contains the other: an SY the classifier could not read in either
+/// direction is not a component, yet a live market still needs its rate to price the curve; and
+/// an SY whose markets have all expired is still a wrapper that trades, so it is still refreshed.
+fn rate_targets(
+    registry: &str,
+    live: &[MarketEntry],
+    components_store: &StoreGetRaw,
+) -> Vec<String> {
+    let mut targets: Vec<String> = sy_components(registry)
+        .into_iter()
+        .filter(|sy| components_store.has_last(sy))
+        .collect();
+    for market in live {
+        if !targets.contains(&market.sy) {
+            targets.push(market.sy.clone());
         }
     }
+    targets
+}
 
+/// The clock alone: this component was looked at, and no rate was read for it.
+fn clock_only(component_id: &str, timestamp: &[u8]) -> EntityChanges {
+    EntityChanges {
+        component_id: component_id.to_string(),
+        attributes: vec![state_attribute(BLOCK_TIMESTAMP, timestamp.to_vec())],
+    }
+}
+
+/// Reads `exchangeRate()` for each SY in one batch.
+///
+/// Every SY in the input appears in the result; the value is `None` where the call failed.
+fn read_exchange_rates(sy_ids: &[String]) -> BTreeMap<String, Option<BigInt>> {
     let mut batch = RpcBatch::new();
-    for sy in &sy_ids {
+    for sy in sy_ids {
         let address = hex::decode(sy.trim_start_matches("0x"))
             .unwrap_or_else(|_| panic!("registry holds a non-hex SY id {sy}"));
         batch = batch.add(pendle_sy::functions::ExchangeRate {}, address);
@@ -473,12 +507,12 @@ fn read_exchange_rates(markets: &[MarketEntry]) -> BTreeMap<String, Option<BigIn
         .unwrap_or_default();
 
     let mut rates = BTreeMap::new();
-    for (index, sy) in sy_ids.into_iter().enumerate() {
+    for (index, sy) in sy_ids.iter().enumerate() {
         let rate = responses
             .get(index)
             .and_then(RpcBatch::decode::<_, pendle_sy::functions::ExchangeRate>);
         if rate.is_none() {
-            log::info!("SY {} did not answer exchangeRate(), marking it stale", sy);
+            log::info!("SY {} did not answer exchangeRate(), leaving its rate undated", sy);
         }
         rates.insert(sy.clone(), rate);
     }
