@@ -209,6 +209,7 @@ impl ProtocolStreamProcessor {
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
+                "sushiswap_v2".to_string(),
                 "uniswap_v3".to_string(),
                 "uniswap_v4".to_string(),
                 "pancakeswap_v3".to_string(),
