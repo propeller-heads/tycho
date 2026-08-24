@@ -1,0 +1,1 @@
+{"reverts":[{"case":"sub_no_neg_goes_negative"},{"case":"to_i256_above_int256_max"},{"case":"to_u256_of_negative"},{"case":"div_down_u_by_zero"},{"case":"div_down_i_by_zero"},{"case":"raw_div_up_by_zero"},{"case":"mul_down_u_overflows"}]}

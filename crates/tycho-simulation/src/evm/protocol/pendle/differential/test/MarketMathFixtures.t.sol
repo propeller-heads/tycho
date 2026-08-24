@@ -52,7 +52,7 @@ contract MarketMathFixtures is Test {
     uint256 constant REUSD_INDEX = 1_095_830;
 
     function test_writeMarketFixtures() public {
-        string[] memory rows = new string[](64);
+        string[] memory rows = new string[](96);
         uint256 n = 0;
 
         // Timestamps spread across the market's life. The same state at two different times must
@@ -90,11 +90,54 @@ contract MarketMathFixtures is Test {
             }
         }
 
+        n = feeVariantRows(rows, n);
+
         string memory body = "";
         for (uint256 i = 0; i < n; i++) {
             body = string.concat(body, rows[i], i + 1 == n ? "" : ",");
         }
         vm.writeFile("../tests/fixtures/market.json", string.concat('{"trades":[', body, "]}"));
+    }
+
+    /// The fee axis, which the two reference markets do not vary: both carry the same
+    /// `lnFeeRateRoot` and the same 80% reserve split, so every row above holds the fee
+    /// configuration constant while varying everything else.
+    ///
+    /// The two ends of the reserve split are what make it an axis rather than a single ratio — at
+    /// 0 the treasury takes nothing and `netSyToReserve` must be zero, at 100 it takes the whole
+    /// fee and `netSyToReserve` must equal `netSyFee`. A port that divided by the wrong constant,
+    /// or applied the split to the wrong side, agrees with the contract at 80 for one operand
+    /// ordering and disagrees at both ends.
+    ///
+    /// A zero fee root is included because it collapses `feeRate` to exactly `exp(0) = 1e18`, and
+    /// the two branches of `calcTrade` treat that value asymmetrically: buying PT computes a fee of
+    /// `preFeeAsset * (1 - feeRate)`, which is zero, while selling divides *by* `feeRate`. A port
+    /// that mirrored the branches would still return zero on one side and something else on the
+    /// other.
+    function feeVariantRows(string[] memory rows, uint256 n) internal pure returns (uint256) {
+        // (lnFeeRateRoot, reserveFeePercent)
+        uint256[2][5] memory feeConfigs = [
+            [uint256(499_875_041_000_000), 0], // the reference root, no treasury cut
+            [uint256(499_875_041_000_000), 100], // the reference root, the whole fee to treasury
+            [uint256(999_750_000_000_000), 80], // roughly twice the reference root
+            [uint256(999_750_000_000_000), 50], // an even split
+            [uint256(0), 80] // no fee at all: feeRate collapses to one
+        ];
+        uint256[2] memory times = [uint256(1_700_000_000), 1_820_000_000];
+        int256[2] memory trades =
+            [int256(1_000_000_000_000_000_000), -int256(1_000_000_000_000_000_000)];
+
+        for (uint256 f = 0; f < feeConfigs.length; f++) {
+            for (uint256 t = 0; t < times.length; t++) {
+                for (uint256 k = 0; k < trades.length; k++) {
+                    MarketState memory m = wstEthMarket();
+                    m.lnFeeRateRoot = feeConfigs[f][0];
+                    m.reserveFeePercent = feeConfigs[f][1];
+                    rows[n++] = tradeRow("wsteth", m, WSTETH_INDEX, times[t], trades[k]);
+                }
+            }
+        }
+        return n;
     }
 
     /// One row: every pre-computed value and every output of `calcTrade`, so a divergence is
@@ -113,6 +156,7 @@ contract MarketMathFixtures is Test {
             MarketMathCore.getMarketPreCompute(market, PYIndex.wrap(index), blockTime);
         return string.concat(
             inputsJson(label, market, index, blockTime, netPtToAccount),
+            feeConfigJson(market),
             preComputeJson(comp),
             outputsJson(market, comp, index, netPtToAccount)
         );
@@ -132,6 +176,16 @@ contract MarketMathFixtures is Test {
             '","total_pt":"', vm.toString(market.totalPt),
             '","total_sy":"', vm.toString(market.totalSy),
             '","net_pt_to_account":"', vm.toString(netPtToAccount),
+            '"'
+        );
+    }
+
+    /// The fee configuration, in its own helper because folding it into `inputsJson` puts that
+    /// concatenation two slots over the stack limit even with `via_ir`.
+    function feeConfigJson(MarketState memory market) internal pure returns (string memory) {
+        return string.concat(
+            ',"ln_fee_rate_root":"', vm.toString(market.lnFeeRateRoot),
+            '","reserve_fee_percent":"', vm.toString(market.reserveFeePercent),
             '"'
         );
     }
@@ -158,6 +212,67 @@ contract MarketMathFixtures is Test {
             ',"net_sy_to_account":"', vm.toString(netSyToAccount),
             '","net_sy_fee":"', vm.toString(netSyFee),
             '","net_sy_to_reserve":"', vm.toString(netSyToReserve),
+            '"}'
+        );
+    }
+
+    /// `_getLnImpliedRate`: the rate the market carries *after* a trade, which is the input to the
+    /// next trade's anchor.
+    ///
+    /// It is not on the quote path itself, so it is not covered by any of the rows above — but it
+    /// is what `lastLnImpliedRate` becomes, and every subsequent quote is anchored on it. The
+    /// reserves are perturbed away from the market's own so the grid covers post-trade states
+    /// rather than only the state the fixtures start from.
+    function test_writeImpliedRateFixtures() public {
+        string[] memory rows = new string[](32);
+        uint256 n = 0;
+
+        uint256[3] memory times =
+            [uint256(1_700_000_000), 1_780_000_000, 1_830_124_799];
+        // Multipliers on `totalPt`, in percent: the proportion moves with the trade, and the logit
+        // is what the implied rate is taken from.
+        uint256[4] memory ptScale = [uint256(100), 90, 110, 150];
+
+        for (uint256 t = 0; t < times.length; t++) {
+            for (uint256 k = 0; k < ptScale.length; k++) {
+                rows[n++] =
+                    impliedRateRow("wsteth", wstEthMarket(), WSTETH_INDEX, times[t], ptScale[k]);
+                rows[n++] =
+                    impliedRateRow("reusd", reUsdMarket(), REUSD_INDEX, times[t], ptScale[k]);
+            }
+        }
+
+        string memory body = "";
+        for (uint256 i = 0; i < n; i++) {
+            body = string.concat(body, rows[i], i + 1 == n ? "" : ",");
+        }
+        vm.writeFile(
+            "../tests/fixtures/implied_rate.json", string.concat('{"cases":[', body, "]}")
+        );
+    }
+
+    function impliedRateRow(
+        string memory label,
+        MarketState memory market,
+        uint256 index,
+        uint256 blockTime,
+        uint256 ptScalePercent
+    ) internal pure returns (string memory) {
+        MarketPreCompute memory comp =
+            MarketMathCore.getMarketPreCompute(market, PYIndex.wrap(index), blockTime);
+        int256 totalPt = (market.totalPt * int256(ptScalePercent)) / 100;
+        uint256 timeToExpiry = market.expiry - blockTime;
+        uint256 lnImpliedRate = MarketMathCore._getLnImpliedRate(
+            totalPt, comp.totalAsset, comp.rateScalar, comp.rateAnchor, timeToExpiry
+        );
+        return string.concat(
+            '{"market":"', label,
+            '","total_pt":"', vm.toString(totalPt),
+            '","total_asset":"', vm.toString(comp.totalAsset),
+            '","rate_scalar":"', vm.toString(comp.rateScalar),
+            '","rate_anchor":"', vm.toString(comp.rateAnchor),
+            '","time_to_expiry":"', vm.toString(timeToExpiry),
+            '","ln_implied_rate":"', vm.toString(lnImpliedRate),
             '"}'
         );
     }

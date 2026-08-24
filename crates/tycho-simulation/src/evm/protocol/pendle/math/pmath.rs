@@ -153,11 +153,6 @@ pub fn sub_with_lower_bound(a: U256, b: U256, bound: U256) -> U256 {
     }
 }
 
-/// `a >= b * (1 - eps) && a <= b * (1 + eps)`: the two-sided acceptance test.
-pub fn is_a_approx_b(a: U256, b: U256, eps: U256) -> PendleResult<bool> {
-    Ok(mul_down(b, one() - eps)? <= a && a <= mul_down(b, one() + eps)?)
-}
-
 /// `a <= b && a >= b * (1 - eps)`: the acceptance test the router's approximation loop uses.
 pub fn is_a_smaller_approx_b(a: U256, b: U256, eps: U256) -> PendleResult<bool> {
     Ok(a <= b && a >= mul_down(b, one() - eps)?)
@@ -165,6 +160,8 @@ pub fn is_a_smaller_approx_b(a: U256, b: U256, eps: U256) -> PendleResult<bool> 
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
 
     fn u(value: u128) -> U256 {
@@ -173,6 +170,136 @@ mod tests {
 
     fn s(value: i128) -> I256 {
         I256::try_from(value).unwrap()
+    }
+
+    #[derive(Deserialize)]
+    struct Case {
+        op: String,
+        a: String,
+        b: String,
+        c: String,
+        y: String,
+    }
+
+    #[derive(Deserialize)]
+    struct Fixtures {
+        cases: Vec<Case>,
+    }
+
+    #[derive(Deserialize)]
+    struct RevertCase {
+        case: String,
+    }
+
+    #[derive(Deserialize)]
+    struct RevertFixtures {
+        reverts: Vec<RevertCase>,
+    }
+
+    fn pu(value: &str) -> U256 {
+        U256::from_str_radix(value, 10).expect("fixture holds a decimal integer")
+    }
+
+    fn pi(value: &str) -> I256 {
+        I256::from_dec_str(value).expect("fixture holds a decimal integer")
+    }
+
+    /// Bit-equality against `PMath` itself, helper by helper.
+    ///
+    /// The market and approximation fixtures already exercise most of this library, but only along
+    /// the paths those take. This pins each helper on operands chosen for it — chiefly ones that do
+    /// not divide evenly, since a grid of exact divisions agrees with either rounding direction.
+    #[test]
+    fn pmath_matches_the_contract() {
+        let fixtures: Fixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/pmath.json")).unwrap();
+        assert!(fixtures.cases.len() >= 80, "fixture grid shrank unexpectedly");
+
+        for case in &fixtures.cases {
+            let label = format!("{}({}, {}, {})", case.op, case.a, case.b, case.c);
+            let (a, b, c) = (case.a.as_str(), case.b.as_str(), case.c.as_str());
+
+            match case.op.as_str() {
+                "mul_down_u" => assert_eq!(mul_down(pu(a), pu(b)).unwrap(), pu(&case.y), "{label}"),
+                "div_down_u" => assert_eq!(div_down(pu(a), pu(b)).unwrap(), pu(&case.y), "{label}"),
+                "raw_div_up" => {
+                    assert_eq!(raw_div_up(pu(a), pu(b)).unwrap(), pu(&case.y), "{label}")
+                }
+                "sub_max_0" => assert_eq!(sub_max_0(pu(a), pu(b)), pu(&case.y), "{label}"),
+                "tweak_up" => assert_eq!(tweak_up(pu(a), pu(b)).unwrap(), pu(&case.y), "{label}"),
+                "tweak_down" => {
+                    assert_eq!(tweak_down(pu(a), pu(b)).unwrap(), pu(&case.y), "{label}")
+                }
+                "clamp" => assert_eq!(clamp(pu(a), pu(b), pu(c)), pu(&case.y), "{label}"),
+                "add_with_upper_bound" => {
+                    assert_eq!(add_with_upper_bound(pu(a), pu(b), pu(c)), pu(&case.y), "{label}")
+                }
+                "sub_with_lower_bound" => {
+                    assert_eq!(sub_with_lower_bound(pu(a), pu(b), pu(c)), pu(&case.y), "{label}")
+                }
+                "is_a_smaller_approx_b" => assert_eq!(
+                    is_a_smaller_approx_b(pu(a), pu(b), pu(c)).unwrap(),
+                    case.y == "1",
+                    "{label}"
+                ),
+                "mul_down_i" => {
+                    assert_eq!(mul_down_i(pi(a), pi(b)).unwrap(), pi(&case.y), "{label}")
+                }
+                "div_down_i" => {
+                    assert_eq!(div_down_i(pi(a), pi(b)).unwrap(), pi(&case.y), "{label}")
+                }
+                "sub_no_neg" => {
+                    assert_eq!(sub_no_neg(pi(a), pi(b)).unwrap(), pi(&case.y), "{label}")
+                }
+                "to_i256" => assert_eq!(to_i256(pu(a)).unwrap(), pi(&case.y), "{label}"),
+                "to_u256" => assert_eq!(to_u256(pi(a)).unwrap(), pu(&case.y), "{label}"),
+                other => panic!("unknown fixture op {other}"),
+            }
+        }
+    }
+
+    /// The guards that revert on chain. The port must error on the same inputs, and with the
+    /// reason the guard is there for rather than merely with something.
+    #[test]
+    fn pmath_failures_match_the_contract() {
+        let fixtures: RevertFixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/pmath_reverts.json")).unwrap();
+        assert!(!fixtures.reverts.is_empty());
+
+        for case in &fixtures.reverts {
+            let int_max_plus_one = U256::from_str_radix(
+                "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+                10,
+            )
+            .unwrap();
+            let matched = match case.case.as_str() {
+                "sub_no_neg_goes_negative" => {
+                    matches!(sub_no_neg(s(3), s(4)), Err(PendleError::NegativeResult { .. }))
+                }
+                "to_i256_above_int256_max" => {
+                    matches!(to_i256(int_max_plus_one), Err(PendleError::CastOutOfRange { .. }))
+                }
+                "to_u256_of_negative" => {
+                    matches!(to_u256(s(-1)), Err(PendleError::CastOutOfRange { .. }))
+                }
+                "div_down_u_by_zero" => {
+                    matches!(div_down(u(1), U256::ZERO), Err(PendleError::DivisionByZero { .. }))
+                }
+                "div_down_i_by_zero" => {
+                    matches!(div_down_i(s(1), I256::ZERO), Err(PendleError::DivisionByZero { .. }))
+                }
+                "raw_div_up_by_zero" => {
+                    matches!(raw_div_up(u(1), U256::ZERO), Err(PendleError::DivisionByZero { .. }))
+                }
+                // The contract multiplies before dividing, so a product past 256 bits reverts even
+                // where the quotient would have fit. The port turns that wrap into an error.
+                "mul_down_u_overflows" => {
+                    matches!(mul_down(U256::MAX, u(2)), Err(PendleError::Overflow { .. }))
+                }
+                other => panic!("unknown revert fixture {other}"),
+            };
+            assert!(matched, "{} did not fail the way the contract does", case.case);
+        }
     }
 
     /// The rounding direction is the reason this module exists: `mulDown` on a product that does

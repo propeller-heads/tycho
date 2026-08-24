@@ -1,0 +1,1 @@
+{"cases":[{"op":"asset_to_sy","outcome":"revert"},{"op":"asset_to_sy_up","outcome":"revert"},{"op":"sy_to_asset","outcome":"ok","y":"0"},{"op":"sy_to_asset_up","outcome":"ok","y":"0"}]}

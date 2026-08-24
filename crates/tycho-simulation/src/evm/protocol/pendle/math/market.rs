@@ -301,6 +301,8 @@ fn get_rate_scalar(market: &MarketState, time_to_expiry: u64) -> PendleResult<I2
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use serde::Deserialize;
 
     use super::*;
@@ -312,6 +314,8 @@ mod tests {
         block_time: String,
         total_pt: String,
         total_sy: String,
+        ln_fee_rate_root: String,
+        reserve_fee_percent: String,
         net_pt_to_account: String,
         rate_scalar: String,
         total_asset: String,
@@ -348,9 +352,13 @@ mod tests {
         U256::from_str_radix(value, 10).expect("fixture holds a decimal integer")
     }
 
-    /// The two markets the fixtures were generated from. `scalar_root` and the fee configuration
-    /// are not in the per-row JSON because they are constant per market, so they are restated here
-    /// and any drift shows up as a mismatch in `rate_scalar`.
+    /// The two markets the fixtures were generated from.
+    ///
+    /// `scalar_root` is not in the per-row JSON because it is immutable per market, so it is
+    /// restated here and any drift shows up as a mismatch in `rate_scalar`. The fee configuration
+    /// *is* per row, because the grid varies it: the same market is quoted at both ends of the
+    /// reserve split and at three fee roots. It stays checked rather than merely consumed, since
+    /// `fee_rate` is recomputed from it and asserted.
     fn market_for(label: &str, case: &TradeCase) -> MarketState {
         let (scalar_root, last_ln_implied_rate) = match label {
             "wsteth" => ("86364560000000000000", "20211000000000000"),
@@ -362,8 +370,8 @@ mod tests {
             total_sy: s(&case.total_sy),
             scalar_root: s(scalar_root),
             expiry: 1_830_124_800,
-            ln_fee_rate_root: u("499875041000000"),
-            reserve_fee_percent: u("80"),
+            ln_fee_rate_root: u(&case.ln_fee_rate_root),
+            reserve_fee_percent: u(&case.reserve_fee_percent),
             last_ln_implied_rate: u(last_ln_implied_rate),
         }
     }
@@ -383,13 +391,14 @@ mod tests {
     const WSTETH_INDEX: &str = "1241884000000000000";
 
     /// Bit-equality against `MarketMathCore` itself, on every intermediate as well as the outputs.
-    /// Forty cases: two markets on opposite sides of the decimal axis, four timestamps each, and
-    /// trades in both directions.
+    /// Sixty cases: two markets on opposite sides of the decimal axis, four timestamps each and
+    /// trades in both directions, plus twenty that hold the market fixed and move the fee
+    /// configuration instead — both ends of the reserve split, three fee roots including zero.
     #[test]
     fn calc_trade_matches_the_contract() {
         let fixtures: TradeFixtures =
             serde_json::from_str(include_str!("../tests/fixtures/market.json")).unwrap();
-        assert!(fixtures.trades.len() >= 40, "fixture grid shrank unexpectedly");
+        assert!(fixtures.trades.len() >= 60, "fixture grid shrank unexpectedly");
 
         for case in &fixtures.trades {
             let market = market_for(&case.market, case);
@@ -418,7 +427,33 @@ mod tests {
                 s(&case.net_sy_to_reserve),
                 "net_sy_to_reserve for {label}"
             );
+
+            // The two ends of the split, stated as the property rather than left to the recorded
+            // number: at 0 the treasury takes nothing, at 100 it takes the whole fee. A port that
+            // divided by the wrong constant still matches at 80 under one operand ordering.
+            match case.reserve_fee_percent.as_str() {
+                "0" => assert_eq!(trade.net_sy_to_reserve, I256::ZERO, "reserve at 0% {label}"),
+                "100" => {
+                    assert_eq!(trade.net_sy_to_reserve, trade.net_sy_fee, "reserve at 100% {label}")
+                }
+                _ => {}
+            }
         }
+
+        // The fee axis is actually swept, rather than the grid having silently collapsed back to
+        // the single configuration both reference markets share.
+        let splits: HashSet<&str> = fixtures
+            .trades
+            .iter()
+            .map(|case| case.reserve_fee_percent.as_str())
+            .collect();
+        let roots: HashSet<&str> = fixtures
+            .trades
+            .iter()
+            .map(|case| case.ln_fee_rate_root.as_str())
+            .collect();
+        assert!(splits.contains("0") && splits.contains("100"), "reserve split ends not covered");
+        assert!(roots.len() >= 3, "fee root held constant across the grid");
     }
 
     /// The contract reverts on these, so the port must error — and with the matching reason, not
@@ -452,6 +487,72 @@ mod tests {
             );
             assert!(matched, "{}: contract gave {}, port gave {error}", case.case, case.error);
         }
+    }
+
+    #[derive(Deserialize)]
+    struct ImpliedRateCase {
+        market: String,
+        total_pt: String,
+        total_asset: String,
+        rate_scalar: String,
+        rate_anchor: String,
+        time_to_expiry: String,
+        ln_implied_rate: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ImpliedRateFixtures {
+        cases: Vec<ImpliedRateCase>,
+    }
+
+    /// `_getLnImpliedRate` against the contract, on perturbed reserves as well as the market's own.
+    ///
+    /// This is not on the quote path, which is why none of the rows above reach it — but it is what
+    /// `last_ln_implied_rate` becomes after a trade, and every later quote's anchor is computed
+    /// from it. An error here is invisible in a single quote and compounds across the next ones.
+    #[test]
+    fn implied_rate_matches_the_contract() {
+        let fixtures: ImpliedRateFixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/implied_rate.json")).unwrap();
+        assert!(fixtures.cases.len() >= 24, "fixture grid shrank unexpectedly");
+
+        for case in &fixtures.cases {
+            let time_to_expiry: u64 = case.time_to_expiry.parse().unwrap();
+            let label = format!("{} pt={} t={}", case.market, case.total_pt, case.time_to_expiry);
+            let actual = get_ln_implied_rate(
+                s(&case.total_pt),
+                s(&case.total_asset),
+                s(&case.rate_scalar),
+                s(&case.rate_anchor),
+                time_to_expiry,
+            )
+            .unwrap_or_else(|e| panic!("implied rate failed for {label}: {e}"));
+            assert_eq!(actual, u(&case.ln_implied_rate), "ln_implied_rate for {label}");
+        }
+    }
+
+    /// The identity the anchor rests on: at the reserves the anchor was built from, the rate that
+    /// comes back out is the one that went in. It round-trips to within a wei of truncation, which
+    /// is what makes a drifting port visible as drift rather than as noise.
+    #[test]
+    fn the_implied_rate_round_trips_through_the_anchor() {
+        let market = wsteth_market();
+        let index = u(WSTETH_INDEX);
+        let block_time = 1_700_000_000;
+
+        let comp = get_market_pre_compute(&market, index, block_time).unwrap();
+        let recovered = get_ln_implied_rate(
+            market.total_pt,
+            comp.total_asset,
+            comp.rate_scalar,
+            comp.rate_anchor,
+            market.expiry - block_time,
+        )
+        .unwrap();
+
+        let stored = market.last_ln_implied_rate;
+        let gap = if recovered > stored { recovered - stored } else { stored - recovered };
+        assert!(gap <= U256::from(1), "implied rate did not round trip: {stored} -> {recovered}");
     }
 
     /// The brief's central point about this AMM: the same state quoted at two timestamps must give

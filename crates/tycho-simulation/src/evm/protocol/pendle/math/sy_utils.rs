@@ -97,6 +97,8 @@ fn signed(
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
 
     /// The wstETH market: SY and accounting asset both 18 decimals, index just above one.
@@ -167,6 +169,121 @@ mod tests {
             sy_to_asset_i(u(WSTETH_INDEX), s(-1_000_000_000_000_000_000)).unwrap(),
             s(-1_241_884_000_000_000_000)
         );
+    }
+
+    #[derive(Deserialize)]
+    struct Case {
+        op: String,
+        index: String,
+        amount: String,
+        y: String,
+    }
+
+    #[derive(Deserialize)]
+    struct Fixtures {
+        cases: Vec<Case>,
+    }
+
+    #[derive(Deserialize)]
+    struct ZeroIndexCase {
+        op: String,
+        outcome: String,
+        #[serde(default)]
+        y: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ZeroIndexFixtures {
+        cases: Vec<ZeroIndexCase>,
+    }
+
+    fn pu(value: &str) -> U256 {
+        U256::from_str_radix(value, 10).expect("fixture holds a decimal integer")
+    }
+
+    fn pi(value: &str) -> I256 {
+        I256::from_dec_str(value).expect("fixture holds a decimal integer")
+    }
+
+    /// Bit-equality against `SYUtils` itself, over five indices and eight magnitudes.
+    ///
+    /// Both rounding directions are evaluated on the same operands, so a swapped call site shows up
+    /// as a one-wei mismatch on the rows that carry a remainder rather than as an aggregate that
+    /// happens to agree.
+    #[test]
+    fn sy_utils_matches_the_contract() {
+        let fixtures: Fixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/sy_utils.json")).unwrap();
+        assert!(fixtures.cases.len() >= 160, "fixture grid shrank unexpectedly");
+
+        for case in &fixtures.cases {
+            let index = pu(&case.index);
+            let amount = pu(&case.amount);
+            let label = format!("{}(index={}, {})", case.op, case.index, case.amount);
+            let actual = match case.op.as_str() {
+                "sy_to_asset" => sy_to_asset(index, amount),
+                "sy_to_asset_up" => sy_to_asset_up(index, amount),
+                "asset_to_sy" => asset_to_sy(index, amount),
+                "asset_to_sy_up" => asset_to_sy_up(index, amount),
+                other => panic!("unknown fixture op {other}"),
+            }
+            .unwrap_or_else(|e| panic!("{label} failed: {e}"));
+            assert_eq!(actual, pu(&case.y), "{label}");
+        }
+    }
+
+    /// The signed variants, both signs of each magnitude. The contract converts `abs()` and
+    /// reapplies the sign, so a negative amount truncates toward zero; converting the signed value
+    /// directly would floor a wei further out on exactly the rows that carry a remainder.
+    #[test]
+    fn signed_sy_utils_match_the_contract() {
+        let fixtures: Fixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/sy_utils_signed.json")).unwrap();
+        assert!(fixtures.cases.len() >= 160, "fixture grid shrank unexpectedly");
+
+        for case in &fixtures.cases {
+            let index = pu(&case.index);
+            let amount = pi(&case.amount);
+            let label = format!("{}(index={}, {})", case.op, case.index, case.amount);
+            let actual = match case.op.as_str() {
+                "sy_to_asset_i" => sy_to_asset_i(index, amount),
+                "asset_to_sy_i" => asset_to_sy_i(index, amount),
+                "asset_to_sy_up_i" => asset_to_sy_up_i(index, amount),
+                other => panic!("unknown fixture op {other}"),
+            }
+            .unwrap_or_else(|e| panic!("{label} failed: {e}"));
+            assert_eq!(actual, pi(&case.y), "{label}");
+        }
+    }
+
+    /// A zero index divides by zero in one direction and is merely zero in the other. The port has
+    /// to fail on the same half — failing on both would refuse quotes the contract serves.
+    #[test]
+    fn a_zero_index_fails_on_the_same_half_as_the_contract() {
+        let fixtures: ZeroIndexFixtures =
+            serde_json::from_str(include_str!("../tests/fixtures/sy_utils_zero_index.json"))
+                .unwrap();
+        assert!(!fixtures.cases.is_empty());
+
+        for case in &fixtures.cases {
+            let one_sy = u(1_000_000_000_000_000_000);
+            let result = match case.op.as_str() {
+                "sy_to_asset" => sy_to_asset(U256::ZERO, one_sy),
+                "sy_to_asset_up" => sy_to_asset_up(U256::ZERO, one_sy),
+                "asset_to_sy" => asset_to_sy(U256::ZERO, u(1)),
+                "asset_to_sy_up" => asset_to_sy_up(U256::ZERO, u(1)),
+                other => panic!("unknown fixture op {other}"),
+            };
+            if case.outcome == "revert" {
+                assert!(
+                    matches!(result, Err(PendleError::DivisionByZero { .. })),
+                    "{} should have failed, got {result:?}",
+                    case.op
+                );
+            } else {
+                assert_eq!(result.unwrap(), pu(&case.y), "{}", case.op);
+            }
+        }
     }
 
     #[test]
