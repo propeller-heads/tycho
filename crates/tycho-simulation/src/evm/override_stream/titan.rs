@@ -127,7 +127,9 @@ const KIPSELI_VENUES: &[&str] =
 /// maker's signed quote into the venue's own storage.
 const BOPAMM_VENUES: &[&str] = &["0x160141a205f5ddcf096ba3f48b7ed21eb52c62ea"];
 /// Tempest venue on Titan's quote stream: the `TempestEth` router, which is also the `target` the
-/// maker writes its lanes against in the shared `PrioUpdateRegistry`.
+/// maker writes its lanes against in the shared `PrioUpdateRegistry`. Confirmed against live
+/// frames — the venue keys the stream publishes carry a `stateDiff` on the registry for this
+/// address, which is what the override snapshot consumes.
 const TEMPEST_VENUES: &[&str] = &["0x00000003f1ec2379e79f58e12ec6c4f51ee92149"];
 
 /// Longest gap between Titan messages tolerated before the socket is treated as dead and
