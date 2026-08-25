@@ -860,6 +860,35 @@ where
         }
         Ok(Some(Arc::new(changes)))
     }
+
+    /// Waits for the in-flight commit task and flushes the write cache, at most once per
+    /// revert (tracked via `settled`). The commit task drains blocks from the buffer
+    /// before its DB write lands, and a below-threshold batch stays staged in the write
+    /// cache after the task completes; only after both are settled does a DB miss prove
+    /// that no prior state exists.
+    async fn settle_pending_commit(&self, settled: &mut bool) -> Result<(), ExtractionError> {
+        if *settled {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().naive_utc();
+        let waited = self
+            .gateway
+            .join_pending_commit()
+            .await?;
+        self.gateway
+            .inner
+            .flush()
+            .await
+            .map_err(ExtractionError::Storage)?;
+        if waited {
+            let wait_time = chrono::Utc::now()
+                .naive_utc()
+                .signed_duration_since(now);
+            trace!(extractor_id = self.name.as_str(), chain = %self.chain, wait_time = %wait_time, "RevertCommitAwaited");
+        }
+        *settled = true;
+        Ok(())
+    }
 }
 
 /// Classifies a revert lookup miss. "young_component" means the component's creation is still
@@ -1155,11 +1184,9 @@ where
             return Ok(None);
         }
 
-        // The commit task drains blocks from the buffer before its DB write lands. Wait for
-        // it, so a miss in the buffer and the DB below proves that no prior state exists.
-        self.gateway
-            .join_pending_commit()
-            .await?;
+        // Settled lazily: the wait + flush is only paid when a buffer lookup below
+        // misses. Covers every DB read in this revert (contracts and protocol states).
+        let mut db_settled = false;
 
         // Send revert to DCI plugin.
         // DCI reverts are hash-only: they have no height fallback and would fail on the
@@ -1365,6 +1392,11 @@ where
 
         trace!(?missing_map, "Missing state keys after buffer lookup");
 
+        if !missing_map.is_empty() {
+            self.settle_pending_commit(&mut db_settled)
+                .await?;
+        }
+
         let missing_contracts = self
             .gateway
             .inner
@@ -1494,6 +1526,11 @@ where
                 });
 
         trace!("Missing state keys after buffer lookup {:?}", &missing_map);
+
+        if !missing_map.is_empty() {
+            self.settle_pending_commit(&mut db_settled)
+                .await?;
+        }
 
         let missing_components_states = self
             .gateway
@@ -3203,6 +3240,7 @@ mod test {
             .times(0)
             .returning(|_, _, _| Ok(()));
         // Revert lookups: contracts, protocol states, component balances, account balances.
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -3313,6 +3351,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -3494,6 +3533,27 @@ mod test {
         }
     }
 
+    /// Swaps in a fake commit handle. Joins and unwraps any displaced real handle so its
+    /// writes are observable. Returns whether a real handle was displaced.
+    async fn replace_commit_handle<G, T, E>(
+        extractor: &ProtocolExtractor<G, T, E>,
+        fake: BatchCommitHandle,
+    ) -> bool {
+        match extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .replace(fake)
+        {
+            Some(real) => {
+                real.await.unwrap().unwrap();
+                true
+            }
+            None => false,
+        }
+    }
+
     fn undo_to(n: u64) -> BlockUndoSignal {
         BlockUndoSignal {
             last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", n), number: n }),
@@ -3516,6 +3576,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -3974,6 +4035,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         // Component is non-finalized: not in DB.
@@ -4127,6 +4189,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         // Component is non-finalized: not in DB.
@@ -4328,6 +4391,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -4467,6 +4531,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         // Component is non-finalized: not in DB.
@@ -4597,6 +4662,7 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         // No component rows anywhere.
@@ -4671,14 +4737,11 @@ mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_handle_revert_waits_for_pending_commit() {
+    // Paused time only advances while every task is idle, i.e. only while `handle_revert`
+    // genuinely awaits the fake commit. A skipped await leaves the flag false.
+    #[tokio::test(start_paused = true)]
+    async fn test_revert_waits_for_pending_commit() {
         use std::sync::atomic::AtomicBool;
-
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
 
         let committed = Arc::new(AtomicBool::new(false));
         let committed_reader = committed.clone();
@@ -4695,6 +4758,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .returning(|_, _, _| Ok(()));
+        gw.expect_flush().returning(|| Ok(()));
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         // The DB sees `pool_x` only after the pending commit finishes.
@@ -4718,80 +4782,23 @@ mod test {
         let extractor = create_extractor(gw).await;
 
         // Block 1: create `pool_x` with `tick`.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(1)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(1, 0)),
-                        component_changes: vec![PbProtocolComponent {
-                            id: "pool_x".to_string(),
-                            change: PbChangeType::Creation.into(),
-                            protocol_type: Some(ProtocolType {
-                                name: "pt_1".to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![Attribute {
-                                name: "tick".to_string(),
-                                value: Bytes::from(100_u64)
-                                    .lpad(32, 0)
-                                    .to_vec(),
-                                change: PbChangeType::Creation.into(),
-                            }],
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@1"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
-
+        tick(
+            &extractor,
+            1,
+            1,
+            vec![creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
         // Block 2: finality height 2 drains block 1 and spawns the commit task.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(2)), ..Default::default() },
-                Some("cursor@2"),
-                Some(2),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
-
+        tick(&extractor, 2, 2, vec![]).await;
         // Block 3: update `tick`. Finality height stays 2, so no drain.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(3)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![Attribute {
-                                name: "tick".to_string(),
-                                value: Bytes::from(200_u64)
-                                    .lpad(32, 0)
-                                    .to_vec(),
-                                change: PbChangeType::Update.into(),
-                            }],
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@3"),
-                Some(2),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(
+            &extractor,
+            3,
+            2,
+            vec![entity_change_tx(3, 0, "pool_x", "tick", 200, PbChangeType::Update)],
+        )
+        .await;
 
         // Replace the finished commit handle with a slow in-flight commit.
         let fake_flag = committed.clone();
@@ -4801,22 +4808,14 @@ mod test {
             Ok(())
         })
         .instrument(tracing::info_span!("fake_commit"));
-        if let Some(real_commit) = extractor
-            .gateway
-            .commit_handle
-            .lock()
-            .await
-            .replace(fake_commit)
-        {
-            real_commit.await.unwrap().unwrap();
-        }
+        assert!(
+            replace_commit_handle(&extractor, fake_commit).await,
+            "block 2 must have spawned a commit task"
+        );
 
         // Revert to block 2. `tick`'s prior value only exists in the pending commit.
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
-                last_valid_cursor: "cursor@2".into(),
-            })
+            .handle_revert(undo_to(2))
             .await
             .unwrap()
             .unwrap();
@@ -4835,6 +4834,127 @@ mod test {
         assert!(pool_x_delta
             .deleted_attributes
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revert_resolved_from_buffer_skips_commit_wait() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Prior value in the buffer → no DB miss → the pending commit is not awaited.
+        tick(
+            &extractor,
+            1,
+            1,
+            vec![creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_r", "tick", 200, PbChangeType::Update)],
+        )
+        .await;
+
+        // A commit that never finishes: if the revert awaited it, the test would hang.
+        let (_never_tx, never_rx) = tokio::sync::oneshot::channel::<()>();
+        let fake_commit = tokio::spawn(async move {
+            let _ = never_rx.await;
+            Ok(())
+        })
+        .instrument(tracing::info_span!("fake_commit"));
+        replace_commit_handle(&extractor, fake_commit).await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            revert_msg
+                .state_deltas
+                .get("pool_r")
+                .unwrap()
+                .updated_attributes
+                .get("tick"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+        );
+        assert!(
+            extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .is_some(),
+            "a buffer-resolved revert must not consume the pending commit handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_pending_commit_error_is_fatal() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        tick(&extractor, 1, 1, vec![]).await;
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_ghost", "rate", 7, PbChangeType::Update)],
+        )
+        .await;
+
+        let fake_commit = tokio::spawn(async move {
+            Err(ExtractionError::Storage(StorageError::Unexpected("boom".to_string())))
+        })
+        .instrument(tracing::info_span!("fake_commit"));
+        replace_commit_handle(&extractor, fake_commit).await;
+
+        let res = extractor
+            .handle_revert(undo_to(1))
+            .await;
+        assert!(res.is_err(), "a failed commit must surface from handle_revert");
+        assert!(
+            extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .is_none(),
+            "the handle must be taken even on failure so a later tick does not re-await it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_pending_commit_panic_is_fatal() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        tick(&extractor, 1, 1, vec![]).await;
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_ghost", "rate", 7, PbChangeType::Update)],
+        )
+        .await;
+
+        let fake_commit = tokio::spawn(async move { panic!("boom") })
+            .instrument(tracing::info_span!("fake_commit"));
+        replace_commit_handle(&extractor, fake_commit).await;
+
+        let res = extractor
+            .handle_revert(undo_to(1))
+            .await;
+        assert!(res.is_err(), "a panicked commit must surface from handle_revert");
+        assert!(
+            extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .is_none(),
+            "the handle must be taken even on failure so a later tick does not re-await it"
+        );
     }
 
     #[test]
@@ -4867,6 +4987,7 @@ mod test {
                 gw.expect_advance()
                     .times(0)
                     .returning(|_, _, _| Ok(()));
+                gw.expect_flush().returning(|| Ok(()));
                 gw.expect_get_contracts()
                     .returning(|_| Ok(Vec::new()));
                 gw.expect_get_protocol_states()
