@@ -1438,76 +1438,46 @@ where
                     acc
                 });
 
-        // Handle reverted protocol state
-
-        // First pass: collect attributes first introduced with ChangeType::Creation across the
-        // entire reverted range. These have no prior state and must be deleted on revert — no
-        // buffer or DB lookup is needed or possible for them.
-        let reverted_created_attrs: HashMap<String, HashSet<String>> = reverted_state
-            .iter()
-            .flat_map(|block_msg| {
-                block_msg
-                    .block_update()
-                    .txs_with_update
-                    .iter()
-                    .flat_map(|update| {
-                        update
-                            .state_updates
-                            .iter()
-                            .filter(|(c_id, _)| !reverted_components_creations.contains_key(*c_id))
-                            .flat_map(|(c_id, delta)| {
-                                delta
-                                    .created_attributes
-                                    .iter()
-                                    .map(move |attr| (c_id.clone(), attr.clone()))
-                            })
-                    })
-            })
-            .fold(HashMap::new(), |mut acc, (c_id, attr)| {
-                acc.entry(c_id)
-                    .or_default()
-                    .insert(attr);
-                acc
-            });
-
-        // Second pass: build the lookup key set, excluding attributes created inside the reverted
-        // range (no prior state).
-        let reverted_protocol_state_keys: HashSet<_> = reverted_state
-            .iter()
-            .flat_map(|block_msg| {
-                block_msg
-                    .block_update()
-                    .txs_with_update
-                    .iter()
-                    .flat_map(|update| {
-                        update
-                            .state_updates
-                            .iter()
-                            .filter(|(c_id, _)| !reverted_components_creations.contains_key(*c_id))
-                            .flat_map(|(c_id, delta)| {
-                                // Attrs born inside the reverted range have no prior state
-                                // anywhere; their revert (deletion) is emitted by the
-                                // created-attrs loop below, so they must not be looked up.
-                                let has_prior_state = |attr: &&String| {
-                                    !reverted_created_attrs
-                                        .get(c_id.as_str())
-                                        .is_some_and(|created| created.contains(*attr))
-                                };
-                                delta
-                                    .updated_attributes
-                                    .keys()
-                                    .filter(has_prior_state)
-                                    .chain(
-                                        delta
-                                            .deleted_attributes
-                                            .iter()
-                                            .filter(has_prior_state),
-                                    )
-                                    .map(move |key| (c_id, key))
-                            })
-                    })
-            })
-            .collect();
+        // Handle reverted protocol state.
+        // One chronological pass (blocks oldest → newest, txs in index order): the first
+        // event seen for a (component, attribute) pair decides its revert. First event
+        // Creation → the attr did not exist before the range, revert it as a deletion;
+        // anything else → a prior value existed, look it up in the buffer, then the DB.
+        // Within one tx a Creation wins: a merged delta holding both a creation and a
+        // later update for the same attr started with the creation.
+        let mut created_in_range: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut seen: HashSet<(&String, &String)> = HashSet::new();
+        let mut reverted_protocol_state_keys: HashSet<(&String, &String)> = HashSet::new();
+        for block_msg in reverted_state.iter() {
+            for update in block_msg
+                .block_update()
+                .txs_with_update
+                .iter()
+            {
+                for (c_id, delta) in update.state_updates.iter() {
+                    if reverted_components_creations.contains_key(c_id) {
+                        continue;
+                    }
+                    for attr in delta.created_attributes.iter() {
+                        if seen.insert((c_id, attr)) {
+                            created_in_range
+                                .entry(c_id.clone())
+                                .or_default()
+                                .insert(attr.clone());
+                        }
+                    }
+                    for attr in delta
+                        .updated_attributes
+                        .keys()
+                        .chain(delta.deleted_attributes.iter())
+                    {
+                        if seen.insert((c_id, attr)) {
+                            reverted_protocol_state_keys.insert((c_id, attr));
+                        }
+                    }
+                }
+            }
+        }
 
         let reverted_protocol_state_keys_vec = reverted_protocol_state_keys
             .into_iter()
@@ -1612,8 +1582,8 @@ where
                 });
         }
 
-        // Revert ChangeType::Creation attributes by emitting deletions — they had no prior state.
-        for (c_id, created_keys) in reverted_created_attrs {
+        // Revert attributes born inside the range by emitting deletions — no prior state.
+        for (c_id, created_keys) in created_in_range {
             state_deltas
                 .entry(c_id.clone())
                 .or_insert_with(|| {
@@ -2167,6 +2137,11 @@ mod test {
         thread::sleep,
     };
 
+    use ::tycho_protobuf::pb::tycho::evm::v1::{
+        Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
+        ProtocolComponent as PbProtocolComponent, ProtocolType as PbProtocolType,
+        TransactionChanges,
+    };
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
@@ -3435,6 +3410,92 @@ mod test {
         }
     }
 
+    type TestExtractor =
+        ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>;
+
+    async fn tick(
+        extractor: &TestExtractor,
+        block: u64,
+        finality: u64,
+        txs: Vec<TransactionChanges>,
+    ) {
+        let cursor = format!("cursor@{block}");
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(block)),
+                    changes: txs,
+                    ..Default::default()
+                },
+                Some(cursor.as_str()),
+                Some(finality),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    fn creation_tx(
+        block: u64,
+        index: u64,
+        component: &str,
+        attrs: &[(&str, u64, PbChangeType)],
+    ) -> TransactionChanges {
+        TransactionChanges {
+            tx: Some(pb_fixtures::pb_transactions(block, index)),
+            component_changes: vec![PbProtocolComponent {
+                id: component.to_string(),
+                change: PbChangeType::Creation.into(),
+                protocol_type: Some(PbProtocolType {
+                    name: "pt_1".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            entity_changes: vec![EntityChanges {
+                component_id: component.to_string(),
+                attributes: attrs
+                    .iter()
+                    .map(|(name, value, change)| Attribute {
+                        name: name.to_string(),
+                        value: Bytes::from(*value).lpad(32, 0).to_vec(),
+                        change: (*change).into(),
+                    })
+                    .collect(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn entity_change_tx(
+        block: u64,
+        index: u64,
+        component: &str,
+        attr: &str,
+        value: u64,
+        change: PbChangeType,
+    ) -> TransactionChanges {
+        TransactionChanges {
+            tx: Some(pb_fixtures::pb_transactions(block, index)),
+            entity_changes: vec![EntityChanges {
+                component_id: component.to_string(),
+                attributes: vec![Attribute {
+                    name: attr.to_string(),
+                    value: Bytes::from(value).lpad(32, 0).to_vec(),
+                    change: change.into(),
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn undo_to(n: u64) -> BlockUndoSignal {
+        BlockUndoSignal {
+            last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", n), number: n }),
+            last_valid_cursor: format!("cursor@{n}"),
+        }
+    }
+
     /// Gateway mock for revert tests that reach the previous-value lookups.
     fn revert_test_gateway() -> MockExtractorGateway {
         let mut gw = MockExtractorGateway::new();
@@ -4185,6 +4246,60 @@ mod test {
                 .is_empty(),
             "Expected no updated_attributes for pool_x, got: {:?}",
             pool_x_delta.updated_attributes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_recreated_attr_restores_prior_value() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: create `pool_r` with `tick` = 100. Finality 1 keeps it in the buffer.
+        tick(
+            &extractor,
+            1,
+            1,
+            vec![creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        // Block 2: delete `tick`. Block 3: re-create it with a new value.
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_r", "tick", 0, PbChangeType::Deletion)],
+        )
+        .await;
+        tick(
+            &extractor,
+            3,
+            1,
+            vec![entity_change_tx(3, 0, "pool_r", "tick", 300, PbChangeType::Creation)],
+        )
+        .await;
+
+        // `tick` was deleted then re-created inside the reverted range, but it existed
+        // before the range, so its original value must come back.
+        let revert_msg = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let delta = revert_msg
+            .state_deltas
+            .get("pool_r")
+            .expect("state_deltas should contain pool_r");
+        assert_eq!(
+            delta.updated_attributes.get("tick"),
+            Some(&Bytes::from(100_u64).lpad(32, 0)),
+            "revert must restore the pre-range value, not delete the attribute"
+        );
+        assert!(
+            !delta
+                .deleted_attributes
+                .contains("tick"),
+            "tick must not be reverted as a deletion, got: {:?}",
+            delta.deleted_attributes
         );
     }
 
