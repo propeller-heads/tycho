@@ -837,7 +837,10 @@ impl PendleMarketState {
         if let Some(value) = attribute_u256(attributes, "rate_sampled_at") {
             self.rate_sampled_at = value.saturating_to();
         }
-        // Injected by the decoder from the block header, not emitted by the Substreams package.
+        // The Substreams refresh emits this on every refresh block whether or not the rate
+        // resolved, which is what lets a delta move the head at all — a `ProtocolStateDelta`
+        // carries no header. It therefore advances only as often as `sy_rate_refresh_blocks`
+        // allows, so the staleness guard under-fires between refreshes at any coarser setting.
         if let Some(value) = attribute_u256(attributes, "block_timestamp") {
             self.head_timestamp = value.saturating_to();
         }
