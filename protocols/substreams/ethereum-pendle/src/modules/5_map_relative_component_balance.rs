@@ -55,8 +55,13 @@ pub fn map_relative_component_balance(
 /// the first match would leave the other permanently overstated. Mints and burns name the zero
 /// address, which is never a component, so that side is dropped here rather than costing a store
 /// lookup.
+///
+/// A transfer whose sender and receiver are the same address yields nothing. The two deltas would
+/// net to zero, but they would carry the same component, token and ordinal, and
+/// `store_balance_changes` panics on an ordinal it has already seen for that pair — which would
+/// halt the module for that block and every block after it.
 fn holder_deltas(transfer: &erc20::events::Transfer) -> Vec<(Vec<u8>, BigInt)> {
-    if transfer.value == BigInt::zero() {
+    if transfer.value == BigInt::zero() || transfer.from == transfer.to {
         return vec![];
     }
     let mut deltas = Vec::new();
@@ -118,13 +123,28 @@ mod tests {
         assert!(holder_deltas(&transfer(SY, MARKET, 0)).is_empty());
     }
 
-    /// A self-transfer nets to zero rather than to double-counting either direction.
+    /// A self-transfer emits nothing at all. Emitting the two halves that net to zero would put
+    /// two deltas for one component, token and ordinal into the aggregation, which panics on a
+    /// repeated ordinal rather than netting them.
     #[test]
-    fn a_self_transfer_nets_out() {
-        let deltas = holder_deltas(&transfer(MARKET, MARKET, 100));
-        let total: BigInt = deltas
-            .iter()
-            .fold(BigInt::zero(), |acc, (_, amount)| acc + amount.clone());
-        assert_eq!(total, BigInt::zero());
+    fn a_self_transfer_emits_nothing() {
+        assert!(holder_deltas(&transfer(MARKET, MARKET, 100)).is_empty());
+    }
+
+    /// The aggregation the module feeds rejects a repeated ordinal for one component and token,
+    /// so no single log may ever produce two deltas that collide on all three.
+    #[test]
+    fn no_log_yields_two_deltas_for_the_same_component_and_token() {
+        for (from, to) in [(MARKET, MARKET), (SY, MARKET), (ZERO, MARKET), (MARKET, ZERO)] {
+            let deltas = holder_deltas(&transfer(from, to, 100));
+            let mut holders: Vec<&Vec<u8>> = deltas
+                .iter()
+                .map(|(holder, _)| holder)
+                .collect();
+            holders.sort();
+            let count = holders.len();
+            holders.dedup();
+            assert_eq!(holders.len(), count, "duplicate holder for a transfer {from:?} -> {to:?}");
+        }
     }
 }
