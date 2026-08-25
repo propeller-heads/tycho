@@ -27,27 +27,27 @@ use super::{
 };
 
 /// A wrapper over an actual SimulationDB that allows overriding specific storage slots
+/// and native balances
 pub struct OverriddenSimulationDB<'a, DB: DatabaseRef> {
     /// Wrapped database. Will be queried if a requested item is not found in the overrides.
     pub inner_db: &'a DB,
     /// A mapping from account address to storage.
     /// Storage is a mapping from slot index to slot value.
     pub overrides: &'a HashMap<Address, HashMap<U256, U256>>,
+    /// A mapping from account address to its overridden native balance.
+    /// An override for an account absent from the inner database materializes it as an
+    /// empty account holding that balance.
+    pub native_balance_overrides: &'a HashMap<Address, U256>,
 }
 
 impl<'a, DB: DatabaseRef> OverriddenSimulationDB<'a, DB> {
-    /// Creates a new OverriddenSimulationDB
-    ///
-    /// # Arguments
-    ///
-    /// * `inner_db` - Reference to the inner database.
-    /// * `overrides` - Reference to a HashMap containing the storage overrides.
-    ///
-    /// # Returns
-    ///
-    /// A new instance of OverriddenSimulationDB.
-    pub fn new(inner_db: &'a DB, overrides: &'a HashMap<Address, HashMap<U256, U256>>) -> Self {
-        OverriddenSimulationDB { inner_db, overrides }
+    /// Creates a new OverriddenSimulationDB.
+    pub fn new(
+        inner_db: &'a DB,
+        overrides: &'a HashMap<Address, HashMap<U256, U256>>,
+        native_balance_overrides: &'a HashMap<Address, U256>,
+    ) -> Self {
+        OverriddenSimulationDB { inner_db, overrides, native_balance_overrides }
     }
 }
 
@@ -55,7 +55,14 @@ impl<DB: DatabaseRef> DatabaseRef for OverriddenSimulationDB<'_, DB> {
     type Error = DB::Error;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.inner_db.basic_ref(address)
+        let info = self.inner_db.basic_ref(address)?;
+        let Some(balance) = self
+            .native_balance_overrides
+            .get(&address)
+        else {
+            return Ok(info);
+        };
+        Ok(Some(AccountInfo { balance: *balance, ..info.unwrap_or_default() }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -696,7 +703,8 @@ mod tests {
                 .collect(),
         );
 
-        let overriden_db = OverriddenSimulationDB::new(&db, &overrides);
+        let native_balance_overrides = HashMap::new();
+        let overriden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
 
         assert_eq!(
             overriden_db
@@ -737,6 +745,95 @@ mod tests {
                 .expect("Value should be available"),
             overridden_value1,
             "Overridden slot of an overridden non-existent account should hold an overriden value."
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct StaticDB {
+        accounts: HashMap<Address, AccountInfo>,
+    }
+
+    impl DatabaseRef for StaticDB {
+        type Error = SimulationDBError;
+
+        fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(self.accounts.get(&address).cloned())
+        }
+
+        fn code_by_hash_ref(&self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
+            Ok(Bytecode::default())
+        }
+
+        fn storage_ref(&self, _address: Address, _index: U256) -> Result<U256, Self::Error> {
+            Ok(U256::ZERO)
+        }
+
+        fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
+            Ok(B256::ZERO)
+        }
+    }
+
+    #[rstest]
+    fn test_balance_override_known_account() {
+        let address = Address::from(U160::from(1));
+        let account = AccountInfo { balance: U256::from(100), nonce: 7, ..Default::default() };
+        let db = StaticDB { accounts: HashMap::from([(address, account)]) };
+        let overrides = HashMap::new();
+        let native_balance_overrides = HashMap::from([(address, U256::from(999))]);
+        let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
+
+        let info = overridden_db
+            .basic_ref(address)
+            .expect("basic_ref should succeed")
+            .expect("account should exist");
+
+        assert_eq!(info.balance, U256::from(999), "Overridden balance should be returned.");
+        assert_eq!(info.nonce, 7, "Other account fields should be preserved.");
+    }
+
+    #[rstest]
+    fn test_balance_override_unknown_account() {
+        let address = Address::from(U160::from(1));
+        let db = StaticDB::default();
+        let overrides = HashMap::new();
+        let native_balance_overrides = HashMap::from([(address, U256::from(999))]);
+        let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
+
+        let info = overridden_db
+            .basic_ref(address)
+            .expect("basic_ref should succeed")
+            .expect("overridden unknown account should be synthesized");
+
+        assert_eq!(
+            info,
+            AccountInfo { balance: U256::from(999), ..Default::default() },
+            "Unknown account should be synthesized as an EOA with the overridden balance."
+        );
+    }
+
+    #[rstest]
+    fn test_balance_override_absent_passthrough() {
+        let address = Address::from(U160::from(1));
+        let unknown_address = Address::from(U160::from(2));
+        let account = AccountInfo { balance: U256::from(100), nonce: 7, ..Default::default() };
+        let db = StaticDB { accounts: HashMap::from([(address, account.clone())]) };
+        let overrides = HashMap::new();
+        let native_balance_overrides = HashMap::new();
+        let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
+
+        assert_eq!(
+            overridden_db
+                .basic_ref(address)
+                .expect("basic_ref should succeed"),
+            Some(account),
+            "Known account without override should pass through unchanged."
+        );
+        assert_eq!(
+            overridden_db
+                .basic_ref(unknown_address)
+                .expect("basic_ref should succeed"),
+            None,
+            "Unknown account without override should stay absent."
         );
     }
 }

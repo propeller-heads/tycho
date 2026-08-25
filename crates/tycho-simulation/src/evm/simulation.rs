@@ -102,8 +102,16 @@ where
             .overrides
             .clone()
             .unwrap_or_default();
+        let native_balance_overrides = params
+            .native_balance_overrides
+            .clone()
+            .unwrap_or_default();
 
-        let db_ref = OverriddenSimulationDB { inner_db: &self.state, overrides: &overrides };
+        let db_ref = OverriddenSimulationDB {
+            inner_db: &self.state,
+            overrides: &overrides,
+            native_balance_overrides: &native_balance_overrides,
+        };
 
         let tx_env = TxEnv {
             caller: params.caller,
@@ -399,6 +407,8 @@ pub struct SimulationParameters {
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     /// Per-call block context overrides.
     pub block_overrides: Option<BlockEnvOverrides>,
+    /// Native balance overrides. Same per-call scoping as `overrides`.
+    pub native_balance_overrides: Option<HashMap<Address, U256>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
