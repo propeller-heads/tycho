@@ -267,6 +267,14 @@ pub fn record_protocol_update_skipped() {
     counter!("tycho_integration_protocol_updates_skipped_total").increment(1);
 }
 
+/// Record a protocol update whose block was not selected by `--test-every-n-blocks` sampling.
+///
+/// Deliberately separate from `tycho_integration_protocol_updates_skipped_total`: skipped means
+/// the harness wanted to test the block but could not; sampled-out is a configured decision.
+pub fn record_protocol_update_sampled_out() {
+    counter!("tycho_integration_protocol_updates_sampled_out_total").increment(1);
+}
+
 /// Record the block delay of protocol updates
 pub fn record_protocol_update_block_delay(block_delay: u64) {
     histogram!("tycho_integration_protocol_update_block_delay_blocks").record(block_delay as f64);

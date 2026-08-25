@@ -927,6 +927,11 @@ async fn process_update(
 
             let update_block_number = update.update.block_number_or_timestamp;
 
+            if !is_sampled_block(update_block_number, cli.test_every_n_blocks) {
+                metrics::record_protocol_update_sampled_out();
+                return Ok(());
+            }
+
             // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
             // standard endpoints use `latest` (confirmed blocks only).
             let block_tag = if cli.partial_blocks && update.update.is_partial {
@@ -1886,7 +1891,7 @@ fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatis
 
 /// True when `block_number` is selected by the `--test-every-n-blocks` sampling interval.
 fn is_sampled_block(block_number: u64, interval: u64) -> bool {
-    block_number % interval == 0
+    block_number.is_multiple_of(interval)
 }
 
 /// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
