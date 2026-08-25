@@ -96,6 +96,34 @@ fn first_registrations(pair_registered_deltas: StoreDeltas) -> HashSet<String> {
         .collect()
 }
 
+/// Decides the pause transition a `PairRegistered` event implies.
+///
+/// Returns `Some(paused)` when the component's pause state has to change, or `None` when the event
+/// is the one that created the component — a new component starts unpaused, so there is nothing to
+/// emit for it.
+///
+/// `pending_creation` holds the ids whose creation event has not been seen yet in this block, and
+/// the entry is **consumed** the first time a registration is seen. That matters when a pair is
+/// added, removed and added again within one block: the store deltas are `("", "1")`, `("1", "0")`
+/// and `("0", "1")`, so the id looks like a first registration for all three. Consuming the entry
+/// means only the first event is treated as the creation, and the third correctly lifts the pause
+/// that the second applied instead of leaving the component paused while it is registered on chain.
+fn pause_transition(
+    pending_creation: &mut HashSet<String>,
+    id: &str,
+    registered: bool,
+) -> Option<bool> {
+    if !registered {
+        return Some(true);
+    }
+    // `remove` reports whether this is the still-unconsumed creation event.
+    if pending_creation.remove(id) {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 /// Emits a component for every pair the router registers.
 ///
 /// `PairRegistered` carries a `registered` flag because `removePair` reuses the event; only
@@ -450,7 +478,7 @@ fn map_protocol_changes(
     component_balance_store_deltas: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let config: Config = serde_qs::from_str(params.as_str())?;
-    let first_registrations = first_registrations(pair_registered_deltas);
+    let mut pending_creation = first_registrations(pair_registered_deltas);
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
 
     for tx_changes in components.changes {
@@ -496,10 +524,8 @@ fn map_protocol_changes(
                 {
                     continue;
                 }
-                if !ev.registered {
-                    builder.change_component_pause_state(&id, true);
-                } else if !first_registrations.contains(&id) {
-                    builder.change_component_pause_state(&id, false);
+                if let Some(paused) = pause_transition(&mut pending_creation, &id, ev.registered) {
+                    builder.change_component_pause_state(&id, paused);
                 }
             } else if Paused::match_and_decode(log).is_some() {
                 // The router is `Pausable` and every settlement and quote entrypoint is
@@ -757,6 +783,38 @@ mod tests {
 
         assert!(first.contains("0xfirst"));
         assert!(!first.contains("0xreadded"));
+    }
+
+    /// `addPair` -> `removePair` -> `addPair` in one block. All three deltas carry the id as a
+    /// first registration, so a non-consuming check would skip the final event and leave the
+    /// component paused while the pair is registered on chain.
+    #[test]
+    fn test_pause_transition_add_remove_add_in_one_block() {
+        let id = "0xpair";
+        let mut pending: HashSet<String> = [id.to_string()].into_iter().collect();
+
+        assert_eq!(pause_transition(&mut pending, id, true), None, "creation emits nothing");
+        assert_eq!(pause_transition(&mut pending, id, false), Some(true), "removePair pauses");
+        assert_eq!(pause_transition(&mut pending, id, true), Some(false), "re-add must unpause");
+    }
+
+    /// A pair created and delisted in the same block ends paused, matching the chain.
+    #[test]
+    fn test_pause_transition_add_then_remove_in_one_block() {
+        let id = "0xpair";
+        let mut pending: HashSet<String> = [id.to_string()].into_iter().collect();
+
+        assert_eq!(pause_transition(&mut pending, id, true), None);
+        assert_eq!(pause_transition(&mut pending, id, false), Some(true));
+    }
+
+    /// An existing component re-registered in a later block has no pending creation, so the very
+    /// first registration it sees must lift the pause.
+    #[test]
+    fn test_pause_transition_reregistration_without_pending_creation() {
+        let mut pending: HashSet<String> = HashSet::new();
+
+        assert_eq!(pause_transition(&mut pending, "0xpair", true), Some(false));
     }
 
     /// A delisting also writes the store, and must not be mistaken for a creation.

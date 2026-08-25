@@ -83,6 +83,7 @@ EXECUTOR_FIXTURES=(
     "BalancerV3|ethereum|vm:balancer_v3"
     "Curve|ethereum|vm:curve"
     "FermiSwap|ethereum|vm:fermiswap"
+    "Tempest|ethereum|vm:tempest"
     "MaverickV2|ethereum|vm:maverick_v2"
     "EkuboV3|ethereum|ekubo_v3"
     "FluidV1|ethereum|fluid_v1"
