@@ -932,50 +932,88 @@ async fn process_update(
                 return Ok(());
             }
 
-            // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
-            // standard endpoints use `latest` (confirmed blocks only).
-            let block_tag = if cli.partial_blocks && update.update.is_partial {
-                BlockNumberOrTag::Pending
-            } else {
-                BlockNumberOrTag::Latest
-            };
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
-            let poll_result = poll_rpc_for_block(
-                &rpc_tools,
-                update_block_number,
-                block_tag,
-                cli.rpc_poll_attempts,
-                poll_interval,
-            )
-            .await?;
+            let block = if cli.test_every_n_blocks > 1 {
+                // Sampled mode: on fast chains the head is expected to be past the update, so the
+                // target block is fetched by number instead of racing the head. clap rejects
+                // --partial-blocks in this mode, so the block is always full.
+                match await_target_block(
+                    &rpc_tools,
+                    update_block_number,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await
+                {
+                    Ok(Some(b)) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
+                        metrics::record_block_processing_duration(latency_seconds, "full");
+                        Arc::new(b)
+                    }
+                    Ok(None) => {
+                        warn!("RPC did not serve sampled block {update_block_number}, skipping.");
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else {
+                // Flashblocks-capable endpoints expose sequencer pre-confirmed state under
+                // `pending`; standard endpoints use `latest` (confirmed blocks only).
+                let block_tag = if cli.partial_blocks && update.update.is_partial {
+                    BlockNumberOrTag::Pending
+                } else {
+                    BlockNumberOrTag::Latest
+                };
 
-            let block_type =
-                if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
-            let block = match poll_result {
-                BlockPollResult::Ready(b) => {
-                    let latency_seconds =
-                        update.received_at.as_secs_f64() - b.header.timestamp as f64;
-                    metrics::record_block_processing_duration(latency_seconds, block_type);
-                    Arc::new(*b)
-                }
-                BlockPollResult::Stale { target_block_timestamp } => {
-                    if let Some(ts) = target_block_timestamp {
-                        let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
+                let poll_result = poll_rpc_for_block(
+                    &rpc_tools,
+                    update_block_number,
+                    block_tag,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await?;
+
+                let block_type =
+                    if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
+                match poll_result {
+                    BlockPollResult::Ready(b) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
                         metrics::record_block_processing_duration(latency_seconds, block_type);
+                        Arc::new(*b)
                     }
-                    metrics::record_protocol_update_skipped();
-                    for protocol in update.update.sync_states.keys() {
-                        metrics::record_protocol_sync_state_skipped(protocol);
+                    BlockPollResult::Stale { target_block_timestamp } => {
+                        if let Some(ts) = target_block_timestamp {
+                            let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
+                            metrics::record_block_processing_duration(latency_seconds, block_type);
+                        }
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                BlockPollResult::Timeout => {
-                    warn!(
-                    "RPC ({block_tag}) did not reach update block {update_block_number}, skipping."
-                );
-                    metrics::record_protocol_update_skipped();
-                    return Ok(());
+                    BlockPollResult::Timeout => {
+                        warn!(
+                            "RPC ({block_tag}) did not reach update block \
+                             {update_block_number}, skipping."
+                        );
+                        metrics::record_protocol_update_skipped();
+                        return Ok(());
+                    }
                 }
             };
             if update.is_first_update {
