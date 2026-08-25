@@ -1,60 +1,205 @@
 use crate::{
-    abi::b_cow_pool::functions::Bind,
-    pb::cowamm::{CowPoolBind, CowPoolBinds},
+    abi::b_cow_pool::functions::{Bind, Unbind},
+    pb::cowamm::{BindingChangeType, CowPoolBind, CowPoolBinds},
 };
-use anyhow::{Ok, Result};
-use substreams_ethereum::pb::eth::v2::Block;
+use anyhow::Result;
+use substreams_ethereum::pb::eth::v2::{Block, Log};
 use substreams_helper::hex::Hexable;
 
 #[substreams::handlers::map]
 pub fn map_cowpool_binds(block: Block) -> Result<CowPoolBinds> {
-    const BIND_TOPIC: &str = "0xe4e1e53800000000000000000000000000000000000000000000000000000000";
-    const BIND_SELECTOR: &str = "e4e1e538";
+    Ok(extract_cowpool_bindings(block))
+}
 
-    let binds = block
-        .transaction_traces
-        .iter()
-        // extract (tx, receipt) pairs; skip tx without receipts
-        .filter_map(|tx| {
-            tx.receipt
-                .as_ref()
-                .map(|receipt| (tx, receipt))
-        })
-        // for each (tx, receipt) emit all the matching binds
-        .flat_map(|(tx, receipt)| {
-            receipt
-                .logs
-                .iter()
-                // topic match
-                .filter(|log| {
-                    log.topics.first().map(|t| t.to_hex()) == Some(BIND_TOPIC.to_string())
-                })
-                // validate log data and map to CowPoolBind
-                .filter_map(move |log| {
-                    // Find the call that contains this log by matching addresses and checking calls
-                    let call = tx.calls.iter().find(|call| {
-                        call.address == log.address
-                        && !call.state_reverted
-                        && call.input.len() > 4 //checks if theres data after the function selector, if not then theres no data to decode
-                        && hex::encode(&call.input[..4]) == BIND_SELECTOR //check if its the the
-                                                                          // right function
-                                                                          // selection selector
-                    })?;
-                    let bind = Bind::decode(call).expect("failed to decode bind");
-                    let token = bind.token;
-                    let amount = bind.balance.to_signed_bytes_be();
-                    let weight = bind.denorm.to_signed_bytes_be();
-                    Some(CowPoolBind {
-                        address: log.address.clone(),
-                        token,
-                        amount,
-                        weight,
-                        tx: Some(tx.into()), // full TransactionTrace
-                        ordinal: log.ordinal,
-                    })
-                })
-        })
-        .collect::<Vec<_>>();
+fn extract_cowpool_bindings(block: Block) -> CowPoolBinds {
+    let mut binds = Vec::new();
+    for tx in block.transactions() {
+        for (log, call) in tx.logs_with_calls() {
+            let is_bind = Bind::match_call(call.call);
+            if !is_bind && !Unbind::match_call(call.call) {
+                continue;
+            }
+            // A bind/unbind call emits several logs (its LOG_CALL plus token transfers);
+            // only the LOG_CALL event carries the binding change ordinal. Pairing each
+            // log with the call that emitted it also makes lookalike logs from other
+            // contracts unreachable here.
+            if !is_log_call_event(log, &call.call.input[..4]) {
+                continue;
+            }
 
-    Ok(CowPoolBinds { binds })
+            let decoded = if is_bind {
+                Bind::decode(call.call).map(|bind| {
+                    (
+                        bind.token,
+                        bind.balance.to_signed_bytes_be(),
+                        bind.denorm.to_signed_bytes_be(),
+                        BindingChangeType::Bind,
+                    )
+                })
+            } else {
+                Unbind::decode(call.call)
+                    .map(|unbind| (unbind.token, vec![], vec![], BindingChangeType::Unbind))
+            };
+            let (token, amount, weight, change_type) = match decoded {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    // Anyone can call a function whose selector collides with
+                    // bind/unbind; erroring here would halt the stream at this block.
+                    substreams::log::info!(
+                        "skipping undecodable binding call at {} in tx {}: {}",
+                        log.address.to_hex(),
+                        tx.hash.to_hex(),
+                        error
+                    );
+                    continue;
+                }
+            };
+            binds.push(CowPoolBind {
+                address: log.address.clone(),
+                token,
+                amount,
+                weight,
+                tx: Some(tx.into()),
+                ordinal: log.ordinal,
+                change_type: change_type.into(),
+            });
+        }
+    }
+
+    CowPoolBinds { binds }
+}
+
+/// The BCoWPool `LOG_CALL` event is anonymous: its only static topic is the four-byte
+/// selector of the executing function, right-padded to 32 bytes.
+fn is_log_call_event(log: &Log, selector: &[u8]) -> bool {
+    let Some(topic) = log.topics.first() else {
+        return false;
+    };
+    topic.len() == 32 && topic[..4] == *selector && topic[4..].iter().all(|byte| *byte == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use substreams::scalar::BigInt;
+    use substreams_ethereum::pb::eth::v2::{Call, TransactionReceipt, TransactionTrace};
+
+    // Pinned on-chain values; these fail if the generated ABI constants ever drift.
+    const BIND_TOPIC: &str = "e4e1e53800000000000000000000000000000000000000000000000000000000";
+    const UNBIND_TOPIC: &str = "cf5e7bd300000000000000000000000000000000000000000000000000000000";
+
+    fn bind_log(address: &[u8], ordinal: u64) -> Log {
+        Log {
+            address: address.to_vec(),
+            topics: vec![hex::decode(BIND_TOPIC).unwrap()],
+            ordinal,
+            ..Default::default()
+        }
+    }
+
+    fn block_with_calls(calls: Vec<Call>) -> Block {
+        let logs = calls
+            .iter()
+            .flat_map(|call| call.logs.clone())
+            .collect();
+        Block {
+            transaction_traces: vec![TransactionTrace {
+                status: 1,
+                hash: vec![1; 32],
+                calls,
+                receipt: Some(TransactionReceipt { logs, ..Default::default() }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn maps_each_binding_log_to_the_call_that_emitted_it() {
+        let pool = hex::decode("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1").unwrap();
+        let token_a = hex::decode("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").unwrap();
+        let token_b = hex::decode("7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0").unwrap();
+        let log_unbind = Log {
+            address: pool.clone(),
+            topics: vec![hex::decode(UNBIND_TOPIC).unwrap()],
+            ordinal: 3,
+            ..Default::default()
+        };
+        let call = |token: Vec<u8>, log: Log| Call {
+            address: pool.clone(),
+            input: Bind { token, balance: BigInt::from(10), denorm: BigInt::from(1) }.encode(),
+            logs: vec![log],
+            ..Default::default()
+        };
+        let block = block_with_calls(vec![
+            call(token_a.clone(), bind_log(&pool, 1)),
+            call(token_b.clone(), bind_log(&pool, 2)),
+            Call {
+                address: pool.clone(),
+                input: Unbind { token: token_a.clone() }.encode(),
+                logs: vec![log_unbind],
+                ..Default::default()
+            },
+        ]);
+
+        let changes = extract_cowpool_bindings(block);
+
+        assert_eq!(changes.binds.len(), 3);
+        assert_eq!(changes.binds[0].token, token_a);
+        assert_eq!(changes.binds[1].token, token_b);
+        assert_eq!(changes.binds[2].token, changes.binds[0].token);
+        assert_eq!(
+            BindingChangeType::from_i32(changes.binds[2].change_type),
+            Some(BindingChangeType::Unbind)
+        );
+    }
+
+    #[test]
+    fn skips_lookalike_logs_not_emitted_by_a_binding_call() {
+        let pool = hex::decode("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1").unwrap();
+        let lookalike = hex::decode("00000000000000000000000000000000000000ff").unwrap();
+        let token = hex::decode("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").unwrap();
+        let block = block_with_calls(vec![
+            // carries the bind topic but comes from a call with a different selector
+            Call {
+                address: lookalike.clone(),
+                input: hex::decode("deadbeef00").unwrap(),
+                logs: vec![bind_log(&lookalike, 1)],
+                ..Default::default()
+            },
+            Call {
+                address: pool.clone(),
+                input: Bind {
+                    token: token.clone(),
+                    balance: BigInt::from(10),
+                    denorm: BigInt::from(1),
+                }
+                .encode(),
+                logs: vec![bind_log(&pool, 2)],
+                ..Default::default()
+            },
+        ]);
+
+        let changes = extract_cowpool_bindings(block);
+
+        assert_eq!(changes.binds.len(), 1);
+        assert_eq!(changes.binds[0].token, token);
+        assert_eq!(changes.binds[0].address, pool);
+    }
+
+    #[test]
+    fn skips_binding_calls_with_undecodable_input() {
+        let lookalike = hex::decode("00000000000000000000000000000000000000ff").unwrap();
+        // starts with the bind selector but is too short to decode as a bind call
+        let block = block_with_calls(vec![Call {
+            address: lookalike.clone(),
+            input: hex::decode("e4e1e538ff").unwrap(),
+            logs: vec![bind_log(&lookalike, 1)],
+            ..Default::default()
+        }]);
+
+        let changes = extract_cowpool_bindings(block);
+
+        assert!(changes.binds.is_empty());
+    }
 }

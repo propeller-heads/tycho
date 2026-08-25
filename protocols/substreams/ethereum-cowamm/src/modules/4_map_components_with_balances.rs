@@ -1,16 +1,14 @@
 use crate::{
+    abi::{b_cow_factory::events::CowammPoolCreated, gpv2_settlement::events::Trade},
     events::get_log_changed_balances,
-    modules::{
-        map_cowpools::parse_binds,
-        utils::{extract_address, Params},
-    },
+    modules::{map_cowpools::parse_binds, utils::Params},
     pb::cowamm::{
         Attribute, BlockBalanceDeltas, BlockPoolChanges, BlockTransactionProtocolComponents,
         CowBalanceDelta, CowPool, CowProtocolComponent, ProtocolType,
         TransactionProtocolComponents,
     },
 };
-use anyhow::{Ok, Result};
+use anyhow::{anyhow, Ok, Result};
 use substreams::{
     prelude::{BigInt, StoreGetString},
     store::{StoreGet, StoreGetProto},
@@ -79,11 +77,7 @@ pub fn map_components_with_balances(
     binds: StoreGetString,
 ) -> Result<BlockPoolChanges, substreams::errors::Error> {
     let params = Params::parse_from_query(&params)?;
-    const COWAMM_POOL_CREATED_TOPIC: &str =
-        "0x0d03834d0d86c7f57e877af40e26f176dc31bd637535d4ba153d1ac9de88a7ea";
     const COW_PROTOCOL_GPV2_SETTLEMENT_ADDRESS: &str = "0x9008d19f58aabd9ed0d60971565aa8510560ab41";
-    const COW_PROTOCOL_GPV2_TOPIC: &str =
-        "0xa07a543ab8a018198e99ca0184c93fe9050a79400a0a723441f84de1d972cc17";
 
     let factory_address = params
         .decode_addresses()
@@ -103,51 +97,61 @@ pub fn map_components_with_balances(
             let tx_hash = tx.hash.clone();
             let tx_index = tx.index;
 
-            let is_pool_creation = log.address == factory_address &&
-                log.topics.first().map(|t| t.to_hex()) ==
-                    Some(COWAMM_POOL_CREATED_TOPIC.to_string());
+            let is_pool_creation =
+                log.address == factory_address && CowammPoolCreated::match_log(log);
             if is_pool_creation {
                 // Handle pool creation
-                let pool_address_topic = match log.topics.get(1) {
-                    Some(topic) => topic.as_slice()[12..].to_vec(),
-                    None => continue,
-                };
+                let creation = CowammPoolCreated::decode(log)
+                    .expect("COWAMMPoolCreated log matched but failed to decode");
 
-                let pool_address_hex = hex::encode(&pool_address_topic);
+                let pool_address_hex = hex::encode(&creation.b_co_w_pool);
                 let pool_key = format!("Pool:0x{}", pool_address_hex);
 
-                let bind_data = match binds.get_first(&pool_address_hex) {
+                let bind_data = match binds.get_at(log.ordinal, &pool_address_hex) {
                     Some(data) => data,
                     None => continue,
                 };
 
-                let parsed_binds = match parse_binds(&bind_data) {
-                    Some(binds) if !binds.is_empty() => binds,
-                    _ => continue,
+                let parsed_binds = parse_binds(&bind_data)?;
+                // Mirror the map_cowpools guard: pools without exactly two active bindings
+                // are never stored, so any other count must skip here as well — otherwise the
+                // store lookup below reports a legitimately skipped pool as missing and halts
+                // the stream.
+                if parsed_binds.len() != 2 {
+                    continue;
+                }
+
+                let Some(pool) = store.get_at(log.ordinal, &pool_key) else {
+                    return Err(anyhow!(
+                        "CowAMM pool {} is missing from store at block {}, tx {}",
+                        pool_key,
+                        block.number,
+                        tx_hash.to_hex()
+                    ));
                 };
 
                 for bind in parsed_binds.iter() {
-                    //HACK - we'll make the txn hash of the balance delta to be the tx hash of the 
+                    //HACK - we'll make the txn hash of the balance delta to be the tx hash of the
                     //pool creation, also the index too, so that it gets emitted in the same transaction
-                    //and not as txns from previous block (Block N) emitted in Block N + X... the decision 
+                    //and not as txns from previous block (Block N) emitted in Block N + X... the decision
                     // to come to this was deliberated and this was the conclusion:
 
                     //we assign the index and the hash of the current balance delta to make it seem
                     //like the component change actually happened in the same transaction in the same
-                    // block, and not from a previous txn from a previous block, doing this before caused 
-                    //write conflicts during syncing with the tycho indexer 
+                    // block, and not from a previous txn from a previous block, doing this before caused
+                    //write conflicts during syncing with the tycho indexer
 
                     //always emit transaction together with the block that produced them, just emit old
-                    // component balances together with the component creation in the same transaction 
-                    //(it’s not 100% accurate but from a Tycho perspective it doesn’t break anything 
-                    // so it’s acceptable) 
+                    // component balances together with the component creation in the same transaction
+                    //(it’s not 100% accurate but from a Tycho perspective it doesn’t break anything
+                    // so it’s acceptable)
                     let bind_tx = bind.tx.as_ref().unwrap();
                     let delta = BalanceDelta {
                         ord: bind.ordinal,
                         tx: Some(Transaction {
                             from: bind_tx.from.clone(),
                             to: bind_tx.to.clone(),
-                            hash: tx_hash.clone(), //since the binds happen 
+                            hash: tx_hash.clone(), //since the binds happen
                             index: tx_index as u64,
                         }),
                         token: bind.token.clone(),
@@ -161,16 +165,13 @@ pub fn map_components_with_balances(
                     };
                     tx_deltas.push(delta);
                 }
-                let pool = store
-                    .get_last(pool_key)
-                    .expect("failed to get pool from store");
                 // Create the component
                 if let Some(component) = create_component(pool.clone()) {
                     tx_components.push(component);
                 }
                 //this case extract any balance deltas from this log that is CowAMM related for the
                 // particular pool
-            } else if let Some(pool) = store.get_last(format!("Pool:{}", &log.address.to_hex())) {
+            } else if let Some(pool) = store.get_last(format!("Pool:{}", log.address.to_hex())) {
                 tx_deltas.extend(get_log_changed_balances(&tx.into(), log, &pool));
             } else if log.address.to_hex() == COW_PROTOCOL_GPV2_SETTLEMENT_ADDRESS {
                 //when a trade is settled on the CowAMM via the cowprotocol a delta also occurs but
@@ -178,18 +179,10 @@ pub fn map_components_with_balances(
                 // to check the owner if its this pool
 
                 //https://etherscan.io/tx/0x530416d2f894e7d029a42854fc7656a1605a4bddf711707e41e4c8997becbac5#eventlog#504 example
-                if log.topics.first().map(|t| t.to_hex()) ==
-                    Some(COW_PROTOCOL_GPV2_TOPIC.to_string())
-                {
-                    if let Some(pool_address) = log.topics.get(1).map(|t| t.to_hex()) {
-                        //24 + 40 chars
-                        //pool is address is left padded with 24 '0's so we remove that
-                        //0x0000000000000000000000009bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1 left
-                        // padded to 44 bytes
-                        let address = extract_address(&pool_address, 40);
-                        if let Some(pool) = store.get_last(format!("Pool:{}", &address)) {
-                            tx_deltas.extend(get_log_changed_balances(&tx.into(), log, &pool));
-                        }
+                if Trade::match_log(log) {
+                    let trade = Trade::decode(log).expect("Trade log matched but failed to decode");
+                    if let Some(pool) = store.get_last(format!("Pool:{}", trade.owner.to_hex())) {
+                        tx_deltas.extend(get_log_changed_balances(&tx.into(), log, &pool));
                     }
                 }
             }
@@ -216,4 +209,24 @@ pub fn map_components_with_balances(
         }),
         block_balance_deltas: Some(BlockBalanceDeltas { balance_deltas: final_deltas }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use substreams_ethereum::pb::eth::v2::Log;
+
+    // Pinned on-chain value; fails if the generated ABI constant ever drifts.
+    const COW_PROTOCOL_GPV2_TRADE_TOPIC: &str =
+        "a07a543ab8a018198e99ca0184c93fe9050a79400a0a723441f84de1d972cc17";
+
+    #[test]
+    fn matches_the_onchain_gpv2_trade_topic() {
+        let log = Log {
+            topics: vec![hex::decode(COW_PROTOCOL_GPV2_TRADE_TOPIC).unwrap(), vec![0u8; 32]],
+            data: vec![0u8; 224],
+            ..Default::default()
+        };
+        assert!(Trade::match_log(&log));
+    }
 }

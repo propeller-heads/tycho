@@ -1,70 +1,37 @@
-use crate::pb::cowamm::{CowPool, CowPoolBind, CowPoolCreations, CowPools, Transaction};
-use anyhow::{Ok, Result};
-use serde::{Deserialize, Serialize};
+use crate::pb::cowamm::{BindingChangeType, CowPool, CowPoolBind, CowPoolCreations, CowPools};
+use anyhow::{bail, Context, Ok, Result};
+use prost::Message;
 use substreams::store::{StoreGet, StoreGetString};
 
-#[derive(Debug, Deserialize, Serialize)]
-struct CowPoolBindJson {
-    address: String,
-    token: String,
-    weight: String,
-    amount: String,
-    //fields for Bind Transaction
-    from: String,
-    to: String,
-    hash: String,
-    index: String,
-    ordinal: String,
-}
-
-pub fn parse_binds(bind_str: &str) -> Option<Vec<CowPoolBind>> {
-    let bind_strs: Vec<&str> = bind_str.split(';').collect();
-    let mut binds = Vec::new();
-    for bind in bind_strs {
-        let bind = bind.trim();
-        // Skip empty strings (which can happen if there are extra semicolons)
-        if bind.is_empty() {
+/// Replays a pool's `;`-delimited binding-change history (hex-encoded `CowPoolBind`
+/// protobufs, ordinal-ordered) and returns the bindings that are still active.
+pub fn parse_binds(history: &str) -> Result<Vec<CowPoolBind>> {
+    let mut active_binds: Vec<CowPoolBind> = Vec::new();
+    for chunk in history.split(';') {
+        // The append store writes a trailing delimiter after every entry.
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
             continue;
         }
-        // Wrap the bind in square brackets to create an array of JSON objects
-        let formatted_str = format!("[{}]", bind.replace("};", "},"));
-
-        let parsed: Vec<CowPoolBindJson> =
-            serde_json::from_str(&formatted_str).expect("should successfully parse binds string");
-        for bind_json in parsed {
-            let cow_bind = CowPoolBind {
-                address: hex::decode(&bind_json.address).expect("Invalid hex for address"),
-                token: hex::decode(&bind_json.token).expect("Invalid hex for token"),
-                weight: hex::decode(&bind_json.weight).expect("Invalid hex for weight"),
-                amount: hex::decode(&bind_json.amount).expect("Invalid hex for amount"),
-                tx: Some(Transaction {
-                    from: hex::decode(&bind_json.from).expect("Invalid hex for tx from address"),
-                    to: hex::decode(&bind_json.to).expect("Invalid hex for tx to address"),
-                    hash: hex::decode(&bind_json.hash).expect("Invalid hex for tx to hash"),
-                    index: u64::from_le_bytes(
-                        //verify this
-                        hex::decode(&bind_json.index)
-                            .expect("Invalid hex for tx index")
-                            .try_into()
-                            .expect("tx index must be exactly 8 bytes"),
-                    ),
-                }),
-                ordinal: u64::from_le_bytes(
-                    //verify this
-                    hex::decode(&bind_json.ordinal)
-                        .expect("Invalid hex for tx ordinal")
-                        .try_into()
-                        .expect("ordinal must be exactly 8 bytes"),
-                ),
-            };
-            binds.push(cow_bind);
+        let raw = hex::decode(chunk).context("invalid hex in CowAMM binding history")?;
+        let bind = CowPoolBind::decode(raw.as_slice())
+            .context("failed to decode CowAMM binding change")?;
+        if bind.tx.is_none() {
+            bail!(
+                "CowAMM binding change for pool 0x{} is missing its transaction",
+                hex::encode(&bind.address)
+            );
+        }
+        active_binds.retain(|active| active.token != bind.token);
+        match BindingChangeType::from_i32(bind.change_type) {
+            Some(BindingChangeType::Bind) => active_binds.push(bind),
+            Some(BindingChangeType::Unbind) => {}
+            Some(BindingChangeType::Unspecified) | None => {
+                bail!("invalid CowAMM binding change type {}", bind.change_type)
+            }
         }
     }
-    if binds.is_empty() {
-        None
-    } else {
-        Some(binds)
-    }
+    Ok(active_binds)
 }
 
 #[substreams::handlers::map]
@@ -79,15 +46,15 @@ pub fn map_cowpools(
 
     for creation in creations.pools.iter() {
         let base_key = hex::encode(&creation.address);
-        let bind_first = match binds.get_first(&base_key) {
+        let bind_history = match binds.get_at(creation.ordinal, &base_key) {
             Some(data) => data,
             None => continue, // skip if no bind found
         };
 
-        let parsed_binds = match parse_binds(&bind_first) {
-            Some(binds) if binds.len() == 2 => binds,
-            _ => continue, // skip if parsing fails or not enough binds
-        };
+        let parsed_binds = parse_binds(&bind_history)?;
+        if parsed_binds.len() != 2 {
+            continue;
+        }
         let bind1 = &parsed_binds[0];
         let bind2 = &parsed_binds[1];
 
@@ -114,43 +81,152 @@ pub fn map_cowpools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{modules::store_cowpool_binds::encode_binding_change, pb::cowamm::Transaction};
     use hex_literal::hex;
 
+    fn binding_change(
+        token: Vec<u8>,
+        weight: Vec<u8>,
+        amount: Vec<u8>,
+        ordinal: u64,
+        change_type: BindingChangeType,
+    ) -> CowPoolBind {
+        CowPoolBind {
+            address: hex!("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1").to_vec(),
+            token,
+            weight,
+            amount,
+            tx: Some(Transaction {
+                from: hex!("1234567890123456789012345678901234567890").to_vec(),
+                to: hex!("abcdefabcdefabcdefabcdefabcdefabcdefabcd").to_vec(),
+                hash: hex!("fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedc")
+                    .to_vec(),
+                index: ordinal,
+            }),
+            ordinal,
+            change_type: change_type.into(),
+        }
+    }
+
+    fn history(changes: &[CowPoolBind]) -> String {
+        changes
+            .iter()
+            .map(encode_binding_change)
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
     #[test]
-    fn test_parse_binds_single_entry() {
-        let bind_str = r#"{"address":"9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1","token":"def1ca1fb7fbcdc777520aa7f396b4e015f497ab","weight":"0000000000000000000000000000000000000000000000000de0b6b3a7640000","amount":"0000000000000000000000000000000000000000000000000000000000000001","from":"1234567890123456789012345678901234567890","to":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","hash":"fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba","index":"0100000000000000","ordinal":"0200000000000000"}"#;
-        let result = parse_binds(bind_str);
-
-        assert!(result.is_some());
-        let binds = result.unwrap();
-        assert_eq!(binds.len(), 1);
-
-        assert_eq!(binds[0].address, hex!("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1"));
-        assert_eq!(binds[0].token, hex!("def1ca1fb7fbcdc777520aa7f396b4e015f497ab"));
-        assert_eq!(
-            binds[0].weight,
-            hex!("0000000000000000000000000000000000000000000000000de0b6b3a7640000")
+    fn test_parse_binds_roundtrips_a_single_bind() {
+        let change = binding_change(
+            hex!("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").to_vec(),
+            hex!("0de0b6b3a7640000").to_vec(),
+            hex!("01").to_vec(),
+            2,
+            BindingChangeType::Bind,
         );
+
+        let binds = parse_binds(&history(std::slice::from_ref(&change)))
+            .expect("binding history should parse");
+
+        assert_eq!(binds, vec![change]);
     }
 
     #[test]
-    fn test_parse_binds_multiple_entries() {
-        let bind_str = r#"{"address":"9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1","token":"def1ca1fb7fbcdc777520aa7f396b4e015f497ab","weight":"0000000000000000000000000000000000000000000000000de0b6b3a7640000","amount":"0000000000000000000000000000000000000000000000000000000000000001","from":"1234567890123456789012345678901234567890","to":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","hash":"fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba","index":"0100000000000000","ordinal":"0200000000000000"};{"address":"9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1","token":"7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0","weight":"0000000000000000000000000000000000000000000000000de0b6b3a7640000","amount":"0000000000000000000000000000000000000000000000000000000000000002","from":"1234567890123456789012345678901234567890","to":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","hash":"fedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcbafedcba","index":"0100000000000000","ordinal":"0200000000000000"}"#;
-        let result = parse_binds(bind_str);
-        assert!(result.is_some());
-        let binds = result.unwrap();
+    fn test_parse_binds_keeps_multiple_active_bindings() {
+        let token_a = hex!("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").to_vec();
+        let token_b = hex!("7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0").to_vec();
+        let changes = [
+            binding_change(
+                token_a.clone(),
+                hex!("01").to_vec(),
+                hex!("0a").to_vec(),
+                1,
+                BindingChangeType::Bind,
+            ),
+            binding_change(
+                token_b.clone(),
+                hex!("02").to_vec(),
+                hex!("14").to_vec(),
+                2,
+                BindingChangeType::Bind,
+            ),
+        ];
+
+        let binds = parse_binds(&history(&changes)).expect("binding history should parse");
+
         assert_eq!(binds.len(), 2);
-        assert_eq!(binds[0].address, hex!("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1"));
-        assert_eq!(binds[0].token, hex!("def1ca1fb7fbcdc777520aa7f396b4e015f497ab"));
-
-        assert_eq!(binds[1].address, hex!("9bd702e05b9c97e4a4a3e47df1e0fe7a0c26d2f1"));
-        assert_eq!(binds[1].token, hex!("7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"));
+        assert_eq!(binds[0].token, token_a);
+        assert_eq!(binds[1].token, token_b);
     }
 
     #[test]
-    #[should_panic(expected = "should successfully parse binds string")]
-    fn test_parse_binds_invalid_json() {
-        let bind_str = r#"invalid_json"#;
-        let _result = parse_binds(bind_str);
+    fn test_parse_binds_returns_only_active_bindings_after_rebind() {
+        let token_a = hex!("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").to_vec();
+        let token_b = hex!("7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0").to_vec();
+        let changes = [
+            binding_change(
+                token_a.clone(),
+                hex!("01").to_vec(),
+                hex!("0a").to_vec(),
+                1,
+                BindingChangeType::Bind,
+            ),
+            binding_change(token_a.clone(), vec![], vec![], 2, BindingChangeType::Unbind),
+            binding_change(
+                token_b,
+                hex!("02").to_vec(),
+                hex!("14").to_vec(),
+                3,
+                BindingChangeType::Bind,
+            ),
+            binding_change(
+                token_a.clone(),
+                hex!("03").to_vec(),
+                hex!("1e").to_vec(),
+                4,
+                BindingChangeType::Bind,
+            ),
+        ];
+
+        let binds = parse_binds(&history(&changes)).expect("two bindings should remain active");
+
+        assert_eq!(binds.len(), 2);
+        let rebound = binds
+            .iter()
+            .find(|bind| bind.token == token_a)
+            .expect("rebound token should be active");
+        assert_eq!(rebound.weight, hex!("03"));
+        assert_eq!(rebound.amount, hex!("1e"));
+    }
+
+    #[test]
+    fn test_parse_binds_rejects_malformed_history() {
+        let error = parse_binds("not-hex").expect_err("non-hex history should error");
+        assert!(error
+            .to_string()
+            .contains("invalid hex in CowAMM binding history"));
+
+        let error = parse_binds("deadbeef").expect_err("non-protobuf bytes should error");
+        assert!(error
+            .to_string()
+            .contains("failed to decode CowAMM binding change"));
+    }
+
+    #[test]
+    fn test_parse_binds_rejects_binding_change_without_transaction() {
+        let mut change = binding_change(
+            hex!("def1ca1fb7fbcdc777520aa7f396b4e015f497ab").to_vec(),
+            hex!("01").to_vec(),
+            hex!("0a").to_vec(),
+            1,
+            BindingChangeType::Bind,
+        );
+        change.tx = None;
+
+        let error = parse_binds(&history(&[change])).expect_err("missing tx should error");
+        assert!(error
+            .to_string()
+            .contains("missing its transaction"));
     }
 }

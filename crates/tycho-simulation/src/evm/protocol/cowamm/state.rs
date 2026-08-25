@@ -14,11 +14,7 @@ use tycho_common::{
 };
 
 use crate::evm::protocol::{
-    cowamm::{
-        bmath::*,
-        constants::{BONE, MAX_IN_RATIO},
-        error::CowAMMError,
-    },
+    cowamm::{bmath::*, constants::MAX_IN_RATIO, error::CowAMMError},
     safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
     u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
 };
@@ -392,19 +388,8 @@ impl ProtocolSim for CowAMMState {
     fn fee(&self) -> f64 {
         COWAMM_FEE
     }
-    /// Calculates a f64 representation of base token price in the AMM.
-    /// ********************************************************************************************
-    /// ** calcSpotPrice
-    /// // sP = spotPrice
-    /// // bI = tokenBalanceIn                ( bI / wI )         1
-    /// // bO = tokenBalanceOut         sP =  -----------  *  ----------
-    /// // wI = tokenWeightIn                 ( bO / wO )     ( 1 - sF )
-    /// // wO = tokenWeightOut
-    /// // sF = swapFee
-    /// // *************************************************************************************
-    /// *********/
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let (bal_in, weight_in) = if base.address == *self.token_a_addr() {
+        let (bal_base, weight_base) = if base.address == *self.token_a_addr() {
             (self.liquidity_a(), self.weight_a())
         } else if base.address == self.token_b.0 {
             (self.liquidity_b(), self.weight_b())
@@ -414,7 +399,7 @@ impl ProtocolSim for CowAMMState {
             ));
         };
 
-        let (bal_out, weight_out) = if quote.address == *self.token_a_addr() {
+        let (bal_quote, weight_quote) = if quote.address == *self.token_a_addr() {
             (self.liquidity_a(), self.weight_a())
         } else if quote.address == self.token_b.0 {
             (self.liquidity_b(), self.weight_b())
@@ -424,28 +409,17 @@ impl ProtocolSim for CowAMMState {
             ));
         };
 
-        let numer = bdiv(bal_in, weight_in).map_err(|err| {
-            SimulationError::FatalError(format!(
-                "Error in numerator bdiv(balance_base / weight_base): {err:?}"
-            ))
-        })?;
-        let denom = bdiv(bal_out, weight_out).map_err(|err| {
-            SimulationError::FatalError(format!(
-                "Error in denominator bdiv(balance_quote / weight_quote): {err:?}"
-            ))
-        })?;
+        if bal_base.is_zero() || bal_quote.is_zero() {
+            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
+        }
 
-        let ratio = bmul(
-            bdiv(numer, denom).map_err(|err| {
-                SimulationError::FatalError(format!("Error in (numer / denom): {err:?}"))
-            })?,
-            BONE,
-        )
-        .map_err(|err| {
-            SimulationError::FatalError(format!("Error in bmul(ratio * scale): {err:?}"))
-        })?;
-
-        u256_to_f64(ratio)
+        // Amount of `quote` needed to buy one unit of `base`:
+        // (bal_quote / w_quote) / (bal_base / w_base), adjusted for token decimals.
+        // The pool takes no swap fee, so no fee markup applies.
+        let price = (u256_to_f64(bal_quote)? * u256_to_f64(weight_base)?) /
+            (u256_to_f64(bal_base)? * u256_to_f64(weight_quote)?);
+        let token_correction = 10f64.powi(base.decimals as i32 - quote.decimals as i32);
+        Ok(price * token_correction)
     }
 
     fn get_amount_out(
@@ -518,12 +492,13 @@ impl ProtocolSim for CowAMMState {
             }
             .map_err(|e| SimulationError::FatalError(format!("amount_out error: {e:?}")))?;
 
+            // The swapped-in token enters the pool; the swapped-out token leaves it.
             if is_token_a_swap_in {
-                new_state.token_a.1 = safe_sub_u256(new_state.liquidity_a(), amount_to_swap)?;
-                new_state.token_b.1 = safe_add_u256(new_state.liquidity_b(), amount_out)?;
+                new_state.token_a.1 = safe_add_u256(new_state.liquidity_a(), amount_to_swap)?;
+                new_state.token_b.1 = safe_sub_u256(new_state.liquidity_b(), amount_out)?;
             } else {
-                new_state.token_b.1 = safe_sub_u256(new_state.liquidity_b(), amount_to_swap)?;
-                new_state.token_a.1 = safe_add_u256(new_state.liquidity_a(), amount_out)?;
+                new_state.token_b.1 = safe_add_u256(new_state.liquidity_b(), amount_to_swap)?;
+                new_state.token_a.1 = safe_sub_u256(new_state.liquidity_a(), amount_out)?;
             }
 
             let total_trade_amount = if is_token_a_swap_in {
@@ -695,12 +670,13 @@ impl ProtocolSim for CowAMMState {
         )
         .map_err(|e| SimulationError::FatalError(format!("amount_out error: {e:?}")))?;
 
+        // The input token enters the pool; the output token leaves it.
         if is_token_a_in {
-            new_state.token_a.1 = safe_sub_u256(new_state.liquidity_a(), amount_in)?;
-            new_state.token_b.1 = safe_add_u256(new_state.liquidity_b(), amount_out)?;
+            new_state.token_a.1 = safe_add_u256(new_state.liquidity_a(), amount_in)?;
+            new_state.token_b.1 = safe_sub_u256(new_state.liquidity_b(), amount_out)?;
         } else {
-            new_state.token_b.1 = safe_sub_u256(new_state.liquidity_b(), amount_in)?;
-            new_state.token_a.1 = safe_add_u256(new_state.liquidity_a(), amount_out)?;
+            new_state.token_b.1 = safe_add_u256(new_state.liquidity_b(), amount_in)?;
+            new_state.token_a.1 = safe_sub_u256(new_state.liquidity_a(), amount_out)?;
         }
 
         Ok(GetAmountOutResult {
@@ -986,13 +962,14 @@ mod tests {
             .downcast_ref::<CowAMMState>()
             .unwrap();
 
+        // The sold token enters the pool; the bought token leaves it.
         assert_eq!(
             new_state.liquidity_a(),
-            safe_sub_u256(liq_a, biguint_to_u256(&amount_in)).unwrap()
+            safe_add_u256(liq_a, biguint_to_u256(&amount_in)).unwrap()
         );
         assert_eq!(
             new_state.liquidity_b(),
-            safe_add_u256(liq_b, biguint_to_u256(&expected_out)).unwrap()
+            safe_sub_u256(liq_b, biguint_to_u256(&expected_out)).unwrap()
         );
 
         // Original state unchanged
@@ -1147,8 +1124,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(244752492017f64)]
-    fn test_spot_price(#[case] expected: f64) {
+    // ~81.3 COW against ~332.16M DOG: one COW buys ~4.086M DOG and one DOG buys the inverse.
+    #[case::base_cow(4085760.237855395f64, false)]
+    #[case::base_dog(2.4475249201722553e-7f64, true)]
+    fn test_spot_price(#[case] expected: f64, #[case] inverted: bool) {
         let (t0, _, _, _, _, t5, _) = create_test_tokens();
         let state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
@@ -1163,8 +1142,33 @@ mod tests {
             0,
         );
 
-        let price = state.spot_price(&t0, &t5).unwrap();
+        let (base, quote) = if inverted { (&t5, &t0) } else { (&t0, &t5) };
+        let price = state.spot_price(base, quote).unwrap();
         assert_ulps_eq!(price, expected);
+    }
+
+    #[test]
+    fn test_spot_price_adjusts_for_token_decimals() {
+        let (_, t1, _, _, t4, _, _) = create_test_tokens();
+        // ~81.3 wstETH (18 decimals) against 300k USDC (6 decimals).
+        let state = CowAMMState::new(
+            Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
+            t1.address.clone(),
+            t4.address.clone(),
+            U256::from_str("81297577909021519893").unwrap(),
+            U256::from_str("300000000000").unwrap(),
+            Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
+            U256::from_str("128375712183366405029").unwrap(),
+            U256::from_str("1000000000000000000").unwrap(),
+            U256::from_str("1000000000000000000").unwrap(),
+            0,
+        );
+
+        let wsteth_in_usdc = state.spot_price(&t1, &t4).unwrap();
+        assert_ulps_eq!(wsteth_in_usdc, 3690.146837286148f64);
+
+        let usdc_in_wsteth = state.spot_price(&t4, &t1).unwrap();
+        assert_ulps_eq!(usdc_in_wsteth, 0.00027099192636340503f64);
     }
 
     #[test]
