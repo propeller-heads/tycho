@@ -141,6 +141,12 @@ pub struct PendleSyState {
     /// What the SY actually holds, per token, as of the indexed block. Redeeming cannot pay out
     /// more than this; depositing is not bounded by it, since the SY mints new shares.
     pub token_balances: HashMap<Bytes, U256>,
+    /// Decimals of each entry and exit token, taken from the stream's token set at decode time.
+    ///
+    /// Every bound on a wrap edge relates an amount of the underlying token to an amount of SY,
+    /// and the two are only comparable through this. A token missing here is one the stream does
+    /// not carry, and its edges report no depth rather than a bound scaled by a guess.
+    pub token_decimals: HashMap<Bytes, u32>,
     /// This component's id, used to find its own balances in a delta.
     pub component_id: String,
 }
@@ -340,6 +346,17 @@ enum Direction {
     Redeem,
 }
 
+/// [`rescale`], rounding up instead of truncating. For inverting a bound, never for a quote.
+fn rescale_up(amount: U256, from_decimals: u32, to_decimals: u32) -> Result<U256, PendleError> {
+    if from_decimals <= to_decimals {
+        return rescale(amount, from_decimals, to_decimals);
+    }
+    let factor = U256::from(10)
+        .checked_pow(U256::from(from_decimals - to_decimals))
+        .ok_or(PendleError::Overflow { operation: "rescale_up" })?;
+    Ok(amount.div_ceil(factor))
+}
+
 fn rescale(amount: U256, from_decimals: u32, to_decimals: u32) -> Result<U256, PendleError> {
     if from_decimals == to_decimals {
         return Ok(amount);
@@ -525,18 +542,37 @@ impl ProtocolSim for PendleState {
                 let Some((class, direction)) = state.class(&sell_token, &buy_token) else {
                     return Ok(no_depth());
                 };
+                // The underlying token's own decimals, never the SY's. Both bounds below relate a
+                // token amount to an SY amount, and substituting `sy_decimals` makes each wrong by
+                // `10^|difference|` on any pair whose decimals do not already match.
+                let token = match direction {
+                    Direction::Deposit => &sell_token,
+                    Direction::Redeem => &buy_token,
+                };
+                let Some(token_decimals) = state
+                    .token_decimals
+                    .get(token)
+                    .copied()
+                else {
+                    return Ok(no_depth());
+                };
                 // Redeeming is capped by what the SY holds of the token being paid out, so that
                 // bound lives on the output side and is converted back into an input amount.
                 // Depositing has no reserve behind it at all.
                 match direction {
                     Direction::Deposit => {
                         let max_in = unbounded_soft_limit();
-                        let max_out = state.convert(max_in, class, direction, state.sy_decimals)?;
+                        let max_out = state.convert(max_in, class, direction, token_decimals)?;
                         Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
                     }
                     Direction::Redeem => {
-                        let max_out = state.held(&buy_token);
-                        let max_in = state.sy_for_exit(max_out, class, state.sy_decimals)?;
+                        let max_in =
+                            state.sy_for_exit(state.held(&buy_token), class, token_decimals)?;
+                        // Re-quoted from the input rather than reported as the holding itself.
+                        // Both conversions floor, so inverting the holding and converting back can
+                        // land a wei short — and a bound whose input does not produce its output
+                        // is not a bound. This also keeps the pair at or under what the SY holds.
+                        let max_out = state.convert(max_in, class, direction, token_decimals)?;
                         Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
                     }
                 }
@@ -697,6 +733,10 @@ impl PendleSyState {
     }
 
     /// How much SY it takes to redeem `exit_amount` of an exit token — the inverse of `convert`.
+    ///
+    /// Rounds up at every step. This inverts an *output* bound, and `convert` floors on the way
+    /// back, so rounding down here lands a wei short of the amount asked for and the bound stops
+    /// describing the edge it bounds.
     fn sy_for_exit(
         &self,
         exit_amount: U256,
@@ -704,10 +744,10 @@ impl PendleSyState {
         token_decimals: u32,
     ) -> Result<U256, PendleError> {
         match class {
-            TokenClass::OneToOne => rescale(exit_amount, token_decimals, self.sy_decimals),
+            TokenClass::OneToOne => rescale_up(exit_amount, token_decimals, self.sy_decimals),
             TokenClass::IndexRate => {
-                let as_asset = rescale(exit_amount, token_decimals, self.asset_decimals)?;
-                sy_utils::asset_to_sy(self.exchange_rate, as_asset)
+                let as_asset = rescale_up(exit_amount, token_decimals, self.asset_decimals)?;
+                sy_utils::asset_to_sy_up(self.exchange_rate, as_asset)
             }
         }
     }

@@ -66,7 +66,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PendleState {
         snapshot: ComponentWithState,
         block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
         match snapshot
@@ -75,7 +75,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PendleState {
             .as_str()
         {
             MARKET_TYPE => decode_market(snapshot, block).map(PendleState::Market),
-            SY_TYPE => decode_sy(snapshot, block).map(PendleState::Sy),
+            SY_TYPE => decode_sy(snapshot, block, all_tokens).map(PendleState::Sy),
             other => Err(InvalidSnapshotError::ValueError(format!(
                 "unknown Pendle protocol type {other}"
             ))),
@@ -158,6 +158,7 @@ fn decode_market(
 fn decode_sy(
     snapshot: ComponentWithState,
     block: BlockHeader,
+    all_tokens: &HashMap<Bytes, Token>,
 ) -> Result<PendleSyState, InvalidSnapshotError> {
     let statics = &snapshot.component.static_attributes;
     let state = &snapshot.state.attributes;
@@ -205,9 +206,24 @@ fn decode_sy(
         .map(|(token, balance)| (token.clone(), U256::from_be_slice(balance)))
         .collect();
 
+    // Every bound on a wrap edge converts between a token amount and an SY amount, so the token's
+    // own decimals are state the quote depends on. Taken from the stream's token set rather than
+    // from an attribute: the indexer does not publish them, and a token it does not carry is not
+    // routable anyway — such a token is simply absent here and its edges report no depth.
+    let token_decimals = tokens_in
+        .keys()
+        .chain(tokens_out.keys())
+        .filter_map(|token| {
+            all_tokens
+                .get(token)
+                .map(|known| (token.clone(), known.decimals))
+        })
+        .collect();
+
     Ok(PendleSyState {
         sy_address,
         token_balances,
+        token_decimals,
         component_id: snapshot.component.id.clone(),
         exchange_rate,
         rate_sampled_at,

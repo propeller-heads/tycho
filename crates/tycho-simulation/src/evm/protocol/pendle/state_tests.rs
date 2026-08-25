@@ -84,6 +84,10 @@ fn wsteth_sy() -> PendleState {
             (Bytes::from_str(WSTETH).unwrap(), u("546768952998816380")),
             (Bytes::from_str(STETH).unwrap(), u("4")),
         ]),
+        token_decimals: HashMap::from([
+            (Bytes::from_str(WSTETH).unwrap(), 18),
+            (Bytes::from_str(STETH).unwrap(), 18),
+        ]),
         component_id: SY.to_string(),
     })
 }
@@ -108,7 +112,11 @@ fn six_decimal_asset_sy() -> PendleState {
             Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap(),
             TokenClass::IndexRate,
         )]),
-        token_balances: HashMap::new(),
+        token_balances: HashMap::from([(
+            Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap(),
+            u("1000000000000"),
+        )]),
+        token_decimals: HashMap::from([(Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap(), 6)]),
         component_id: SIX_DECIMAL_SY.to_string(),
     })
 }
@@ -462,7 +470,9 @@ fn a_redemption_draws_down_the_wrapper_and_a_deposit_does_not_refill_it() {
 /// hard bound on a wrapper that has no such bound recorded.
 #[test]
 fn a_redemption_does_not_invent_a_balance_that_was_never_indexed() {
-    let state = six_decimal_asset_sy();
+    let PendleState::Sy(mut unindexed) = six_decimal_asset_sy() else { panic!("not an SY") };
+    unindexed.token_balances.clear();
+    let state = PendleState::Sy(unindexed);
     let after = quote_after(
         &state,
         BigUint::from(1_000_000_000_000_000_000u64),
@@ -671,6 +681,51 @@ fn redeeming_is_bounded_by_holdings_and_depositing_is_not() {
         .get_limits(wsteth, sy)
         .unwrap();
     assert_eq!(deposit_in, BigUint::from(u128::MAX));
+}
+
+/// Both bounds on a wrap edge are only meaningful if the input they report actually produces the
+/// output they report. Asserted on the decimal-gap component, where substituting the SY's decimals
+/// for the token's — the shape this once had — leaves the redeem bound yielding nothing at all.
+#[test]
+fn a_wrap_bound_is_reachable_across_a_decimal_gap() {
+    let sy = Bytes::from_str(SIX_DECIMAL_SY).unwrap();
+    let usdc = Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap();
+    let sy_token = token(SIX_DECIMAL_SY, 18);
+    let usdc_token = token(SIX_DECIMAL_TOKEN, 6);
+
+    let (deposit_in, deposit_out) = six_decimal_asset_sy()
+        .get_limits(usdc.clone(), sy.clone())
+        .unwrap();
+    let quoted = six_decimal_asset_sy()
+        .get_amount_out(deposit_in, &usdc_token, &sy_token)
+        .expect("the reported deposit maximum must be quotable");
+    assert_eq!(quoted.amount, deposit_out, "deposit bound does not describe its own edge");
+
+    let (redeem_in, redeem_out) = six_decimal_asset_sy()
+        .get_limits(sy, usdc)
+        .unwrap();
+    let quoted = six_decimal_asset_sy()
+        .get_amount_out(redeem_in, &sy_token, &usdc_token)
+        .expect("the reported redeem maximum must be quotable");
+    assert_eq!(quoted.amount, redeem_out, "redeem bound does not describe its own edge");
+    // At or under what the SY holds, and within a wei of it — the two floors cost no more.
+    let held = BigUint::from(1_000_000_000_000u64);
+    assert!(redeem_out <= held && redeem_out >= &held - BigUint::from(1u32), "{redeem_out}");
+}
+
+/// A token the stream does not carry has no decimals to convert through, and every bound on a wrap
+/// edge is a conversion. Reported as no depth rather than as a bound scaled by a guess, which is
+/// wrong by orders of magnitude in whichever direction the guess falls.
+#[test]
+fn a_token_with_unknown_decimals_reports_no_depth() {
+    let PendleState::Sy(mut state) = six_decimal_asset_sy() else { panic!("not an SY") };
+    state.token_decimals.clear();
+    let state = PendleState::Sy(state);
+
+    let sy = Bytes::from_str(SIX_DECIMAL_SY).unwrap();
+    let usdc = Bytes::from_str(SIX_DECIMAL_TOKEN).unwrap();
+    assert_eq!(state.get_limits(usdc.clone(), sy.clone()).unwrap(), (BigUint::ZERO, BigUint::ZERO));
+    assert_eq!(state.get_limits(sy, usdc).unwrap(), (BigUint::ZERO, BigUint::ZERO));
 }
 
 /// The reported maximum is quotable, and past it the quote fails rather than returning a number the
