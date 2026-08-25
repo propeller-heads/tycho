@@ -1,6 +1,6 @@
 use anyhow::Result;
 use itertools::Itertools;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use substreams::{
     log,
     pb::substreams::StoreDeltas,
@@ -40,6 +40,10 @@ pub fn map_protocol_changes(
     py_index_store: StoreGetBigInt,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let refresh = RefreshParams::parse(&params)?;
+    // Which holdings a `Transfer` touched this block. Collected before `deltas` is consumed by the
+    // aggregation below, because `sy_balances` re-reads exactly these off chain — see there for
+    // why a transfer is enough on its own to warrant a read.
+    let moved = moved_holdings(&deltas);
     let mut transaction_changes: HashMap<u64, TransactionChangesBuilder> = HashMap::new();
 
     for tx_components in &new_components.tx_components {
@@ -130,7 +134,7 @@ pub fn map_protocol_changes(
 
     // After the transfer-derived balances, so the read value wins for an SY holding a rebasing
     // token.
-    for (tx, change) in sy_balances(&block, &refresh, &registry_store, &components_store) {
+    for (tx, change) in sy_balances(&block, &refresh, &moved, &registry_store, &components_store) {
         transaction_changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx))
@@ -207,16 +211,35 @@ fn absolute_state_changes(
 /// holdings go on moving after the last market that priced against it has expired, and a wrapper
 /// quoting depth from frozen balances would report limits it cannot honour.
 ///
-/// Costs one `balanceOf` per (SY component, declared token) per refresh block. Both this and the
-/// rate refresh grow with the number of SYs ever created, and `sy_rate_refresh_blocks` throttles
-/// both.
+/// # Which holdings are read, and why it is not only the refresh
+///
+/// The read corrects what is *emitted*; it does not write back into the balance store, which goes
+/// on accumulating transfers alone. So the store's own drift never converges, and on any block
+/// where the transfer path emits — that is, any block a holding moved — the emitted balance is the
+/// drifted one.
+///
+/// Reading only on refresh blocks would therefore make `sy_rate_refresh_blocks` a correctness
+/// knob as well as a freshness one: raising it for a backfill, which is what it exists for, would
+/// leave balances wrong for up to that many blocks rather than merely stale. So a holding is read
+/// whenever *either* is true — this is a refresh block, or a `Transfer` moved it. The second case
+/// costs one `balanceOf` per moved holding on a block that already had activity, so it scales with
+/// transfer volume rather than with block count and adds nothing to a backfill's per-block cost.
+///
+/// The refresh case still stands on its own: a rebase moves a balance with no transfer at all, so
+/// without it a quiet SY would never be re-read.
+///
+/// Costs one `balanceOf` per (SY component, declared token) per refresh block, plus one per moved
+/// holding otherwise. The refresh half grows with the number of SYs ever created, and
+/// `sy_rate_refresh_blocks` throttles it.
 fn sy_balances(
     block: &eth::Block,
     params: &RefreshParams,
+    moved: &HashSet<(String, Vec<u8>)>,
     registry_store: &StoreGetString,
     components_store: &StoreGetRaw,
 ) -> Vec<(Transaction, BalanceChange)> {
-    if !params.should_refresh(block.number) {
+    let refreshing = params.should_refresh(block.number);
+    if !refreshing && moved.is_empty() {
         return vec![];
     }
     let Some(registry) = registry_store.get_last(MARKET_REGISTRY) else { return vec![] };
@@ -231,6 +254,9 @@ fn sy_balances(
         let address = hex::decode(sy.trim_start_matches("0x"))
             .expect("registry holds a non-hex SY component id");
         for token in tokens {
+            if !is_read(refreshing, moved, &sy, &token) {
+                continue;
+            }
             holdings.push((sy.clone(), address.clone(), token));
         }
     }
@@ -460,6 +486,29 @@ fn refresh_live_state(
     changes
 }
 
+/// Whether one SY holding has its balance read this block.
+///
+/// A refresh block reads everything; any other block reads what moved. See [`sy_balances`].
+fn is_read(refreshing: bool, moved: &HashSet<(String, Vec<u8>)>, sy: &str, token: &[u8]) -> bool {
+    refreshing || moved.contains(&(sy.to_string(), token.to_vec()))
+}
+
+/// The `(component, token)` holdings a `Transfer` moved this block.
+///
+/// Market ids appear here too and are simply never matched: the lookup runs over the SY components
+/// alone, and a market is not one.
+fn moved_holdings(deltas: &BlockBalanceDeltas) -> HashSet<(String, Vec<u8>)> {
+    deltas
+        .balance_deltas
+        .iter()
+        .filter_map(|delta| {
+            String::from_utf8(delta.component_id.clone())
+                .ok()
+                .map(|id| (id, delta.token.clone()))
+        })
+        .collect()
+}
+
 /// The SYs whose `exchangeRate()` is read this block.
 ///
 /// Every SY that is a component, plus the SY of every live market. The two sets overlap almost
@@ -533,4 +582,69 @@ fn market_sy_pt(store: &StoreGetRaw, component_id: &str) -> Option<(Vec<u8>, Vec
 
 fn state_attribute(name: &str, value: Vec<u8>) -> Attribute {
     Attribute { name: name.to_string(), value, change: ChangeType::Update.into() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SY: &str = "0xcbc72d92b2dc8187414f6734718563898740c0bc";
+    const STETH: [u8; 20] = [0xae; 20];
+    const WSTETH: [u8; 20] = [0x7f; 20];
+
+    fn delta(component_id: &str, token: [u8; 20]) -> BalanceDelta {
+        BalanceDelta {
+            ord: 0,
+            tx: None,
+            token: token.to_vec(),
+            delta: vec![1],
+            component_id: component_id.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_refresh_block_reads_every_holding() {
+        let moved = HashSet::new();
+        assert!(is_read(true, &moved, SY, &STETH));
+        assert!(is_read(true, &moved, SY, &WSTETH));
+    }
+
+    /// The case the refresh alone would miss: the transfer path emits on this block, and what it
+    /// emits is the drifted store value unless the read overwrites it.
+    #[test]
+    fn a_moved_holding_is_read_off_a_refresh_block() {
+        let moved = moved_holdings(&BlockBalanceDeltas { balance_deltas: vec![delta(SY, STETH)] });
+        assert!(is_read(false, &moved, SY, &STETH));
+    }
+
+    /// A holding nothing touched cannot have moved without a rebase, and a rebase is what the
+    /// refresh is for. Reading it here would cost an RPC call for a balance that did not change.
+    #[test]
+    fn an_untouched_holding_is_left_alone_off_a_refresh_block() {
+        let moved = moved_holdings(&BlockBalanceDeltas { balance_deltas: vec![delta(SY, STETH)] });
+        assert!(!is_read(false, &moved, SY, &WSTETH));
+    }
+
+    /// Two components can hold the same token, so the pair is the key, not the token.
+    #[test]
+    fn a_holding_is_keyed_by_component_and_token_together() {
+        let other = "0x9f30507c264cc6eb5be35b18ff9ad7b4539aa920";
+        let moved =
+            moved_holdings(&BlockBalanceDeltas { balance_deltas: vec![delta(other, STETH)] });
+        assert!(is_read(false, &moved, other, &STETH));
+        assert!(!is_read(false, &moved, SY, &STETH));
+    }
+
+    /// Market deltas ride the same channel and are simply never looked up — but they must not
+    /// collide with an SY of the same address either, which is what keying on both prevents.
+    #[test]
+    fn market_deltas_are_carried_without_matching_an_sy() {
+        let market = "0x34280882267ffa6383b363e278b027be083bbe3b";
+        let moved = moved_holdings(&BlockBalanceDeltas {
+            balance_deltas: vec![delta(market, STETH), delta(SY, WSTETH)],
+        });
+        assert_eq!(moved.len(), 2);
+        assert!(!is_read(false, &moved, SY, &STETH));
+        assert!(is_read(false, &moved, SY, &WSTETH));
+    }
 }
