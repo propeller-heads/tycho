@@ -52,6 +52,11 @@ params:
 refresh block and is dominated by that cost, so raise it there — the trade is index freshness for
 backfill time. `0` is rejected rather than reinterpreted.
 
+The trade is freshness only. SY balances are read off chain on any block a `Transfer` moved one,
+not only on refresh blocks, so a coarse interval leaves the PY index stale without leaving balances
+wrong. What the refresh alone covers is a *rebase*, which moves a balance with no transfer to
+notice.
+
 ## Module graph
 
 One handler per file under `src/modules/`, prefixed with its stage. A module at stage N reads only
