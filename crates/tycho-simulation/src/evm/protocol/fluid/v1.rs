@@ -362,30 +362,43 @@ impl ProtocolSim for FluidV1 {
         ))
     }
 
+    /// When `updated_attributes` carries `pool_reserves_adjusted` (the resolver's ABI-encoded
+    /// `PoolWithReserves` bytes) and `block_timestamp` (as `Bytes`), pool state is decoded from
+    /// them. Otherwise the reserves resolver is called against confirmed state.
     fn delta_transition(
         &mut self,
-        _delta: ProtocolStateDelta,
+        delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+        let fields = match delta
+            .updated_attributes
+            .get("pool_reserves_adjusted")
+        {
+            Some(reserves) => {
+                let sync_time = delta
+                    .updated_attributes
+                    .get("block_timestamp")
+                    .map(|timestamp| u64::from(timestamp.clone()))
+                    .ok_or_else(|| {
+                        TransitionError::MissingAttribute("block_timestamp".to_string())
+                    })?;
+                vm::decode_reserves(reserves, sync_time)?
+            }
+            None => {
+                let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+                vm::fetch_pool_state(&self.pool_address, &Bytes::from(RESERVES_RESOLVER), &engine)?
+            }
+        };
 
-        let state = vm::decode_from_vm(
-            &self.pool_address,
-            &self.token0,
-            &self.token1,
-            RESERVES_RESOLVER,
-            engine,
-        )?;
+        trace!(?fields, "Calling delta transition for {}", &self.pool_address);
 
-        trace!(?state, "Calling delta transition for {}", &self.pool_address);
-
-        self.collateral_reserves = state.collateral_reserves;
-        self.debt_reserves = state.debt_reserves;
-        self.dex_limits = state.dex_limits;
-        self.center_price = state.center_price;
-        self.fee = state.fee;
-        self.sync_time = state.sync_time;
+        self.collateral_reserves = fields.collateral_reserves;
+        self.debt_reserves = fields.debt_reserves;
+        self.dex_limits = fields.dex_limits;
+        self.center_price = fields.center_price;
+        self.fee = fields.fee;
+        self.sync_time = fields.sync_time;
 
         self.pool_reserve0 = get_max_reserves(
             self.token0.decimals as u8,
@@ -1560,6 +1573,86 @@ mod test {
         };
 
         Ok(price)
+    }
+
+    #[test]
+    fn test_delta_transition_from_attribute() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        let sync_time: u64 = 1_700_000_000;
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from([
+                (
+                    "pool_reserves_adjusted".to_string(),
+                    Bytes::from(alloy::sol_types::SolValue::abi_encode(
+                        &vm::sample_pool_with_reserves(),
+                    )),
+                ),
+                ("block_timestamp".to_string(), Bytes::from(sync_time.to_be_bytes().to_vec())),
+            ]),
+            ..Default::default()
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("delta transition from attribute failed");
+
+        // Values must come from the attribute bytes; a VM call would fail here because the
+        // shared engine has no block set.
+        assert_eq!(
+            pool.collateral_reserves
+                .token0_real_reserves,
+            U256::from(1u64)
+        );
+        assert_eq!(
+            pool.collateral_reserves
+                .token1_imaginary_reserves,
+            U256::from(4u64)
+        );
+        assert_eq!(pool.debt_reserves.token0_real_reserves, U256::from(13u64));
+        assert_eq!(
+            pool.debt_reserves
+                .token1_imaginary_reserves,
+            U256::from(16u64)
+        );
+        assert_eq!(
+            pool.dex_limits
+                .withdrawable_token0
+                .available,
+            U256::from(21u64)
+        );
+        assert_eq!(
+            pool.dex_limits
+                .borrowable_token1
+                .expand_duration,
+            U256::from(32u64)
+        );
+        assert_eq!(pool.fee, U256::from(41u64));
+        assert_eq!(pool.center_price, U256::from(42u64));
+        assert_eq!(pool.sync_time, sync_time);
+        // Pool reserves are recomputed from the new limits and reserves:
+        // withdrawable + borrowable expands_to caps the summed real reserves.
+        assert_eq!(pool.pool_reserve0, U256::from(22u64 + 28u64));
+        assert_eq!(pool.pool_reserve1, U256::from(25u64 + 31u64));
+    }
+
+    #[test]
+    fn test_delta_transition_attribute_without_timestamp() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from([(
+                "pool_reserves_adjusted".to_string(),
+                Bytes::from(alloy::sol_types::SolValue::abi_encode(
+                    &vm::sample_pool_with_reserves(),
+                )),
+            )]),
+            ..Default::default()
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        match result {
+            Err(TransitionError::MissingAttribute(attr)) => assert_eq!(attr, "block_timestamp"),
+            other => panic!("expected MissingAttribute error, got {other:?}"),
+        }
     }
 
     #[test]
