@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, watch};
 use tycho_client::feed::{synchronizer::Snapshot, BlockHeader, FeedMessage};
 use tycho_common::{
     models::{
-        blockchain::{Block, BlockAggregatedChanges, TxInput},
+        blockchain::{Block, BlockAggregatedChanges, PendingBlock},
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
         Chain,
     },
@@ -58,7 +58,7 @@ pub enum PendingError {
 /// ```no_run
 /// # async fn example(
 /// #     mut pending: tycho_simulation::evm::pending::PendingBlockProcessor,
-/// #     txs: &[tycho_common::models::blockchain::TxInput],
+/// #     pending_block: &tycho_common::models::blockchain::PendingBlock,
 /// #     target_header: tycho_client::feed::BlockHeader,
 /// # ) {
 /// pending
@@ -67,7 +67,7 @@ pub enum PendingError {
 ///     .await
 ///     .expect("stream closed");
 /// let update = pending
-///     .generate_pending_update(txs, target_header, "bundle-1".to_string())
+///     .generate_pending_update(pending_block, target_header, "bundle-1".to_string())
 ///     .await
 ///     .expect("pending update failed");
 /// # }
@@ -126,7 +126,7 @@ impl PendingBlockProcessor {
         self.advance_inner(msg)
     }
 
-    /// Simulates `txs` against the confirmed parent state of `target_block` and returns an
+    /// Simulates `pending` against the confirmed parent state of `target_block` and returns an
     /// ephemeral [`Update`].
     ///
     /// Drains any confirmed blocks that have arrived since the last call, then immediately
@@ -139,7 +139,8 @@ impl PendingBlockProcessor {
     /// mutated. Calling this twice with the same arguments returns identical results.
     ///
     /// # Parameters
-    /// * `txs` — candidate bundle in execution order; failed transactions are skipped.
+    /// * `pending` — the in-flight block: candidate bundle in execution order (failed transactions
+    ///   are skipped) plus post-execution account state for the accounts it touched.
     /// * `target_header` — header of the block being built. Its `number` is used for the
     ///   parent-block guard; the full header is forwarded to `apply_deltas_ephemeral` so that block
     ///   number and timestamp are injected into each state delta.
@@ -147,7 +148,7 @@ impl PendingBlockProcessor {
     ///   to associate the result with a specific bundle or evaluation context.
     pub async fn generate_pending_update(
         &mut self,
-        txs: &[TxInput],
+        pending: &PendingBlock,
         target_header: BlockHeader,
         label: String,
     ) -> Result<PendingUpdate, PendingError> {
@@ -166,7 +167,7 @@ impl PendingBlockProcessor {
 
         let mut pending_deltas: HashMap<String, BlockAggregatedChanges> = HashMap::new();
         for (extractor, indexer) in &mut self.indexers {
-            let changes = indexer.generate_deltas(txs);
+            let changes = indexer.generate_deltas(pending);
             pending_deltas.insert(extractor.clone(), changes);
         }
 

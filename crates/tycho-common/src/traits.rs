@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use crate::{
     models::{
         blockchain::{
-            Block, BlockAggregatedChanges, BlockTag, EntryPointWithTracingParams, TracedEntryPoint,
-            TxInput,
+            Block, BlockAggregatedChanges, BlockTag, EntryPointWithTracingParams, PendingBlock,
+            TracedEntryPoint,
         },
         contract::AccountDelta,
         token::{Token, TokenQuality, TransferCost, TransferTax},
@@ -20,8 +20,8 @@ use crate::{
 ///
 /// A `TxDeltaIndexer` is a native-code substitute for a Substreams package.
 /// It consumes a stream of finalised [`BlockAggregatedChanges`] to keep its internal
-/// protocol state current, then — on demand — applies a batch of in-flight
-/// [`TxInput`]s and returns the resulting [`BlockAggregatedChanges`]. The primary
+/// protocol state current, then — on demand — applies an in-flight [`PendingBlock`]
+/// and returns the resulting [`BlockAggregatedChanges`]. The primary
 /// consumer is an Ethereum block builder that needs to know how a candidate
 /// transaction bundle alters DEX state before deciding whether to include it.
 ///
@@ -32,11 +32,10 @@ use crate::{
 ///    `component_balances` will contain the full snapshot at that height rather than a sparse
 ///    delta. Subsequent calls apply incremental deltas.
 ///
-/// 2. **Query** — call [`generate_deltas`][TxDeltaIndexer::generate_deltas] with a batch of
-///    in-flight transactions at any point. The indexer applies them against its current internal
-///    state and returns a [`BlockAggregatedChanges`] describing what would change. Internal state
-///    is **not** mutated by this call; it always operates on the state left by the most recent
-///    `apply_block`.
+/// 2. **Query** — call [`generate_deltas`][TxDeltaIndexer::generate_deltas] with an in-flight
+///    [`PendingBlock`] at any point. The indexer applies it against its current internal state and
+///    returns a [`BlockAggregatedChanges`] describing what would change. Internal state is **not**
+///    mutated by this call; it always operates on the state left by the most recent `apply_block`.
 pub trait TxDeltaIndexer: Send {
     /// Advances internal protocol state by applying a finalised block.
     ///
@@ -52,26 +51,27 @@ pub trait TxDeltaIndexer: Send {
     ///   only the changed attributes and balances.
     fn apply_block(&mut self, block: &BlockAggregatedChanges) -> anyhow::Result<()>;
 
-    /// Applies a batch of in-flight transactions against the current state and
-    /// returns the protocol state deltas they would produce.
+    /// Applies an in-flight block against the current state and returns the
+    /// protocol state deltas it would produce.
     ///
     /// The returned [`BlockAggregatedChanges`] contains the aggregated deltas across
-    /// all transactions in the batch: `state_deltas`, `component_balances`,
+    /// all transactions in the pending block: `state_deltas`, `component_balances`,
     /// `new_protocol_components`, and `deleted_protocol_components`. Block
     /// metadata (`block`, `chain`, `extractor`, `finalized_block_height`) is
     /// populated from the state stored by the most recent
     /// [`apply_block`][TxDeltaIndexer::apply_block] call.
     ///
     /// Internal state is **not** modified. Calling `generate_deltas` twice with
-    /// the same transactions returns identical results.
+    /// the same pending block returns identical results.
     ///
     /// Transactions where `succeeded == false` are silently skipped.
     ///
     /// # Parameters
     ///
-    /// * `txs` — ordered slice of in-flight transactions, typically a builder's candidate bundle or
-    ///   the full mempool selection for one block.
-    fn generate_deltas(&mut self, txs: &[TxInput]) -> BlockAggregatedChanges;
+    /// * `pending` — the in-flight block: transactions in execution order (typically a builder's
+    ///   candidate bundle or the full mempool selection for one block) plus post-execution account
+    ///   state for the accounts those transactions touched.
+    fn generate_deltas(&mut self, pending: &PendingBlock) -> BlockAggregatedChanges;
 }
 
 /// A struct representing a request to get an account state.
