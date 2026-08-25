@@ -94,22 +94,27 @@ When no DCI is configured the call is a no-op.
 On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
 1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
-   match purges strictly after the target; when the hash is absent, a buffered target
-   height purges from that height inclusive (stale copy). A hash miss is fatal when the height
-   target is below the buffer, at the buffer's oldest block (no predecessor left to anchor
-   the revert), or above the buffer. Nonfatal hash-miss fallbacks log a warning and increment `extractor_revert_hash_miss`.
-2. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
+   match purges strictly after the target; when the hash is absent, a buffered target height
+   purges from that height inclusive (stale copy). A hash miss is fatal when the
+   height target is below the buffer, at the buffer's oldest block (no predecessor left to
+   anchor the revert), or above the buffer without a pending partial at exactly that height
+   (the flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
+   fallbacks log a warning and increment `extractor_revert_hash_miss`.
+2. Pending partials are dropped only when above the target height; partials at the target
+   height are the still-valid prefix of the last valid block and are kept.
+3. Previous attribute values are restored from the buffer, then the DB. Before any DB read —
+   and only when the buffer lookup left misses — the revert waits for the in-flight commit
+   task and flushes the write cache, so a DB miss proves that no prior state exists.
+   Attributes first created inside the reverted range, and attributes with no prior value in
+   either place, revert as deletions instead. The latter emit one summary warning and
+   increment `extractor_revert_attr_miss` per attribute; its `component_found` label says
+   whether the DB returned state rows for the component (rows, not the component row itself —
+   a component with zero dynamic attributes reads as `false`). Any hit means an upstream
+   module emitted an Update or Deletion for an attribute that never had a Creation.
+4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
-3. `handle_revert` first waits for any in-flight DB commit task, so a miss in the buffer and
-   the DB proves that no prior state exists. Previous attribute values are then restored from
-   the buffer, then the DB. Attributes created inside the reverted range, and attributes of
-   components with no state in either place, revert as deletions instead — with a warning and
-   the `extractor_revert_component_not_found` counter. Its `cause` label separates
-   `young_component` (creation still buffered — expected below the finality horizon) from
-   `unknown_component` (no creation anywhere — an upstream bug, e.g. a Creation marked as an
-   Update).
-4. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted state
-   is always on the canonical chain.
+5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
+   state is always on the canonical chain.
 
 `PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
 hash-only `purge` on the block named by the broadcast revert message.
