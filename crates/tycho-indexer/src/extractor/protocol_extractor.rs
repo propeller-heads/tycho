@@ -70,6 +70,29 @@ struct GatewayInner<G> {
     commit_batch_size: usize,
 }
 
+impl<G> GatewayInner<G> {
+    /// Awaits the in-flight DB commit task, if any. The handle is taken even when the
+    /// task failed, so a later call does not re-await it. Returns whether an unfinished
+    /// task was actually waited on.
+    async fn join_pending_commit(&self) -> Result<bool, ExtractionError> {
+        let mut commit_handle_guard = self.commit_handle.lock().await;
+        let Some(pending_commit) = commit_handle_guard.take() else {
+            return Ok(false);
+        };
+        let needs_await = !pending_commit.inner().is_finished();
+        match pending_commit
+            .instrument(info_span!("await_previous_commit"))
+            .await
+        {
+            Ok(Ok(())) => Ok(needs_await),
+            Ok(Err(err)) => Err(err),
+            Err(join_err) => Err(ExtractionError::Storage(StorageError::Unexpected(format!(
+                "Failed to join database commit task: {join_err}"
+            )))),
+        }
+    }
+}
+
 /// Accumulates partial block changes for a single block.
 ///
 /// Each incoming partial is merged immediately via [`BlockChanges::merge_partial`].
@@ -742,7 +765,6 @@ where
         };
 
         if let Some(last_block) = blocks_to_commit.last() {
-            let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
             let gateway = self.gateway.inner.clone();
             let committed_block_height = self
                 .gateway
@@ -752,34 +774,16 @@ where
             let batch_size = blocks_to_commit.len();
             let (extractor_name, chain) = (self.name.clone(), self.chain);
 
-            if let Some(db_commit_handle_to_join) = commit_handle_guard.take() {
-                let needs_await = !db_commit_handle_to_join
-                    .inner()
-                    .is_finished();
-                let now = chrono::Utc::now().naive_utc();
-
-                let result = db_commit_handle_to_join
-                    .instrument(info_span!("await_previous_commit"))
-                    .await;
-
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(storage_err)) => {
-                        return Err(storage_err);
-                    }
-                    Err(join_err) => {
-                        return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
-                            "Failed to join database commit task: {join_err}"
-                        ))));
-                    }
-                }
-
-                if needs_await {
-                    let wait_time = chrono::Utc::now()
-                        .naive_utc()
-                        .signed_duration_since(now);
-                    trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, wait_time = %wait_time, "CommitTaskAwaited");
-                }
+            let now = chrono::Utc::now().naive_utc();
+            if self
+                .gateway
+                .join_pending_commit()
+                .await?
+            {
+                let wait_time = chrono::Utc::now()
+                    .naive_utc()
+                    .signed_duration_since(now);
+                trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, wait_time = %wait_time, "CommitTaskAwaited");
             }
 
             let new_handle = tokio::spawn(async move {
@@ -818,7 +822,11 @@ where
             commit_span.follows_from(tracing::Span::current().id());
             let new_handle = new_handle.instrument(commit_span);
 
-            *commit_handle_guard = Some(new_handle);
+            *self
+                .gateway
+                .commit_handle
+                .lock()
+                .await = Some(new_handle);
 
             trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
         };
@@ -1149,23 +1157,9 @@ where
 
         // The commit task drains blocks from the buffer before its DB write lands. Wait for
         // it, so a miss in the buffer and the DB below proves that no prior state exists.
-        {
-            let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
-            if let Some(pending_commit) = commit_handle_guard.take() {
-                match pending_commit
-                    .instrument(info_span!("await_previous_commit"))
-                    .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => return Err(err),
-                    Err(join_err) => {
-                        return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
-                            "Failed to join database commit task: {join_err}"
-                        ))))
-                    }
-                }
-            }
-        }
+        self.gateway
+            .join_pending_commit()
+            .await?;
 
         // Send revert to DCI plugin.
         // DCI reverts are hash-only: they have no height fallback and would fail on the
