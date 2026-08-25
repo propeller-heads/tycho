@@ -891,38 +891,6 @@ where
     }
 }
 
-/// Classifies a revert lookup miss. "young_component" means the component's creation is still
-/// in the reorg buffer, so it is younger than the finality horizon — expected, no prior state
-/// can exist. "unknown_component" means no creation explains the miss — unexpected, e.g. an
-/// integration marked a Creation as an Update.
-fn revert_miss_cause(
-    reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
-    component_id: &str,
-) -> &'static str {
-    let creation_is_buffered = reorg_buffer
-        .get_block_range(None, None)
-        .map(|mut blocks| {
-            blocks.any(|entry| {
-                entry
-                    .block_update()
-                    .txs_with_update
-                    .iter()
-                    .any(|tx| {
-                        tx.protocol_components
-                            .get(component_id)
-                            .is_some_and(|component| component.change == ChangeType::Creation)
-                    })
-            })
-        })
-        .unwrap_or(false);
-
-    if creation_is_buffered {
-        "young_component"
-    } else {
-        "unknown_component"
-    }
-}
-
 #[async_trait]
 impl<G, T, E> Extractor for ProtocolExtractor<G, T, E>
 where
@@ -1547,40 +1515,68 @@ where
         let mut not_found: HashMap<String, HashSet<String>> = HashMap::new();
         let mut db_states: HashMap<(String, String), Bytes> = HashMap::new();
 
+        let states_by_id: HashMap<&str, &ProtocolComponentState> = missing_components_states
+            .iter()
+            .map(|state| (state.component_id.as_str(), state))
+            .collect();
+
+        // Misses below mean an upstream module emitted an Update/Deletion for an attribute
+        // that never had a Creation, so no prior value exists and the revert deletes it.
+        // Substreams output is external input — a miss is a data-quality signal, not a
+        // reason to kill the extractor. `component_found` reflects whether the DB returned
+        // state rows for the component, not whether the component row exists: a component
+        // with zero dynamic attributes reads as "false".
+        let mut attr_misses_component_found = 0_u64;
+        let mut attr_misses_component_missing = 0_u64;
         for (component_id, keys) in missing_map {
-            let state = missing_components_states
-                .iter()
-                .find(|comp| comp.component_id == component_id);
-            if state.is_none() {
-                // No rows in buffer or DB: the component is younger than the finality
-                // horizon, or an upstream module mis-marked its attributes. Either way no
-                // previous value exists, so the revert deletes the attributes. Substreams
-                // output is external input — this must never be fatal.
-                let cause = revert_miss_cause(&reorg_buffer, &component_id);
-                warn!(
-                    component_id = component_id.as_str(),
-                    cause,
-                    "Component not found in buffer or DB during revert; \
-                     reverting its attributes as deletions"
-                );
-                counter!(
-                    "extractor_revert_component_not_found",
-                    "extractor" => self.name.clone(),
-                    "chain" => self.chain.to_string(),
-                    "cause" => cause,
-                )
-                .increment(1);
-            }
+            let state = states_by_id
+                .get(component_id.as_str())
+                .copied();
             for key in keys {
                 if let Some(value) = state.and_then(|s| s.attributes.get(&key)) {
                     db_states.insert((component_id.clone(), key), value.clone());
                 } else {
+                    if state.is_some() {
+                        attr_misses_component_found += 1;
+                    } else {
+                        attr_misses_component_missing += 1;
+                    }
                     not_found
                         .entry(component_id.clone())
                         .or_default()
                         .insert(key);
                 }
             }
+        }
+        if !not_found.is_empty() {
+            let missed: Vec<(&str, usize)> = not_found
+                .iter()
+                .map(|(id, keys)| (id.as_str(), keys.len()))
+                .collect();
+            warn!(
+                components = ?missed,
+                total = attr_misses_component_found + attr_misses_component_missing,
+                "Attributes with no prior state in buffer or DB during revert; \
+                 reverting them as deletions"
+            );
+        }
+        if attr_misses_component_found > 0 {
+            counter!(
+                "extractor_revert_attr_miss",
+                "extractor" => self.name.clone(),
+                "chain" => self.chain.to_string(),
+                "component_found" => "true",
+            )
+            .increment(attr_misses_component_found);
+        }
+        if attr_misses_component_missing > 0 {
+            counter!(
+                "extractor_revert_attr_miss",
+                "extractor" => self.name.clone(),
+                "chain" => self.chain.to_string(),
+                "component_found" => "false",
+            )
+            .increment(attr_misses_component_missing);
         }
 
         let empty = HashSet::<String>::new();
@@ -4957,13 +4953,52 @@ mod test {
         );
     }
 
+    fn snapshot_to_map(
+        snapshot: metrics_util::debugging::Snapshot,
+    ) -> HashMap<
+        (metrics_util::MetricKind, String, std::collections::BTreeMap<String, String>),
+        metrics_util::debugging::DebugValue,
+    > {
+        snapshot
+            .into_vec()
+            .into_iter()
+            .map(|(ck, _unit, _desc, value)| {
+                let name = ck.key().name().to_string();
+                let labels = ck
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+
+                ((ck.kind(), name, labels), value)
+            })
+            .collect()
+    }
+
+    fn counter_value(
+        map: &HashMap<
+            (metrics_util::MetricKind, String, std::collections::BTreeMap<String, String>),
+            metrics_util::debugging::DebugValue,
+        >,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> u64 {
+        let labels_map = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        match map.get(&(metrics_util::MetricKind::Counter, name.to_owned(), labels_map)) {
+            Some(metrics_util::debugging::DebugValue::Counter(value)) => *value,
+            _ => 0,
+        }
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
+    // #[tokio::test]; it drives its own current-thread runtime instead.
     #[test]
-    fn test_revert_component_not_found_counter_cause_label() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    fn test_revert_attr_miss_counter() {
+        use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -4991,7 +5026,13 @@ mod test {
                 gw.expect_get_contracts()
                     .returning(|_| Ok(Vec::new()));
                 gw.expect_get_protocol_states()
-                    .returning(|_| Ok(Vec::new()));
+                    .returning(|_| {
+                        Ok(vec![ProtocolComponentState::new(
+                            "pool_w",
+                            HashMap::from([("other".to_string(), Bytes::from(1_u64).lpad(32, 0))]),
+                            HashMap::new(),
+                        )])
+                    });
                 gw.expect_get_components_balances()
                     .returning(|_| Ok(HashMap::new()));
                 gw.expect_get_account_balances()
@@ -4999,128 +5040,58 @@ mod test {
 
                 let extractor = create_extractor(gw).await;
 
-                // Block 1: empty anchor.
-                extractor
-                    .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                        PbBlockChanges {
-                            block: Some(pb_fixtures::pb_blocks(1)),
-                            ..Default::default()
-                        },
-                        Some("cursor@1"),
-                        Some(1),
-                    ))
-                    .await
-                    .unwrap()
-                    .unwrap();
-
-                // Block 2: create `pool_y` without attributes. Stays in the buffer (finality
-                // height 1), so `pool_y` is younger than the finality horizon.
-                extractor
-                    .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                        PbBlockChanges {
-                            block: Some(pb_fixtures::pb_blocks(2)),
-                            changes: vec![TransactionChanges {
-                                tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                                component_changes: vec![PbProtocolComponent {
-                                    id: "pool_y".to_string(),
-                                    change: PbChangeType::Creation.into(),
-                                    protocol_type: Some(ProtocolType {
-                                        name: "pt_1".to_string(),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                }],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                        Some("cursor@2"),
-                        Some(1),
-                    ))
-                    .await
-                    .unwrap()
-                    .unwrap();
-
-                // Block 3: `fee` update on buffered `pool_y`; `rate` update on `pool_z`, which
-                // no creation explains anywhere.
-                extractor
-                    .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                        PbBlockChanges {
-                            block: Some(pb_fixtures::pb_blocks(3)),
-                            changes: vec![TransactionChanges {
-                                tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                                entity_changes: vec![
-                                    EntityChanges {
-                                        component_id: "pool_y".to_string(),
-                                        attributes: vec![Attribute {
-                                            name: "fee".to_string(),
-                                            value: Bytes::from(30_u64).lpad(32, 0).to_vec(),
-                                            change: PbChangeType::Update.into(),
-                                        }],
-                                    },
-                                    EntityChanges {
-                                        component_id: "pool_z".to_string(),
-                                        attributes: vec![Attribute {
-                                            name: "rate".to_string(),
-                                            value: Bytes::from(7_u64).lpad(32, 0).to_vec(),
-                                            change: PbChangeType::Update.into(),
-                                        }],
-                                    },
-                                ],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                        Some("cursor@3"),
-                        Some(1),
-                    ))
-                    .await
-                    .unwrap()
-                    .unwrap();
+                // Empty anchor, then a zero-attribute creation that stays buffered.
+                tick(&extractor, 1, 1, vec![]).await;
+                tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_y", &[])]).await;
+                // fee: pool_y has a buffered creation but no attrs and no DB rows → "false".
+                // rate: pool_ghost was never created anywhere → "false".
+                // gone: pool_w has DB state rows, but not this attribute → "true".
+                tick(
+                    &extractor,
+                    3,
+                    1,
+                    vec![
+                        entity_change_tx(3, 0, "pool_y", "fee", 30, PbChangeType::Update),
+                        entity_change_tx(3, 1, "pool_ghost", "rate", 7, PbChangeType::Update),
+                        entity_change_tx(3, 2, "pool_w", "gone", 9, PbChangeType::Update),
+                    ],
+                )
+                .await;
 
                 extractor
-                    .handle_revert(BlockUndoSignal {
-                        last_valid_block: Some(BlockRef {
-                            id: format!("0x{:0>64x}", 2_u64),
-                            number: 2,
-                        }),
-                        last_valid_cursor: "cursor@2".into(),
-                    })
+                    .handle_revert(undo_to(2))
                     .await
                     .unwrap()
                     .unwrap();
             })
         });
 
-        let cause_counts: HashMap<String, u64> = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(ck, _, _, _)| ck.key().name() == "extractor_revert_component_not_found")
-            .map(|(ck, _, _, value)| {
-                let cause = ck
-                    .key()
-                    .labels()
-                    .find(|l| l.key() == "cause")
-                    .map(|l| l.value().to_string())
-                    .unwrap_or_default();
-                let count = match value {
-                    DebugValue::Counter(v) => v,
-                    _ => 0,
-                };
-                (cause, count)
-            })
-            .collect();
-
+        let map = snapshot_to_map(snapshotter.snapshot());
         assert_eq!(
-            cause_counts.get("young_component"),
-            Some(&1),
-            "pool_y creation is buffered, its miss is the expected cause"
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_found", "false")
+                ],
+            ),
+            2,
+            "pool_y (no state rows) and pool_ghost (never created) miss without DB rows"
         );
         assert_eq!(
-            cause_counts.get("unknown_component"),
-            Some(&1),
-            "pool_z has no creation anywhere, its miss is the unexpected cause"
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_found", "true")
+                ],
+            ),
+            1,
+            "pool_w has state rows but not the reverted attribute"
         );
     }
 }
