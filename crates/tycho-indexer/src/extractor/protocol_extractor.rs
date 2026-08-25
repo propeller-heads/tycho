@@ -822,11 +822,7 @@ where
             commit_span.follows_from(tracing::Span::current().id());
             let new_handle = new_handle.instrument(commit_span);
 
-            *self
-                .gateway
-                .commit_handle
-                .lock()
-                .await = Some(new_handle);
+            *self.gateway.commit_handle.lock().await = Some(new_handle);
 
             trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
         };
