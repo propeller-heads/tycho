@@ -3,9 +3,6 @@ protocol_system: "vm:balancer_v3"
 module_name: "map_protocol_changes"
 protocol_type_names:
   - "balancer_v3_pool"
-adapter_contract: "BalancerV3SwapAdapter"
-adapter_build_signature: "constructor(address,address,address,address)"
-adapter_build_args: "0xbA1333333333a1BA1108E8412f11850A5C319bA9,0x136f1EFcC3f8f88516B9E94110D56FDBfB1778d1,0x000000000022D473030F116dDEE9F6B43aC78BA3,0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 skip_balance_check: true # Skipped because this Balancer V3 uses a Vault, the current version of the testing module doesn't support this.
 
 # vault address for v3 needed for the router contract
@@ -92,5 +89,91 @@ tests:
           token_a_price_includes_rate: "0x00"
           token_b_price_includes_rate: "0x00"
         skip_simulation: false
-        skip_execution: true
         creation_tx: "0xb5aa9e7019fa807d8e41b00634a18d02d38a185a40ba3d09dc28c771488163c6"
+
+  # The three generations added alongside the original December 2024 factories. Their pools are
+  # invisible to a configuration that names one factory per family, so these cover the addresses
+  # rather than the decoding — `create` is identical across generations.
+  - name: test_weighted_v2_pool_creation
+    start_block: 25486263
+    stop_block: 25486273
+    expected_components:
+      - id: "0x48995DbDCA50Fa5346B0771d40a5AE7664262f7e"
+        tokens:
+          - "0x68917a0e538cf4a807b3d415c1af5cdbab0ff4dc"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          normalized_weights: "0x5b22307830646264326663313337613330303030222c2230783233383666323666633130303030225d"
+          fee: "0x0aa87bee538000"
+          pool_type: "0x5765696768746564506f6f6c466163746f7279"
+        # Liquidity was added well after creation, so there is nothing to quote in this range.
+        skip_simulation: true
+        creation_tx: "0xe3142ae8e86019a7800aab4e9e3d64824083146e8f25015828af3475b1bcbae8"
+
+  - name: test_stable_v2_swap_msusd_usdc
+    start_block: 24033998
+    stop_block: 24034008
+    expected_components:
+      - id: "0x111ce2a60c30f6058a57d0dbae1a39a42d998826"
+        tokens:
+          - "0x4ba01f22827018b4772cd326c7627fb4956a7c00"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          bpt: "0x111ce2a60c30f6058a57d0dbae1a39a42d998826"
+          fee: "0x5af3107a4000"
+          pool_type: "0x537461626c65506f6f6c466163746f7279"
+        skip_simulation: false
+        creation_tx: "0x48b355986dc3c4beef8fe7b6468354732a375cd538523cee379857722d2af7be"
+
+  # Also the only test covering a pool registered with rate providers, which is what the DCI
+  # entrypoints are emitted for.
+  - name: test_stable_v3_pool_creation
+    start_block: 25505216
+    stop_block: 25505226
+    expected_components:
+      - id: "0xDA28666719e28BC243B2F44A889E5C0577185A54"
+        tokens:
+          - "0x531e90a2376902de8915789fcc1075e3b0c153e7"
+          - "0xac2435e3c25e8246870d33ce0a26988a46d5db68"
+        static_attributes:
+          bpt: "0xda28666719e28bc243b2f44a889e5c0577185a54"
+          fee: "0x48c273950000"
+          pool_type: "0x537461626c65506f6f6c466163746f7279"
+          rate_providers: "0x5b22307830653630313365623535343064626638316531396662373636373463656335396232613234326134222c22307830393432356137633364323561306537343366353234326632373639663737366435623730383439225d"
+        skip_simulation: true
+        creation_tx: "0x08b69b2409fa1d919c5c502f35eefeea7323d1e17ccc04dd7b350aa442b994a9"
+
+  # QuantAMM pools are matched on the Vault's `PoolRegistered` event rather than their factory's
+  # `PoolCreated`, so this also covers that dispatch path.
+  - name: test_quantamm_pool_creation
+    start_block: 22428328
+    stop_block: 22428338
+    expected_components:
+      - id: "0x6b61d8680C4F9E560c8306807908553f95c749C5"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          - "0x45804880de22913dafe09f4980848ece6ecbaf78"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          fee: "0x470de4df820000"
+          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279"
+        # The pool is funded in a later block, so there is nothing to quote in this range.
+        skip_simulation: true
+        creation_tx: "0x28fe2c31a2b97f60874dfc458af6242b371828a2c9fe2c2fe0f2c7c90117204c"
+
+  # The same pool carried past the block that funds it (22428606), so the native decoder, its
+  # quotes and a router execution are all exercised rather than only component detection.
+  - name: test_quantamm_swap_wbtc_paxg_usdc
+    start_block: 22428333
+    stop_block: 22428616
+    expected_components:
+      - id: "0x6b61d8680C4F9E560c8306807908553f95c749C5"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          - "0x45804880de22913dafe09f4980848ece6ecbaf78"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          fee: "0x470de4df820000"
+          pool_type: "0x5175616e74414d4d5765696768746564506f6f6c466163746f7279"
+        skip_simulation: false
+        creation_tx: "0x28fe2c31a2b97f60874dfc458af6242b371828a2c9fe2c2fe0f2c7c90117204c"
