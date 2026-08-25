@@ -1,7 +1,7 @@
 use substreams::hex;
 
 /// The original market factory. It emits a four-parameter `CreateNewMarket` and keys its fee
-/// config by router rather than by market — see `abi/README.md`.
+/// config by router rather than by market — see `crate::fees` for both generations' rules.
 pub const MARKET_FACTORY_V1: [u8; 20] = hex!("27b1dacd74688af24a64bd3c9c1b143118740784");
 
 /// Market factories V3 through V6, which share one ABI.
