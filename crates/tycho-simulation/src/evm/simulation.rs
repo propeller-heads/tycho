@@ -378,7 +378,7 @@ fn interpret_evm_success(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 /// Data needed to invoke a transaction simulation
 pub struct SimulationParameters {
     /// Address of the sending account
@@ -636,10 +636,8 @@ mod tests {
             to: contract,
             data: Vec::new(),
             value: U256::ZERO,
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
             block_overrides: Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+            ..Default::default()
         };
 
         let engine = SimulationEngine::new(state, false);
@@ -688,16 +686,8 @@ mod tests {
         };
 
         // Simulation parameters
-        let sim_params = SimulationParameters {
-            caller,
-            to: router_addr,
-            data: encoded,
-            value: U256::from(0u64),
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
-        };
+        let sim_params =
+            SimulationParameters { caller, to: router_addr, data: encoded, ..Default::default() };
         let mut eng = SimulationEngine::new(state, true);
 
         let block = BlockHeader {
@@ -834,11 +824,8 @@ mod tests {
             to: usdt_address,
             // to: Address::from(deployed_contract_address),
             data: calldata,
-            value: U256::from(0u64),
             overrides: Some(overrides),
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         };
 
         let mut eng = SimulationEngine::new(state, false);

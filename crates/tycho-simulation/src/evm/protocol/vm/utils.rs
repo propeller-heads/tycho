@@ -535,11 +535,7 @@ where
             caller: Address::ZERO,
             to,
             data: selector,
-            value: U256::ZERO,
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         })
         .map_err(|e| SimulationError::FatalError(format!("stateless call failed: {e}")))?;
     let address = Address::abi_decode(res.result.as_ref())
