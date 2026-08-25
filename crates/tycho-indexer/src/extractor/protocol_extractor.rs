@@ -1751,6 +1751,13 @@ pub trait ExtractorGateway: Send + Sync {
         force_commit: bool,
     ) -> Result<(), StorageError>;
 
+    /// Forces any block changes still staged in the write cache to be committed to the
+    /// store. No-op when nothing is staged.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] if the flush fails.
+    async fn flush(&self) -> Result<(), StorageError>;
+
     /// Returns the current state of the protocol components identified by `component_ids`.
     ///
     /// Only components that exist in the store are returned: unknown ids are silently omitted
@@ -2089,6 +2096,10 @@ impl ExtractorGateway for ExtractorPgGateway {
         self.state_gateway
             .commit_transaction(batch_size)
             .await
+    }
+
+    async fn flush(&self) -> Result<(), StorageError> {
+        self.state_gateway.flush().await
     }
 
     async fn get_protocol_states<'a>(

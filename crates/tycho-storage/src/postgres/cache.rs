@@ -630,40 +630,48 @@ impl CachedGateway {
         }
     }
 
+    async fn submit_batch(
+        &self,
+        mut db_txn: DBTransaction,
+        rx: oneshot::Receiver<Result<(), StorageError>>,
+    ) -> Result<(), StorageError> {
+        let span = info_span!("DatabaseCommit", size = db_txn.size);
+        db_txn.caller_span = tracing::Span::current();
+        async move {
+            db_txn
+                .operations
+                .sort_by_key(|e| e.order_key());
+            debug!(
+                size = db_txn.size,
+                ops = ?db_txn
+                    .operations
+                    .iter()
+                    .map(WriteOp::variant_name)
+                    .collect::<Vec<_>>(),
+                "Submitting db operation batch!"
+            );
+            self.tx
+                .send(DBCacheMessage::Write(db_txn))
+                .await
+                .expect("Send message to receiver ok");
+            rx.await
+                .map_err(|_| StorageError::WriteCacheGoneAway())??;
+
+            Ok::<(), StorageError>(())
+        }
+        .instrument(span)
+        .await
+    }
+
     pub async fn commit_transaction(&self, min_ops_batch_size: usize) -> Result<(), StorageError> {
         let mut open_tx = self.open_tx.lock().await;
         match open_tx.take() {
             None => {
                 Err(StorageError::Unexpected("Usage error: Commit without transaction".to_string()))
             }
-            Some((mut db_txn, rx)) => {
+            Some((db_txn, rx)) => {
                 if db_txn.size > min_ops_batch_size {
-                    let span = info_span!("DatabaseCommit", size = db_txn.size);
-                    db_txn.caller_span = tracing::Span::current();
-                    async move {
-                        db_txn
-                            .operations
-                            .sort_by_key(|e| e.order_key());
-                        debug!(
-                            size = db_txn.size,
-                            ops = ?db_txn
-                                .operations
-                                .iter()
-                                .map(WriteOp::variant_name)
-                                .collect::<Vec<_>>(),
-                            "Submitting db operation batch!"
-                        );
-                        self.tx
-                            .send(DBCacheMessage::Write(db_txn))
-                            .await
-                            .expect("Send message to receiver ok");
-                        rx.await
-                            .map_err(|_| StorageError::WriteCacheGoneAway())??;
-
-                        Ok::<(), StorageError>(())
-                    }
-                    .instrument(span)
-                    .await?;
+                    self.submit_batch(db_txn, rx).await?;
                 } else {
                     // if we are not ready to commit, give the OpenTx struct back.
                     *open_tx = Some((db_txn, rx));
@@ -671,6 +679,20 @@ impl CachedGateway {
                 Ok(())
             }
         }
+    }
+
+    /// Forces any staged operations in the open transaction to the store. No-op when no
+    /// transaction is open or it holds no operations.
+    pub async fn flush(&self) -> Result<(), StorageError> {
+        let mut open_tx = self.open_tx.lock().await;
+        let Some((db_txn, rx)) = open_tx.take() else {
+            return Ok(());
+        };
+        if db_txn.size == 0 {
+            *open_tx = Some((db_txn, rx));
+            return Ok(());
+        }
+        self.submit_batch(db_txn, rx).await
     }
 
     #[allow(private_interfaces)]
@@ -1617,6 +1639,64 @@ mod test_serial_db {
             assert_eq!(fetched_block_2, block_2);
             // Assert block 3 is still pending in cache
             assert_eq!(fetched_block_3, block_3);
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_cached_gateway_flush() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+
+            let handle = write_executor.run();
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
+
+            let block_1 = get_sample_block(1);
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            // Below the batch threshold: the op stays staged in the write cache.
+            cached_gw
+                .commit_transaction(100)
+                .await
+                .expect("committing tx failed");
+
+            cached_gw
+                .flush()
+                .await
+                .expect("flush failed");
+
+            let fetched_block = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("Failed to fetch block");
+            assert_eq!(fetched_block, block_1);
+
+            cached_gw
+                .flush()
+                .await
+                .expect("flush without an open transaction must be a no-op");
+
+            handle.abort();
         })
         .await;
     }
