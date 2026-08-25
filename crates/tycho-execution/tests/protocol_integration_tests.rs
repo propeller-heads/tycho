@@ -1646,7 +1646,10 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
 
 #[test]
 fn test_single_encoding_strategy_fermiswap_weth_usdc() {
-    // WETH -> (FermiSwap) -> USDC
+    // WETH -> (the FermiSwap pAMM through the PropAMMRouter) -> USDC.
+    //
+    // `vm:fermiswap` resolves to `PropAMMFallbackExecutor`, so the amounts below are the Uniswap
+    // V3 retry price at the fork block of `FermiSwapRouterTest`, where the venue is stale.
     let token_in = weth();
     let token_out = usdc();
 
@@ -1668,8 +1671,8 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         token_in,
         token_out,
         BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from(2_114_000_000_u64),
-        BigUint::from(2071720000u64),
+        BigUint::from(1_872_190_012_u64),
+        BigUint::from(1_800_000_000_u64),
         vec![swap],
     );
 
@@ -1756,6 +1759,63 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file(
         "test_single_encoding_strategy_propamm_weth_usdc",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_propamm_fallback_indexed_fermiswap() {
+    // WETH -> (the FermiSwap pAMM through the PropAMMRouter) -> USDC, from a component shaped
+    // like the indexed `vm:fermiswap` path: an opaque id and no `pamm_address` attribute, so the
+    // venue comes from `protocol_specific_addresses.json`.
+    let token_in = weth();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0x7c85004568584fbf3665f41ebe85146ee0483587d65d9ea5a56c79816bb720d0"),
+            protocol_system: String::from("propammfallback:fermiswap"),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        // The venue is stale at the Solidity test's fork block, so the route must clear at the
+        // Uniswap V3 retry price, not the pAMM quote.
+        BigUint::from(1_800_000_000_u64),
+        BigUint::from(1_800_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_propamm_fallback_indexed_fermiswap",
         hex_calldata.as_str(),
     );
 }

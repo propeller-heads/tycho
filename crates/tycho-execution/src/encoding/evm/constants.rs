@@ -147,6 +147,24 @@ pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
 
+/// Indexed protocol systems whose venue is a pAMM on the PropAMMRouter whitelist. They resolve to
+/// `PropAMMSwapEncoder` and `PropAMMFallbackExecutor` instead of their own encoder, so a stale
+/// maker quote retries on Uniswap V3 rather than reverting `StaleUpdate`.
+///
+/// `vm:fermiswap` describes the same venue the price level stream serves, reached through the
+/// FermiSwapper contract, and its components carry no `pamm_address` attribute. The venue address
+/// therefore comes from the `propammfallback` entry in `protocol_specific_addresses.json`, keyed
+/// by the protocol system's suffix.
+pub const PROPAMM_ROUTER_INDEXED_PROTOCOLS: &[&str] = &["vm:fermiswap"];
+
+/// Whether swaps on `protocol_system` reach their venue through the PropAMMRouter, either by
+/// carrying `PROPAMM_FALLBACK_PREFIX` or by being one of
+/// `PROPAMM_ROUTER_INDEXED_PROTOCOLS`.
+pub fn executes_via_propamm_router(protocol_system: &str) -> bool {
+    protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) ||
+        PROPAMM_ROUTER_INDEXED_PROTOCOLS.contains(&protocol_system)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

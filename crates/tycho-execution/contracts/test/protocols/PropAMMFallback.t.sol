@@ -427,6 +427,26 @@ contract PropAMMFallbackRouterTest is TychoRouterTestSetup {
         _assertRouterHolds(USDC_ADDR, 0);
     }
 
+    /// Rust-encoded calldata for a component shaped like the indexed `vm:fermiswap` path: no
+    /// `pamm_address` attribute, so the encoder took the venue from
+    /// `protocol_specific_addresses.json`. A wrong venue would revert `UnknownVenue` here.
+    function testIndexedFermiswapIntegration() public {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_propamm_fallback_indexed_fermiswap"
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(USDC_ADDR).balanceOf(ALICE), FALLBACK_AMOUNT_OUT);
+        _assertRouterHolds(USDC_ADDR, 0);
+    }
+
     function _fallbackSwap(address tokenOut)
         internal
         view

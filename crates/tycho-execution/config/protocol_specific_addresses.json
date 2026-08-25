@@ -9,6 +9,9 @@
     },
     "rfq:liquorice": {
       "balance_manager_address": "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
+    },
+    "propammfallback": {
+      "fermiswap_venue_address": "0x5979458912F80B96d30D4220af8E2e4925A33320"
     }
   },
   "base": {},

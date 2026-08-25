@@ -1,7 +1,7 @@
 use num_bigint::BigUint;
 
 use super::{
-    constants::{PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX},
+    constants::{executes_via_propamm_router, PRICE_LEVEL_STREAM_PREFIX},
     group_swaps::group_swaps,
 };
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
@@ -64,11 +64,11 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
 ];
 
 /// Whether the router must approve the protocol before swapping (see
-/// `PROTOCOLS_NEEDING_APPROVAL`). The PropAMMRouter pulls `tokenIn` with `transferFrom`, so the
-/// whole `propammfallback:` family needs the approval.
+/// `PROTOCOLS_NEEDING_APPROVAL`). The PropAMMRouter pulls `tokenIn` with `transferFrom`, so every
+/// protocol reaching its venue through it needs the approval.
 pub fn needs_approval(protocol_system: &str) -> bool {
     PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system) ||
-        protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX)
+        executes_via_propamm_router(protocol_system)
 }
 
 /// Extra gas the PropAMMRouter adds around the venue swap: the `transferFrom` that pulls `tokenIn`
@@ -220,7 +220,7 @@ fn estimate_transfer_overhead(
     // - The PropAMMRouter pulls tokenIn itself and PROPAMM_FALLBACK_OVERHEAD_GAS already prices
     //   that pull, so charging a transfer here would count it twice.
     if !PROTOCOLS_CALLBACK.contains(&protocol_system) &&
-        !protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) &&
+        !executes_via_propamm_router(protocol_system) &&
         (!optimizable_transfer_in(protocol_system) || *strategy == Strategy::Split)
     {
         overhead += transfer_token_gas(token_in);
@@ -232,7 +232,7 @@ fn estimate_transfer_overhead(
 
     // The venue swap gas from `get_amount_out` prices a direct call to an already-funded venue,
     // not one wrapped by the PropAMMRouter.
-    if protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) {
+    if executes_via_propamm_router(protocol_system) {
         overhead += BigUint::from(PROPAMM_FALLBACK_OVERHEAD_GAS);
     }
 
@@ -357,6 +357,22 @@ mod tests {
         // leg2 pool gas                       100_000
         // extra output transfer (→ router)     60_000  ← TOKEN_GAS
         assert_eq!(gas, BigUint::from(490_000u64));
+    }
+
+    #[test]
+    fn test_single_vm_fermiswap_via_propamm_router() {
+        // `vm:fermiswap` reaches its venue through the PropAMMRouter, so it is priced like the
+        // `propammfallback:` family rather than as a direct venue call.
+        let solution = make_solution(vec![make_swap("vm:fermiswap")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← the PropAMMRouter pulls
+        // approval                             25_000  ← TOKEN_APPROVAL_GAS
+        // PropAMMRouter overhead               70_000  ← PROPAMM_FALLBACK_OVERHEAD_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(295_000u64));
     }
 
     #[test]
