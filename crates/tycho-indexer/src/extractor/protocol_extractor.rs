@@ -3475,6 +3475,32 @@ mod test {
             .unwrap();
     }
 
+    async fn partial_tick(
+        extractor: &TestExtractor,
+        block: u64,
+        partial_index: u32,
+        finality: u64,
+        txs: Vec<TransactionChanges>,
+    ) {
+        let cursor = format!("cursor@{block}_p{partial_index}");
+        let mut partial = pb_fixtures::pb_block_scoped_data(
+            PbBlockChanges {
+                block: Some(pb_fixtures::pb_blocks(block)),
+                changes: txs,
+                ..Default::default()
+            },
+            Some(cursor.as_str()),
+            Some(finality),
+        );
+        partial.partial_index = Some(partial_index);
+        partial.is_partial = true;
+        extractor
+            .handle_tick_scoped_data(partial)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     fn creation_tx(
         block: u64,
         index: u64,
@@ -4013,131 +4039,48 @@ mod test {
     // value in the remaining buffer. The expected behavior is to emit a deletion for the attribute.
     #[tokio::test]
     async fn test_revert_new_attribute_on_non_finalized_component() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
-
-        let mut gw = MockExtractorGateway::new();
-        gw.expect_ensure_protocol_types()
-            .times(1)
-            .returning(|_| Ok(()));
-        gw.expect_get_cursor()
-            .times(1)
-            .returning(|| Ok(("cursor".into(), Bytes::default())));
-        gw.expect_get_block()
-            .times(1)
-            .returning(|_| Ok(Block::default()));
-        gw.expect_advance()
-            .times(0)
-            .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
-        gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        // Component is non-finalized: not in DB.
-        gw.expect_get_protocol_states()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_components_balances()
-            .returning(|_| Ok(HashMap::new()));
-        gw.expect_get_account_balances()
-            .returning(|_| Ok(HashMap::new()));
-
-        let extractor = create_extractor(gw).await;
+        let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
-                Some("cursor@1"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x` with initial attributes. Non-finalized (stays in buffer).
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(2)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                        component_changes: vec![PbProtocolComponent {
-                            id: "pool_x".to_string(),
-                            change: PbChangeType::Creation.into(),
-                            protocol_type: Some(ProtocolType {
-                                name: "pt_1".to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![
-                                Attribute {
-                                    name: "sqrt_price_x96".to_string(),
-                                    value: Bytes::from(1000_u64)
-                                        .lpad(32, 0)
-                                        .to_vec(),
-                                    change: PbChangeType::Creation.into(),
-                                },
-                                Attribute {
-                                    name: "tick".to_string(),
-                                    value: Bytes::from(100_u64)
-                                        .lpad(32, 0)
-                                        .to_vec(),
-                                    change: PbChangeType::Creation.into(),
-                                },
-                            ],
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@2"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![creation_tx(
+                2,
+                0,
+                "pool_x",
+                &[
+                    ("sqrt_price_x96", 1000, PbChangeType::Creation),
+                    ("tick", 100, PbChangeType::Creation),
+                ],
+            )],
+        )
+        .await;
 
         // Partial block 3: first-ever tick attribute on `pool_x` (ChangeType::Creation).
-        let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
-                block: Some(pb_fixtures::pb_blocks(3)),
-                changes: vec![TransactionChanges {
-                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                    entity_changes: vec![EntityChanges {
-                        component_id: "pool_x".to_string(),
-                        attributes: vec![Attribute {
-                            name: "ticks/100/net-liquidity".to_string(),
-                            value: Bytes::from(5000_u64)
-                                .lpad(32, 0)
-                                .to_vec(),
-                            change: PbChangeType::Creation.into(),
-                        }],
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            Some("cursor@3_p0"),
-            Some(1),
-        );
-        partial.partial_index = Some(0);
-        partial.is_partial = true;
-        extractor
-            .handle_tick_scoped_data(partial)
-            .await
-            .unwrap()
-            .unwrap();
+        partial_tick(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![entity_change_tx(
+                3,
+                0,
+                "pool_x",
+                "ticks/100/net-liquidity",
+                5000,
+                PbChangeType::Creation,
+            )],
+        )
+        .await;
 
         // Revert to block 2 — partial block 3 is reverted.
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
-                last_valid_cursor: "cursor@2".into(),
-            })
+            .handle_revert(undo_to(2))
             .await
             .expect("handle_revert should not error for non-finalized component with new attr")
             .expect("handle_revert should return a revert message");
@@ -4167,127 +4110,45 @@ mod test {
 
     #[tokio::test]
     async fn test_revert_attr_created_and_deleted_in_range() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
-
-        let mut gw = MockExtractorGateway::new();
-        gw.expect_ensure_protocol_types()
-            .times(1)
-            .returning(|_| Ok(()));
-        gw.expect_get_cursor()
-            .times(1)
-            .returning(|| Ok(("cursor".into(), Bytes::default())));
-        gw.expect_get_block()
-            .times(1)
-            .returning(|_| Ok(Block::default()));
-        gw.expect_advance()
-            .times(0)
-            .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
-        gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        // Component is non-finalized: not in DB.
-        gw.expect_get_protocol_states()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_components_balances()
-            .returning(|_| Ok(HashMap::new()));
-        gw.expect_get_account_balances()
-            .returning(|_| Ok(HashMap::new()));
-
-        let extractor = create_extractor(gw).await;
+        let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
-                Some("cursor@1"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(2)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                        component_changes: vec![PbProtocolComponent {
-                            id: "pool_x".to_string(),
-                            change: PbChangeType::Creation.into(),
-                            protocol_type: Some(ProtocolType {
-                                name: "pt_1".to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@2"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: tx 0 mints a fresh tick (Creation), tx 1 burns it (Deletion) —
         // the JIT-liquidity pattern from the production crashes.
-        let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
-                block: Some(pb_fixtures::pb_blocks(3)),
-                changes: vec![
-                    TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![Attribute {
-                                name: "ticks/100/net-liquidity".to_string(),
-                                value: Bytes::from(5000_u64)
-                                    .lpad(32, 0)
-                                    .to_vec(),
-                                change: PbChangeType::Creation.into(),
-                            }],
-                        }],
-                        ..Default::default()
-                    },
-                    TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(3, 1)),
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![Attribute {
-                                name: "ticks/100/net-liquidity".to_string(),
-                                value: Vec::new(),
-                                change: PbChangeType::Deletion.into(),
-                            }],
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            },
-            Some("cursor@3_p0"),
-            Some(1),
-        );
-        partial.partial_index = Some(0);
-        partial.is_partial = true;
-        extractor
-            .handle_tick_scoped_data(partial)
-            .await
-            .unwrap()
-            .unwrap();
+        partial_tick(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![
+                entity_change_tx(
+                    3,
+                    0,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    5000,
+                    PbChangeType::Creation,
+                ),
+                entity_change_tx(
+                    3,
+                    1,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    0,
+                    PbChangeType::Deletion,
+                ),
+            ],
+        )
+        .await;
 
         // Revert to block 2 — partial block 3 is reverted.
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
-                last_valid_cursor: "cursor@2".into(),
-            })
+            .handle_revert(undo_to(2))
             .await
             .expect("revert must not error when the attr was created and deleted in range")
             .expect("revert must produce a message");
@@ -4369,119 +4230,33 @@ mod test {
 
     #[tokio::test]
     async fn test_revert_deleted_attr_with_history_restores_value() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
-
-        let mut gw = MockExtractorGateway::new();
-        gw.expect_ensure_protocol_types()
-            .times(1)
-            .returning(|_| Ok(()));
-        gw.expect_get_cursor()
-            .times(1)
-            .returning(|| Ok(("cursor".into(), Bytes::default())));
-        gw.expect_get_block()
-            .times(1)
-            .returning(|_| Ok(Block::default()));
-        gw.expect_advance()
-            .times(0)
-            .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
-        gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_protocol_states()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_components_balances()
-            .returning(|_| Ok(HashMap::new()));
-        gw.expect_get_account_balances()
-            .returning(|_| Ok(HashMap::new()));
-
-        let extractor = create_extractor(gw).await;
+        let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
-                Some("cursor@1"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x` with attribute `fee` = 100. Stays in the buffer.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(2)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                        component_changes: vec![PbProtocolComponent {
-                            id: "pool_x".to_string(),
-                            change: PbChangeType::Creation.into(),
-                            protocol_type: Some(ProtocolType {
-                                name: "pt_1".to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_x".to_string(),
-                            attributes: vec![Attribute {
-                                name: "fee".to_string(),
-                                value: Bytes::from(100_u64)
-                                    .lpad(32, 0)
-                                    .to_vec(),
-                                change: PbChangeType::Creation.into(),
-                            }],
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@2"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![creation_tx(2, 0, "pool_x", &[("fee", 100, PbChangeType::Creation)])],
+        )
+        .await;
 
         // Partial block 3: delete `fee`. Its creation is OUTSIDE the reverted range, so the
         // revert must restore the previous value from the buffer.
-        let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
-                block: Some(pb_fixtures::pb_blocks(3)),
-                changes: vec![TransactionChanges {
-                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                    entity_changes: vec![EntityChanges {
-                        component_id: "pool_x".to_string(),
-                        attributes: vec![Attribute {
-                            name: "fee".to_string(),
-                            value: Vec::new(),
-                            change: PbChangeType::Deletion.into(),
-                        }],
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            Some("cursor@3_p0"),
-            Some(1),
-        );
-        partial.partial_index = Some(0);
-        partial.is_partial = true;
-        extractor
-            .handle_tick_scoped_data(partial)
-            .await
-            .unwrap()
-            .unwrap();
+        partial_tick(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![entity_change_tx(3, 0, "pool_x", "fee", 0, PbChangeType::Deletion)],
+        )
+        .await;
 
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
-                last_valid_cursor: "cursor@2".into(),
-            })
+            .handle_revert(undo_to(2))
             .await
             .expect("revert must not error")
             .expect("revert must produce a message");
@@ -4509,110 +4284,27 @@ mod test {
 
     #[tokio::test]
     async fn test_revert_update_attr_without_history_deletes() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            ProtocolComponent as PbProtocolComponent, ProtocolType, TransactionChanges,
-        };
-
-        let mut gw = MockExtractorGateway::new();
-        gw.expect_ensure_protocol_types()
-            .times(1)
-            .returning(|_| Ok(()));
-        gw.expect_get_cursor()
-            .times(1)
-            .returning(|| Ok(("cursor".into(), Bytes::default())));
-        gw.expect_get_block()
-            .times(1)
-            .returning(|_| Ok(Block::default()));
-        gw.expect_advance()
-            .times(0)
-            .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
-        gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        // Component is non-finalized: not in DB.
-        gw.expect_get_protocol_states()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_components_balances()
-            .returning(|_| Ok(HashMap::new()));
-        gw.expect_get_account_balances()
-            .returning(|_| Ok(HashMap::new()));
-
-        let extractor = create_extractor(gw).await;
+        let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
-                Some("cursor@1"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x` without attributes. Non-finalized.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(2)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                        component_changes: vec![PbProtocolComponent {
-                            id: "pool_x".to_string(),
-                            change: PbChangeType::Creation.into(),
-                            protocol_type: Some(ProtocolType {
-                                name: "pt_1".to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@2"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: first touch of the attribute, mis-marked as Update instead of
         // Creation. No history in buffer or DB.
-        let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
-                block: Some(pb_fixtures::pb_blocks(3)),
-                changes: vec![TransactionChanges {
-                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                    entity_changes: vec![EntityChanges {
-                        component_id: "pool_x".to_string(),
-                        attributes: vec![Attribute {
-                            name: "mis_marked".to_string(),
-                            value: Bytes::from(7_u64).lpad(32, 0).to_vec(),
-                            change: PbChangeType::Update.into(),
-                        }],
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            Some("cursor@3_p0"),
-            Some(1),
-        );
-        partial.partial_index = Some(0);
-        partial.is_partial = true;
-        extractor
-            .handle_tick_scoped_data(partial)
-            .await
-            .unwrap()
-            .unwrap();
+        partial_tick(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![entity_change_tx(3, 0, "pool_x", "mis_marked", 7, PbChangeType::Update)],
+        )
+        .await;
 
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 2_u64), number: 2 }),
-                last_valid_cursor: "cursor@2".into(),
-            })
+            .handle_revert(undo_to(2))
             .await
             .expect("revert must not error when the component has no rows in the DB")
             .expect("revert must produce a message");
@@ -4640,81 +4332,24 @@ mod test {
 
     #[tokio::test]
     async fn test_revert_attr_on_component_absent_everywhere_deletes() {
-        use ::tycho_protobuf::pb::tycho::evm::v1::{
-            Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-            TransactionChanges,
-        };
-
-        let mut gw = MockExtractorGateway::new();
-        gw.expect_ensure_protocol_types()
-            .times(1)
-            .returning(|_| Ok(()));
-        gw.expect_get_cursor()
-            .times(1)
-            .returning(|| Ok(("cursor".into(), Bytes::default())));
-        gw.expect_get_block()
-            .times(1)
-            .returning(|_| Ok(Block::default()));
-        gw.expect_advance()
-            .times(0)
-            .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
-        gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        // No component rows anywhere.
-        gw.expect_get_protocol_states()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_components_balances()
-            .returning(|_| Ok(HashMap::new()));
-        gw.expect_get_account_balances()
-            .returning(|_| Ok(HashMap::new()));
-
-        let extractor = create_extractor(gw).await;
+        let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges { block: Some(pb_fixtures::pb_blocks(1)), ..Default::default() },
-                Some("cursor@1"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(&extractor, 1, 1, vec![]).await;
 
         // Block 2 (full block): attribute update on `pool_ghost`, a component that was never
         // created in the buffer and has no DB rows.
-        extractor
-            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
-                    block: Some(pb_fixtures::pb_blocks(2)),
-                    changes: vec![TransactionChanges {
-                        tx: Some(pb_fixtures::pb_transactions(2, 0)),
-                        entity_changes: vec![EntityChanges {
-                            component_id: "pool_ghost".to_string(),
-                            attributes: vec![Attribute {
-                                name: "reserve".to_string(),
-                                value: Bytes::from(42_u64).lpad(32, 0).to_vec(),
-                                change: PbChangeType::Update.into(),
-                            }],
-                        }],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                Some("cursor@2"),
-                Some(1),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
+        tick(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_ghost", "reserve", 42, PbChangeType::Update)],
+        )
+        .await;
 
         // Revert to block 1 — sealed block 2 is reverted.
         let revert_msg = extractor
-            .handle_revert(BlockUndoSignal {
-                last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", 1_u64), number: 1 }),
-                last_valid_cursor: "cursor@1".into(),
-            })
+            .handle_revert(undo_to(1))
             .await
             .expect("revert must not error when the component is absent everywhere")
             .expect("revert must produce a message");
@@ -4730,6 +4365,12 @@ mod test {
                 .contains("reserve"),
             "Expected reserve in deleted_attributes, got: {:?}",
             ghost_delta.deleted_attributes
+        );
+        assert!(
+            ghost_delta
+                .updated_attributes
+                .is_empty(),
+            "a value must not be both restored and deleted"
         );
     }
 
