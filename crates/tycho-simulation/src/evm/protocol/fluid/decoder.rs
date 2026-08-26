@@ -73,8 +73,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
                 .unwrap_or_default(),
         )
         .expect("Infallible");
-        let state =
-            vm::decode_from_vm(&pool_address, token0, token1, resolver_address.as_ref(), engine)?;
+        let state = vm::decode_from_vm(&pool_address, token0, token1, resolver_address, &engine)?;
 
         Ok(state)
     }
