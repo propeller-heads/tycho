@@ -1,4 +1,5 @@
 #![allow(clippy::all)]
+pub mod base_pool;
 pub mod composable_stable_pool_factory;
 pub mod erc_linear_pool_factory;
 pub mod euler_linear_pool_factory;

@@ -46,6 +46,7 @@ pub enum Chain {
     Unichain,
     Polygon,
     Plasma,
+    Robinhood,
     #[schema(value_type = String)]
     Custom(ArrayString<32>),
 }
@@ -113,6 +114,7 @@ impl From<models::Chain> for Chain {
             models::Chain::Unichain => Chain::Unichain,
             models::Chain::Polygon => Chain::Polygon,
             models::Chain::Plasma => Chain::Plasma,
+            models::Chain::Robinhood => Chain::Robinhood,
             models::Chain::Custom(id) => Chain::Custom(
                 ArrayString::from(id.as_str())
                     .expect("custom chain name is already within 32 bytes"),

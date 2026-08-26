@@ -11,6 +11,7 @@ const executorDeployments = require("../../config/executor_deployments.json");
 const deploy_protocols = {
     "ethereum": [
         "uniswap_v2",
+        "ring_swap_v2",
         "pancakeswap_v2",
         "uniswap_v3",
         "uniswap_v4",
@@ -28,8 +29,11 @@ const deploy_protocols = {
         "native_wrapper",
         "rfq:liquorice",
         "vm:fermiswap",
+        "vm:liquidityparty",
         "vm:bopamm",
         "rfq:metric",
+        "pricelevelstream",
+        "propammfallback",
     ],
     "base": [
         "uniswap_v2",
@@ -76,6 +80,12 @@ const deploy_protocols = {
         "uniswap_v3",
         "fluid_v1",
         "vm:curve",
+        "native_wrapper",
+    ],
+    "robinhood": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
         "native_wrapper",
     ],
 };

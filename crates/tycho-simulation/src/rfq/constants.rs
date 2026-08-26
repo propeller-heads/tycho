@@ -1,4 +1,6 @@
-use std::env;
+use std::{env, str::FromStr};
+
+use tycho_common::Bytes;
 
 use crate::rfq::errors::RFQError;
 
@@ -62,6 +64,35 @@ pub fn get_bebop_auth() -> Result<BebopAuth, RFQError> {
         .map_err(|_| RFQError::InvalidInput("BEBOP_KEY environment variable is required".into()))?;
 
     Ok(BebopAuth { key })
+}
+
+/// Bebop origin identification, sent with binding quote requests. Bebop can configure API
+/// accounts to require these fields. See the `BebopClientBuilder` docs for their meaning.
+#[derive(Debug, Default)]
+pub struct BebopOrigins {
+    pub address: Option<Bytes>,
+    pub target: Option<Bytes>,
+    pub source: Option<String>,
+}
+
+/// Read optional Bebop origin identification from the BEBOP_ORIGIN_ADDRESS,
+/// BEBOP_ORIGIN_TARGET and BEBOP_ORIGIN_SOURCE environment variables.
+///
+/// Unset variables yield `None`; a set but unparseable address is an error.
+pub fn get_bebop_origins() -> Result<BebopOrigins, RFQError> {
+    let parse_address = |var: &str| -> Result<Option<Bytes>, RFQError> {
+        match env::var(var) {
+            Ok(value) => Bytes::from_str(&value)
+                .map(Some)
+                .map_err(|e| RFQError::InvalidInput(format!("Invalid {var}: {e}"))),
+            Err(_) => Ok(None),
+        }
+    };
+    Ok(BebopOrigins {
+        address: parse_address("BEBOP_ORIGIN_ADDRESS")?,
+        target: parse_address("BEBOP_ORIGIN_TARGET")?,
+        source: env::var("BEBOP_ORIGIN_SOURCE").ok(),
+    })
 }
 
 /// Read Metric API configuration from environment variables.

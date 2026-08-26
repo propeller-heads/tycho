@@ -1,6 +1,6 @@
 # Tycho Execution
 
-DeFi swap execution framework: Solidity smart contracts (TychoRouter) + Rust encoding library. Multi-protocol token
+DeFi swap execution framework: Solidity smart contracts (TychoRouterV3) + Rust encoding library. Multi-protocol token
 swaps with fee-taking, vault-based accounting, and 20+ DEX integrations.
 
 **Docs**: https://docs.propellerheads.xyz/tycho
@@ -9,7 +9,7 @@ swaps with fee-taking, vault-based accounting, and 20+ DEX integrations.
 ## Solidity Architecture
 
 ```
-TychoRouter (entry point)
+TychoRouterV3 (entry point)
   inherits AccessControl           -- role-based admin (add executors, set fees)
   inherits Dispatcher              -- executor dispatch via delegatecall
     inherits TransferManager       -- input/output transfers, Permit2/ERC20/Vault funding
@@ -40,18 +40,17 @@ Entry (e.g. splitSwap)
 
 | Contract                       | Purpose                                                                                                                                                                                                                                                        |
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `TychoRouter.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 3 funding modes (transferFrom/Permit2/vault) = 9 public methods. `_takeFees()` deducts fees, `_settleOutput()` transfers/credits final output to receiver or vault                                  |
+| `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 3 funding modes (transferFrom/Permit2/vault) = 9 public methods. `_takeFees()` deducts fees, `_settleOutput()` transfers/credits final output to receiver or vault                                  |
 | `Vault.sol`                    | ERC6909 multi-token vault (see subsection below)                                                                                                                                                                                                               |
 | `Dispatcher.sol`               | Executor dispatch. 3-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
-| `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouter: receives an order via `reactorCallback`, approves TychoRouter to pull input tokens, calls TychoRouter, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
+| `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes amountIn, client, clientFeeBps], getEffectiveRouterFeeOnOutput,
-getEffectiveRouterFeeOnOutputScaled [takes client → uint32],
+calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
 
 ### Vault (`Vault.sol`)
@@ -86,11 +85,16 @@ Three fee layers, deducted from swap output:
 1. **Client fee** (EIP-712 signed): Passed per-swap via `ClientFeeParams` struct
    containing `clientFeeBps`, `clientFeeReceiver`, `maxClientContribution`, `deadline`, and `clientSignature`. The
    client signs a `ClientFee` typehash that covers both the fee params **and** the full swap
-   intent (`amountIn`, `tokenIn`, `tokenOut`, `minAmountOut`, `receiver`, `swap`); the router verifies the EIP-712
+   intent (`amountIn`, `tokenIn`, `tokenOut`, `expectedAmountOut`, `minAmountOut`, `receiver`, `swap`); the router verifies the EIP-712
    signature on-chain before applying any fee. Binding the signature to swap data (including the encoded swap bytes)
-   prevents cross-swap replay attacks. The `clientFeeReceiver` address doubles as the client
-   identifier. `maxClientContribution` caps how much positive slippage the client absorbs (prevents the client from
-   claiming all surplus). Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
+   prevents cross-swap replay attacks. `_isValidClientSignature` accepts two signature kinds: a 65-byte ECDSA signature
+   recovering to `clientFeeReceiver`, or — when that fails — an ERC-1271 signature of any length that the
+   `clientFeeReceiver` contract validates itself (`isValidSignature`, staticcalled via OpenZeppelin's
+   `SignatureChecker`). ECDSA runs first so an EOA carrying delegated code (EIP-7702) keeps signing with its own key.
+   Contract signatures are revocable — one that verifies in a given block may stop verifying later.
+   The `clientFeeReceiver` address doubles as the client
+   identifier. `maxClientContribution` caps how much the client contributes from their vault balance to cover a
+   shortfall below `minAmountOut`. Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
 2. **Router fee on output** (stored): `_routerFeeOnOutputBps` -- Tycho's cut of the swap output amount.
 3. **Router fee on client fee** (stored): `_routerFeeOnClientFeeBps` -- Tycho's cut of the client fee (deducted from the
    client's portion, not from the user).
@@ -99,22 +103,26 @@ Three fee layers, deducted from swap output:
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
 removed to revert to defaults.
 
-**Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied), all fee
-read methods (`calculateFee`, `getEffectiveRouterFeeOnOutput`, `getEffectiveRouterFeeOnOutputScaled`) fall back to
-`tx.origin` for the custom fee lookup. This lets unsigned calls still benefit from a custom rate when the originating
-EOA is a registered client.
+**Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
+`calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets
+unsigned calls still benefit from a custom rate when the originating EOA is a registered client.
 
 **Fee scale**: Fees use 8-decimal-BPS units (1 unit = 0.0001 BPS; 100% = 100 000 000). Two public constants are
 queryable via RPC:
-- `MAX_FEE_BPS = 100_000_000` — 100% expressed in fee units
-- `MAX_FEE_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_FEE_BPS²`; the combined denominator when both fees use the
+- `MAX_BPS = 100_000_000` — 100% expressed in fee units
+- `MAX_BPS_SQUARED = 10_000_000_000_000_000` — `MAX_BPS²`; the combined denominator when both fees use the
   sub-BPS scale
+
+**Positive slippage** (`_positiveSlippageEnabled`, toggled via `setPositiveSlippageEnabled`): when enabled, the router
+takes the entire surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
+`expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
+also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
 
 **Accounting**: FeeCalculator only computes amounts (called via staticcall). Actual distribution happens in
-TychoRouter's `_takeFees()`, which credits fee receivers' vault balances via `_creditVault()`. `_settleOutput()` then
+TychoRouterV3's `_takeFees()`, which credits fee receivers' vault balances via `_creditVault()`. `_settleOutput()` then
 handles the remaining output (transfer to receiver or vault credit).
 
 ### Executors (`contracts/src/executors/`)
@@ -125,7 +133,9 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
-AerodromeV1, LiquidityParty, Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, WETH.
+AerodromeV1, LiquidityParty, Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, WETH,
+PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
+address travels in the swap data).
 
 ### Executor Flow, Callbacks & Output Verification
 
@@ -150,11 +160,12 @@ the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs th
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool
-3. Pool calls back to TychoRouter's `fallback()`
+3. Pool calls back to TychoRouterV3's `fallback()`
 4. `fallback()` routes to `_callHandleCallbackOnExecutor()` in Dispatcher
-5. Dispatcher delegatecalls `getCallbackTransferData()` -- returns transfer details and amount owed. **The pool's
-   callback arguments (e.g. Uniswap V3's `amount0Delta`/`amount1Delta`) are ignored**; the executor derives the owed
-   amount independently.
+5. Dispatcher calls `getCallbackTransferData(data, tokenIn, caller)` on the executor (a plain `view` call, not a
+   delegatecall) -- returns only `(transferType, receiver)`. `tokenIn` and the amount come from the Dispatcher's own
+   transient storage, so a protocol cannot inject a different token; `caller` is the `fallback()` `msg.sender`.
+   **The pool's callback arguments (e.g. Uniswap V3's `amount0Delta`/`amount1Delta`) are ignored.**
 6. Dispatcher performs the transfer
 7. Dispatcher delegatecalls `handleCallback()` to complete the interaction
 
@@ -178,7 +189,7 @@ enum TransferType {
 on the current executor. Returns a hardcoded `TransferType`, receiver address, `tokenIn`, `tokenOut`,
 and `outputToRouter`. `_transfer()` handles 6 scenarios based on (TransferType, isFirstSwap, isSplitSwap, isCallback).
 
-**Output settlement** (in TychoRouter): After all swaps complete, `_takeFees()` deducts fees and credits fee receivers'
+**Output settlement** (in TychoRouterV3): After all swaps complete, `_takeFees()` deducts fees and credits fee receivers'
 vault balances. Then `_settleOutput()` updates delta accounting and either credits the user's vault balance or transfers
 tokens to the receiver.
 
@@ -205,11 +216,11 @@ TychoEncoder (trait)                     -- public API, validates Solution
 **TychoRouterEncoder** validates each `Solution` (exact input, has swaps, no invalid cycles), auto-inserts WETH
 wrap/unwrap where ETH↔WETH bridges are missing, then selects strategy: **Single** (1 swap or 1 groupable-protocol batch
 with no splits), **Sequential** (multiple swaps, all `split == 0.0`), **Split** (any `split > 0.0`). *
-*TychoExecutorEncoder** is a simplified variant that bypasses TychoRouter and calls the executor directly.
+*TychoExecutorEncoder** is a simplified variant that bypasses TychoRouterV3 and calls the executor directly.
 
 ### StrategyEncoder
 
-Three implementations (`evm/strategy_encoder/`), each targeting a TychoRouter method family. Protocol data within a
+Three implementations (`evm/strategy_encoder/`), each targeting a TychoRouterV3 method family. Protocol data within a
 group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (`NON_PLE_ENCODED_PROTOCOLS`).
 
 | Strategy                        | Router methods                              | Encoding                                                                                                                           |
@@ -231,7 +242,39 @@ flags) into packed bytes. Each encoder holds its executor address.
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
-e.g. `uniswap_v2`, `fluid_v1`).
+e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
+with the venue name or, for auto-detected pAMMs, the venue address). Price-level-stream protocols
+resolve generically: a single `pricelevelstream` config entry serves the whole family via a
+`get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
+`pricelevelstream:{venue}` entries overriding per venue.
+
+`propammfallback:{venue}` is the same liquidity executed through Titan's PropAMMRouter
+(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the venue
+directly, so a stale maker quote falls back to a single-hop Uniswap V3 pool rather than reverting
+the route. It resolves the same
+way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only venues
+whitelisted on the PropAMMRouter may use the prefix.
+
+### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
+
+Angstrom's Uniswap V4 pools start every block locked. A swap against one carries a pool unlock attestation, signed by
+the current Angstrom leader, as its `hookData`. The attestation is scoped to a block number and says nothing about the
+swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 5) serves every swap, pool and route.
+
+`AttestationCache` therefore keeps the window in a process-wide cache instead of fetching it during encoding:
+
+- A dedicated OS thread (`angstrom-attestations`) refreshes the window every
+  `ANGSTROM_ATTESTATION_REFRESH_INTERVAL`, twice per Ethereum block. Not a `tokio` task — the encoder must work without
+  a runtime, and `reqwest`'s blocking client cannot be driven from inside one.
+- `AttestationCache::global()` starts the thread on first call. `UniswapV4SwapEncoder::new` calls it when
+  `angstrom_hook_address` is configured for the chain (`config/protocol_specific_addresses.json`), so registry
+  construction warms the cache. `ANGSTROM_API_KEY` / `ANGSTROM_API_URL` / `ANGSTROM_BLOCKS_IN_FUTURE` are read once, at
+  that point; without the API key the thread never starts and Angstrom swaps fail to encode with a `FatalError`.
+- `encode_swap` reads the cache. A window older than `ANGSTROM_ATTESTATION_MAX_AGE` triggers one inline fetch on a
+  scoped thread, so encoding degrades to the old behavior instead of failing. Fetch failures are `RecoverableError`.
+- On chain, `UniswapV4Executor._selectAttestation` picks the 93-byte entry (8-byte block number + 85-byte attestation)
+  matching `block.number` and returns empty bytes when none match. Entries for blocks that already passed only cost
+  calldata; a window that covers no upcoming block falls back to Angstrom's protocol-driven empty-batch unlock.
 
 ### Gas estimation
 
@@ -297,23 +340,30 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 
 ## Security
 
-### Using TychoRouter (caller checklist)
+### Using TychoRouterV3 (caller checklist)
 
-When writing code that calls TychoRouter swap functions:
+When writing code that calls TychoRouterV3 swap functions:
 
-- **Always set `minAmountOut`** to the minimum acceptable output. Example: 1000 USDC at 5% slippage → `950 * 10**6`. Setting it to `1` may result in receiving just `1` due to faulty swap sequences, slippage, or an attack.
-- **Verify price data** for `minAmountOut` against at least one independent source. Incorrect price data may set `minAmountOut` too low.
+- **Always set `expectedAmountOut` and `minAmountOut`** accurately. `expectedAmountOut` is your
+  quoted output; `minAmountOut` is the revert guardrail —
+  the tx reverts if the actual output falls below it. Compute it off-chain from your slippage
+  tolerance. Example: 1000 USDC quoted, 5% tolerance → `expectedAmountOut = 1000 * 10**6`,
+  `minAmountOut = 950 * 10**6`. The router rejects `minAmountOut > expectedAmountOut` and any
+  `minAmountOut` more than `MAX_SLIPPAGE_TOLERANCE_BPS` below it, which also excludes zero.
+  Setting `minAmountOut` too low may result in a sandwiched swap.
+- **Verify the price data** used for `expectedAmountOut` against at least one independent source.
+  Incorrect price data may set the slippage floor too low.
 - **Never approve infinite allowances**, including Permit2. Set Permit2 allowance and deadline as low as practical.
 
 ### Building Executors (executor checklist)
 
-Executors run via `delegatecall` inside TychoRouter — they have full access to the router's assets and storage.
+Executors run via `delegatecall` inside TychoRouterV3 — they have full access to the router's assets and storage.
 
-- **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Return transfer intent through `getTransferData`/`getCallbackTransferData`; TychoRouter performs the actual transfers.
-- **Never write to state variables.** Any storage write in an executor writes to TychoRouter's storage.
+- **Never call `ERC20.transfer`, `ERC20.transferFrom`, or `Permit2.transferFrom` directly.** Return transfer intent through `getTransferData`/`getCallbackTransferData`; TychoRouterV3 performs the actual transfers.
+- **Never write to state variables.** Any storage write in an executor writes to TychoRouterV3's storage.
 - **Do not execute `delegatecall`.** If unavoidable, ensure the caller cannot control the target address.
 - **Verify callback origin.** Call `verifyCallback` inside `handleCallback` to confirm `msg.sender` is a valid pool.
-- **Allowlist selectors when the caller controls calldata.** If `swap()` forwards caller-supplied calldata to an external contract (e.g. RFQ settlement), validate the first 4 bytes against an explicit allowlist of safe function selectors before making the call. An unrestricted selector lets an attacker invoke arbitrary functions on that contract — including ones that could drain TychoRouter's balance at the settlement contract. See `LiquoriceExecutor` for the pattern.
+- **Allowlist selectors when the caller controls calldata.** If `swap()` forwards caller-supplied calldata to an external contract (e.g. RFQ settlement), validate the first 4 bytes against an explicit allowlist of safe function selectors before making the call. An unrestricted selector lets an attacker invoke arbitrary functions on that contract — including ones that could drain TychoRouterV3's balance at the settlement contract. See `LiquoriceExecutor` for the pattern.
 - `handleCallback`'s `data` argument is raw ABI-encoded calldata the executor must decode manually.
 - `handleCallback`'s return value must be raw ABI-encoded data the executor encodes manually.
 

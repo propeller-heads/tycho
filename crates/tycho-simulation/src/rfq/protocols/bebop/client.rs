@@ -71,11 +71,20 @@ pub struct BebopClient {
     // quote tokens to normalize to for TVL purposes. Should have the same prices.
     quote_tokens: HashSet<Bytes>,
     quote_timeout: Duration,
+    /// The real end-user's EOA when the taker is not the end-user's own wallet.
+    origin_address: Option<Bytes>,
+    /// The `to` address of the resulting transaction when a contract executes the swap.
+    origin_target: Option<Bytes>,
+    /// Stable identifier for the upstream flow source when aggregating multiple sources.
+    origin_source: Option<String>,
 }
 
 impl BebopClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:bebop";
 
+    /// Creates a fully configured client. Prefer constructing through
+    /// [`BebopClientBuilder`](super::client_builder::BebopClientBuilder).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         tokens: HashSet<Bytes>,
@@ -83,6 +92,9 @@ impl BebopClient {
         ws_key: String,
         quote_tokens: HashSet<Bytes>,
         quote_timeout: Duration,
+        origin_address: Option<Bytes>,
+        origin_target: Option<Bytes>,
+        origin_source: Option<String>,
     ) -> Result<Self, RFQError> {
         let url = chain_to_bebop_url(chain)?;
         Ok(Self {
@@ -94,6 +106,9 @@ impl BebopClient {
             ws_key,
             quote_tokens,
             quote_timeout,
+            origin_address,
+            origin_target,
+            origin_source,
         })
     }
 
@@ -265,8 +280,8 @@ impl RFQClient for BebopClient {
 
         Box::pin(async_stream::stream! {
             let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
-            let mut reconnect_attempts = 0;
-            const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+            let mut consecutive_failures = 0;
+            const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
             loop {
                 let request = Request::builder()
@@ -285,19 +300,18 @@ impl RFQClient for BebopClient {
                 let (ws_stream, _) = match connect_async_with_config(request, None, false).await {
                     Ok(connection) => {
                         info!("Successfully connected to Bebop WebSocket");
-                        reconnect_attempts = 0; // Reset counter on successful connection
                         connection
                     },
                     Err(e) => {
-                        reconnect_attempts += 1;
-                        error!("Failed to connect to Bebop WebSocket (attempt {}): {}", reconnect_attempts, e);
+                        consecutive_failures += 1;
+                        error!("Failed to connect to Bebop WebSocket (consecutive failure {}): {}", consecutive_failures, e);
 
-                        if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                            yield Err(RFQError::ConnectionError(format!("Failed to connect after {MAX_RECONNECT_ATTEMPTS} attempts: {e}")));
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                            yield Err(RFQError::ConnectionError(format!("Failed to connect after {MAX_CONSECUTIVE_FAILURES} consecutive failures: {e}")));
                             return;
                         }
 
-                        let backoff_duration = Duration::from_secs(2_u64.pow(reconnect_attempts.min(5)));
+                        let backoff_duration = Duration::from_secs(2_u64.pow(consecutive_failures.min(5)));
                         info!("Retrying connection in {} seconds...", backoff_duration.as_secs());
                         sleep(backoff_duration).await;
                         continue;
@@ -312,6 +326,10 @@ impl RFQClient for BebopClient {
                         Ok(Message::Binary(data)) => {
                             match BebopPricingUpdate::decode(&data[..]) {
                                 Ok(protobuf_update) => {
+                                    // A completed handshake says nothing about whether the
+                                    // connection works, so only pricing data clears the counter.
+                                    consecutive_failures = 0;
+
                                     let mut new_components = HashMap::new();
 
                                     // Process all pairs directly from protobuf
@@ -403,8 +421,11 @@ impl RFQClient for BebopClient {
                                 }
                             }
                         }
-                        Ok(Message::Close(_)) => {
-                            info!("WebSocket connection closed by server");
+                        Ok(Message::Close(frame)) => {
+                            match frame {
+                                Some(frame) => warn!("WebSocket closed by server: {frame}"),
+                                None => warn!("WebSocket closed by server without a close frame"),
+                            }
                             break;
                         }
                         Err(e) => {
@@ -415,15 +436,16 @@ impl RFQClient for BebopClient {
                     }
                 }
 
-                // If we're here, the message loop exited - always attempt to reconnect
-                reconnect_attempts += 1;
-                if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                    yield Err(RFQError::ConnectionError(format!("Connection failed after {MAX_RECONNECT_ATTEMPTS} attempts")));
+                // If we're here, the message loop exited - always attempt to reconnect.
+                // Pricing data resets this, so it only grows while the feed stays unusable.
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    yield Err(RFQError::ConnectionError(format!("No pricing data received after {MAX_CONSECUTIVE_FAILURES} consecutive failures")));
                     return;
                 }
 
-                let backoff_duration = Duration::from_secs(2_u64.pow(reconnect_attempts.min(5)));
-                info!("Reconnecting in {} seconds (attempt {})...", backoff_duration.as_secs(), reconnect_attempts);
+                let backoff_duration = Duration::from_secs(2_u64.pow(consecutive_failures.min(5)));
+                info!("Reconnecting in {} seconds (consecutive failure {})...", backoff_duration.as_secs(), consecutive_failures);
                 sleep(backoff_duration).await;
                 // Continue to the next iteration of the main loop
             }
@@ -441,6 +463,30 @@ impl RFQClient for BebopClient {
         let receiver = bytes_to_address(&params.receiver)?.to_string();
 
         let url = self.quote_endpoint.clone();
+
+        let mut query = vec![
+            ("sell_tokens", sell_token),
+            ("buy_tokens", buy_token),
+            ("sell_amounts", sell_amount),
+            ("taker_address", sender),
+            ("receiver_address", receiver),
+            ("approval_type", "Standard".into()),
+            ("skip_validation", "true".into()),
+            ("skip_taker_checks", "true".into()),
+            ("gasless", "false".into()),
+            ("expiry_type", "standard".into()),
+            ("fee", "0".into()),
+            ("is_ui", "false".into()),
+        ];
+        if let Some(origin_address) = &self.origin_address {
+            query.push(("origin_address", bytes_to_address(origin_address)?.to_string()));
+        }
+        if let Some(origin_target) = &self.origin_target {
+            query.push(("origin_target", bytes_to_address(origin_target)?.to_string()));
+        }
+        if let Some(origin_source) = &self.origin_source {
+            query.push(("origin_source", origin_source.clone()));
+        }
 
         let client = Client::new();
 
@@ -464,20 +510,7 @@ impl RFQClient for BebopClient {
 
             let request = client
                 .get(&url)
-                .query(&[
-                    ("sell_tokens", sell_token.clone()),
-                    ("buy_tokens", buy_token.clone()),
-                    ("sell_amounts", sell_amount.clone()),
-                    ("taker_address", sender.clone()),
-                    ("receiver_address", receiver.clone()),
-                    ("approval_type", "Standard".into()),
-                    ("skip_validation", "true".into()),
-                    ("skip_taker_checks", "true".into()),
-                    ("gasless", "false".into()),
-                    ("expiry_type", "standard".into()),
-                    ("fee", "0".into()),
-                    ("is_ui", "false".into()),
-                ])
+                .query(&query)
                 .header("accept", "application/json")
                 .bearer_auth(&self.ws_key);
 
@@ -555,6 +588,13 @@ mod tests {
     use super::*;
     use crate::rfq::constants::get_bebop_auth;
 
+    /// BebopSettlement.swapSingle
+    const SWAP_SINGLE_SELECTOR: [u8; 4] = [0x4d, 0xce, 0xbc, 0xba];
+    /// BebopSettlement.swapAggregate
+    const SWAP_AGGREGATE_SELECTOR: [u8; 4] = [0xa2, 0xf7, 0x48, 0x93];
+    /// BebopRouter.swap
+    const ROUTER_SWAP_SELECTOR: [u8; 4] = [0x95, 0x86, 0xd0, 0xe8];
+
     #[tokio::test]
     #[ignore] // Requires network access and setting proper env vars
     async fn test_bebop_websocket_connection() {
@@ -579,6 +619,9 @@ mod tests {
             auth.key,
             quote_tokens,
             Duration::from_secs(30),
+            None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -746,6 +789,9 @@ mod tests {
             quote_tokens: test_quote_tokens,
             quote_endpoint: "".to_string(),
             quote_timeout: Duration::from_secs(5),
+            origin_address: None,
+            origin_target: None,
+            origin_source: None,
         };
 
         let start_time = std::time::Instant::now();
@@ -810,6 +856,8 @@ mod tests {
         dotenv().expect("Missing .env file");
         let auth = get_bebop_auth().expect("Failed to get Bebop authentication");
 
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+
         let client = BebopClient::new(
             Chain::Ethereum,
             HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
@@ -817,10 +865,11 @@ mod tests {
             auth.key,
             HashSet::new(),
             Duration::from_secs(30),
+            Some(Bytes::from_str("0x00000000219ab540356cBB839Cbe05303d7705Fa").unwrap()),
+            Some(router.clone()),
+            Some("tycho-test".to_string()),
         )
         .unwrap();
-
-        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
 
         let params = GetAmountOutParams {
             amount_in: BigUint::from(1_000000000000000000u64),
@@ -842,25 +891,26 @@ mod tests {
         // back without depending closely on the live WETH/WBTC price.
         assert!(quote.amount_out > BigUint::from(1_000_000u64));
 
-        // SWAP_SINGLE_SELECTOR = 0x4dcebcba;
-        assert_eq!(
-            quote
-                .quote_attributes
-                .get("calldata")
-                .unwrap()[..4],
-            Bytes::from_str("0x4dcebcba")
-                .unwrap()
-                .to_vec()
-        );
-        let partial_fill_offset_slice = quote
+        // The settlement mode depends on the API account configuration behind BEBOP_KEY:
+        // settlement-mode accounts get BebopSettlement.swapSingle calldata, router-mode
+        // accounts get BebopRouter.swap calldata.
+        let selector = &quote
             .quote_attributes
-            .get("partial_fill_offset")
-            .unwrap()
-            .as_ref();
-        let mut partial_fill_offset_array = [0u8; 8];
-        partial_fill_offset_array.copy_from_slice(partial_fill_offset_slice);
+            .get("calldata")
+            .unwrap()[..4];
+        if selector == SWAP_SINGLE_SELECTOR {
+            let partial_fill_offset_slice = quote
+                .quote_attributes
+                .get("partial_fill_offset")
+                .unwrap()
+                .as_ref();
+            let mut partial_fill_offset_array = [0u8; 8];
+            partial_fill_offset_array.copy_from_slice(partial_fill_offset_slice);
 
-        assert_eq!(u64::from_be_bytes(partial_fill_offset_array), 12);
+            assert_eq!(u64::from_be_bytes(partial_fill_offset_array), 12);
+        } else {
+            assert_eq!(selector, ROUTER_SWAP_SELECTOR);
+        }
     }
 
     #[tokio::test]
@@ -873,6 +923,8 @@ mod tests {
         dotenv().expect("Missing .env file");
         let auth = get_bebop_auth().expect("Failed to get Bebop authentication");
 
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+
         let client = BebopClient::new(
             Chain::Ethereum,
             HashSet::from_iter(vec![token_in.clone(), token_out.clone()]),
@@ -880,10 +932,11 @@ mod tests {
             auth.key,
             HashSet::new(),
             Duration::from_secs(30),
+            Some(Bytes::from_str("0x00000000219ab540356cBB839Cbe05303d7705Fa").unwrap()),
+            Some(router.clone()),
+            Some("tycho-test".to_string()),
         )
         .unwrap();
-
-        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
 
         let amount_in = BigUint::from_str("20_000_000_000").unwrap(); // 20k USDC
         let params = GetAmountOutParams {
@@ -905,27 +958,28 @@ mod tests {
         // Assuming the USDC - ONDO price doesn't change too much at the time of running this
         assert!(quote.amount_out > BigUint::from_str("18000000000000000000000").unwrap()); // ~19k ONDO
 
-        // SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
-        assert_eq!(
-            quote
-                .quote_attributes
-                .get("calldata")
-                .unwrap()[..4],
-            Bytes::from_str("0xa2f74893")
-                .unwrap()
-                .to_vec()
-        );
-        let partial_fill_offset_slice = quote
+        // The settlement mode depends on the API account configuration behind BEBOP_KEY:
+        // settlement-mode accounts get BebopSettlement.swapAggregate calldata, router-mode
+        // accounts get BebopRouter.swap calldata.
+        let selector = &quote
             .quote_attributes
-            .get("partial_fill_offset")
-            .unwrap()
-            .as_ref();
-        let mut partial_fill_offset_array = [0u8; 8];
-        partial_fill_offset_array.copy_from_slice(partial_fill_offset_slice);
+            .get("calldata")
+            .unwrap()[..4];
+        if selector == SWAP_AGGREGATE_SELECTOR {
+            let partial_fill_offset_slice = quote
+                .quote_attributes
+                .get("partial_fill_offset")
+                .unwrap()
+                .as_ref();
+            let mut partial_fill_offset_array = [0u8; 8];
+            partial_fill_offset_array.copy_from_slice(partial_fill_offset_slice);
 
-        // This is the only attribute that is significantly different for the Single and Aggregate
-        // Order
-        assert_eq!(u64::from_be_bytes(partial_fill_offset_array), 2);
+            // This is the only attribute that is significantly different for the Single and
+            // Aggregate Order
+            assert_eq!(u64::from_be_bytes(partial_fill_offset_array), 2);
+        } else {
+            assert_eq!(selector, ROUTER_SWAP_SELECTOR);
+        }
     }
 
     #[test]
@@ -935,14 +989,14 @@ mod tests {
                 .unwrap();
         let quote_response: BebopQuoteResponse = serde_json::from_str(&json).unwrap();
         let params = GetAmountOutParams {
-            amount_in: BigUint::from_str("43067495979235520920162").unwrap(),
+            amount_in: BigUint::from_str("20000000000").unwrap(),
             token_in: Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
             sender: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
             receiver: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
-        assert_eq!(res.amount_out, BigUint::from_str("21700473797683400419007").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("52571055094221715780641").unwrap());
         assert_eq!(res.amount_in, BigUint::from_str("20000000000").unwrap());
         assert_eq!(res.base_token, params.token_in);
         assert_eq!(res.quote_token, params.token_out);
@@ -967,6 +1021,76 @@ mod tests {
         assert_eq!(res.amount_in, BigUint::from_str("43067495979235520920162").unwrap());
         assert_eq!(res.base_token, params.token_in);
         assert_eq!(res.quote_token, params.token_out);
+    }
+
+    #[test]
+    fn test_process_bebop_quote_response_single_order() {
+        // Captured from a settlement-mode API account: the signed order's taker and receiver
+        // are the requested sender/receiver and the calldata targets the settlement contract.
+        let json =
+            std::fs::read_to_string("src/rfq/protocols/bebop/test_responses/single_order.json")
+                .unwrap();
+        let quote_response: BebopQuoteResponse = serde_json::from_str(&json).unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from_str("1000000000000000000").unwrap(),
+            token_in: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            sender: router.clone(),
+            receiver: router,
+        };
+        let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
+        assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("2915408").unwrap());
+        let settlement = Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap();
+        assert_eq!(
+            res.quote_attributes
+                .get("tx_to")
+                .unwrap(),
+            &settlement
+        );
+        assert_eq!(
+            res.quote_attributes
+                .get("calldata")
+                .unwrap()[..4],
+            SWAP_SINGLE_SELECTOR
+        );
+    }
+
+    #[test]
+    fn test_process_bebop_quote_response_single_order_router_mode() {
+        // Captured from an API account configured for router-mode settlement: the signed
+        // order's taker and receiver are the Bebop router contract (= tx.to), not the
+        // requested sender/receiver.
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/bebop/test_responses/single_order_router_mode.json",
+        )
+        .unwrap();
+        let quote_response: BebopQuoteResponse = serde_json::from_str(&json).unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from_str("1000000000000000000").unwrap(),
+            token_in: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            sender: router.clone(),
+            receiver: router,
+        };
+        let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
+        assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("2926296").unwrap());
+        let bebop_router = Bytes::from_str("0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A").unwrap();
+        assert_eq!(
+            res.quote_attributes
+                .get("tx_to")
+                .unwrap(),
+            &bebop_router
+        );
+        assert_eq!(
+            res.quote_attributes
+                .get("calldata")
+                .unwrap()[..4],
+            ROUTER_SWAP_SELECTOR
+        );
     }
 
     /// Helper function to create a mock server that responds after a delay
@@ -1018,6 +1142,9 @@ mod tests {
             ws_key: "test_key".to_string(),
             quote_tokens: HashSet::new(),
             quote_timeout,
+            origin_address: None,
+            origin_target: None,
+            origin_source: None,
         }
     }
 
@@ -1028,7 +1155,7 @@ mod tests {
         let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
 
         GetAmountOutParams {
-            amount_in: BigUint::from_str("43067495979235520920162").unwrap(),
+            amount_in: BigUint::from_str("20000000000").unwrap(),
             token_in,
             token_out,
             sender: router.clone(),
@@ -1157,7 +1284,7 @@ mod tests {
 
         // Verify the quote (amounts from aggregate_order.json)
         assert_eq!(quote.amount_in, BigUint::from_str("20000000000").unwrap());
-        assert_eq!(quote.amount_out, BigUint::from_str("21700473797683400419007").unwrap());
+        assert_eq!(quote.amount_out, BigUint::from_str("52571055094221715780641").unwrap());
 
         // Verify exactly 3 requests were made (2 failures + 1 success)
         let final_count = *request_count.lock().unwrap();
@@ -1179,6 +1306,13 @@ mod tests {
             ws_key: "secret_key".to_string(),
             quote_tokens: HashSet::from([quote_token.clone()]),
             quote_timeout: Duration::from_millis(5500),
+            origin_address: Some(
+                Bytes::from_str("0x00000000219ab540356cBB839Cbe05303d7705Fa").unwrap(),
+            ),
+            origin_target: Some(
+                Bytes::from_str("0xdA892C989d07A18B5DD3F392d949f00dF15C5736").unwrap(),
+            ),
+            origin_source: Some("tycho".to_string()),
         };
 
         let serialized = serde_json::to_string(&original).unwrap();
@@ -1192,6 +1326,9 @@ mod tests {
         assert_eq!(deserialized.tvl, original.tvl);
         assert_eq!(deserialized.quote_tokens, original.quote_tokens);
         assert_eq!(deserialized.quote_timeout, original.quote_timeout);
+        assert_eq!(deserialized.origin_address, original.origin_address);
+        assert_eq!(deserialized.origin_target, original.origin_target);
+        assert_eq!(deserialized.origin_source, original.origin_source);
 
         // ws_key should NOT round-trip (skip_serializing + default)
         assert_eq!(deserialized.ws_key, "");
@@ -1217,5 +1354,40 @@ mod tests {
 
         // Credentials should be deserialized from JSON
         assert_eq!(client.ws_key, "provided_key");
+    }
+
+    #[test]
+    fn test_process_bebop_quote_response_aggregate_order_router_mode() {
+        // Captured from a router-mode API account: an aggregate order split across three
+        // makers where the signed order's taker and receiver are the Bebop router (= tx.to).
+        let json = std::fs::read_to_string(
+            "src/rfq/protocols/bebop/test_responses/aggregate_order_router_mode.json",
+        )
+        .unwrap();
+        let quote_response: BebopQuoteResponse = serde_json::from_str(&json).unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from_str("20000000000").unwrap(),
+            token_in: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
+            token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
+            sender: router.clone(),
+            receiver: router,
+        };
+        let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
+        assert_eq!(res.amount_in, BigUint::from_str("20000000000").unwrap());
+        assert_eq!(res.amount_out, BigUint::from_str("52577858553072299423490").unwrap());
+        let bebop_router = Bytes::from_str("0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A").unwrap();
+        assert_eq!(
+            res.quote_attributes
+                .get("tx_to")
+                .unwrap(),
+            &bebop_router
+        );
+        assert_eq!(
+            res.quote_attributes
+                .get("calldata")
+                .unwrap()[..4],
+            ROUTER_SWAP_SELECTOR
+        );
     }
 }

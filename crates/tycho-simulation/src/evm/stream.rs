@@ -146,9 +146,9 @@ const EXCHANGES_REQUIRING_FILTER: [&str; 4] = ["vm:balancer_v2", "fluid_v1", "er
 
 /// The client-side filter applied to exchange `name` when the caller provides none.
 ///
-/// `uniswap_v4_hooks`: without `ANGSTROM_API_KEY`, Angstrom swaps cannot be encoded (encoding
-/// fetches per-block attestations from the Angstrom API), so Angstrom pools are excluded up
-/// front rather than failing every route that selects them at encoding time.
+/// `uniswap_v4_hooks`: without `ANGSTROM_API_KEY`, Angstrom swaps cannot be encoded (they carry
+/// per-block attestations from the Angstrom API), so Angstrom pools are excluded up front rather
+/// than failing every route that selects them at encoding time.
 fn default_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
     if name == "uniswap_v4_hooks" && std::env::var("ANGSTROM_API_KEY").is_err() {
         warn!(

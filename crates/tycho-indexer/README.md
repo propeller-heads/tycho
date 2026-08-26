@@ -8,7 +8,7 @@ The system is divided into two main responsibilities: *Extractors* for incoming 
 
 Currently, on-chain data is pushed into the Tycho system via Substreams. Substreams are specialized data pipelines designed to handle blockchain data. These Substreams send fork-aware messages to the tycho indexer for processing. The extractors consume these messages and propogate the relevant information to the client via websocket subscriptions, and to the database for storage.
 
-[![Logical Architecture Diagram](../assets/logical.drawio.png)](https://drive.google.com/file/d/1mhbARX2ipAh-YUDfm4gPN3Is4sLvyJxM/view?usp=sharing)
+[![Logical Architecture Diagram](../../docs/assets/logical.drawio.png)](https://drive.google.com/file/d/1mhbARX2ipAh-YUDfm4gPN3Is4sLvyJxM/view?usp=sharing)
 
 In future iterations of Tycho we plan to enhance flexibility in data sources, enabling the system to support a broader range of pipelines beyond just Substreams.
 

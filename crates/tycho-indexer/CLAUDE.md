@@ -91,15 +91,24 @@ When no DCI is configured the call is a no-op.
 
 ### Revert handling
 
-On `BlockUndoSignal(target_hash)` from Substreams:
+On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
-1. `ReorgBuffer::purge(target_hash)` removes all buffered blocks after the common ancestor.
-2. A `BlockAggregatedChanges` with `revert = true` is broadcast.
-3. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted state
-   is always on the canonical chain.
+1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
+   match purges strictly after the target; when the hash is absent, a buffered target
+   height purges from that height inclusive (stale copy). A hash miss is fatal when the
+   target is below the buffer, at the buffer's oldest block (no predecessor left to anchor
+   the revert), or above the buffer without a pending partial at exactly that height (the
+   flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
+   fallbacks log a warning and increment `extractor_revert_hash_miss`.
+2. Pending partials are dropped only when above the target height; partials at the target
+   height are the valid prefix of the last valid block and are kept.
+3. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
+   a `BlockAggregatedChanges` with `revert = true` is broadcast.
+4. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
+   state is always on the canonical chain.
 
-`PendingDeltasBuffer` (RPC side) mirrors this: it uses its own `ReorgBuffer` and discards
-non-canonical pending blocks on the same broadcast.
+`PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
+hash-only `purge` on the block named by the broadcast revert message.
 
 ## Persistence
 

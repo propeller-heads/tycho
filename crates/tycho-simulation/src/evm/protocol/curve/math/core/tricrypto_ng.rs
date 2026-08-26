@@ -95,7 +95,42 @@ pub fn cbrt(x: U256) -> U256 {
     }
 }
 
+/// Domain guard ported from the Vyper math contract's `get_y` safety asserts
+/// (`dev: unsafe values D` / `Unsafe values x[i]`):
+/// <https://github.com/curvefi/tricrypto-ng/blob/ecaa8161c240f21dd7c3712eefc5637e1dac742b/contracts/main/CurveCryptoMathOptimized3.vy#L48-L57>
+/// (`_newton_y` re-asserts the balance bounds at L250).
+///
+/// The unchecked arithmetic in the solvers below is only sound inside this domain; the
+/// deployed contract reverts outside it, so quoting returns `None`. Without this guard,
+/// out-of-domain balances (e.g. an absurdly large `dx`) wrap the I256 cubic coefficients
+/// and drive `newton_y_3` into a division by zero.
+///
+/// The A and gamma asserts from the same block are intentionally not ported: pool
+/// parameters come from the deployed contract, which already enforces them at deploy
+/// time, while `D` and the balances are recomputed during simulation and can leave the
+/// domain through caller-supplied amounts.
+fn check_solver_domain(x: &[U256; 3], d: U256, i: usize) -> Option<()> {
+    let p = |exp: u32| -> U256 { U256::from(10u64).pow(U256::from(exp)) };
+    if d < p(17) || d > p(33) {
+        return None;
+    }
+    for (k, x_k) in x.iter().enumerate() {
+        if k == i {
+            continue;
+        }
+        let frac = x_k.checked_mul(WAD)? / d;
+        if frac < p(16) || frac > p(20) {
+            return None;
+        }
+    }
+    Some(())
+}
+
 pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Option<U256> {
+    if j >= 3 {
+        return None;
+    }
+    check_solver_domain(&x, d, j)?;
     let n = U256::from(3u64);
     let mut others: Vec<U256> = x
         .iter()
@@ -158,6 +193,7 @@ pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Op
 }
 
 pub fn get_y_3_ng(ann: U256, gamma: U256, x: [U256; 3], d: U256, i: usize) -> Option<(U256, U256)> {
+    check_solver_domain(&x, d, i)?;
     // These closures convert known small constants from the Vyper Cardano solver into I256.
     // All values are hardcoded literals (max 10^36 << 2^255), so try_from never fails.
     let s = |v: u128| -> I256 { I256::try_from(v).expect("i256 const") };
@@ -320,6 +356,36 @@ mod tests {
         let (y, _k0) = result.expect("converge");
         assert!(y > U256::ZERO);
         assert!(y < d);
+    }
+
+    #[test]
+    fn get_y_3_ng_rejects_out_of_domain_balances() {
+        // Deployed contract reverts with "Unsafe values x[i]" when a balance is far out of
+        // proportion to D; the solver must reject instead of panicking on such inputs.
+        let (ann, gamma, x, d) = realistic_params();
+        let huge = U256::from(10u64).pow(U256::from(47u64));
+        assert!(get_y_3_ng(ann, gamma, [huge, x[1], x[2]], d, 2).is_none());
+    }
+
+    #[test]
+    fn newton_y_3_rejects_out_of_domain_balances() {
+        let (ann, gamma, x, d) = realistic_params();
+        let huge = U256::from(10u64).pow(U256::from(47u64));
+        assert!(newton_y_3(ann, gamma, [huge, x[1], x[2]], d, 2).is_none());
+    }
+
+    #[test]
+    fn solvers_reject_out_of_range_index() {
+        let (ann, gamma, x, d) = realistic_params();
+        assert!(get_y_3_ng(ann, gamma, x, d, 3).is_none());
+        assert!(newton_y_3(ann, gamma, x, d, 3).is_none());
+    }
+
+    #[test]
+    fn get_y_3_ng_rejects_out_of_domain_d() {
+        let (ann, gamma, x, _) = realistic_params();
+        assert!(get_y_3_ng(ann, gamma, x, U256::from(10u64).pow(U256::from(16u64)), 2).is_none());
+        assert!(get_y_3_ng(ann, gamma, x, U256::from(10u64).pow(U256::from(34u64)), 2).is_none());
     }
 
     #[test]

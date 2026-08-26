@@ -1,7 +1,7 @@
 //! # Run
 //!
 //! Run the model using:
-//! ```
+//! ```text
 //! cargo run --release
 //! ```
 //!
@@ -70,6 +70,13 @@
 //!
 //! Sequential swaps and split swaps with more than 2 swaps were not simulated.
 //!
+//! [PropAMMFallback](model::executors::Executor::PropAMMFallback) is the one modeled
+//! [Executor](model::executors::Executor) whose counterparty the caller does not control: the
+//! PropAMMRouter reverts for any venue outside its governance whitelist. The model reverts for a
+//! sender-controlled venue and, for a whitelisted one, pulls the input the router was approved
+//! for. What the venue or the Uniswap V3 retry pays back is not modeled, so every leg on it
+//! measures zero output.
+//!
 //! At the time of the hand over, this project is intended to model
 //! <https://github.com/propeller-heads/tycho-execution/tree/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry>.
 //! Later commits are not yet reflected in the model.
@@ -77,9 +84,9 @@
 //! # Highlevel Overview
 //!
 //! [simulate], the project's most important function, takes [Params](params::Params)
-//! and runs the [model] of TychoRouter V3.
+//! and runs the [model] of TychoRouterV3.
 //!
-//! [model] mostly follows the naming and file structure of the original Solidity TychoRouter.
+//! [model] mostly follows the naming and file structure of the original Solidity TychoRouterV3.
 //!
 //! [Params](params::Params) represents all parameters the execution depends on,
 //! like whether to call `singleSwap` or `sequentialSwap`, each swap's

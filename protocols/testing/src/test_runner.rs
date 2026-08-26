@@ -10,18 +10,13 @@ use alloy::{
     primitives::{Address, U256},
     rpc::types::Block,
 };
-use figment::{
-    providers::{Format, Yaml},
-    Figment,
-};
 use futures::StreamExt;
 use itertools::Itertools;
-use miette::{miette, IntoDiagnostic, WrapErr};
+use miette::{ensure, miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 use postgres::NoTls;
-use regex::Regex;
 use serde_json::json;
 use tokio::runtime::Runtime;
 use tracing::{debug, error, info, warn};
@@ -65,17 +60,51 @@ use crate::{
     state_registry::register_protocol,
     tycho_rpc::TychoClient,
     tycho_runner::TychoRunner,
-    utils::build_spkg,
+    utils::{build_spkg, extract_initial_block},
 };
 
 static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
+        ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
+        ("base-balancer-v3", "ethereum-balancer-v3"),
+        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
+        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("unichain-curve", "ethereum-curve"),
     ])
 });
+
+/// Largest relative difference tolerated between the simulated and the executed amount out.
+const MAX_EXECUTION_SLIPPAGE: f64 = 0.005;
+
+/// Reports whether an executed amount out matches the simulated one, i.e. whether the difference
+/// between them stays within [`MAX_EXECUTION_SLIPPAGE`] of the executed amount.
+///
+/// Returns the reason for the mismatch otherwise. A zero executed amount never matches, since no
+/// relative difference can be expressed against it.
+fn check_execution_slippage(
+    expected_amount_out: &BigUint,
+    amount_out: &BigUint,
+) -> Result<(), String> {
+    if amount_out.is_zero() {
+        return Err("execution returned no output".to_string());
+    }
+
+    let diff = BigInt::from(expected_amount_out.clone()) - BigInt::from(amount_out.clone());
+    let slippage = BigRational::new(diff.abs(), BigInt::from(amount_out.clone()));
+
+    // A slippage that cannot be evaluated counts as out of tolerance.
+    if slippage
+        .to_f64()
+        .is_none_or(|slippage| slippage > MAX_EXECUTION_SLIPPAGE)
+    {
+        Err(format!("amounts differ by more than {}%", MAX_EXECUTION_SLIPPAGE * 100.0))
+    } else {
+        Ok(())
+    }
+}
 
 pub enum TestType {
     Full(TestTypeFull),
@@ -88,6 +117,21 @@ pub struct TestTypeFull {
 
 pub struct TestTypeRange {
     pub match_test: Option<String>,
+}
+
+pub struct RunnerConfig {
+    pub test_type: TestType,
+    /// Directory holding `substreams/` and `adapter-integration/evm/`.
+    pub root_path: PathBuf,
+    pub chain: Chain,
+    pub protocol: String,
+    pub db_url: String,
+    pub rpc_url: String,
+    pub tycho_server_port: u16,
+    pub vm_simulation_traces: bool,
+    pub reuse_last_sync: bool,
+    /// Skip compiling the Substreams WASM binaries and pack the ones already present.
+    pub prebuilt_wasm: bool,
 }
 
 pub struct TestRunner {
@@ -103,21 +147,24 @@ pub struct TestRunner {
     rpc_provider: RPCProvider,
     protocol_components: Arc<RwLock<HashMap<String, ProtocolComponentModel>>>,
     reuse_last_sync: bool,
+    prebuilt_wasm: bool,
 }
 
 impl TestRunner {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        test_type: TestType,
-        root_path: PathBuf,
-        chain: Chain,
-        protocol: String,
-        db_url: String,
-        rpc_url: String,
-        tycho_server_port: u16,
-        vm_simulation_traces: bool,
-        reuse_last_sync: bool,
-    ) -> miette::Result<Self> {
+    pub fn new(config: RunnerConfig) -> miette::Result<Self> {
+        let RunnerConfig {
+            test_type,
+            root_path,
+            chain,
+            protocol,
+            db_url,
+            rpc_url,
+            tycho_server_port,
+            vm_simulation_traces,
+            reuse_last_sync,
+            prebuilt_wasm,
+        } = config;
+
         let base_protocol = CLONE_TO_BASE_PROTOCOL
             .get(protocol.as_str())
             .unwrap_or(&protocol.as_str())
@@ -153,6 +200,7 @@ impl TestRunner {
             runtime,
             rpc_provider,
             reuse_last_sync,
+            prebuilt_wasm,
             protocol_components: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -202,13 +250,12 @@ impl TestRunner {
 
     fn parse_config(config_yaml_path: &PathBuf) -> miette::Result<IntegrationTestsConfig> {
         info!("Parsing config YAML at {}", config_yaml_path.display());
-        let yaml = Yaml::file(config_yaml_path);
-        let figment = Figment::new().merge(yaml);
-        let config = figment
-            .extract::<IntegrationTestsConfig>()
+        let file = std::fs::File::open(config_yaml_path)
             .into_diagnostic()
-            .wrap_err("Failed to load test configuration:")?;
-        Ok(config)
+            .wrap_err_with(|| format!("Failed to open {}", config_yaml_path.display()))?;
+        serde_yaml::from_reader(file)
+            .into_diagnostic()
+            .wrap_err("Failed to load test configuration:")
     }
 
     async fn run_full_test(
@@ -220,18 +267,24 @@ impl TestRunner {
         let start_block = match test_type.initial_block {
             Some(b) => b,
             None => {
-                let content = std::fs::read_to_string(substreams_yaml_path).into_diagnostic()?;
-                let re = Regex::new(r"initialBlock:\s*(\d+)").unwrap();
-                re.captures(&content)
-                    .and_then(|cap| cap.get(1))
-                    .and_then(|m| m.as_str().parse::<u64>().ok())
-                    .ok_or_else(|| {
-                        miette!("Failed to extract initialBlock from substreams.yaml. Please specify it explicitly.")
-                    })?
+                let yaml = std::fs::read_to_string(substreams_yaml_path)
+                    .into_diagnostic()
+                    .wrap_err_with(|| {
+                        format!("Failed to read {}", substreams_yaml_path.display())
+                    })?;
+                extract_initial_block(&yaml).wrap_err_with(|| {
+                    format!(
+                        "Failed to determine the initial block from {}",
+                        substreams_yaml_path.display()
+                    )
+                })?
             }
         };
+        // Only an explicit override rewrites the manifest — a start block derived from the manifest
+        // is where the package already starts.
         let spkg_path =
-            build_spkg(substreams_yaml_path, start_block).wrap_err("Failed to build spkg")?;
+            build_spkg(substreams_yaml_path, test_type.initial_block, self.prebuilt_wasm)
+                .wrap_err("Failed to build spkg")?;
         let initialized_accounts = config
             .initialized_accounts
             .clone()
@@ -505,8 +558,9 @@ impl TestRunner {
             if self.reuse_last_sync {
                 info!("Skipping indexing and using existent DB")
             } else {
-                let spkg_path = build_spkg(substreams_yaml_path, test.start_block)
-                    .wrap_err("Failed to build spkg")?;
+                let spkg_path =
+                    build_spkg(substreams_yaml_path, Some(test.start_block), self.prebuilt_wasm)
+                        .wrap_err("Failed to build spkg")?;
 
                 tycho_runner
                     .run_tycho(
@@ -587,7 +641,9 @@ impl TestRunner {
             .collect();
 
         // Step 1: Validate that all expected components are present on Tycho after indexing
-        self.validate_state(&test.expected_components, protocol_components)?;
+        self.validate_state(&test.expected_components, protocol_components.clone())?;
+
+        self.validate_excluded_components(&test.excluded_components, &protocol_components)?;
 
         // Step 2: Validate Token Balances
         match config.skip_balance_check {
@@ -1015,6 +1071,33 @@ impl TestRunner {
         Ok(())
     }
 
+    fn validate_excluded_components(
+        &self,
+        excluded_components: &[String],
+        protocol_components: &[ProtocolComponent],
+    ) -> miette::Result<()> {
+        if excluded_components.is_empty() {
+            return Ok(());
+        }
+
+        let indexed_ids: HashSet<String> = protocol_components
+            .iter()
+            .map(|c| c.id.to_lowercase())
+            .collect();
+
+        for excluded_id in excluded_components {
+            let excluded = excluded_id.to_lowercase();
+            if indexed_ids.contains(&excluded) {
+                return Err(miette!(
+                    "Component {excluded_id} was indexed but is listed in excluded_components"
+                ));
+            }
+            info!("Component {excluded_id} correctly absent from Tycho output");
+        }
+
+        Ok(())
+    }
+
     /// Runs simulations for all protocol components and swap directions.
     ///
     /// This method performs comprehensive simulation testing on protocol components by:
@@ -1162,6 +1245,7 @@ impl TestRunner {
                         chain_model,
                         Some(executors_json.to_string()),
                         amount_out_result.gas.clone(),
+                        amount_out_result.amount.clone(),
                     )?;
 
                     // Create unique simulation ID
@@ -1298,10 +1382,10 @@ impl TestRunner {
         let mut failure_count = 0;
 
         for (simulation_id, expected_input) in &filtered_execution_data {
-            match results.get(simulation_id) {
+            let success = match results.get(simulation_id) {
                 Some(TychoExecutionResult::Success { amount_out, .. }) => {
                     info!(
-                        "[{}] Execution passed: {} {} -> {} {}",
+                        "[{}] Execution returned: {} {} -> {} {}",
                         expected_input.component_id,
                         expected_input.solution.amount_in(),
                         expected_input.token_in,
@@ -1309,50 +1393,54 @@ impl TestRunner {
                         expected_input.token_out
                     );
 
-                    // Compare execution amount out with simulation amount out
-                    let diff = BigInt::from(
-                        expected_input
-                            .expected_amount_out
-                            .clone(),
-                    ) - BigInt::from(amount_out.clone());
-                    let slippage: BigRational =
-                        BigRational::new(diff.abs(), BigInt::from(amount_out.clone()));
-
-                    if slippage.to_f64() > Some(0.005) {
-                        failure_count += 1;
-                        error!(
-                            "[{}] Execution amount and simulation amount differ more than 0.05% for {}: simulation={}, execution={}",
-                            expected_input.component_id, simulation_id, expected_input.expected_amount_out, amount_out
-                        );
-                    } else {
-                        success_count += 1;
+                    match check_execution_slippage(&expected_input.expected_amount_out, amount_out)
+                    {
+                        Ok(()) => true,
+                        Err(reason) => {
+                            error!(
+                                "[{}] Execution does not match simulation for {}: {} (simulation={}, execution={})",
+                                expected_input.component_id, simulation_id, reason, expected_input.expected_amount_out, amount_out
+                            );
+                            false
+                        }
                     }
                 }
                 Some(TychoExecutionResult::Revert { reason, .. }) => {
-                    failure_count += 1;
                     error!(
                         "[{}] Execution reverted for {}: {}",
                         expected_input.component_id, simulation_id, reason
                     );
+                    false
                 }
                 Some(TychoExecutionResult::Failed { error_msg }) => {
-                    failure_count += 1;
                     error!(
                         "[{}] Execution failed for {}: {}",
                         expected_input.component_id, simulation_id, error_msg
                     );
+                    false
                 }
                 None => {
-                    failure_count += 1;
                     error!(
                         "[{}] No result found for simulation {}",
                         expected_input.component_id, simulation_id
                     );
+                    false
                 }
+            };
+
+            if success {
+                success_count += 1;
+            } else {
+                failure_count += 1;
             }
         }
 
         info!("Batch execution complete: {} successes, {} failures", success_count, failure_count);
+
+        ensure!(
+            failure_count.is_zero(),
+            "Execution validation failed: {success_count} successes, {failure_count} failures"
+        );
 
         Ok(())
     }
@@ -1453,6 +1541,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn execution_within_slippage_tolerance_matches() {
+        let executed = BigUint::from(1000u32);
+
+        assert!(check_execution_slippage(&BigUint::from(1000u32), &executed).is_ok());
+        // 5/1000 is exactly MAX_EXECUTION_SLIPPAGE, in either direction.
+        assert!(check_execution_slippage(&BigUint::from(1005u32), &executed).is_ok());
+        assert!(check_execution_slippage(&BigUint::from(995u32), &executed).is_ok());
+    }
+
+    #[test]
+    fn execution_beyond_slippage_tolerance_does_not_match() {
+        let executed = BigUint::from(1000u32);
+
+        assert!(check_execution_slippage(&BigUint::from(1006u32), &executed).is_err());
+        assert!(check_execution_slippage(&BigUint::from(994u32), &executed).is_err());
+    }
+
+    #[test]
+    fn zero_output_execution_does_not_match() {
+        let reason = check_execution_slippage(&BigUint::from(1000u32), &BigUint::zero())
+            .expect_err("a zero output must never match");
+        assert!(reason.contains("no output"), "unexpected reason: {reason}");
+
+        // Simulating zero as well does not turn a swap that returned nothing into a match.
+        assert!(check_execution_slippage(&BigUint::zero(), &BigUint::zero()).is_err());
+    }
+
+    #[test]
     fn test_parse_all_configs() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let curr_dir = PathBuf::from(manifest_dir);
@@ -1502,17 +1618,18 @@ mod tests {
         dotenv().ok();
         let rpc_url = env::var("RPC_URL").unwrap();
         let current_dir = std::env::current_dir().unwrap();
-        TestRunner::new(
-            TestType::Range(TestTypeRange { match_test: None }),
-            current_dir,
-            Chain::Ethereum,
-            "test-protocol".to_string(),
-            "".to_string(),
+        TestRunner::new(RunnerConfig {
+            test_type: TestType::Range(TestTypeRange { match_test: None }),
+            root_path: current_dir,
+            chain: Chain::Ethereum,
+            protocol: "test-protocol".to_string(),
+            db_url: "".to_string(),
             rpc_url,
-            4242,
-            false,
-            false,
-        )
+            tycho_server_port: 4242,
+            vm_simulation_traces: false,
+            reuse_last_sync: false,
+            prebuilt_wasm: false,
+        })
         .unwrap()
     }
     #[test]

@@ -73,6 +73,12 @@ pub trait SwapValidator {
     }
 }
 
+/// Validates whether a single swap represents a valid solution.
+#[derive(Clone)]
+pub struct SingleSwapValidator;
+
+impl SwapValidator for SingleSwapValidator {}
+
 /// Validates whether a sequence of split swaps represents a valid solution.
 #[derive(Clone)]
 pub struct SplitSwapValidator;

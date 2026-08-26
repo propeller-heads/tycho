@@ -36,9 +36,18 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
     let token_in = params.request("token_in", Address::VARIANTS_EXCEPT_ZERO)?;
     let token_out = params.request("token_out", Address::VARIANTS_EXCEPT_ZERO)?;
 
-    // assumption: all swap methods revert if `min_amount_out = 0`.
+    // assumption: all swap methods revert if `expected_amount_out = 0`.
     // no need to simulate it.
-    let min_amount_out = params.request("min_amount_out", [1, 10000])?;
+    let expected_amount_out = params.request("expected_amount_out", [1, 10000])?;
+    // assumption: all swap methods revert if `min_amount_out` is 0, above
+    // `expected_amount_out`, or below the slippage floor (mirrors
+    // `_validate_amounts`). no need to simulate it. The floor (clamped to 1,
+    // matching the explicit zero check) is the loosest valid guardrail,
+    // `expected_amount_out` the tightest.
+    let slippage_floor = (expected_amount_out * (BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS) /
+        BPS_DENOMINATOR)
+        .max(1);
+    let min_amount_out = params.request("min_amount_out", [slippage_floor, expected_amount_out])?;
     // assumption: all swap methods revert if `receiver = address(0)`.
     // no need to simulate it.
     let receiver = params.request("receiver", Address::VARIANTS_EXCEPT_ZERO)?;
@@ -89,6 +98,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 receiver,
             )?;
@@ -102,6 +112,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 receiver,
             )?;
@@ -115,6 +126,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 receiver,
             )?;
@@ -128,6 +140,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 receiver,
             )?;
@@ -141,6 +154,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 receiver,
             )?;
@@ -154,6 +168,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 receiver,
             )?;
@@ -167,6 +182,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 params.request("n_tokens", [1, 2])?,
                 receiver,
@@ -181,6 +197,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 params.request("n_tokens", [1, 2])?,
                 receiver,
@@ -195,6 +212,7 @@ pub fn simulate(params: &Params) -> Result<(State, Vault, impl Log + use<> + Ser
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 params.request("n_tokens", [1, 2])?,
                 receiver,

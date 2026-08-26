@@ -93,11 +93,15 @@ services:
     command: [ "/opt/tycho-indexer/tycho-indexer", "--endpoint", "${SUBSTREAMS_ENDPOINT:-https://mainnet.eth.streamingfast.io:443}", "index", "--chains", "${CHAINS:-ethereum}", "--retention-horizon", "${RETENTION_HORIZON:-2000-01-01T00:00:00}" ]
 
   # Self-hosted Firehose + Substreams stack backed by an EVM JSON-RPC node.
-  # NOTE: This is a single-machine deployment — all components run in one container.
-  # It is suitable for development and testing but not for production workloads that
-  # require high availability. For a distributed, fault-tolerant setup see:
-  # https://firehose.streamingfast.io/firehose/overview/deployment-and-scaling
   # Opt-in: docker compose --profile substreams-endpoint up
+  # Limitations (see docs/for-solvers/self-hosted-evm-chain.md#limitations):
+  # - Base blocks: the RPC poller sees no storage changes or internal calls — only
+  #   logs-only packages work; VM/hybrid packages and DCI panic. Extended blocks
+  #   need a Firehose-instrumented node.
+  # - Finality: the poller reports LIB as head - 200, not the chain's finalized tag.
+  # - Single machine, single RPC endpoint: no HA, no failover.
+  # Suits development and testing; for production consider a distributed topology:
+  # https://firehose.streamingfast.io/firehose/overview/distributed-deployment
   # Reuses RPC_URL from the tycho-indexer service.
   # Optional: START_BLOCK (default: 0), CHAIN_NAME (default: mainnet)
   substreams-endpoint:
@@ -120,7 +124,7 @@ services:
       - "10015:10015" # Firehose gRPC
       - "10016:10016" # Substreams Tier1 gRPC
     # The poller (protocol v3) pipes blocks into reader-node-stdin.
-    # poll-rpc-blocks emits protocol v2 and is incompatible with this fireeth build.
+    # poll-rpc-blocks in the pinned image (f8e2132) emits protocol v2, incompatible with this build.
     # RESUME auto-detects the highest stored one-block file so restarts skip already-fetched blocks.
     entrypoint: /bin/sh
     command:

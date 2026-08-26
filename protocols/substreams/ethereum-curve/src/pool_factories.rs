@@ -15,31 +15,6 @@ use tycho_substreams::{
 
 use substreams::scalar::BigInt;
 
-/// This trait defines some helpers for serializing and deserializing `Vec<BigInt>` which is needed
-///  to be able to encode some of the `Attribute`s. This should also be handled by any downstream
-///  application.
-#[allow(dead_code)]
-trait SerializableVecBigInt {
-    fn serialize_bytes(&self) -> Vec<u8>;
-    fn deserialize_bytes(bytes: &[u8]) -> Vec<BigInt>;
-}
-
-impl SerializableVecBigInt for Vec<BigInt> {
-    fn serialize_bytes(&self) -> Vec<u8> {
-        self.iter()
-            .flat_map(|big_int| big_int.to_signed_bytes_be())
-            .collect()
-    }
-    fn deserialize_bytes(bytes: &[u8]) -> Vec<BigInt> {
-        bytes
-            .as_chunks::<32>()
-            .0
-            .iter()
-            .map(|chunk| BigInt::from_signed_bytes_be(chunk))
-            .collect::<Vec<BigInt>>()
-    }
-}
-
 /// Converts address bytes into a Vec<u8> containing a leading `0x`.
 fn address_to_bytes_with_0x(address: &[u8; 20]) -> Vec<u8> {
     address_to_string_with_0x(address).into_bytes()

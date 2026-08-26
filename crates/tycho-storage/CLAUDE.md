@@ -13,6 +13,7 @@ postgres/
 ├── chain.rs            — block & transaction persistence
 ├── contract.rs         — account, code, storage slot, and native-balance persistence
 ├── protocol.rs         — protocol component, attribute, and token-balance persistence
+├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
 ├── versioning.rs       — VersionedRow / StoredVersionedRow traits + apply_versioning()
@@ -35,6 +36,11 @@ Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain lo
 
 `versioning` is the only module without a DB table of its own; it provides the shared traits
 and `apply_versioning()` utility consumed by `contract` and `protocol`.
+
+`token_cache` holds an in-memory copy of the token tables so `get_tokens` never touches SQL.
+Opt-in via `GatewayBuilder::enable_token_cache()` (the `index` and `rpc` commands enable it;
+the token-analysis job does not). Kept fresh by write-through on token/balance writes plus a
+periodic `modified_ts` delta poll for out-of-process writers. See the module docs for design.
 
 ## Write Order
 

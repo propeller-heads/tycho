@@ -70,6 +70,7 @@ fn test_uniswap_v3_uniswap_v2() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("25650453").unwrap(),
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     );
 
@@ -155,6 +156,7 @@ fn test_uniswap_v3_uniswap_v3() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("25650453").unwrap(),
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     );
 
@@ -249,6 +251,7 @@ fn test_uniswap_v3_curve() {
         usdt,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("25650453").unwrap(),
         vec![swap_weth_wbtc, swap_wbtc_usdt],
     );
 
@@ -318,6 +321,7 @@ fn test_balancer_v2_uniswap_v2() {
         usdc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("25650453").unwrap(),
         vec![swap_weth_wbtc, swap_wbtc_usdc],
     );
 
@@ -463,6 +467,7 @@ fn test_evm_multi_protocol() {
         eth.clone(),
         BigUint::from_str("1500_000000000000000000").unwrap(),
         BigUint::from_str("732214216964381330").unwrap(),
+        BigUint::from_str("717569932625093703").unwrap(),
         vec![
             usv2_swap_dai_weth,
             balancer_swap_weth_wbtc,
@@ -543,6 +548,7 @@ fn test_uniswap_v3_balancer_v3() {
         qnt,
         BigUint::from_str("1_0000000000000000").unwrap(),
         BigUint::from_str("26173932").unwrap(),
+        BigUint::from_str("25650453").unwrap(),
         vec![swap_weth_wbtc, swap_wbtc_qnt],
     );
 

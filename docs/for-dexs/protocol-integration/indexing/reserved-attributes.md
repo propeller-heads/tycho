@@ -50,6 +50,28 @@ Attribute {
 }
 ```
 
+### 3. **`is_exclusive`**
+
+#### Description
+
+Marks a component that gates swaps behind off-chain authorization. Fynd uses this attribute to keep such pools out of public routing.
+
+Presence of the attribute is the signal: consumers should test whether the key exists rather than parse its value. Do not set it on non-exclusive components.
+
+#### Type
+
+Set to `[1u8]` to mark the component as exclusive.
+
+#### Example Usage
+
+```rust
+Attribute {
+    name: "is_exclusive".to_string(),
+    value: vec![1u8],
+    change: ChangeType::Creation.into(),
+}
+```
+
 ##
 
 ## State Attributes

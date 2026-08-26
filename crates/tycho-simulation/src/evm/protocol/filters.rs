@@ -4,7 +4,10 @@ use tracing::{debug, info};
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::Bytes;
 
-pub use crate::evm::protocol::ekubo_v3::filter_fn as ekubo_v3_extension_filter;
+pub use crate::evm::protocol::ekubo_v3::{
+    filter_fn as ekubo_v3_extension_filter,
+    filter_fn_with_signed_exclusive_swap as ekubo_v3_extension_filter_with_signed_exclusive_swap,
+};
 
 /// Filters out pools that DCI currently fails to find some accounts for
 pub fn balancer_v2_pool_filter(component: &ComponentWithState) -> bool {
@@ -130,6 +133,24 @@ pub fn curve_filter(component: &ComponentWithState) -> bool {
             component.component.id
         );
         return false;
+    }
+    true
+}
+
+/// Filters out Killed LiquidityParty pools
+///
+/// The Substreams module sets a `killed` dynamic attribute (`0x01`) and this
+/// filter removes such components from the stream.
+/// Attempting a swap on a killed pool will revert.
+pub fn liquidityparty_killed_pools_filter(component: &ComponentWithState) -> bool {
+    if let Some(killed) = component.state.attributes.get("killed") {
+        if killed.to_vec() == [1u8] {
+            debug!(
+                "Filtering out LiquidityParty pool {} because it is killed",
+                component.component.id
+            );
+            return false;
+        }
     }
     true
 }

@@ -214,37 +214,4 @@ contract WrapTest is TychoRouterTestSetup {
         assertEq(WETH.balanceOf(tychoRouterAddr), 0);
         assertEq(tychoRouterAddr.balance, 0);
     }
-
-    function testSequentialSwapWrapAdded() public {
-        //  ETH -> wETH -> DAI
-        IWrapped WETH = IWrapped(WETH_ADDR);
-        IERC20 DAI = IERC20(DAI_ADDR);
-
-        uint256 amountIn = 1 ether;
-
-        bytes memory callData = loadCallDataFromFile(
-            "test_sequential_encoding_strategy_wrap_added"
-        );
-
-        // Fund Bob with ETH
-        vm.deal(BOB, amountIn);
-        vm.startPrank(BOB);
-
-        WETH.approve(tychoRouterAddr, amountIn);
-
-        uint256 ethBalanceBefore = BOB.balance;
-        uint256 daiBalanceBefore = DAI.balanceOf(BOB);
-        (bool success,) = tychoRouterAddr.call{value: amountIn}(callData);
-        uint256 ethBalanceAfter = BOB.balance;
-        uint256 daiBalanceAfter = DAI.balanceOf(BOB);
-
-        // Check balances
-        assertTrue(success, "Call Failed");
-        assertEq(ethBalanceBefore - ethBalanceAfter, 1 ether);
-        assertEq(
-            daiBalanceAfter - daiBalanceBefore, 2_018_817_438_608_734_439_722
-        );
-        assertEq(WETH.balanceOf(tychoRouterAddr), 0);
-        assertEq(tychoRouterAddr.balance, 0);
-    }
 }

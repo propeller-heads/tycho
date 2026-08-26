@@ -2,6 +2,7 @@
   "ethereum": {
     "uniswap_v2": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
     "sushiswap_v2": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+    "ring_swap_v2": "0x796f2974e3C1af763252512dd6d521E9E984726C",
     "pancakeswap_v2": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
     "uniswap_v3": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",
     "pancakeswap_v3": "0x5991A2dF15A8F6A256D3Ec51E99254Cd3fb576A9",
@@ -21,7 +22,9 @@
     "etherfi": "0xDB25A7b768311dE128BBDa7B8426c3f9C74f3240",
     "rfq:liquorice": "0x3381cD18e2Fb4dB236BF0525938AB6E43Db0440f",
     "vm:fermiswap": "0xe8dc788818033232EF9772CB2e6622F1Ec8bc840",
-    "vm:bopamm": "0x27cc01A4676C73fe8b6d0933Ac991BfF1D77C4da"
+    "vm:bopamm": "0x27cc01A4676C73fe8b6d0933Ac991BfF1D77C4da",
+    "pricelevelstream": "0x92a6649Fdcc044DA968d94202465578a9371C7b1",
+    "propammfallback": "0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d"
   },
   "base": {
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",

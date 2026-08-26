@@ -8,11 +8,12 @@ use std::{collections::HashMap, sync::LazyLock};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tycho_test::execution::models::RouterOverwritesData;
-pub const ROUTER_BYTECODE_JSON: &str = include_str!("../fixtures/TychoRouter.runtime.json");
+pub const ROUTER_BYTECODE_JSON: &str = include_str!("../fixtures/TychoRouterV3.runtime.json");
 const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculator.runtime.json");
 
 // Include all executor bytecode files at compile time
 const UNISWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV2.runtime.json");
+const RING_SWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2.runtime.json");
 const UNISWAP_V3_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV3.runtime.json");
 const UNISWAP_V4_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV4.runtime.json");
 const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
@@ -31,6 +32,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     let mut map = HashMap::new();
     map.insert("uniswap_v2", UNISWAP_V2_BYTECODE_JSON);
     map.insert("sushiswap", UNISWAP_V2_BYTECODE_JSON);
+    map.insert("ring_swap_v2", RING_SWAP_V2_BYTECODE_JSON);
     map.insert("pancakeswap_v2", UNISWAP_V2_BYTECODE_JSON);
     map.insert("uniswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("pancakeswap_v3", UNISWAP_V3_BYTECODE_JSON);

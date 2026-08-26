@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.9
+
+- Update `tycho-substreams` from `0.8.0` to `0.8.1`. Contract changes carrying only
+  token balance updates are no longer dropped by `TransactionChangesBuilder` (#1056).
+- Remove the dead `SerializableVecBigInt` trait. Its `as_chunks` call required
+  Rust 1.88+, breaking builds with the package's pinned 1.83.0 toolchain.
+
 ## v0.3.8
 
 - Update `tycho-substreams` from git rev `655fae7` (2025-09-05, pre-0.6.0) to `0.8.0`.

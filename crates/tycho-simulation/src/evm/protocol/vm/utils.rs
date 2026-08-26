@@ -1,18 +1,25 @@
-use std::{collections::HashMap, env, str::FromStr};
+use std::{collections::HashMap, env, fmt::Debug, str::FromStr};
 
 use alloy::{
-    primitives::{Address, Bytes, U256},
+    primitives::{Address, Bytes, Keccak256, U256},
     providers::{Provider, ProviderBuilder},
     sol_types::SolValue,
     transports::{RpcError, TransportErrorKind},
 };
 use hex::FromHex;
 use num_bigint::BigInt;
-use revm::state::Bytecode;
+use revm::{
+    state::{AccountInfo, Bytecode},
+    DatabaseRef,
+};
 use serde_json::Value;
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::{simulation::SimulationEngineError, ContractCompiler, SlotId};
+use crate::evm::{
+    engine_db::engine_db_interface::EngineDatabaseInterface,
+    simulation::{SimulationEngine, SimulationEngineError, SimulationParameters},
+    ContractCompiler, SlotId,
+};
 
 pub(crate) fn coerce_error(
     err: &SimulationEngineError,
@@ -423,6 +430,121 @@ pub fn json_deserialize_be_bigint_list(input: &[u8]) -> Result<Vec<BigInt>, Simu
     } else {
         Err(SimulationError::FatalError("Input is not a JSON array".into()))
     }
+}
+
+/// Load the pool's stateless/implementation contracts (the `stateless_contract_addr_{i}` state
+/// attributes) into the engine's DB so getter calls on proxy pools resolve their delegatecall
+/// targets. Curve pools are commonly EIP-1167 proxies whose implementation code is not part of the
+/// indexed pool storage; without this, getters delegatecall into empty code and revert.
+///
+/// Addresses may be static (`0x…`) or dynamic (`call:0x<factory>:method()`), and code is fetched
+/// via RPC unless provided inline as `stateless_contract_code_{i}`. The engine shares its DB with
+/// `SHARED_TYCHO_DB`, so accounts loaded here persist for later `delta_transition` rebuilds.
+pub(crate) async fn load_stateless_contracts<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    attributes: &HashMap<String, tycho_common::Bytes>,
+) -> Result<(), SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let mut index = 0;
+    while let Some(encoded) = attributes.get(&format!("stateless_contract_addr_{index}")) {
+        let address = String::from_utf8(encoded.to_vec()).map_err(|e| {
+            SimulationError::FatalError(format!("stateless contract address is not UTF-8: {e}"))
+        })?;
+        let inline_code = attributes
+            .get(&format!("stateless_contract_code_{index}"))
+            .map(|value| value.to_vec());
+        index += 1;
+
+        let (account, code) = match inline_code {
+            Some(bytecode) => (address, Bytecode::new_raw(bytecode.into())),
+            None => {
+                let resolved = if address.starts_with("call") {
+                    resolve_call_address(engine, &address)?
+                } else {
+                    address
+                };
+                let code = get_code_for_contract(&resolved, None).await?;
+                (resolved, code)
+            }
+        };
+        let account: Address = account.parse().map_err(|_| {
+            SimulationError::FatalError(format!(
+                "stateless contract has an invalid address {account}"
+            ))
+        })?;
+        engine
+            .state
+            .init_account(
+                account,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash: code.hash_slow(),
+                    code: Some(code),
+                },
+                None,
+                false,
+            )
+            .map_err(|e| {
+                SimulationError::FatalError(format!(
+                    "stateless contract init_account failed: {e:?}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+/// Resolve a dynamic `call:0x<address>:method()` directive to a concrete implementation address by
+/// simulating the parameterless `method()` view and decoding its returned address.
+pub(crate) fn resolve_call_address<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    directive: &str,
+) -> Result<String, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let method = directive
+        .split(':')
+        .next_back()
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!("malformed stateless call directive {directive}"))
+        })?;
+    let to: Address = directive
+        .split(':')
+        .nth(1)
+        .ok_or_else(|| {
+            SimulationError::FatalError(format!(
+                "stateless call directive is missing its target {directive}"
+            ))
+        })?
+        .parse()
+        .map_err(|_| {
+            SimulationError::FatalError(format!(
+                "stateless call directive has an invalid target {directive}"
+            ))
+        })?;
+    let mut hasher = Keccak256::new();
+    hasher.update(method.as_bytes());
+    let selector = hasher.finalize()[..4].to_vec();
+    let res = engine
+        .simulate(&SimulationParameters {
+            caller: Address::ZERO,
+            to,
+            data: selector,
+            value: U256::ZERO,
+            overrides: None,
+            gas_limit: None,
+            transient_storage: None,
+            block_overrides: None,
+        })
+        .map_err(|e| SimulationError::FatalError(format!("stateless call failed: {e}")))?;
+    let address = Address::abi_decode(res.result.as_ref())
+        .map_err(|e| SimulationError::FatalError(format!("stateless call decode failed: {e}")))?;
+    Ok(address.to_string())
 }
 
 #[cfg(test)]
