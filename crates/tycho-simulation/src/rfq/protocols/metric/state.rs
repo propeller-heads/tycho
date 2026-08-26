@@ -520,6 +520,7 @@ mod tests {
             total_token0_available: Some(big("10000000000000000000")),
             total_token1_available: Some(big("30000000000")),
             server_ts: 100,
+            price_provider_status: Some("healthy".to_string()),
             depth: MetricDepth::default(),
         };
         let client = MetricClient::new(

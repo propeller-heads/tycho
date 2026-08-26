@@ -440,6 +440,7 @@ mod tests {
             total_token0_available: Some(big("1000000000000000000")),
             total_token1_available: Some(big("3000000000")),
             server_ts: 1_770_053_095,
+            price_provider_status: Some("healthy".to_string()),
             depth: MetricDepth::default(),
         }
     }

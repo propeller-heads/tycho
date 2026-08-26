@@ -75,6 +75,9 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for MetricState {
             total_token0_available: Some(read_biguint_attr(&attrs, "total_token0_available")?),
             total_token1_available: Some(read_biguint_attr(&attrs, "total_token1_available")?),
             server_ts: read_u64_attr(&attrs, "server_ts")?,
+            // Component attributes do not carry the provider status: only healthy pools are
+            // emitted, and is_quotable treats a missing status as "decide structurally".
+            price_provider_status: None,
             depth: read_optional_depth_attr(&attrs, "depth")?,
         };
 

@@ -98,6 +98,11 @@ pub struct MetricBidAskResponse {
     /// Server Unix timestamp (seconds) when the quote was produced.
     #[serde(rename = "serverTs")]
     pub server_ts: u64,
+    /// Price-provider health for this quote: `healthy`, `feed_down` (no valid price right now),
+    /// or `internal_error`. `None` when the field is absent (older responses, or states rebuilt
+    /// from component attributes).
+    #[serde(rename = "priceProviderStatus", default)]
+    pub price_provider_status: Option<String>,
     #[serde(default)]
     pub depth: MetricDepth,
 }
@@ -147,11 +152,20 @@ impl MetricBidAskResponse {
             .ok_or_else(|| RFQError::ParsingError("totalToken1Available is null".to_string()))
     }
 
-    /// Whether the pool can currently be quoted. The API has no `quoteAvailable` flag, so
-    /// availability is inferred from both non-null availability figures and a non-empty order
-    /// book. Pools with empty depth (e.g. `bidAdj=0` / `askAdj` sentinel and no bins) are treated
-    /// as not quotable, since depth-based pricing has no bins to walk.
+    /// Whether the pool can currently be quoted.
+    ///
+    /// The API's own `priceProviderStatus` is the primary gate: anything other than `healthy`
+    /// (e.g. `feed_down`, `internal_error`) is not quotable. When the field is absent the
+    /// structural checks below decide alone; they are always applied as defence in depth:
+    /// both availability figures must be non-null and the order book non-empty. Pools with empty
+    /// depth (e.g. `bidAdj=0` / `askAdj` sentinel and no bins) are treated as not quotable, since
+    /// depth-based pricing has no bins to walk.
     pub fn is_quotable(&self) -> bool {
+        if let Some(status) = self.price_provider_status.as_deref() {
+            if status != "healthy" {
+                return false;
+            }
+        }
         self.total_token0_available.is_some() &&
             self.total_token1_available.is_some() &&
             !(self.depth.bids.is_empty() && self.depth.asks.is_empty())
@@ -248,6 +262,42 @@ mod tests {
 
         assert!(response.depth.bids.is_empty() && response.depth.asks.is_empty());
         assert!(!response.is_quotable());
+    }
+
+    #[test]
+    fn test_bid_ask_unhealthy_provider_status_is_not_quotable() {
+        // Structurally complete quote, but the API reports the price provider as down: the
+        // explicit status must veto quotability regardless of the structural checks.
+        let quotable = serde_json::json!({
+            "bidAdj": "55340232221128654848000",
+            "askAdj": "55524699661865750400000",
+            "totalToken0Available": "1000000000000000000",
+            "totalToken1Available": "3000000000",
+            "serverTs": 1_787_710_476u64,
+            "depth": {
+                "asks": [{
+                    "binIdx": 0,
+                    "price": "57184906628499610009600",
+                    "cumulativeVolume": "1000000000000000000",
+                    "cumulativeInputVolume": "3100000000"
+                }],
+                "bids": []
+            }
+        });
+
+        for (status, expected) in
+            [("healthy", true), ("feed_down", false), ("internal_error", false)]
+        {
+            let mut payload = quotable.clone();
+            payload["priceProviderStatus"] = serde_json::json!(status);
+            let response: MetricBidAskResponse = serde_json::from_value(payload).unwrap();
+            assert_eq!(response.is_quotable(), expected, "status {status}");
+        }
+
+        // Absent status (older responses, attribute round-trips): structural checks decide.
+        let response: MetricBidAskResponse = serde_json::from_value(quotable).unwrap();
+        assert_eq!(response.price_provider_status, None);
+        assert!(response.is_quotable());
     }
 
     #[test]
