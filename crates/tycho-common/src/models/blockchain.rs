@@ -150,6 +150,38 @@ impl TxInput {
     }
 }
 
+/// The in-flight block a delta generation runs against.
+#[derive(Debug, Clone, Default)]
+pub struct PendingBlock {
+    block: Block,
+    txs: Vec<TxInput>,
+    accounts: HashMap<Address, AccountDelta>,
+}
+
+impl PendingBlock {
+    pub fn new(block: Block, txs: Vec<TxInput>, accounts: HashMap<Address, AccountDelta>) -> Self {
+        Self { block, txs, accounts }
+    }
+
+    /// The block being assembled, as the caller stamped it. Its number and timestamp are the
+    /// clock the transactions execute under; deriving either from the confirmed parent instead
+    /// misprices any protocol whose state depends on elapsed time.
+    pub fn block(&self) -> &Block {
+        &self.block
+    }
+
+    /// Transactions in execution order.
+    pub fn txs(&self) -> &[TxInput] {
+        &self.txs
+    }
+
+    /// Post-execution account state for the accounts the transactions touched.
+    /// Empty for protocols whose state is fully described by logs.
+    pub fn accounts(&self) -> &HashMap<Address, AccountDelta> {
+        &self.accounts
+    }
+}
+
 pub struct BlockTransactionDeltas<T> {
     pub extractor: String,
     pub chain: Chain,
