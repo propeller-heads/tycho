@@ -97,13 +97,21 @@ where
         // db, the db is simply a reference wrapper. To avoid lifetimes leaking we don't let the evm
         // struct outlive this scope.
 
-        // We protect the state from being consumed.
-        let overrides = params
-            .overrides
-            .clone()
-            .unwrap_or_default();
-
-        let db_ref = OverriddenSimulationDB { inner_db: &self.state, overrides: &overrides };
+        // Borrowed, not cloned: an override map can hold every storage slot a pending block
+        // touched, and this runs once per pool.
+        let no_storage_overrides = HashMap::new();
+        let no_balance_overrides = HashMap::new();
+        let db_ref = OverriddenSimulationDB {
+            inner_db: &self.state,
+            overrides: params
+                .overrides
+                .as_ref()
+                .unwrap_or(&no_storage_overrides),
+            native_balance_overrides: params
+                .native_balance_overrides
+                .as_ref()
+                .unwrap_or(&no_balance_overrides),
+        };
 
         let tx_env = TxEnv {
             caller: params.caller,
@@ -399,6 +407,8 @@ pub struct SimulationParameters {
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     /// Per-call block context overrides.
     pub block_overrides: Option<BlockEnvOverrides>,
+    /// Native balance overrides. Same per-call scoping as `overrides`.
+    pub native_balance_overrides: Option<HashMap<Address, U256>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
