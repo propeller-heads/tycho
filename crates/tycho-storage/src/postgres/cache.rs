@@ -1650,7 +1650,17 @@ mod test_serial_db {
                 .get()
                 .await
                 .expect("Failed to get a connection from the pool");
-            db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            // `from_connection` builds the native-token cache and panics without this row.
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
             let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
             let (tx, rx) = mpsc::channel(10);
 
