@@ -30,3 +30,10 @@ similar          = "2.7.0"
 termsize         = "0.1.9"
 itertools        = { workspace = true }
 tempfile         = "3.8.1"
+
+[dev-dependencies]
+tycho-indexer    = { workspace = true }
+tycho-protobuf   = { workspace = true }
+prost            = "0.11"
+reqwest          = { workspace = true }
+tokio-stream     = { workspace = true }
