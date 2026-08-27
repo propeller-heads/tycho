@@ -417,6 +417,17 @@ pub struct BlockEnvOverrides {
     pub timestamp: Option<u64>,
 }
 
+/// State a view call runs against, overriding what the engine's database holds.
+///
+/// Built once per pending block and reused across every pool priced against it. `Default`
+/// overrides nothing, so a call reads the engine's confirmed state.
+#[derive(Debug, Clone, Default)]
+pub struct PendingOverrides {
+    pub storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+    pub native_balances: Option<HashMap<Address, U256>>,
+    pub block: Option<BlockEnvOverrides>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, str::FromStr, time::Instant};

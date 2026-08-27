@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 
 use alloy::{core::sol, dyn_abi::SolType, primitives::U256, sol_types::SolCall};
 use revm::DatabaseRef;
@@ -10,7 +10,7 @@ use tycho_common::{
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
     protocol::fluid::FluidV1,
-    simulation::{BlockEnvOverrides, SimulationEngine, SimulationParameters},
+    simulation::{PendingOverrides, SimulationEngine, SimulationParameters},
 };
 
 sol! {
@@ -93,15 +93,6 @@ where
     ))
 }
 
-/// State the resolver call runs against, overriding what the engine's database holds.
-/// `Default` overrides nothing and reads confirmed state.
-#[derive(Debug, Clone, Default)]
-pub struct ResolverOverrides {
-    pub storage: Option<HashMap<alloy::primitives::Address, HashMap<U256, U256>>>,
-    pub native_balances: Option<HashMap<alloy::primitives::Address, U256>>,
-    pub block: Option<BlockEnvOverrides>,
-}
-
 /// Calls the reserves resolver for `pool` and returns the raw ABI-encoded return bytes.
 ///
 /// Takes `overrides` by reference so one override set can be built once and reused across
@@ -110,7 +101,7 @@ pub fn call_resolver<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &Address,
     resolver_address: &Address,
     engine: &SimulationEngine<D>,
-    overrides: &ResolverOverrides,
+    overrides: &PendingOverrides,
 ) -> Result<Vec<u8>, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
@@ -149,7 +140,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let bytes = call_resolver(pool, resolver_address, engine, &ResolverOverrides::default())?;
+    let bytes = call_resolver(pool, resolver_address, engine, &PendingOverrides::default())?;
     let sync_time = engine
         .state
         .get_current_block()
@@ -379,8 +370,8 @@ mod test {
             simulation_db::SimulationDB,
             utils::{get_client, get_runtime},
         },
-        protocol::fluid::vm::{call_resolver, decode_from_vm, decode_reserves, ResolverOverrides},
-        simulation::{BlockEnvOverrides, SimulationEngine},
+        protocol::fluid::vm::{call_resolver, decode_from_vm, decode_reserves},
+        simulation::{BlockEnvOverrides, PendingOverrides, SimulationEngine},
     };
 
     #[test]
@@ -473,13 +464,13 @@ mod test {
         let pool = Bytes::from("0x0B1a513ee24972DAEf112bC777a5610d4325C9e7");
         let pending_balance = U256::from(4_200_000_000_000_000_000u64);
 
-        let confirmed = call_resolver(&pool, &resolver, &engine, &ResolverOverrides::default())
+        let confirmed = call_resolver(&pool, &resolver, &engine, &PendingOverrides::default())
             .expect("resolver call failed");
         let pending = call_resolver(
             &pool,
             &resolver,
             &engine,
-            &ResolverOverrides {
+            &PendingOverrides {
                 native_balances: Some(HashMap::from([(resolver_address, pending_balance)])),
                 ..Default::default()
             },
@@ -503,7 +494,7 @@ mod test {
         let resolver = Bytes::from("0xC93876C0EEd99645DD53937b25433e311881A27C");
         let resolver_address = alloy::primitives::Address::from_slice(resolver.as_ref());
         let pool = Bytes::from("0x0B1a513ee24972DAEf112bC777a5610d4325C9e7");
-        let overrides = ResolverOverrides {
+        let overrides = PendingOverrides {
             block: Some(BlockEnvOverrides {
                 number: Some(23_526_115),
                 timestamp: Some(1_759_842_947),
@@ -548,7 +539,7 @@ mod test {
             &pool,
             &resolver,
             &opcode_reporting_engine(resolver_address, NUMBER),
-            &ResolverOverrides::default(),
+            &PendingOverrides::default(),
         )
         .expect("resolver call failed");
 
