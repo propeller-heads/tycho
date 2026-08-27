@@ -12,7 +12,8 @@ use alloy::{
     sol_types::SolCall,
 };
 use revm::{state::AccountInfo, DatabaseRef};
-use tycho_common::simulation::errors::SimulationError;
+use serde::{Deserialize, Serialize};
+use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
@@ -79,7 +80,7 @@ const STORED_RATES_SELECTOR: [u8; 4] = [0xfd, 0x06, 0x84, 0xb1];
 /// Holds only what is read from the chain. A pool's variant and coin decimals are static, so a
 /// consumer that already knows them (e.g. `CurveState`) can rebuild the pool from these readings
 /// alone.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurvePoolReadings {
     pub balances: Vec<U256>,
     pub amp: U256,
@@ -94,6 +95,25 @@ pub struct CurvePoolReadings {
     pub dynamic_rates: Option<Vec<Option<U256>>>,
     pub precisions: Option<Vec<U256>>,
     pub eth_variant: Option<bool>,
+}
+
+/// State-delta attribute carrying a pool's [`CurvePoolReadings`] for a pending block.
+///
+/// A pending block's state is not in the indexed VM storage, so an indexer that has already read
+/// the pool under that block's overrides passes the readings through this attribute instead.
+pub const POOL_STATE_ADJUSTED: &str = "pool_state_adjusted";
+
+/// Encode `readings` for the [`POOL_STATE_ADJUSTED`] attribute.
+pub fn encode_readings(readings: &CurvePoolReadings) -> Result<Bytes, SimulationError> {
+    serde_json::to_vec(readings)
+        .map(Bytes::from)
+        .map_err(|e| SimulationError::FatalError(format!("curve readings encode failed: {e}")))
+}
+
+/// Decode the bytes of a [`POOL_STATE_ADJUSTED`] attribute.
+pub fn decode_readings(bytes: &[u8]) -> Result<CurvePoolReadings, SimulationError> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| SimulationError::FatalError(format!("curve readings decode failed: {e}")))
 }
 
 /// Read Curve pool state for `variant` from the engine and build the matching [`Pool`].
@@ -631,6 +651,37 @@ mod test {
         .expect("on-chain get_dy failed");
 
         assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy");
+    }
+
+    /// Readings must survive the attribute encoding unchanged; a lossy field would silently
+    /// misprice the pool that decodes them.
+    #[test]
+    fn readings_roundtrip_through_the_attribute_encoding() {
+        let u = |s: &str| s.parse::<U256>().unwrap();
+        let readings = CurvePoolReadings {
+            balances: vec![u("2466241139205"), u("4200057336")],
+            amp: u("1707629"),
+            fee: Some(u("4000000")),
+            mid_fee: Some(u("3000000")),
+            out_fee: Some(u("30000000")),
+            fee_gamma: Some(u("500000000000000")),
+            offpeg_fee_multiplier: Some(u("20000000000")),
+            price_scale: Some(vec![u("59372627314351316239076")]),
+            d: Some(u("7457948167729606869978625")),
+            gamma: Some(u("11809167828997")),
+            dynamic_rates: Some(vec![Some(u("1000000000000000000")), None]),
+            precisions: Some(vec![u("1"), u("1000000000000")]),
+            eth_variant: Some(true),
+        };
+
+        let encoded = encode_readings(&readings).expect("encode failed");
+
+        assert_eq!(decode_readings(&encoded).expect("decode failed"), readings);
+    }
+
+    #[test]
+    fn decoding_malformed_readings_fails() {
+        assert!(decode_readings(b"not json").is_err());
     }
 
     /// Pure check (no RPC): assemble `RawPoolState` from on-chain getter values for the
