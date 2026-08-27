@@ -1,0 +1,49 @@
+[package]
+name = "curve-core"
+version = "0.1.0"
+edition = "2021"
+description = "Native Curve pending-block indexing logic"
+
+[dependencies]
+tycho-common.workspace = true
+tycho-simulation.workspace = true
+alloy = { workspace = true, features = ["sol-types"] }
+# Needed only for the `DatabaseRef` bounds `SimulationEngine` carries; keep in step with
+# tycho-simulation's version.
+revm = { version = "29.0.1", features = ["alloydb", "serde", "optional_eip3607"] }
+anyhow.workspace = true
+chrono.workspace = true
+hex.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# Substreams streaming client for the parity test's ground truth. Optional because it links
+# libpq through the indexer's storage layer, which `cargo test --lib` should not need.
+tycho-indexer = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the substreams parity integration test. Linking it needs Postgres client libraries.
+parity-test = ["tycho-indexer"]
+
+[dev-dependencies]
+tokio.workspace = true
+tokio-stream.workspace = true
+# Archive RPC calls (eth_getLogs, eth_getBlockByNumber, eth_getBalance).
+alloy = { workspace = true, features = [
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    "sol-types",
+    "contract",
+    "network",
+] }
+tycho-client.workspace = true
+dotenv.workspace = true
+prost = "0.13"
+rstest.workspace = true
+
+[[test]]
+name = "integration"
+required-features = ["parity-test"]

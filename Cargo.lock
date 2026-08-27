@@ -3307,6 +3307,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "curve-core"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "chrono",
+ "dotenv",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "prost 0.13.5",
+ "revm",
+ "rstest 0.24.0",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tycho-client",
+ "tycho-common",
+ "tycho-indexer",
+ "tycho-simulation",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
