@@ -436,10 +436,7 @@ impl PostgresGateway {
         }
         .instrument(debug_span!("resolve_tx_ids"))
         .await?;
-        // Resolved per distinct type name, not once for the whole batch. A protocol may emit more
-        // than one component type — Pendle creates a market and its SY wrapper in the same
-        // transaction — and taking `new[0]`'s type for all of them silently stamps every component
-        // in the batch with whichever happened to be first.
+
         let mut pt_ids: HashMap<&str, i64> = HashMap::new();
         for pc in new {
             if pt_ids.contains_key(pc.protocol_type_name.as_str()) {
