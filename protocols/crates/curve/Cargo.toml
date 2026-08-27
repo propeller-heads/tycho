@@ -40,9 +40,9 @@ alloy = { workspace = true, features = [
     "network",
 ] }
 tycho-client.workspace = true
+tycho-protobuf.workspace = true
 dotenv.workspace = true
-prost = "0.13"
-rstest.workspace = true
+prost = "0.11"
 
 [[test]]
 name = "integration"

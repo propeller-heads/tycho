@@ -3317,9 +3317,8 @@ dependencies = [
  "hex",
  "num-bigint",
  "num-traits",
- "prost 0.13.5",
+ "prost 0.11.9",
  "revm",
- "rstest 0.24.0",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -3327,6 +3326,7 @@ dependencies = [
  "tycho-client",
  "tycho-common",
  "tycho-indexer",
+ "tycho-protobuf",
  "tycho-simulation",
 ]
 

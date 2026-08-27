@@ -24,7 +24,7 @@ use tycho_simulation::evm::{
     engine_db::{
         engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB, SHARED_TYCHO_DB,
     },
-    protocol::curve::{encode_readings, read_pool_readings, POOL_STATE_ADJUSTED},
+    protocol::curve::{encode_readings, read_pool_readings, CurveVariant, POOL_STATE_ADJUSTED},
     simulation::SimulationEngine,
 };
 
@@ -85,6 +85,25 @@ where
     /// Number of pools the processor tracks.
     pub fn tracked_pools(&self) -> usize {
         self.registry.len()
+    }
+
+    /// The math variant resolved for a tracked component, if it is tracked.
+    ///
+    /// Which getters a pool exposes follows from its variant, so a caller re-reading the same
+    /// pool needs the variant the processor settled on.
+    pub fn pool_variant(&self, component_id: &str) -> Option<CurveVariant> {
+        self.registry
+            .get(component_id)
+            .map(|pool| pool.variant)
+    }
+
+    /// The engine the pool getters read confirmed state from.
+    ///
+    /// Exposed for callers that own the database and decide which block it sits at. With the
+    /// shared engine that block is maintained by the stream decoder, so production wiring never
+    /// needs this.
+    pub fn engine_mut(&mut self) -> &mut SimulationEngine<D> {
+        &mut self.engine
     }
 }
 
