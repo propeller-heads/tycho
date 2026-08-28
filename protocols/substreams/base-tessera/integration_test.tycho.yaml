@@ -8,6 +8,10 @@ adapter_contract: "TesseraSwapAdapter"
 adapter_build_signature: "constructor(address,address,address)"
 adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e,0x505352DA2918C6a06f12F3d59FFb79905d43439f,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
+# Balances are validated: the range is self-consistent (the NVDAc book is created and seeded
+# inside it) and the treasury never idles.
+skip_balance_check: false
+
 # The stable venue contracts and the code-only satellites were all deployed before this test's
 # range, so the substreams only emit their storage updates here, never their account creations.
 # Bootstrap them from RPC so slot updates have something to attach to and the quote path has
