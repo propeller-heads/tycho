@@ -240,6 +240,15 @@ An independent review of the Phase 2–4 diff found and the package now fixes:
 
 ## 10. Open questions (not blocking Phase 2)
 
+- **Pre-rotation balance drift (~+2.3–2.5%)**: the rotation-range live run shows the accumulated
+  balances entering block 37,737,344 exceeded the old treasury's true (zero) balance by
+  +3,444,538 USDC-wei (~$3.44) and +0.00093 WETH — i.e. a small fraction of the old epoch's
+  *outflows* was missed by the Transfer-delta tracking, proportional to flow. The rotation
+  re-seed is delta-based, so the drift persists additively. Mechanism unidentified (all known
+  transfer paths emit logs); reconcile the accumulated balances against `balanceOf(treasury)` at
+  head after a full-range sync, and use the NVDAc-range harness balance check (in-range
+  self-consistent) to separate seed semantics from event-tracking misses.
+
 - Identity of `0x7034c5c7…` (one slot written per swap — nonce/accounting?). Tracked regardless.
 - Engine slot5 (`2e9`) and store slots 5–7 config semantics (VM executes them; labels only).
 - Engine token→store mapping hash preimage (nice for cross-checks; discovery does not need it).
