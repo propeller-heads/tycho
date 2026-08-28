@@ -8,18 +8,30 @@ adapter_contract: "TesseraSwapAdapter"
 adapter_build_signature: "constructor(address,address,address)"
 adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e,0x505352DA2918C6a06f12F3d59FFb79905d43439f,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
+# The stable venue contracts and the code-only satellites were all deployed before this test's
+# range, so the substreams only emit their storage updates here, never their account creations.
+# Bootstrap them from RPC so slot updates have something to attach to and the quote path has
+# code to run. (The NVDAc book's own price store is created inside the range.)
+initialized_accounts:
+  - "0x55555522005BcAE1c2424D474BfD5ed477749E3e" # TesseraSwap (entrypoint)
+  - "0x31e99e05fee3dce580af777c3fd63ee1b3b40c17" # engine
+  - "0x6d9dd143e42b6338f4f6a7c0c26d124658f641cb" # store impl (gen 3)
+  - "0x9f924c0765815851d9f4982c7030e2189a7828a9" # pricing lib (tail books, incl. NVDAc)
+  - "0xfdb7fa3f95e47624b7423b48462564107aa4e684" # pricing lib (WETH/cbBTC books)
+  - "0x7034c5c74f66d3337777772c2964db31765db23e" # write-path contract
+  - "0x505352DA2918C6a06f12F3d59FFb79905d43439f" # pair-list helper (adapter getPoolIds/getTokens)
+
 tests:
   - name: test_nvdac_book_discovery_and_simulation
-    # Covers the NVDAc/USDC book creation at block 50,526,653: the owner Safe
-    # calls the engine (tx 0x3447f2ec…a5cb), which internally CREATEs the
-    # book's price store; the store's init writes (EIP-1967 impl slot + base
-    # token slot 48 + quote slot 49) plus the engine's mapping write are the
-    # discovery signal. Prices post into the store every block, so simulation
-    # at the stop block is fresh (the venue's freshness gate keys on the age
-    # of the last post relative to block.number, and simulation runs with the
-    # indexed block's environment).
+    # Covers the NVDAc/USDC book lifecycle: creation at block 50,526,653 (the owner Safe calls
+    # the engine — tx 0x3447f2ec…a5cb — which internally CREATEs the book's price store; the
+    # store's init writes of the EIP-1967 impl slot + base/quote token slots plus the engine's
+    # mapping write are the discovery signal), the pricing-lib assignment at 50,527,583, and
+    # the first price post at 50,528,239. The stop block sits just after the first post so the
+    # book quotes at simulation time — Tessera's freshness gate zeroes quotes when the last
+    # post is older than ~20 blocks, and posts only begin ~26 minutes after creation.
     start_block: 50526640
-    stop_block: 50526700
+    stop_block: 50528260
     expected_components:
       - id: "0x55555522005bcae1c2424d474bfd5ed477749e3e00000078ee7ce2fe4908108c"
         tokens:

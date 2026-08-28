@@ -212,11 +212,41 @@ revert `T33` — **venue not configured/live on BSC** (2026-08-28). Re-check bef
    creations from the impl-deployer EOA `0x3b9e5466…` as candidate contracts; (b) runbook — on
    impl-slot change alert, add the address to params and re-sync. Decide in Phase 2.
 
+## 9.5 Adversarial-review findings (2026-08-28, addressed in-package)
+
+An independent review of the Phase 2–4 diff found and the package now fixes:
+
+1. **Components must not reference not-yet-deployed contracts** (sync-breaking): the storage
+   layer resolves every `contracts` entry against known accounts and fails the flush on a miss.
+   Components now carry only `[TesseraSwap, engine, own store]`; the code-only satellites are
+   delivered as plain account changes via the tracked predicate (production syncs from
+   initialBlock, so their creations are witnessed) and via `initialized_accounts` in the
+   integration-test yaml.
+2. **Seed-skip granularity** (balance drift): snapshot suppression of event deltas is per
+   `(token, component)` — a new book's USDC seed no longer swallows same-block USDC deltas on
+   the other books.
+3. **Rotation-block accounting**: event deltas in a rotation block are matched against the
+   *old* custodian and the re-seed is `balanceOf(new) − balanceOf(old)` at end-of-block —
+   exact even when inventory migrates within the rotation block. (Verified live: the 37,737,344
+   rotation had zero in-block flows — the old treasury was drained in earlier blocks.)
+4. **Store re-deploy resilience**: `all_books` dedupes by component id so a store re-deploy for
+   an existing base token cannot double the USDC fan-out (which would panic the balance store on
+   duplicate ordinals).
+5. **Pricing-lib alert**: writes to the store's lib slot (51) now emit a `book_lib` attribute
+   (like `engine` / `store_impl`) so a new lib generation missing from `tracked` params alerts
+   instead of silently breaking that book.
+6. Balance deltas sort by `(tx index, ordinal)` so one transaction's deltas stay contiguous for
+   the downstream aggregation; `store_treasury` uses the padded word decoder.
+
 ## 10. Open questions (not blocking Phase 2)
 
 - Identity of `0x7034c5c7…` (one slot written per swap — nonce/accounting?). Tracked regardless.
 - Engine slot5 (`2e9`) and store slots 5–7 config semantics (VM executes them; labels only).
 - Engine token→store mapping hash preimage (nice for cross-checks; discovery does not need it).
 - Exact decay-curve shape between blocks 5–8 and the precise dead cutoff (19 vs 20).
+- A store re-deploy for an existing base token would re-emit the component creation (same id,
+  new `price_store` attribute) — behavior of the extractor on a duplicate creation is untested;
+  the balance path is now safe (dedupe), monitoring would see the `store_impl`/`book_lib`
+  attributes move.
 - Whether the two per-book pricing libs (`0xfdb7…`, `0x9f924c…`) are generations or book-class
   variants (majors vs tail) — watch which lib new books get.

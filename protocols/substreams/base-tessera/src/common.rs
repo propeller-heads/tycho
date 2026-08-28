@@ -80,13 +80,19 @@ pub fn all_book_stores(books_store: &StoreGetString) -> Vec<Vec<u8>> {
 }
 
 /// All known book components, resolved through the books list and the components store.
+///
+/// Deduplicated by component id: a store re-deploy for an existing base token appends a second
+/// store address that resolves to the same component (the id is keyed by token, not by store),
+/// and duplicated ids would double every fanned-out balance delta.
 pub fn all_books(
     components_store: &StoreGetProto<ProtocolComponent>,
     books_store: &StoreGetString,
 ) -> Vec<ProtocolComponent> {
+    let mut seen = std::collections::HashSet::new();
     all_book_stores(books_store)
         .iter()
         .filter_map(|addr| components_store.get_last(store_key(addr)))
+        .filter(|c| seen.insert(c.id.clone()))
         .collect()
 }
 

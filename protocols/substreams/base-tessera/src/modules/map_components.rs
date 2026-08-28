@@ -109,9 +109,14 @@ fn discover(
             // bookkeeping instead of delegating to an implementation another VM protocol
             // indexed for the same token.
             let self_contained = json_serialize_address_list(&tokens);
-            let mut contracts =
+            // Only contracts that exist on-chain at creation time may be referenced here: the
+            // storage layer resolves every entry against known accounts and fails the flush on
+            // a miss. The code-only satellites (store impl generations, pricing libs, the
+            // write-path contract) are deployed at unrelated blocks, so they are delivered as
+            // plain account changes through the tracked-contract predicate instead (and via
+            // `initialized_accounts` bootstrap for ranges that start after their deployment).
+            let contracts =
                 vec![config.tesseraswap.clone(), config.engine.clone(), store_addr.clone()];
-            contracts.extend(config.tracked_addresses());
             components.push(
                 ProtocolComponent::new(&component_id(&config.tesseraswap, &base_token))
                     .with_tokens(&tokens)
@@ -143,7 +148,7 @@ mod tests {
                           &engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17\
                           &usdc=833589fcd6edb6e08f4c7c32d4f71b54bda02913\
                           &tracked=\
-                          &treasury_slot=1&book_token_slot=48&book_quote_slot=49";
+                          &treasury_slot=1&book_token_slot=48&book_quote_slot=49&book_lib_slot=51";
     const ENGINE: [u8; 20] = hex!("31e99e05fee3dce580af777c3fd63ee1b3b40c17");
     // The NVDAc book creation (Base block 50,526,653) as ground truth.
     const STORE: [u8; 20] = hex!("ede940cdf2a9c5620cbf97e45947594723e29c14");

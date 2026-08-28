@@ -193,13 +193,16 @@ fn extract_treasury_changes(
     }
 }
 
-/// Surfaces the two admin mutations that can silently break simulation, as attributes for
+/// Surfaces the admin mutations that can silently break simulation, as attributes for
 /// monitoring to alert on (the runbook then adds the new address to `params` and re-releases
 /// the spkg — see HANDOVER §9.3):
 ///
 /// * an engine hot-swap (TesseraSwap `slot0` write) → `engine` attribute on every book;
 /// * a store implementation upgrade (EIP-1967 slot write on a tracked store) → `store_impl`
-///   attribute on that store's book.
+///   attribute on that store's book;
+/// * a pricing-lib (re)assignment (store lib-slot write) → `book_lib` attribute on that store's
+///   book — a lib generation not in the `tracked` params would otherwise break that book with no
+///   signal.
 fn extract_admin_mutations(
     block: &eth::v2::Block,
     config: &DeploymentConfig,
@@ -208,6 +211,7 @@ fn extract_admin_mutations(
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
     let engine_slot = slot_key(ENGINE_SLOT);
+    let lib_slot = slot_key(config.book_lib_slot);
     let mut books: Option<Vec<String>> = None;
     for tx in block.transactions() {
         for call in tx
@@ -246,27 +250,55 @@ fn extract_admin_mutations(
                 } else if change.key == EIP1967_IMPL_SLOT.as_slice() && !is_zero(&change.old_value)
                 {
                     // old_value == 0 is store init, already covered by component creation.
-                    let Some(component) = components_store.get_last(store_key(&change.address))
-                    else {
-                        continue;
-                    };
-                    let transaction: Transaction = tx.into();
-                    let builder = transaction_changes
-                        .entry(transaction.index)
-                        .or_insert_with(|| TransactionChangesBuilder::new(&transaction));
-                    builder.add_entity_change(&EntityChanges {
-                        component_id: component.id.clone(),
-                        attributes: vec![Attribute {
-                            name: "store_impl".to_string(),
-                            value: address_from_word(&change.new_value),
-                            change: ChangeType::Update.into(),
-                        }],
-                    });
-                    builder.mark_component_as_updated(&component.id);
+                    emit_store_attribute(
+                        "store_impl",
+                        change,
+                        tx,
+                        components_store,
+                        transaction_changes,
+                    );
+                } else if change.key == lib_slot && !is_zero(&change.new_value) {
+                    // Includes the post-creation first assignment: the lib is not part of the
+                    // component's static attributes, so every write is surfaced.
+                    emit_store_attribute(
+                        "book_lib",
+                        change,
+                        tx,
+                        components_store,
+                        transaction_changes,
+                    );
                 }
             }
         }
     }
+}
+
+/// Emits a monitoring attribute (an address-valued update) on the book owning the store the
+/// storage change belongs to, and marks the book for re-simulation. No-op for addresses that
+/// are not a known book store.
+fn emit_store_attribute(
+    name: &str,
+    change: &eth::v2::StorageChange,
+    tx: &eth::v2::TransactionTrace,
+    components_store: &StoreGetProto<ProtocolComponent>,
+    transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
+) {
+    let Some(component) = components_store.get_last(store_key(&change.address)) else {
+        return;
+    };
+    let transaction: Transaction = tx.into();
+    let builder = transaction_changes
+        .entry(transaction.index)
+        .or_insert_with(|| TransactionChangesBuilder::new(&transaction));
+    builder.add_entity_change(&EntityChanges {
+        component_id: component.id.clone(),
+        attributes: vec![Attribute {
+            name: name.to_string(),
+            value: address_from_word(&change.new_value),
+            change: ChangeType::Update.into(),
+        }],
+    });
+    builder.mark_component_as_updated(&component.id);
 }
 
 /// Marks books for re-simulation from tracked-contract changes: a change to a shared contract

@@ -27,6 +27,9 @@ pub struct DeploymentConfig {
     pub book_token_slot: u64,
     /// Store slot holding the packed `decimals ‖ quote token`.
     pub book_quote_slot: u64,
+    /// Store slot holding the book's pricing-lib address (written after creation; a write is
+    /// surfaced as a monitoring attribute — a new lib generation needs a params update).
+    pub book_lib_slot: u64,
 }
 
 impl DeploymentConfig {
@@ -54,13 +57,15 @@ mod tests {
              &tracked=f3be571a3a73201033b43bec1d1a566d45f590956d9dd143e42b6338f4f6a7c0c26d124658f641cb\
              &treasury_slot=1\
              &book_token_slot=48\
-             &book_quote_slot=49",
+             &book_quote_slot=49\
+             &book_lib_slot=51",
         )
         .unwrap();
         assert_eq!(config.tesseraswap.len(), 20);
         assert_eq!(config.engine.len(), 20);
         assert_eq!(config.treasury_slot, 1);
         assert_eq!(config.book_token_slot, 48);
+        assert_eq!(config.book_lib_slot, 51);
         let tracked = config.tracked_addresses();
         assert_eq!(tracked.len(), 2);
         assert_eq!(hex::encode(&tracked[0]), "f3be571a3a73201033b43bec1d1a566d45f59095");
@@ -76,7 +81,8 @@ mod tests {
              &tracked=\
              &treasury_slot=1\
              &book_token_slot=48\
-             &book_quote_slot=49",
+             &book_quote_slot=49\
+             &book_lib_slot=51",
         )
         .unwrap();
         assert!(config.tracked_addresses().is_empty());

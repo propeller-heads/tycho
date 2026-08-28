@@ -2,7 +2,7 @@ use substreams::store::{StoreNew, StoreSet, StoreSetString};
 use substreams_ethereum::pb::eth;
 
 use crate::{
-    common::{is_zero, slot_key},
+    common::{address_from_word, is_zero, slot_key},
     config::DeploymentConfig,
 };
 
@@ -27,9 +27,8 @@ pub fn store_treasury(params: String, block: eth::v2::Block, store: StoreSetStri
                     change.key == treasury_slot &&
                     !is_zero(&change.new_value)
                 {
-                    if let Some(treasury) = change.new_value.get(12..32) {
-                        store.set(change.ordinal, "treasury", &hex::encode(treasury));
-                    }
+                    let treasury = address_from_word(&change.new_value);
+                    store.set(change.ordinal, "treasury", &hex::encode(treasury));
                 }
             }
         }

@@ -26,7 +26,7 @@ network: base
 # contract) — they are deployed top-level by rotating EOAs and cannot be discovered at creation
 # time; a new generation is appended here and the spkg re-released (HANDOVER §9.3).
 params:
-  map_components: &config "tesseraswap=55555522005bcae1c2424d474bfd5ed477749e3e&engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17&usdc=833589fcd6edb6e08f4c7c32d4f71b54bda02913&tracked=f3be571a3a73201033b43bec1d1a566d45f5909510182fdad9f530332eb0ccd28edefc83a23b2c426d9dd143e42b6338f4f6a7c0c26d124658f641cbfdb7fa3f95e47624b7423b48462564107aa4e6849f924c0765815851d9f4982c7030e2189a7828a97034c5c74f66d3337777772c2964db31765db23e&treasury_slot=1&book_token_slot=48&book_quote_slot=49"
+  map_components: &config "tesseraswap=55555522005bcae1c2424d474bfd5ed477749e3e&engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17&usdc=833589fcd6edb6e08f4c7c32d4f71b54bda02913&tracked=f3be571a3a73201033b43bec1d1a566d45f5909510182fdad9f530332eb0ccd28edefc83a23b2c426d9dd143e42b6338f4f6a7c0c26d124658f641cbfdb7fa3f95e47624b7423b48462564107aa4e6849f924c0765815851d9f4982c7030e2189a7828a97034c5c74f66d3337777772c2964db31765db23e&treasury_slot=1&book_token_slot=48&book_quote_slot=49&book_lib_slot=51"
   store_treasury: *config
   map_relative_balances: *config
   map_protocol_changes: *config
