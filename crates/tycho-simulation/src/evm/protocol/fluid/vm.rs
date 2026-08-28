@@ -83,6 +83,7 @@ where
         gas_limit: None,
         transient_storage: None,
         block_overrides: None,
+        gas_price: None,
     };
 
     let res = vm

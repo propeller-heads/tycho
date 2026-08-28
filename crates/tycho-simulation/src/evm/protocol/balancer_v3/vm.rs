@@ -758,6 +758,7 @@ fn params(to: AlloyAddress, data: Vec<u8>) -> SimulationParameters {
         gas_limit: None,
         transient_storage: None,
         block_overrides: None,
+        gas_price: None,
     }
 }
 
