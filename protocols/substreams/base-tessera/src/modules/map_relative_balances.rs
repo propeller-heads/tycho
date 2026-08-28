@@ -273,6 +273,12 @@ fn event_delta(log: &eth::v2::Log, treasury: &[u8]) -> Option<BigInt> {
     if let Some(erc20::events::Transfer { from, to, value }) =
         erc20::events::Transfer::match_and_decode(log)
     {
+        // A self-transfer nets zero; counting its inflow branch alone drifts the balance
+        // upward (observed on Base: the venue's first test swap self-transferred 3,444,538
+        // USDC-wei inside the treasury, block 37,519,381).
+        if from == to {
+            return None;
+        }
         if to == treasury {
             return Some(value);
         }
@@ -387,6 +393,13 @@ mod tests {
     #[test]
     fn transfer_not_touching_treasury_is_ignored() {
         assert_eq!(event_delta(&transfer_log(&other(), &other(), 50), &treasury()), None);
+    }
+
+    #[test]
+    fn self_transfer_nets_zero() {
+        // Transfer(from=treasury, to=treasury) moves nothing; crediting the inflow branch
+        // alone would drift the accumulated balance upward.
+        assert_eq!(event_delta(&transfer_log(&treasury(), &treasury(), 50), &treasury()), None);
     }
 
     #[test]

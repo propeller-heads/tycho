@@ -240,14 +240,16 @@ An independent review of the Phase 2–4 diff found and the package now fixes:
 
 ## 10. Open questions (not blocking Phase 2)
 
-- **Pre-rotation balance drift (~+2.3–2.5%)**: the rotation-range live run shows the accumulated
-  balances entering block 37,737,344 exceeded the old treasury's true (zero) balance by
-  +3,444,538 USDC-wei (~$3.44) and +0.00093 WETH — i.e. a small fraction of the old epoch's
-  *outflows* was missed by the Transfer-delta tracking, proportional to flow. The rotation
-  re-seed is delta-based, so the drift persists additively. Mechanism unidentified (all known
-  transfer paths emit logs); reconcile the accumulated balances against `balanceOf(treasury)` at
-  head after a full-range sync, and use the NVDAc-range harness balance check (in-range
-  self-consistent) to separate seed semantics from event-tracking misses.
+- ~~Pre-rotation balance drift~~ **RESOLVED (2026-08-28)**: the drift was a **self-transfer
+  double-count** — the venue's first test swap (block 37,519,381, tx `0x79faebf9…3d41`) contains
+  `Transfer(from=treasury, to=treasury, 3444538)` and the delta matcher's inflow branch credited
+  it (+$3.44 exactly; the WETH drift came from WETH self-transfers the same way). Fixed:
+  `from == to` transfers now net zero. Independent per-block eth_getLogs reconciliation of the
+  whole pre-rotation epoch matches the true balances to the wei with this one correction. Two
+  side-findings: substreams store-prep eth_calls execute at **end-of-block** state (the seed
+  values that persist are correct; a re-streamed map's printed eth_call results can differ — an
+  RPC-cache artifact, not an accounting input), and **the same self-transfer bug exists upstream
+  in `ethereum-bopamm`'s maker delta matcher** (flagged for a separate fix).
 
 - Identity of `0x7034c5c7…` (one slot written per swap — nonce/accounting?). Tracked regardless.
 - Engine slot5 (`2e9`) and store slots 5–7 config semantics (VM executes them; labels only).
