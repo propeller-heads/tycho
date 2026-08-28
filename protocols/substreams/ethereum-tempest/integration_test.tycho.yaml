@@ -10,9 +10,10 @@ skip_balance_check: true
 # Only the registry, which predates the start block. The router and vault proxies are created in
 # the start block itself, so the package witnesses their construction and emits full storage —
 # including the ERC1967 implementation slot. Bootstrapping them here instead creates the account
-# from RPC with code and balance but no storage, and that pre-existing account suppresses the
-# creation storage the package emits in the same block, leaving the proxy with no implementation
-# pointer until its first upgrade happens to write the slot.
+# from RPC, which takes code and balance from the end of the block but storage from a dump
+# anchored before the block's first transaction (propeller-heads/tycho#1358) — so a proxy created
+# in this very block is stored with code and no storage at all, and delegatecalls address zero
+# until an upgrade happens to rewrite the slot. Keep them out of this list until #1358 is fixed.
 initialized_accounts:
   - "0xDa7AfeeD01fe625CF15d187a19f94B45f00b8C5F" # Shared ETH PrioUpdateRegistry.
 

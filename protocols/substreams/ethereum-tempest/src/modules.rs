@@ -13,7 +13,7 @@ use substreams::{
 use substreams_ethereum::{
     pb::eth::{
         self,
-        v2::{Block, Log, StorageChange, TransactionTrace},
+        v2::{Block, Log, TransactionTrace},
     },
     Event, Function,
 };
@@ -34,41 +34,14 @@ use crate::{
         registry::functions::{BatchUpdateStateWithSignature, UpdateState},
         tempest::{
             self,
-            events::{PairRegistered, Paused, Unpaused, Upgraded},
+            events::{PairRegistered, Paused, Unpaused},
         },
     },
     utils::{
         component_id, lane_index_to_component_id, sort_tokens, Config, ALL_COMPONENTS_KEY,
-        BALANCE_OWNER_ATTRIBUTE, ERC1967_IMPLEMENTATION_SLOT, OVERRIDE_BLOCK_TIMESTAMP_ATTRIBUTE,
-        ROUTER_IMPLEMENTATION_KEY, VAULT_IMPLEMENTATION_KEY,
+        BALANCE_OWNER_ATTRIBUTE, OVERRIDE_BLOCK_TIMESTAMP_ATTRIBUTE,
     },
 };
-
-/// Records the logic contract behind each UUPS proxy, from `Upgraded`.
-///
-/// Only used to re-assert the ERC1967 implementation slot in `map_protocol_changes` — see
-/// [`assert_implementation_slot`] for why that is necessary.
-#[substreams::handlers::store]
-fn store_implementations(params: String, block: Block, store: StoreSetString) {
-    let Ok(config) = serde_qs::from_str::<Config>(params.as_str()) else {
-        return;
-    };
-
-    for trx in block.transactions() {
-        for (log, _) in trx.logs_with_calls() {
-            let key = if log.address == config.router_address {
-                ROUTER_IMPLEMENTATION_KEY
-            } else if log.address == config.vault_address {
-                VAULT_IMPLEMENTATION_KEY
-            } else {
-                continue;
-            };
-            if let Some(ev) = Upgraded::match_and_decode(log) {
-                store.set(log.ordinal, key, &hex::encode(&ev.implementation));
-            }
-        }
-    }
-}
 
 #[substreams::handlers::map]
 fn map_protocol_components(
@@ -470,7 +443,6 @@ fn map_protocol_changes(
     pair_registered_store: StoreGetString,
     pair_registered_deltas: StoreDeltas,
     component_index_store: StoreGetString,
-    implementation_store: StoreGetString,
     // Component-scoped, despite being derived from the shared vault's token balances: the deltas
     // arrive from `map_balance_deltas`/`store_balances`, which have already fanned the vault's
     // per-token movements out to every component that trades the token.
@@ -492,9 +464,6 @@ fn map_protocol_changes(
         for component in &tx_changes.component_changes {
             builder.add_protocol_component(component);
             add_entrypoints(builder, &config, component);
-        }
-        if !tx_changes.component_changes.is_empty() {
-            assert_implementation_slot(builder, &config, &implementation_store);
         }
         for entity_change in &tx_changes.entity_changes {
             builder.add_entity_change(entity_change);
@@ -624,49 +593,6 @@ fn map_protocol_changes(
         // implementation above all) up to date after the initial trace.
         storage_changes: get_block_storage_changes(&block),
     })
-}
-
-/// Re-asserts the router's ERC1967 implementation slot on every block that creates a component.
-///
-/// The proxy's construction storage is not reaching the indexer: the router's code and slots first
-/// appear at its first `addPair` rather than at its creation block, and the implementation slot
-/// only appears when an `upgradeToAndCall` happens to rewrite it. A snapshot taken in between has
-/// no implementation pointer at all, so the proxy delegatecalls address zero and every quote
-/// reverts. Rather than depend on that storage arriving, write the slot explicitly from the
-/// `Upgraded` event the proxy emits at deployment and on every upgrade.
-///
-/// Re-asserting an already-correct value is a no-op, so this is safe even once the underlying
-/// extraction gap is closed.
-fn assert_implementation_slot(
-    builder: &mut TransactionChangesBuilder,
-    config: &Config,
-    implementation_store: &StoreGetString,
-) {
-    for (key, proxy) in [
-        (ROUTER_IMPLEMENTATION_KEY, &config.router_address),
-        (VAULT_IMPLEMENTATION_KEY, &config.vault_address),
-    ] {
-        let Some(implementation) = implementation_store
-            .get_last(key)
-            .and_then(|addr| hex::decode(addr).ok())
-        else {
-            continue;
-        };
-
-        // ERC1967 stores the implementation address right-aligned in a 32-byte word.
-        let mut value = vec![0u8; 32];
-        value[32 - implementation.len()..].copy_from_slice(&implementation);
-
-        let mut change = InterimContractChange::new(proxy, false);
-        change.upsert_slot(&StorageChange {
-            address: proxy.clone(),
-            key: ERC1967_IMPLEMENTATION_SLOT.to_vec(),
-            old_value: vec![0u8; 32],
-            new_value: value,
-            ordinal: 0,
-        });
-        builder.add_contract_changes(&change);
-    }
 }
 
 /// Registers the DCI entrypoints a component's simulation depends on.

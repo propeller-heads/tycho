@@ -9,17 +9,6 @@ pub const BALANCE_OWNER_ATTRIBUTE: &str = "balance_owner";
 /// Deliberately not a valid `token:` key, so the balance modules can tell the two apart.
 pub const ALL_COMPONENTS_KEY: &str = "all";
 
-/// ERC1967 implementation slot: `keccak256("eip1967.proxy.implementation") - 1`.
-pub const ERC1967_IMPLEMENTATION_SLOT: [u8; 32] = [
-    0x36, 0x08, 0x94, 0xa1, 0x3b, 0xa1, 0xa3, 0x21, 0x06, 0x67, 0xc8, 0x28, 0x49, 0x2d, 0xb9, 0x8d,
-    0xca, 0x3e, 0x20, 0x76, 0xcc, 0x37, 0x35, 0xa9, 0x20, 0xa3, 0xca, 0x50, 0x5d, 0x38, 0x2b, 0xbc,
-];
-
-/// Implementation-store key for the logic contract behind the router proxy.
-pub const ROUTER_IMPLEMENTATION_KEY: &str = "router";
-/// Implementation-store key for the logic contract behind the vault proxy.
-pub const VAULT_IMPLEMENTATION_KEY: &str = "vault";
-
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// The Tempest router (`TempestEth` proxy) — emits `PairRegistered` and settles swaps.
