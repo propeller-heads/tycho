@@ -24,8 +24,7 @@ contract TesseraSwapAdapterTest is AdapterTest {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
-        adapter =
-            new TesseraSwapAdapter(TESSERA_SWAP, PAIR_HELPER, USDC);
+        adapter = new TesseraSwapAdapter(TESSERA_SWAP, PAIR_HELPER, USDC);
 
         vm.label(address(adapter), "TesseraSwapAdapter");
         vm.label(TESSERA_SWAP, "TesseraSwap");
@@ -110,13 +109,11 @@ contract TesseraSwapAdapterTest is AdapterTest {
 
         assertEq(prices.length, 2);
         // ~2,500 USDC per WETH at the fork block; sanity-band the quote.
-        uint256 unit0 = (prices[0].numerator * 1 ether) /
-            prices[0].denominator;
+        uint256 unit0 = (prices[0].numerator * 1 ether) / prices[0].denominator;
         assertGt(unit0, 1_000e6);
         assertLt(unit0, 10_000e6);
         // Near size-invariance: 10x the size moves the unit price < 0.1%.
-        uint256 unit1 = (prices[1].numerator * 1 ether) /
-            prices[1].denominator;
+        uint256 unit1 = (prices[1].numerator * 1 ether) / prices[1].denominator;
         assertApproxEqRel(unit0, unit1, 0.001e18);
     }
 
@@ -148,14 +145,11 @@ contract TesseraSwapAdapterTest is AdapterTest {
         IERC20(WETH).approve(address(adapter), quotedIn);
 
         uint256 usdcBefore = IERC20(USDC).balanceOf(address(this));
-        Trade memory trade = adapter.swap(
-            _wethPoolId(), WETH, USDC, OrderSide.Buy, amountOut
-        );
+        Trade memory trade =
+            adapter.swap(_wethPoolId(), WETH, USDC, OrderSide.Buy, amountOut);
 
         assertEq(trade.calculatedAmount, quotedIn);
-        assertEq(
-            IERC20(USDC).balanceOf(address(this)) - usdcBefore, amountOut
-        );
+        assertEq(IERC20(USDC).balanceOf(address(this)) - usdcBefore, amountOut);
     }
 
     function testSwapUsdcToWeth() public {

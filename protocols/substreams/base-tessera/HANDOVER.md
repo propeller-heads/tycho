@@ -45,6 +45,7 @@ EIP-1967 implementation-slot write (§5).
 | AERO/USDC | `0x3b84be4d48888a6bc385eea93e522246b214069e` | `0xf75c8d7864d4d9c039de17cbb74c810094c79e56` |
 | VVV/USDC | `0x402e0d314fd6f55348df7cc478bab811826e3e91` | `0xd52f194ff7b52aae71b1485228a50460da1eaefc` |
 | deSPXA/USDC | `0x4955d3c5c755f654cd27ada9f085ded00469fbc8` | `0xaa2f721ee57f5f5bafbad95c484b4b131c52cc1f` |
+| NVDAc/USDC | `0xede940cdf2a9c5620cbf97e45947594723e29c14` | `0xee6cb1eeb0a141a54b5c5faa94a50859c288e120` |
 | USDT/USDC (disabled) | `0x532c782afd8f6a1deed25d274235674a624a002f` | — |
 
 Each book has its **own price-post signer EOA** (store slot 50) — liveness monitoring must be
@@ -190,6 +191,7 @@ every book, `self_contained_tokens` static attribute.
 | 44,091,817 | deSPXA book created (Safe tx `0x1938ddaf…9958`) |
 | 49,879,701 | impl gen-3 `0x6d9d…41cb` deployed (EOA `0x3b9e5466…`) |
 | 49,881,382–49,883,986 | USDT + ZORA test books live (9 trades each), then disabled |
+| 50,526,653 | NVDAc/USDC book created (tokenized NVIDIA, 8 dp; Safe tx `0x3447f2ec…a5cb` proposed by `0x3b9e5466…` — the same EOA that deployed the gen-3 impl) — the token set is actively growing |
 
 BSC: same TesseraSwap/engine/treasury addresses, different owner (`0xae3c0084…`); WBNB/USDT quotes
 revert `T33` — **venue not configured/live on BSC** (2026-08-28). Re-check before planning BSC.

@@ -3381,3 +3381,56 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_uniswap_v3_bsc", hex_calldata.as_str());
 }
+
+#[test]
+fn test_single_encoding_strategy_tessera() {
+    // WETH -> (Tessera V) -> USDC on Base. Amount stays below the WETH book's
+    // quote-ladder cap at the test fork block (~139 WETH at block 50548423).
+    let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+    let token_out = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0x55555522005bcae1c2424d474bfd5ed477749e3e000000000000000000000006"),
+            protocol_system: String::from("vm:tessera"),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1000000000000000000").unwrap(),
+        // ~2,500 USDC per WETH at the fork block; the router test asserts the
+        // exact on-chain quote, this floor only guards the encoding.
+        BigUint::from(2_500_000_000_u64),
+        BigUint::from(2_400_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_tessera", hex_calldata.as_str());
+}

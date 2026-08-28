@@ -1,0 +1,37 @@
+substreams_yaml_path: ./base-tessera.yaml
+protocol_system: "vm:tessera"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "tessera_book"
+
+adapter_contract: "TesseraSwapAdapter"
+adapter_build_signature: "constructor(address,address,address)"
+adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e,0x505352DA2918C6a06f12F3d59FFb79905d43439f,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+tests:
+  - name: test_nvdac_book_discovery_and_simulation
+    # Covers the NVDAc/USDC book creation at block 50,526,653: the owner Safe
+    # calls the engine (tx 0x3447f2ec…a5cb), which internally CREATEs the
+    # book's price store; the store's init writes (EIP-1967 impl slot + base
+    # token slot 48 + quote slot 49) plus the engine's mapping write are the
+    # discovery signal. Prices post into the store every block, so simulation
+    # at the stop block is fresh (the venue's freshness gate keys on the age
+    # of the last post relative to block.number, and simulation runs with the
+    # indexed block's environment).
+    start_block: 50526640
+    stop_block: 50526700
+    expected_components:
+      - id: "0x55555522005bcae1c2424d474bfd5ed477749e3e00000078ee7ce2fe4908108c"
+        tokens:
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+          - "0xb20000000000000000000078ee7ce2fe4908108c" # NVDAc
+        static_attributes:
+          base_token: "0xb20000000000000000000078ee7ce2fe4908108c"
+          price_store: "0xede940cdf2a9c5620cbf97e45947594723e29c14"
+          manual_updates: "0x01"
+          self_contained_tokens: "0x5b22307838333335383966636436656462366530386634633763333264346637316235346264613032393133222c22307862323030303030303030303030303030303030303030373865653763653266653439303831303863225d"
+        creation_tx: "0x3447f2ec3b4e6aa38a6d5f50968df46b9c7d492dc0a8022981dd71cc2063a5cb"
+        # No vm:tessera executor is deployed on Base yet; execution is
+        # validated in Foundry (crates/tycho-execution/contracts/test/
+        # protocols/Tessera.t.sol) until the rollout phase deploys one.
+        skip_execution: true

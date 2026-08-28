@@ -289,7 +289,8 @@ contract TesseraSwapAdapter is ISwapAdapter {
         view
         returns (uint256)
     {
-        uint256 amount = 10 ** IERC20Metadata(sellToken).decimals() / 1e6;
+        uint256 amount =
+            10 ** IERC20Metadata(sellToken).decimals() / 1e6;
         if (amount == 0) {
             amount = 1;
         }
