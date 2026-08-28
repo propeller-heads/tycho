@@ -59,8 +59,31 @@ package.
 
 `cargo test -p curve-core --lib` needs nothing external.
 
-The parity test is behind the `parity-test` feature, which pulls `tycho-indexer` for the
-substreams client and therefore needs Postgres client libraries to link:
+### `tests/pending_state.rs` — does the pending quote match the chain?
+
+The primary correctness test. Needs only an archive RPC endpoint exposing `debug_traceBlockByNumber`
+with the `prestateTracer` in `diffMode`:
+
+```bash
+cargo test -p curve-core --test pending_state -- --ignored --nocapture
+```
+
+For each active block it assembles the `PendingBlock` a builder would supply — the block's logs as
+transactions, the block's real post-execution state diff as accounts — runs the processor against
+the **parent** block, and checks three things against the chain at that block: the emitted readings
+equal readings taken directly there, a quote built from them equals the pool's own `get_dy`, and the
+log-derived component balances equal `balanceOf(pool)`.
+
+Env: `CURVE_START_BLOCK`, `CURVE_BLOCKS`. Validated at 30 blocks from 23,000,000 and 20 blocks from
+25,800,000: 70 pool states, 70 quotes, 130 balances, seven variants (StableSwap V1/V2/NG/STETH,
+TriCrypto V1/NG, TwoCryptoV1), zero mismatches.
+
+### `tests/integration.rs` — byte-parity with the substreams package
+
+Secondary, and the only leg that needs a StreamingFast key. It proves the emitted balance bytes are
+encoded exactly as the package encodes them, which unit tests and the chain cannot show. Behind the
+`parity-test` feature, which pulls `tycho-indexer` for the substreams client and therefore needs
+Postgres client libraries to link:
 
 ```bash
 protocols/crates/curve/scripts/build_main_spkg.sh
@@ -70,6 +93,4 @@ STREAMINGFAST_KEY="$TOKEN" cargo test -p curve-core --features parity-test \
   --test integration -- --ignored --nocapture
 ```
 
-It checks balances against the spkg built from `origin/main` and pool state against the chain, and
-fails if the block window yielded no comparisons. Window overrides: `CURVE_START_BLOCK`,
-`CURVE_STOP_BLOCK`, `CURVE_SEED_BLOCKS`.
+Window overrides: `CURVE_START_BLOCK`, `CURVE_STOP_BLOCK`, `CURVE_SEED_BLOCKS`. Not yet run.
