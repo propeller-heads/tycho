@@ -19,8 +19,9 @@ use crate::encoding::{
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
             metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
-            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, tessera::TesseraSwapEncoder,
+            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
+            uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -148,6 +149,9 @@ impl SwapEncoderRegistry {
             }
             "vm:bopamm" => {
                 Ok(Box::new(BopAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "vm:tessera" => {
+                Ok(Box::new(TesseraSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:curve" => {
                 Ok(Box::new(CurveSwapEncoder::new(executor_address, self.chain, config)?))

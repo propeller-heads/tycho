@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+pragma solidity ^0.8.13;
+
+import "./AdapterTest.sol";
+import "openzeppelin-contracts/contracts/interfaces/IERC20.sol";
+import "src/tessera/TesseraSwapAdapter.sol";
+import "src/interfaces/ISwapAdapterTypes.sol";
+
+contract TesseraSwapAdapterTest is AdapterTest {
+    TesseraSwapAdapter adapter;
+
+    address constant TESSERA_SWAP = 0x55555522005BcAE1c2424D474BfD5ed477749E3e;
+    address constant PAIR_HELPER = 0x505352DA2918C6a06f12F3d59FFb79905d43439f;
+    address constant TREASURY = 0x3dBE077e7986657E95e1CC50089f17a5a4AF0AaE;
+    address constant WETH = 0x4200000000000000000000000000000000000006;
+    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+
+    // A recent Base block where 7 books are live and the WETH book's max
+    // quotable clip was ~139 WETH. Pinned so the tests are reproducible: the
+    // venue reprices every block and its freshness gate zeroes quotes when
+    // the fork's block env drifts from the posted state.
+    uint256 constant FORK_BLOCK = 50548423;
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
+        adapter =
+            new TesseraSwapAdapter(TESSERA_SWAP, PAIR_HELPER, USDC);
+
+        vm.label(address(adapter), "TesseraSwapAdapter");
+        vm.label(TESSERA_SWAP, "TesseraSwap");
+        vm.label(PAIR_HELPER, "TesseraPairs");
+        vm.label(TREASURY, "Treasury");
+        vm.label(WETH, "WETH");
+        vm.label(CBBTC, "cbBTC");
+        vm.label(USDC, "USDC");
+    }
+
+    function _wethPoolId() internal view returns (bytes32) {
+        return bytes32(bytes20(TESSERA_SWAP))
+            | bytes32(uint256(uint160(WETH)) & type(uint96).max);
+    }
+
+    function testConstructorConfig() public view {
+        assertEq(address(adapter.tesseraSwap()), TESSERA_SWAP);
+        assertEq(address(adapter.pairHelper()), PAIR_HELPER);
+        assertEq(adapter.usdc(), USDC);
+    }
+
+    function testGetPoolIds() public view {
+        // 8 live books at the fork block (the NVDAc book was listed at
+        // block 50,526,653, three days before it).
+        bytes32[] memory poolIds = adapter.getPoolIds(0, 10);
+        assertEq(poolIds.length, 8);
+        // WETH is the first pair returned by the helper at the fork block.
+        assertEq(poolIds[0], _wethPoolId());
+
+        bytes32[] memory offsetPoolIds = adapter.getPoolIds(5, 10);
+        assertEq(offsetPoolIds.length, 3);
+
+        bytes32[] memory emptyPoolIds = adapter.getPoolIds(8, 10);
+        assertEq(emptyPoolIds.length, 0);
+    }
+
+    function testGetTokens() public view {
+        address[] memory tokens = adapter.getTokens(_wethPoolId());
+        assertEq(tokens.length, 2);
+        assertEq(tokens[0], WETH);
+        assertEq(tokens[1], USDC);
+    }
+
+    function testGetCapabilities() public view {
+        Capability[] memory capabilities =
+            adapter.getCapabilities(_wethPoolId(), WETH, USDC);
+
+        assertEq(capabilities.length, 4);
+        assertEq(uint256(capabilities[0]), uint256(Capability.SellOrder));
+        assertEq(uint256(capabilities[1]), uint256(Capability.BuyOrder));
+        assertEq(uint256(capabilities[2]), uint256(Capability.PriceFunction));
+        assertEq(uint256(capabilities[3]), uint256(Capability.HardLimits));
+    }
+
+    function testGetLimits() public view {
+        uint256[] memory limits = adapter.getLimits(_wethPoolId(), WETH, USDC);
+        assertEq(limits.length, 2);
+        // The WETH book's sell-side cap was ~139 WETH at the fork block.
+        assertGt(limits[0], 100 ether);
+        assertLt(limits[0], 200 ether);
+        assertGt(limits[1], 0);
+
+        uint256[] memory reverseLimits =
+            adapter.getLimits(_wethPoolId(), USDC, WETH);
+        assertGt(reverseLimits[0], 0);
+        assertGt(reverseLimits[1], 0);
+    }
+
+    function testQuoteAboveLimitIsZero() public view {
+        uint256 sellLimit = adapter.getLimits(_wethPoolId(), WETH, USDC)[0];
+        (, uint256 amountOut) = ITesseraSwap(TESSERA_SWAP)
+            .tesseraSwapViewAmounts(WETH, USDC, int256(sellLimit * 2));
+        assertEq(amountOut, 0);
+    }
+
+    function testPrice() public view {
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 1 ether;
+        amounts[1] = 10 ether;
+        Fraction[] memory prices =
+            adapter.price(_wethPoolId(), WETH, USDC, amounts);
+
+        assertEq(prices.length, 2);
+        // ~2,500 USDC per WETH at the fork block; sanity-band the quote.
+        uint256 unit0 = (prices[0].numerator * 1 ether) /
+            prices[0].denominator;
+        assertGt(unit0, 1_000e6);
+        assertLt(unit0, 10_000e6);
+        // Near size-invariance: 10x the size moves the unit price < 0.1%.
+        uint256 unit1 = (prices[1].numerator * 1 ether) /
+            prices[1].denominator;
+        assertApproxEqRel(unit0, unit1, 0.001e18);
+    }
+
+    function testSwapSellExactIn() public {
+        uint256 amountIn = 1 ether;
+        (, uint256 quoted) = ITesseraSwap(TESSERA_SWAP)
+            .tesseraSwapViewAmounts(WETH, USDC, int256(amountIn));
+        assertGt(quoted, 0);
+
+        deal(WETH, address(this), amountIn);
+        IERC20(WETH).approve(address(adapter), amountIn);
+
+        uint256 usdcBefore = IERC20(USDC).balanceOf(address(this));
+        Trade memory trade =
+            adapter.swap(_wethPoolId(), WETH, USDC, OrderSide.Sell, amountIn);
+
+        assertEq(trade.calculatedAmount, quoted);
+        assertEq(IERC20(USDC).balanceOf(address(this)) - usdcBefore, quoted);
+        assertGt(trade.gasUsed, 0);
+    }
+
+    function testSwapBuyExactOut() public {
+        uint256 amountOut = 1_000e6; // 1,000 USDC
+        (uint256 quotedIn,) = ITesseraSwap(TESSERA_SWAP)
+            .tesseraSwapViewAmounts(WETH, USDC, -int256(amountOut));
+        assertGt(quotedIn, 0);
+
+        deal(WETH, address(this), quotedIn);
+        IERC20(WETH).approve(address(adapter), quotedIn);
+
+        uint256 usdcBefore = IERC20(USDC).balanceOf(address(this));
+        Trade memory trade = adapter.swap(
+            _wethPoolId(), WETH, USDC, OrderSide.Buy, amountOut
+        );
+
+        assertEq(trade.calculatedAmount, quotedIn);
+        assertEq(
+            IERC20(USDC).balanceOf(address(this)) - usdcBefore, amountOut
+        );
+    }
+
+    function testSwapUsdcToWeth() public {
+        uint256 amountIn = 2_500e6;
+        (, uint256 quoted) = ITesseraSwap(TESSERA_SWAP)
+            .tesseraSwapViewAmounts(USDC, WETH, int256(amountIn));
+        assertGt(quoted, 0);
+
+        deal(USDC, address(this), amountIn);
+        IERC20(USDC).approve(address(adapter), amountIn);
+
+        uint256 wethBefore = IERC20(WETH).balanceOf(address(this));
+        Trade memory trade =
+            adapter.swap(_wethPoolId(), USDC, WETH, OrderSide.Sell, amountIn);
+
+        assertEq(trade.calculatedAmount, quoted);
+        assertEq(IERC20(WETH).balanceOf(address(this)) - wethBefore, quoted);
+    }
+
+    function testValidationRejectsWrongPool() public {
+        bytes32 cbbtcPool = bytes32(bytes20(TESSERA_SWAP))
+            | bytes32(uint256(uint160(CBBTC)) & type(uint96).max);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1 ether;
+
+        vm.expectRevert();
+        adapter.price(cbbtcPool, WETH, USDC, amounts);
+    }
+
+    function testValidationRejectsNonUsdcPair() public {
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1 ether;
+
+        vm.expectRevert();
+        adapter.price(_wethPoolId(), WETH, CBBTC, amounts);
+    }
+}

@@ -22,6 +22,7 @@ mod propamm;
 mod ring_swap_v2;
 mod rocketpool;
 mod slipstreams;
+mod tessera;
 pub mod swap_encoder_registry;
 mod uniswap_v2;
 mod uniswap_v3;

@@ -1,0 +1,28 @@
+# information about the author helps us reach out in case of issues.
+author:
+  name: PropellerHeads
+  email: zach@propellerheads.xyz
+
+# Protocol Constants
+constants:
+  # The expected average gas cost of a swap (measured ~365k on Base)
+  protocol_gas: 370000
+  # Minimum capabilities we can expect, individual pools may extend these
+  capabilities:
+    - SellSide
+    - BuySide
+    - PriceFunction
+    - HardLimits
+
+# The file containing the adapter contract
+contract: TesseraSwapAdapter.sol
+
+# Deployment instances used to generate chain specific bytecode.
+instances:
+  - chain:
+      name: base
+      id: 8453
+    arguments:
+      - "0x55555522005BcAE1c2424D474BfD5ed477749E3e" # TesseraSwap entrypoint
+      - "0x505352DA2918C6a06f12F3d59FFb79905d43439f" # pair-list helper
+      - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC (quote token)
