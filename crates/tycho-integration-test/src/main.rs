@@ -182,6 +182,18 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     partial_blocks: bool,
 
+    /// Run the protocol-stream test pipeline only on blocks whose number is a multiple of this
+    /// value. 1 tests every block (current behavior). Use a higher value on fast chains (e.g.
+    /// Robinhood) where the harness cannot keep up with the head. State from every block is
+    /// still ingested. Incompatible with --partial-blocks.
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..),
+        conflicts_with = "partial_blocks"
+    )]
+    test_every_n_blocks: u64,
+
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     /// 0 disables the watchdog.
     #[arg(long, default_value_t = 30)]
@@ -915,50 +927,93 @@ async fn process_update(
 
             let update_block_number = update.update.block_number_or_timestamp;
 
-            // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
-            // standard endpoints use `latest` (confirmed blocks only).
-            let block_tag = if cli.partial_blocks && update.update.is_partial {
-                BlockNumberOrTag::Pending
-            } else {
-                BlockNumberOrTag::Latest
-            };
+            if !is_sampled_block(update_block_number, cli.test_every_n_blocks) {
+                metrics::record_protocol_update_sampled_out();
+                return Ok(());
+            }
+
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
-            let poll_result = poll_rpc_for_block(
-                &rpc_tools,
-                update_block_number,
-                block_tag,
-                cli.rpc_poll_attempts,
-                poll_interval,
-            )
-            .await?;
+            let block = if cli.test_every_n_blocks > 1 {
+                // Sampled mode: on fast chains the head is expected to be past the update, so the
+                // target block is fetched by number instead of racing the head. clap rejects
+                // --partial-blocks in this mode, so the block is always full.
+                match await_target_block(
+                    &rpc_tools,
+                    update_block_number,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await
+                {
+                    Ok(Some(b)) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
+                        metrics::record_block_processing_duration(latency_seconds, "full");
+                        Arc::new(b)
+                    }
+                    Ok(None) => {
+                        warn!("RPC did not serve sampled block {update_block_number}, skipping.");
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else {
+                // Flashblocks-capable endpoints expose sequencer pre-confirmed state under
+                // `pending`; standard endpoints use `latest` (confirmed blocks only).
+                let block_tag = if cli.partial_blocks && update.update.is_partial {
+                    BlockNumberOrTag::Pending
+                } else {
+                    BlockNumberOrTag::Latest
+                };
 
-            let block_type =
-                if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
-            let block = match poll_result {
-                BlockPollResult::Ready(b) => {
-                    let latency_seconds =
-                        update.received_at.as_secs_f64() - b.header.timestamp as f64;
-                    metrics::record_block_processing_duration(latency_seconds, block_type);
-                    Arc::new(*b)
-                }
-                BlockPollResult::Stale { target_block_timestamp } => {
-                    if let Some(ts) = target_block_timestamp {
-                        let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
+                let poll_result = poll_rpc_for_block(
+                    &rpc_tools,
+                    update_block_number,
+                    block_tag,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await?;
+
+                let block_type =
+                    if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
+                match poll_result {
+                    BlockPollResult::Ready(b) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
                         metrics::record_block_processing_duration(latency_seconds, block_type);
+                        Arc::new(*b)
                     }
-                    metrics::record_protocol_update_skipped();
-                    for protocol in update.update.sync_states.keys() {
-                        metrics::record_protocol_sync_state_skipped(protocol);
+                    BlockPollResult::Stale { target_block_timestamp } => {
+                        if let Some(ts) = target_block_timestamp {
+                            let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
+                            metrics::record_block_processing_duration(latency_seconds, block_type);
+                        }
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                BlockPollResult::Timeout => {
-                    warn!(
-                    "RPC ({block_tag}) did not reach update block {update_block_number}, skipping."
-                );
-                    metrics::record_protocol_update_skipped();
-                    return Ok(());
+                    BlockPollResult::Timeout => {
+                        warn!(
+                            "RPC ({block_tag}) did not reach update block \
+                             {update_block_number}, skipping."
+                        );
+                        metrics::record_protocol_update_skipped();
+                        return Ok(());
+                    }
                 }
             };
             if update.is_first_update {
@@ -1872,6 +1927,11 @@ fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatis
     stats.blocks_processed >= max_blocks
 }
 
+/// True when `block_number` is selected by the `--test-every-n-blocks` sampling interval.
+fn is_sampled_block(block_number: u64, interval: u64) -> bool {
+    block_number.is_multiple_of(interval)
+}
+
 /// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
 /// registry-priced pAMMs (FermiSwap, Kipseli, Bebop, TaurusFi).
 const STALE_UPDATE_SELECTOR: &str = "666a2814";
@@ -1949,9 +2009,10 @@ fn format_error_chain(e: &miette::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use rstest::rstest;
 
-    use super::is_oracle_stale_revert;
+    use super::{is_oracle_stale_revert, is_sampled_block, Cli};
 
     #[rstest]
     #[case::stale_update_name("fermiswap", "execution reverted: StaleUpdate()")]
@@ -1977,5 +2038,34 @@ mod tests {
     #[case::feed_stalled_on_non_metric_pamm("fermiswap", "execution reverted: FeedStalled()")]
     fn other_reverts_stay_real_failures(#[case] pamm: &str, #[case] reason: &str) {
         assert!(!is_oracle_stale_revert(pamm, reason));
+    }
+
+    #[rstest]
+    #[case::interval_one_selects_every_block(1, 41513952, true)]
+    #[case::interval_one_selects_multiples_too(1, 41513950, true)]
+    #[case::multiple_of_interval(10, 41513950, true)]
+    #[case::not_a_multiple(10, 41513952, false)]
+    #[case::block_zero(10, 0, true)]
+    fn sampling_selects_multiples_of_interval(
+        #[case] interval: u64,
+        #[case] block: u64,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_sampled_block(block, interval), expected);
+    }
+
+    #[test]
+    fn test_every_n_blocks_conflicts_with_partial_blocks() {
+        let result = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--partial-blocks",
+            "--test-every-n-blocks",
+            "10",
+        ]);
+        assert!(result.is_err());
     }
 }

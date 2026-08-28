@@ -230,6 +230,7 @@ mod test {
                 });
         let hashflow_calldata = Bytes::from(hashflow_quote_data_values);
         let hashflow_state = MockRFQState {
+            quote_amount_in: None,
             quote_amount_out,
             quote_data: hashflow_quote_data
                 .into_iter()

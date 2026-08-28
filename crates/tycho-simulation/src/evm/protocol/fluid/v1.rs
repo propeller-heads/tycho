@@ -186,6 +186,22 @@ impl FluidV1 {
     }
 }
 
+fn decode_block_timestamp(attributes: &HashMap<String, Bytes>) -> Result<u64, TransitionError> {
+    let bytes = attributes
+        .get(vm::BLOCK_TIMESTAMP_ATTRIBUTE)
+        .ok_or_else(|| {
+            TransitionError::MissingAttribute(vm::BLOCK_TIMESTAMP_ATTRIBUTE.to_string())
+        })?;
+    let timestamp = <[u8; 8]>::try_from(bytes.as_ref()).map_err(|_| {
+        TransitionError::DecodeError(format!(
+            "{} must be an 8-byte big-endian u64, got {} bytes",
+            vm::BLOCK_TIMESTAMP_ATTRIBUTE,
+            bytes.len()
+        ))
+    })?;
+    Ok(u64::from_be_bytes(timestamp))
+}
+
 #[typetag::serde]
 impl ProtocolSim for FluidV1 {
     fn fee(&self) -> f64 {
@@ -362,43 +378,36 @@ impl ProtocolSim for FluidV1 {
         ))
     }
 
-    /// When `updated_attributes` carries `pool_reserves_adjusted` (the resolver's ABI-encoded
-    /// `PoolWithReserves` bytes) and `block_timestamp` (as `Bytes`), pool state is decoded from
-    /// them. Otherwise the reserves resolver is called against confirmed state.
+    /// Decodes `pool_reserves_adjusted` with its eight-byte `block_timestamp` when present.
+    /// A missing timestamp fails; only missing reserves fall back to confirmed state.
     fn delta_transition(
         &mut self,
         delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        let fields = match delta
+        let state = match delta
             .updated_attributes
-            .get("pool_reserves_adjusted")
+            .get(vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE)
         {
             Some(reserves) => {
-                let sync_time = delta
-                    .updated_attributes
-                    .get("block_timestamp")
-                    .map(|timestamp| u64::from(timestamp.clone()))
-                    .ok_or_else(|| {
-                        TransitionError::MissingAttribute("block_timestamp".to_string())
-                    })?;
+                let sync_time = decode_block_timestamp(&delta.updated_attributes)?;
                 vm::decode_reserves(reserves, sync_time)?
             }
             None => {
                 let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
-                vm::fetch_pool_state(&self.pool_address, &Bytes::from(RESERVES_RESOLVER), &engine)?
+                vm::fetch_pool_state(&self.pool_address, RESERVES_RESOLVER, &engine)?
             }
         };
 
-        trace!(?fields, "Calling delta transition for {}", &self.pool_address);
+        trace!(?state, "Calling delta transition for {}", &self.pool_address);
 
-        self.collateral_reserves = fields.collateral_reserves;
-        self.debt_reserves = fields.debt_reserves;
-        self.dex_limits = fields.dex_limits;
-        self.center_price = fields.center_price;
-        self.fee = fields.fee;
-        self.sync_time = fields.sync_time;
+        self.collateral_reserves = state.collateral_reserves;
+        self.debt_reserves = state.debt_reserves;
+        self.dex_limits = state.dex_limits;
+        self.center_price = state.center_price;
+        self.fee = state.fee;
+        self.sync_time = state.sync_time;
 
         self.pool_reserve0 = get_max_reserves(
             self.token0.decimals as u8,
@@ -1580,15 +1589,10 @@ mod test {
         let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
         let sync_time: u64 = 1_700_000_000;
         let delta = ProtocolStateDelta {
-            updated_attributes: HashMap::from([
-                (
-                    "pool_reserves_adjusted".to_string(),
-                    Bytes::from(alloy::sol_types::SolValue::abi_encode(
-                        &vm::sample_pool_with_reserves(),
-                    )),
-                ),
-                ("block_timestamp".to_string(), Bytes::from(sync_time.to_be_bytes().to_vec())),
-            ]),
+            updated_attributes: HashMap::from(vm::pending_state_attributes(
+                alloy::sol_types::SolValue::abi_encode(&vm::sample_pool_with_reserves()),
+                sync_time,
+            )),
             ..Default::default()
         };
 
@@ -1639,7 +1643,7 @@ mod test {
         let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
         let delta = ProtocolStateDelta {
             updated_attributes: HashMap::from([(
-                "pool_reserves_adjusted".to_string(),
+                vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE.to_string(),
                 Bytes::from(alloy::sol_types::SolValue::abi_encode(
                     &vm::sample_pool_with_reserves(),
                 )),
@@ -1650,8 +1654,38 @@ mod test {
         let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
 
         match result {
-            Err(TransitionError::MissingAttribute(attr)) => assert_eq!(attr, "block_timestamp"),
+            Err(TransitionError::MissingAttribute(attr)) => {
+                assert_eq!(attr, vm::BLOCK_TIMESTAMP_ATTRIBUTE)
+            }
             other => panic!("expected MissingAttribute error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delta_transition_rejects_malformed_timestamp() {
+        for timestamp in [vec![0; 7], vec![0; 9], vec![0; 32]] {
+            let delta = ProtocolStateDelta {
+                updated_attributes: HashMap::from([
+                    (
+                        vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE.to_string(),
+                        Bytes::from(alloy::sol_types::SolValue::abi_encode(
+                            &vm::sample_pool_with_reserves(),
+                        )),
+                    ),
+                    (vm::BLOCK_TIMESTAMP_ATTRIBUTE.to_string(), Bytes::from(timestamp.clone())),
+                ]),
+                ..Default::default()
+            };
+            let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+
+            let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+            match result {
+                Err(TransitionError::DecodeError(message)) => {
+                    assert!(message.contains(&format!("got {} bytes", timestamp.len())));
+                }
+                other => panic!("expected DecodeError, got {other:?}"),
+            }
         }
     }
 

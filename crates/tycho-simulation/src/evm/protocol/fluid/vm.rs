@@ -1,16 +1,17 @@
-use std::fmt::Debug;
+use std::{collections::HashMap, fmt::Debug};
 
 use alloy::{core::sol, dyn_abi::SolType, primitives::U256, sol_types::SolCall};
 use revm::DatabaseRef;
 use tycho_common::{
     models::{token::Token, Address},
     simulation::errors::SimulationError,
+    Bytes,
 };
 
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
     protocol::fluid::FluidV1,
-    simulation::{PendingOverrides, SimulationEngine, SimulationParameters},
+    simulation::{BlockEnvOverrides, SimulationEngine, SimulationParameters},
 };
 
 sol! {
@@ -57,6 +58,22 @@ sol! {
     function getPoolReservesAdjusted(address pool_) public returns (PoolWithReserves memory poolReserves_);
 }
 
+/// Attribute carrying the resolver's ABI-encoded `PoolWithReserves` output.
+pub const POOL_RESERVES_ADJUSTED_ATTRIBUTE: &str = "pool_reserves_adjusted";
+/// Attribute carrying the target block's timestamp as an eight-byte big-endian `u64`.
+pub const BLOCK_TIMESTAMP_ATTRIBUTE: &str = "block_timestamp";
+
+/// Encodes Fluid resolver output and its block timestamp as pending-state attributes.
+pub fn pending_state_attributes(reserves: Vec<u8>, block_timestamp: u64) -> [(String, Bytes); 2] {
+    [
+        (POOL_RESERVES_ADJUSTED_ATTRIBUTE.to_string(), Bytes::from(reserves)),
+        (
+            BLOCK_TIMESTAMP_ATTRIBUTE.to_string(),
+            Bytes::from(block_timestamp.to_be_bytes().to_vec()),
+        ),
+    ]
+}
+
 /// The pool state decoded from the resolver's `getPoolReservesAdjusted` return bytes.
 #[derive(Debug, PartialEq)]
 pub(super) struct FluidPoolState {
@@ -72,25 +89,34 @@ pub fn decode_from_vm<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &Address,
     token0: &Token,
     token1: &Token,
-    resolver_address: &Address,
+    resolver_address: &[u8],
     vm: &SimulationEngine<D>,
 ) -> Result<FluidV1, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let fields = fetch_pool_state(pool, resolver_address, vm)?;
+    let state = fetch_pool_state(pool, resolver_address, vm)?;
     Ok(FluidV1::new(
         pool,
         token0,
         token1,
-        fields.collateral_reserves,
-        fields.debt_reserves,
-        fields.dex_limits,
-        fields.center_price,
-        fields.fee,
-        fields.sync_time,
+        state.collateral_reserves,
+        state.debt_reserves,
+        state.dex_limits,
+        state.center_price,
+        state.fee,
+        state.sync_time,
     ))
+}
+
+/// State the resolver call runs against, overriding what the engine's database holds.
+/// `Default` overrides nothing and reads confirmed state.
+#[derive(Debug, Clone, Default)]
+pub struct ResolverOverrides {
+    pub storage: Option<HashMap<alloy::primitives::Address, HashMap<U256, U256>>>,
+    pub native_balances: Option<HashMap<alloy::primitives::Address, U256>>,
+    pub block: Option<BlockEnvOverrides>,
 }
 
 /// Calls the reserves resolver for `pool` and returns the raw ABI-encoded return bytes.
@@ -99,9 +125,9 @@ where
 /// every pool priced against the same pending block.
 pub fn call_resolver<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &Address,
-    resolver_address: &Address,
+    resolver_address: &[u8],
     engine: &SimulationEngine<D>,
-    overrides: &PendingOverrides,
+    overrides: &ResolverOverrides,
 ) -> Result<Vec<u8>, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
@@ -112,7 +138,7 @@ where
     };
     let data = reserves_call.abi_encode();
 
-    let to = alloy::primitives::Address::from_slice(resolver_address.as_ref());
+    let to = alloy::primitives::Address::from_slice(resolver_address);
     let params = SimulationParameters {
         caller: alloy::primitives::Address::ZERO,
         to,
@@ -133,14 +159,14 @@ where
 /// stamping `sync_time` from the engine's current block.
 pub(super) fn fetch_pool_state<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &Address,
-    resolver_address: &Address,
+    resolver_address: &[u8],
     engine: &SimulationEngine<D>,
 ) -> Result<FluidPoolState, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let bytes = call_resolver(pool, resolver_address, engine, &PendingOverrides::default())?;
+    let bytes = call_resolver(pool, resolver_address, engine, &ResolverOverrides::default())?;
     let sync_time = engine
         .state
         .get_current_block()
@@ -370,8 +396,11 @@ mod test {
             simulation_db::SimulationDB,
             utils::{get_client, get_runtime},
         },
-        protocol::fluid::vm::{call_resolver, decode_from_vm, decode_reserves},
-        simulation::{BlockEnvOverrides, PendingOverrides, SimulationEngine},
+        protocol::fluid::vm::{
+            call_resolver, decode_from_vm, decode_reserves, pending_state_attributes,
+            ResolverOverrides, BLOCK_TIMESTAMP_ATTRIBUTE, POOL_RESERVES_ADJUSTED_ATTRIBUTE,
+        },
+        simulation::{BlockEnvOverrides, SimulationEngine},
     };
 
     #[test]
@@ -432,16 +461,11 @@ mod test {
     const NUMBER: u8 = 0x43;
     const TIMESTAMP: u8 = 0x42;
 
-    /// Stands in for the resolver: ignores its calldata and returns whatever `opcode` pushes,
-    /// so a test can read back the environment the resolver actually executed against.
-    /// `<opcode>; PUSH1 0; MSTORE; PUSH1 32; PUSH1 0; RETURN`
-    fn opcode_reporting_engine(
+    fn bytecode_reporting_engine(
         resolver: alloy::primitives::Address,
-        opcode: u8,
+        bytecode: Vec<u8>,
     ) -> SimulationEngine<SimulationDB<crate::evm::engine_db::simulation_db::EVMProvider>> {
-        let bytecode = Bytecode::new_raw(alloy::primitives::Bytes::from(vec![
-            opcode, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
-        ]));
+        let bytecode = Bytecode::new_raw(alloy::primitives::Bytes::from(bytecode));
         let mut db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
         db.init_account(
             resolver,
@@ -456,7 +480,33 @@ mod test {
         SimulationEngine::new(db, false)
     }
 
+    /// Returns the value pushed by `opcode` from the resolver execution environment.
+    fn opcode_reporting_engine(
+        resolver: alloy::primitives::Address,
+        opcode: u8,
+    ) -> SimulationEngine<SimulationDB<crate::evm::engine_db::simulation_db::EVMProvider>> {
+        bytecode_reporting_engine(
+            resolver,
+            vec![opcode, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3],
+        )
+    }
+
     #[test]
+    fn test_pending_state_attributes() {
+        let attributes = HashMap::from(pending_state_attributes(vec![1, 2, 3], 42));
+
+        assert_eq!(
+            attributes.get(POOL_RESERVES_ADJUSTED_ATTRIBUTE),
+            Some(&Bytes::from(vec![1, 2, 3]))
+        );
+        assert_eq!(
+            attributes.get(BLOCK_TIMESTAMP_ATTRIBUTE),
+            Some(&Bytes::from(42_u64.to_be_bytes().to_vec()))
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
     fn test_call_resolver_applies_native_balance_override() {
         let resolver = Bytes::from("0xC93876C0EEd99645DD53937b25433e311881A27C");
         let resolver_address = alloy::primitives::Address::from_slice(resolver.as_ref());
@@ -464,13 +514,13 @@ mod test {
         let pool = Bytes::from("0x0B1a513ee24972DAEf112bC777a5610d4325C9e7");
         let pending_balance = U256::from(4_200_000_000_000_000_000u64);
 
-        let confirmed = call_resolver(&pool, &resolver, &engine, &PendingOverrides::default())
+        let confirmed = call_resolver(&pool, &resolver, &engine, &ResolverOverrides::default())
             .expect("resolver call failed");
         let pending = call_resolver(
             &pool,
             &resolver,
             &engine,
-            &PendingOverrides {
+            &ResolverOverrides {
                 native_balances: Some(HashMap::from([(resolver_address, pending_balance)])),
                 ..Default::default()
             },
@@ -490,11 +540,12 @@ mod test {
     }
 
     #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
     fn test_call_resolver_applies_block_env_overrides() {
         let resolver = Bytes::from("0xC93876C0EEd99645DD53937b25433e311881A27C");
         let resolver_address = alloy::primitives::Address::from_slice(resolver.as_ref());
         let pool = Bytes::from("0x0B1a513ee24972DAEf112bC777a5610d4325C9e7");
-        let overrides = PendingOverrides {
+        let overrides = ResolverOverrides {
             block: Some(BlockEnvOverrides {
                 number: Some(23_526_115),
                 timestamp: Some(1_759_842_947),
@@ -530,6 +581,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
     fn test_call_resolver_without_overrides_reads_confirmed_block() {
         let resolver = Bytes::from("0xC93876C0EEd99645DD53937b25433e311881A27C");
         let resolver_address = alloy::primitives::Address::from_slice(resolver.as_ref());
@@ -539,7 +591,7 @@ mod test {
             &pool,
             &resolver,
             &opcode_reporting_engine(resolver_address, NUMBER),
-            &PendingOverrides::default(),
+            &ResolverOverrides::default(),
         )
         .expect("resolver call failed");
 
@@ -548,6 +600,39 @@ mod test {
             U256::ONE,
             "Default overrides must leave the engine's confirmed block in place."
         );
+    }
+
+    #[test]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
+    fn test_call_resolver_applies_storage_override() {
+        let resolver = Bytes::from("0xC93876C0EEd99645DD53937b25433e311881A27C");
+        let resolver_address = alloy::primitives::Address::from_slice(resolver.as_ref());
+        let pool = Bytes::from("0x0B1a513ee24972DAEf112bC777a5610d4325C9e7");
+        let expected = U256::from(123);
+        let engine = bytecode_reporting_engine(
+            resolver_address,
+            vec![
+                0x60, 0x00, // PUSH1 0
+                0x54, // SLOAD
+                0x60, 0x00, // PUSH1 0
+                0x52, // MSTORE
+                0x60, 0x20, // PUSH1 32
+                0x60, 0x00, // PUSH1 0
+                0xf3, // RETURN
+            ],
+        );
+        let overrides = ResolverOverrides {
+            storage: Some(HashMap::from([(
+                resolver_address,
+                HashMap::from([(U256::ZERO, expected)]),
+            )])),
+            ..Default::default()
+        };
+
+        let result =
+            call_resolver(&pool, &resolver, &engine, &overrides).expect("resolver call failed");
+
+        assert_eq!(U256::from_be_slice(&result), expected);
     }
 
     #[test]

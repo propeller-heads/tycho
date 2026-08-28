@@ -510,6 +510,7 @@ mod tests {
     use crate::evm::engine_db::{
         engine_db_interface::EngineDatabaseInterface,
         simulation_db::{EVMProvider, SimulationDB},
+        tycho_db::PreCachedDB,
         utils::{get_client, get_runtime},
     };
 
@@ -687,7 +688,7 @@ mod tests {
 
     #[test]
     fn test_simulate_applies_block_env_overrides() -> Result<(), Box<dyn Error>> {
-        let mut state = new_state();
+        let state = PreCachedDB::new()?;
         let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
         // Minimal runtime bytecode equivalent to the following Solidity contract:
         //
@@ -710,7 +711,10 @@ mod tests {
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
         state.init_account(contract, account, None, true)?;
         state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
-        state.set_block(Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }));
+        state.update(
+            Vec::new(),
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )?;
 
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
@@ -727,6 +731,41 @@ mod tests {
             .expect("simulation should apply block env overrides");
 
         assert_eq!(U256::from_be_slice(result.result.as_ref()), U256::from(123));
+        Ok(())
+    }
+
+    #[test]
+    fn test_simulate_applies_native_balance_overrides() -> Result<(), Box<dyn Error>> {
+        let state = PreCachedDB::new()?;
+        let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x47, // SELFBALANCE
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]));
+        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
+        state.init_account(contract, account, None, true)?;
+        state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
+        state.update(
+            Vec::new(),
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )?;
+        let expected_balance = U256::from(4_200_000_000_000_000_000u64);
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            native_balance_overrides: Some(HashMap::from([(contract, expected_balance)])),
+            ..Default::default()
+        };
+
+        let result = SimulationEngine::new(state, false)
+            .simulate(&sim_params)
+            .expect("simulation should apply the native balance override");
+
+        assert_eq!(U256::from_be_slice(result.result.as_ref()), expected_balance);
         Ok(())
     }
 

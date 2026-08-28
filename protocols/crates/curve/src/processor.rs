@@ -156,7 +156,7 @@ where
     /// A pool whose getters fail is dropped with a warning; every other pool still produces its
     /// delta. Internal state is untouched, so repeated calls with the same pending block return
     /// the same result.
-    fn generate_deltas(&mut self, pending: &PendingBlock) -> BlockAggregatedChanges {
+    fn generate_deltas(&self, pending: &PendingBlock) -> BlockAggregatedChanges {
         if pending.accounts().is_empty() && !pending.txs().is_empty() {
             // Curve's state is in contract storage, not in its logs. With no post-execution
             // accounts there is nothing to override, so every pool would read confirmed state

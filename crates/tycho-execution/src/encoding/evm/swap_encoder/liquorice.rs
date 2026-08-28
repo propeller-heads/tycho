@@ -209,6 +209,7 @@ mod tests {
             .to_vec();
 
         let liquorice_state = MockRFQState {
+            quote_amount_in: None,
             quote_amount_out,
             quote_data: HashMap::from([
                 ("calldata".to_string(), liquorice_calldata.clone()),

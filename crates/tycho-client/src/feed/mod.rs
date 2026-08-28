@@ -19,7 +19,10 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 use tycho_common::{
     display::opt,
-    models::{blockchain::BlockAggregatedChanges, ExtractorIdentity},
+    models::{
+        blockchain::{Block, BlockAggregatedChanges},
+        ExtractorIdentity,
+    },
     Bytes,
 };
 
@@ -81,16 +84,24 @@ impl Display for BlockHeader {
     }
 }
 
-impl From<&BlockAggregatedChanges> for BlockHeader {
-    fn from(block_changes: &BlockAggregatedChanges) -> Self {
-        let block = &block_changes.block;
+impl From<&Block> for BlockHeader {
+    fn from(block: &Block) -> Self {
         Self {
             hash: block.hash.clone(),
             number: block.number,
             parent_hash: block.parent_hash.clone(),
-            revert: block_changes.revert,
             timestamp: block.ts.and_utc().timestamp() as u64,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&BlockAggregatedChanges> for BlockHeader {
+    fn from(block_changes: &BlockAggregatedChanges) -> Self {
+        Self {
+            revert: block_changes.revert,
             partial_block_index: block_changes.partial_block_index,
+            ..Self::from(&block_changes.block)
         }
     }
 }
@@ -1110,6 +1121,28 @@ mod tests {
 
     use super::*;
     use crate::feed::synchronizer::{SyncResult, SynchronizerTaskHandle};
+
+    #[test]
+    fn block_header_from_block_maps_block_fields() {
+        let block = Block {
+            number: 42,
+            chain: Chain::Ethereum,
+            hash: Bytes::from([1; 32]),
+            parent_hash: Bytes::from([2; 32]),
+            ts: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .expect("valid timestamp")
+                .naive_utc(),
+        };
+
+        let header = BlockHeader::from(&block);
+
+        assert_eq!(header.hash, block.hash);
+        assert_eq!(header.number, block.number);
+        assert_eq!(header.parent_hash, block.parent_hash);
+        assert_eq!(header.timestamp, 1_700_000_000);
+        assert!(!header.revert);
+        assert_eq!(header.partial_block_index, None);
+    }
 
     #[derive(Clone, Debug)]
     enum MockBehavior {

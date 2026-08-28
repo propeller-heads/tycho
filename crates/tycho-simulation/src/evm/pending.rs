@@ -33,8 +33,7 @@ pub struct PendingUpdate {
 
 #[derive(Debug, Error)]
 pub enum PendingError {
-    /// Returned when `generate_pending_update` is called before the parent block of
-    /// `target_block` has been confirmed. Use
+    /// Returned when the parent of `pending.block()` has not been confirmed. Use
     /// [`subscribe_confirmed_block`](PendingBlockProcessor::subscribe_confirmed_block) to wait
     /// for the right block before calling.
     #[error("parent block {needed} not yet confirmed (current: {current})")]
@@ -57,15 +56,15 @@ pub enum PendingError {
 ///
 /// ```no_run
 /// # async fn example(
-/// #     mut pending: tycho_simulation::evm::pending::PendingBlockProcessor,
+/// #     mut processor: tycho_simulation::evm::pending::PendingBlockProcessor,
 /// #     pending_block: &tycho_common::models::blockchain::PendingBlock,
 /// # ) {
-/// pending
+/// processor
 ///     .subscribe_confirmed_block()
 ///     .wait_for(|&n| n >= pending_block.block().number - 1)
 ///     .await
 ///     .expect("stream closed");
-/// let update = pending
+/// let update = processor
 ///     .generate_pending_update(pending_block, "bundle-1".to_string())
 ///     .await
 ///     .expect("pending update failed");
@@ -125,11 +124,10 @@ impl PendingBlockProcessor {
         self.advance_inner(msg)
     }
 
-    /// Simulates `pending` against the confirmed parent state of `target_block` and returns an
-    /// ephemeral [`Update`].
+    /// Simulates `pending` against the confirmed parent of `pending.block()`.
     ///
     /// Drains any confirmed blocks that have arrived since the last call, then immediately
-    /// checks whether the parent block (`target_block - 1`) is available. If not, returns
+    /// checks whether `pending.block().number - 1` is available. If not, returns
     /// [`PendingError::ParentNotYetConfirmed`] — **no blocking**. Use
     /// [`subscribe_confirmed_block`](Self::subscribe_confirmed_block) to wait for the right
     /// block before calling.
@@ -140,10 +138,7 @@ impl PendingBlockProcessor {
     /// # Parameters
     /// * `pending` — the in-flight block: the block being built, the candidate bundle in execution
     ///   order (failed transactions are skipped), and post-execution account state for the accounts
-    ///   it touched. Its [`block`][PendingBlock::block] is the single source of the target block:
-    ///   its number drives the parent-block guard, and it is the header forwarded to
-    ///   `apply_deltas_ephemeral`, so the clock an indexer reads state under is the same one each
-    ///   state delta is stamped with.
+    ///   it touched. The returned deltas use this block's number and timestamp.
     /// * `label` — opaque caller-supplied tag stamped onto the returned [`PendingUpdate`]. Use it
     ///   to associate the result with a specific bundle or evaluation context.
     pub async fn generate_pending_update(
@@ -164,16 +159,10 @@ impl PendingBlockProcessor {
                 current: self.current_confirmed_block,
             });
         }
-        let target_header = BlockHeader {
-            hash: target_block.hash.clone(),
-            number: target_block.number,
-            parent_hash: target_block.parent_hash.clone(),
-            timestamp: target_block.ts.and_utc().timestamp() as u64,
-            ..Default::default()
-        };
+        let target_header = BlockHeader::from(target_block);
 
         let mut pending_deltas: HashMap<String, BlockAggregatedChanges> = HashMap::new();
-        for (extractor, indexer) in &mut self.indexers {
+        for (extractor, indexer) in &self.indexers {
             let changes = indexer.generate_deltas(pending);
             pending_deltas.insert(extractor.clone(), changes);
         }
@@ -318,7 +307,7 @@ mod tests {
             Ok(())
         }
 
-        fn generate_deltas(&mut self, pending: &PendingBlock) -> BlockAggregatedChanges {
+        fn generate_deltas(&self, pending: &PendingBlock) -> BlockAggregatedChanges {
             self.seen
                 .lock()
                 .unwrap()

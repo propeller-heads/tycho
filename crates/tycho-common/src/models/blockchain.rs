@@ -150,7 +150,7 @@ impl TxInput {
     }
 }
 
-/// The in-flight block a delta generation runs against.
+/// A block under construction with ordered transactions and post-execution account state.
 #[derive(Debug, Clone, Default)]
 pub struct PendingBlock {
     block: Block,
@@ -163,9 +163,7 @@ impl PendingBlock {
         Self { block, txs, accounts }
     }
 
-    /// The block being assembled, as the caller stamped it. Its number and timestamp are the
-    /// clock the transactions execute under; deriving either from the confirmed parent instead
-    /// misprices any protocol whose state depends on elapsed time.
+    /// The block being assembled; its number and timestamp are the transaction execution clock.
     pub fn block(&self) -> &Block {
         &self.block
     }
@@ -175,8 +173,8 @@ impl PendingBlock {
         &self.txs
     }
 
-    /// Post-execution account state for the accounts the transactions touched.
-    /// Empty for protocols whose state is fully described by logs.
+    /// Post-execution state for accounts touched by the transactions.
+    /// May be empty when no consuming indexer needs account state.
     pub fn accounts(&self) -> &HashMap<Address, AccountDelta> {
         &self.accounts
     }

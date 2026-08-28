@@ -55,13 +55,17 @@ impl<DB: DatabaseRef> DatabaseRef for OverriddenSimulationDB<'_, DB> {
     type Error = DB::Error;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        let info = self.inner_db.basic_ref(address)?;
         let Some(balance) = self
             .native_balance_overrides
             .get(&address)
         else {
-            return Ok(info);
+            return self.inner_db.basic_ref(address);
         };
+        let info = self
+            .inner_db
+            .basic_ref(address)
+            .ok()
+            .flatten();
         Ok(Some(AccountInfo { balance: *balance, ..info.unwrap_or_default() }))
     }
 
@@ -751,12 +755,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct StaticDB {
         accounts: HashMap<Address, AccountInfo>,
+        fail_basic_ref: bool,
     }
 
     impl DatabaseRef for StaticDB {
         type Error = SimulationDBError;
 
         fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            if self.fail_basic_ref {
+                return Err(SimulationDBError::Internal("account unavailable".to_string()));
+            }
             Ok(self.accounts.get(&address).cloned())
         }
 
@@ -776,8 +784,9 @@ mod tests {
     #[rstest]
     fn test_balance_override_known_account() {
         let address = Address::from(U160::from(1));
-        let account = AccountInfo { balance: U256::from(100), nonce: 7, ..Default::default() };
-        let db = StaticDB { accounts: HashMap::from([(address, account)]) };
+        let bytecode = Bytecode::new_raw(AlloyBytes::from_static(&[0x00]));
+        let account = AccountInfo::new(U256::from(100), 7, bytecode.hash_slow(), bytecode.clone());
+        let db = StaticDB { accounts: HashMap::from([(address, account)]), ..Default::default() };
         let overrides = HashMap::new();
         let native_balance_overrides = HashMap::from([(address, U256::from(999))]);
         let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
@@ -789,6 +798,7 @@ mod tests {
 
         assert_eq!(info.balance, U256::from(999), "Overridden balance should be returned.");
         assert_eq!(info.nonce, 7, "Other account fields should be preserved.");
+        assert_eq!(info.code, Some(bytecode), "Contract code should be preserved.");
     }
 
     #[rstest]
@@ -812,11 +822,48 @@ mod tests {
     }
 
     #[rstest]
+    fn test_balance_override_materializes_account_when_inner_db_errors() {
+        let address = Address::from(U160::from(1));
+        let db = StaticDB { fail_basic_ref: true, ..Default::default() };
+        let overrides = HashMap::new();
+        let native_balance_overrides = HashMap::from([(address, U256::from(999))]);
+        let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
+
+        let info = overridden_db
+            .basic_ref(address)
+            .expect("balance override should shield an inner account miss")
+            .expect("overridden account should be synthesized");
+
+        assert_eq!(info, AccountInfo { balance: U256::from(999), ..Default::default() });
+    }
+
+    #[rstest]
+    fn test_missing_balance_override_propagates_inner_error() {
+        let address = Address::from(U160::from(1));
+        let db = StaticDB { fail_basic_ref: true, ..Default::default() };
+        let overrides = HashMap::new();
+        let native_balance_overrides = HashMap::new();
+        let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);
+
+        let result = overridden_db.basic_ref(address);
+
+        match result {
+            Err(SimulationDBError::Internal(message)) => {
+                assert_eq!(message, "account unavailable")
+            }
+            other => panic!("expected inner database error, got {other:?}"),
+        }
+    }
+
+    #[rstest]
     fn test_balance_override_absent_passthrough() {
         let address = Address::from(U160::from(1));
         let unknown_address = Address::from(U160::from(2));
         let account = AccountInfo { balance: U256::from(100), nonce: 7, ..Default::default() };
-        let db = StaticDB { accounts: HashMap::from([(address, account.clone())]) };
+        let db = StaticDB {
+            accounts: HashMap::from([(address, account.clone())]),
+            ..Default::default()
+        };
         let overrides = HashMap::new();
         let native_balance_overrides = HashMap::new();
         let overridden_db = OverriddenSimulationDB::new(&db, &overrides, &native_balance_overrides);

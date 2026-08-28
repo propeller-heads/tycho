@@ -259,7 +259,7 @@ whitelisted on the PropAMMRouter may use the prefix.
 
 Angstrom's Uniswap V4 pools start every block locked. A swap against one carries a pool unlock attestation, signed by
 the current Angstrom leader, as its `hookData`. The attestation is scoped to a block number and says nothing about the
-swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 5) serves every swap, pool and route.
+swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 10) serves every swap, pool and route.
 
 `AttestationCache` therefore keeps the window in a process-wide cache instead of fetching it during encoding:
 

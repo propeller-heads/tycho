@@ -317,6 +317,7 @@ mod tests {
         let first_oracle_args = Bytes::from_str("0xaabbccdd").unwrap();
         let second_oracle_args = Bytes::from_str("0x11223344").unwrap();
         let quote_state = MockRFQState {
+            quote_amount_in: None,
             quote_amount_out: BigUint::from(1u64),
             quote_data: HashMap::from([
                 (ORACLE_UPDATE_ARGS_ATTR.to_string(), first_oracle_args.clone()),
@@ -349,6 +350,7 @@ mod tests {
         let token_out = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let oracle_args = Bytes::from_str("0xaabbccdd").unwrap();
         let quote_state = MockRFQState {
+            quote_amount_in: None,
             quote_amount_out: BigUint::from(1u64),
             quote_data: HashMap::from([(ORACLE_UPDATE_ARGS_ATTR.to_string(), oracle_args.clone())]),
         };

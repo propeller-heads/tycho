@@ -16,6 +16,8 @@ use tycho_common::{
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MockRFQState {
+    #[serde(default)]
+    pub quote_amount_in: Option<BigUint>,
     pub quote_amount_out: BigUint,
     pub quote_data: HashMap<String, Bytes>,
 }
@@ -85,7 +87,10 @@ impl IndicativelyPriced for MockRFQState {
         Ok(SignedQuote {
             base_token: params.token_in,
             quote_token: params.token_out,
-            amount_in: params.amount_in,
+            amount_in: self
+                .quote_amount_in
+                .clone()
+                .unwrap_or(params.amount_in),
             amount_out: self.quote_amount_out.clone(),
             quote_attributes: self.quote_data.clone(),
         })

@@ -57,8 +57,7 @@ pub trait TxDeltaIndexer: Send {
     /// The returned [`BlockAggregatedChanges`] contains the aggregated deltas across
     /// all transactions in the pending block: `state_deltas`, `component_balances`,
     /// `new_protocol_components`, and `deleted_protocol_components`. Its `block` is
-    /// the pending block's own [`block`][PendingBlock::block] — never the confirmed
-    /// parent, and never a block reconstructed from it. The remaining metadata
+    /// the pending block's own [`block`][PendingBlock::block]. The remaining metadata
     /// (`chain`, `extractor`, `finalized_block_height`) comes from the state stored by
     /// the most recent [`apply_block`][TxDeltaIndexer::apply_block] call.
     ///
@@ -69,10 +68,9 @@ pub trait TxDeltaIndexer: Send {
     ///
     /// # Parameters
     ///
-    /// * `pending` — the in-flight block: the block being assembled, transactions in execution
-    ///   order (typically a builder's candidate bundle or the full mempool selection for one
-    ///   block), and post-execution account state for the accounts those transactions touched.
-    fn generate_deltas(&mut self, pending: &PendingBlock) -> BlockAggregatedChanges;
+    /// * `pending` — the block being assembled, transactions in execution order, and post-execution
+    ///   account state for the accounts those transactions touched.
+    fn generate_deltas(&self, pending: &PendingBlock) -> BlockAggregatedChanges;
 }
 
 /// A struct representing a request to get an account state.
