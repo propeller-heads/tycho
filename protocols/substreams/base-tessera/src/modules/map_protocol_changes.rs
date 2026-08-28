@@ -12,9 +12,7 @@ use tycho_substreams::{
 };
 
 use crate::{
-    common::{
-        address_from_word, all_books, is_zero, slot_key, store_key, EIP1967_IMPL_SLOT,
-    },
+    common::{address_from_word, all_books, is_zero, slot_key, store_key, EIP1967_IMPL_SLOT},
     config::DeploymentConfig,
 };
 
@@ -68,7 +66,9 @@ pub fn map_protocol_changes(
         |addr| {
             addr == config.tesseraswap.as_slice() ||
                 addr == config.engine.as_slice() ||
-                tracked.iter().any(|t| t.as_slice() == addr) ||
+                tracked
+                    .iter()
+                    .any(|t| t.as_slice() == addr) ||
                 components_store
                     .get_last(store_key(addr))
                     .is_some()
@@ -76,8 +76,20 @@ pub fn map_protocol_changes(
         &mut transaction_changes,
     );
 
-    extract_treasury_changes(&block, &config, &components_store, &books_store, &mut transaction_changes);
-    extract_admin_mutations(&block, &config, &components_store, &books_store, &mut transaction_changes);
+    extract_treasury_changes(
+        &block,
+        &config,
+        &components_store,
+        &books_store,
+        &mut transaction_changes,
+    );
+    extract_admin_mutations(
+        &block,
+        &config,
+        &components_store,
+        &books_store,
+        &mut transaction_changes,
+    );
     mark_books_updated(&config, &components_store, &books_store, &mut transaction_changes);
 
     Ok(BlockChanges {
@@ -231,8 +243,7 @@ fn extract_admin_mutations(
                         });
                         builder.mark_component_as_updated(book);
                     }
-                } else if change.key == EIP1967_IMPL_SLOT.as_slice() &&
-                    !is_zero(&change.old_value)
+                } else if change.key == EIP1967_IMPL_SLOT.as_slice() && !is_zero(&change.old_value)
                 {
                     // old_value == 0 is store init, already covered by component creation.
                     let Some(component) = components_store.get_last(store_key(&change.address))
@@ -276,7 +287,9 @@ fn mark_books_updated(
         for addr in builder.changed_contracts() {
             if addr == config.tesseraswap.as_slice() ||
                 addr == config.engine.as_slice() ||
-                tracked.iter().any(|t| t.as_slice() == addr)
+                tracked
+                    .iter()
+                    .any(|t| t.as_slice() == addr)
             {
                 mark_all = true;
                 break;

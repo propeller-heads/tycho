@@ -24,16 +24,16 @@ use crate::{
 /// filtering). Three sources are combined so the accumulated balance tracks the treasury's
 /// true holdings:
 ///
-/// * **Seeding a new book** — `balanceOf(treasury)` is snapshotted via eth_call for the book's
-///   base token (emitted under the new book) and for USDC (emitted under the new book only,
-///   giving it the same USDC baseline the older books accumulated). The snapshotted tokens'
-///   plain event deltas are skipped this block to avoid double-counting.
-/// * **Re-seeding on a treasury rotation** — when TesseraSwap's treasury slot is written,
-///   every tracked token is re-seeded by `balanceOf(new) - balanceOf(old)` fanned to its
-///   book(s). On Base the treasury rotated once, at block 37,737,344.
+/// * **Seeding a new book** — `balanceOf(treasury)` is snapshotted via eth_call for the book's base
+///   token (emitted under the new book) and for USDC (emitted under the new book only, giving it
+///   the same USDC baseline the older books accumulated). The snapshotted tokens' plain event
+///   deltas are skipped this block to avoid double-counting.
+/// * **Re-seeding on a treasury rotation** — when TesseraSwap's treasury slot is written, every
+///   tracked token is re-seeded by `balanceOf(new) - balanceOf(old)` fanned to its book(s). On Base
+///   the treasury rotated once, at block 37,737,344.
 /// * **Existing tokens** — ERC20 `Transfer`s touching the treasury, plus WETH
-///   `Deposit`/`Withdrawal` on the treasury (which change its WETH balance without a
-///   `Transfer` log).
+///   `Deposit`/`Withdrawal` on the treasury (which change its WETH balance without a `Transfer`
+///   log).
 #[substreams::handlers::map]
 pub fn map_relative_balances(
     params: String,
