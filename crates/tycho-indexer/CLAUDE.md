@@ -96,7 +96,7 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
    match purges strictly after the target; when the hash is absent, a buffered target height
    purges from that height inclusive (stale copy). A hash miss is fatal when the
-   height target is below the buffer, at the buffer's oldest block (no predecessor left to
+   target is below the buffer, at the buffer's oldest block (no predecessor left to
    anchor the revert), or above the buffer without a pending partial at exactly that height
    (the flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
    fallbacks log a warning and increment `extractor_revert_hash_miss`.
@@ -106,13 +106,15 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    drained blocks in a committing section until `CachedGateway` reports their write
    flushed, so lookups cover every block whose write has not landed and a DB miss proves
    that no prior state exists — the revert never waits on the commit task. Attributes
-   first created inside the reverted range revert as deletions (none at all when they
-   were also deleted inside the range), as do attributes with no prior value anywhere.
-   The latter emit one summary warning and increment `extractor_revert_attr_miss` per
-   attribute; its `component_found` label says whether the DB returned state rows for
-   the component (rows, not the component row itself — a component with zero dynamic
-   attributes reads as `false`). Any hit means an upstream module emitted an Update or
-   Deletion for an attribute that never had a Creation.
+   first created inside the reverted range revert as deletions when they survive the
+   range, and revert to nothing otherwise. A same-tx create+delete merges into one
+   ambiguous delta, so those attributes go through the lookup: a hit restores the
+   pre-range value, a miss reverts to nothing unless a later event proves the attribute
+   alive. Attributes with no prior value anywhere revert as deletions, emit one summary
+   warning, and increment `extractor_revert_attr_miss` per attribute; its
+   `component_state_found` label says whether the DB returned state rows for the
+   component. Any hit means an upstream module emitted an Update or Deletion for an
+   attribute that never had a Creation.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
