@@ -2193,7 +2193,7 @@ impl ExtractorGateway for ExtractorPgGateway {
 mod test {
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc,
         },
         thread::sleep,
@@ -4722,6 +4722,98 @@ mod test {
         assert!(pool_x_delta
             .deleted_attributes
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tick_path_releases_flushed_blocks() {
+        let flushed = Arc::new(AtomicU64::new(0));
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        let flushed_writer = flushed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _| {
+                flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
+                Ok(())
+            });
+        let flushed_reader = flushed.clone();
+        gw.expect_flushed_block_height()
+            .returning(move || {
+                let height = flushed_reader.load(Ordering::SeqCst);
+                (height > 0).then_some(height)
+            });
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        // The released block must no longer serve the lookup: the prior value comes
+        // from the DB, which reports a different value than the buffer held.
+        gw.expect_get_protocol_states()
+            .times(1)
+            .returning(|component_ids| {
+                assert_eq!(
+                    component_ids.to_vec(),
+                    vec!["pool_x"],
+                    "lookup must fall through to the DB"
+                );
+                Ok(vec![ProtocolComponentState::new(
+                    "pool_x",
+                    HashMap::from([("tick".to_string(), Bytes::from(999_u64).lpad(32, 0))]),
+                    HashMap::new(),
+                )])
+            });
+        gw.expect_get_components_balances()
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_account_balances()
+            .returning(|_| Ok(HashMap::new()));
+
+        let extractor = create_extractor(gw).await;
+
+        // Block 1: create `pool_x` with `tick` = 100.
+        full_block(
+            &extractor,
+            1,
+            1,
+            vec![component_creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
+        )
+        .await;
+        // Block 2: finality 2 drains block 1 into the committing section and spawns
+        // its commit task.
+        full_block(&extractor, 2, 2, vec![]).await;
+        // Block 3: finality 3 drains block 2; that drain awaits block 1's commit task
+        // first, so block 1's write has provably landed after this call.
+        full_block(&extractor, 3, 3, vec![]).await;
+        // Block 4: the tick path reads the flushed height (≥ 1) and releases block 1.
+        full_block(
+            &extractor,
+            4,
+            3,
+            vec![entity_change_tx(4, 0, "pool_x", "tick", 200, PbChangeType::Update)],
+        )
+        .await;
+
+        // Revert to block 3: `tick`'s prior value lived only in released block 1, so
+        // the lookup must miss the buffer and restore the DB value.
+        let revert_msg = extractor
+            .handle_revert(undo_to(3))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            delta.updated_attributes.get("tick"),
+            Some(&Bytes::from(999_u64).lpad(32, 0)),
+            "the released block must not serve the lookup"
+        );
     }
 
     fn snapshot_to_map(
