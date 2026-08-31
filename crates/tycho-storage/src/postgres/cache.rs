@@ -1684,12 +1684,23 @@ mod test_serial_db {
                 .expect("committing tx failed");
             assert_eq!(cached_gw.flushed_block_height().await, None);
 
-            // Forcing the commit flushes the staged op and records the block height.
+            // Stage a second block so the open transaction spans blocks 1–2: the
+            // recorded height must be the range end, not its start.
+            let block_2 = get_sample_block(2);
+            cached_gw
+                .start_transaction(&block_2, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_2))
+                .await
+                .expect("Upsert block 2 ok");
+
+            // Forcing the commit flushes the staged ops and records the range-end height.
             cached_gw
                 .commit_transaction(0)
                 .await
                 .expect("committing tx failed");
-            assert_eq!(cached_gw.flushed_block_height().await, Some(block_1.number));
+            assert_eq!(cached_gw.flushed_block_height().await, Some(block_2.number));
 
             let fetched_block = gateway
                 .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
