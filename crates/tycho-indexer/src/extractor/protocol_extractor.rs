@@ -1527,14 +1527,12 @@ where
             .map(|state| (state.component_id.as_str(), state))
             .collect();
 
-        // Misses below mean an upstream module emitted an Update/Deletion for an attribute
-        // that never had a Creation, so no prior value exists and the revert deletes it.
-        // Substreams output is external input — a miss is a data-quality signal, not a
-        // reason to kill the extractor. `component_found` reflects whether the DB returned
-        // state rows for the component, not whether the component row exists: a component
-        // with zero dynamic attributes reads as "false".
-        let mut attr_misses_component_found = 0_u64;
-        let mut attr_misses_component_missing = 0_u64;
+        // Misses below mean an upstream module emitted an Update/Deletion for an
+        // attribute that never had a Creation, so no prior value exists and the revert
+        // deletes it. Substreams output is external input — a miss is a data-quality
+        // signal, not a reason to kill the extractor.
+        let mut attr_misses_state_found = 0_u64;
+        let mut attr_misses_state_missing = 0_u64;
         let mut ambiguous_survivor_deletions: HashMap<String, HashSet<String>> = HashMap::new();
         for (component_id, keys) in missing_map {
             let state = states_by_id
@@ -1561,9 +1559,9 @@ where
                     continue;
                 }
                 if state.is_some() {
-                    attr_misses_component_found += 1;
+                    attr_misses_state_found += 1;
                 } else {
-                    attr_misses_component_missing += 1;
+                    attr_misses_state_missing += 1;
                 }
                 not_found
                     .entry(component_id.clone())
@@ -1578,28 +1576,23 @@ where
                 .collect();
             warn!(
                 components = ?missed,
-                total = attr_misses_component_found + attr_misses_component_missing,
+                total = attr_misses_state_found + attr_misses_state_missing,
                 "Attributes with no prior state in buffer or DB during revert; \
                  reverting them as deletions"
             );
         }
-        if attr_misses_component_found > 0 {
-            counter!(
-                "extractor_revert_attr_miss",
-                "extractor" => self.name.clone(),
-                "chain" => self.chain.to_string(),
-                "component_found" => "true",
-            )
-            .increment(attr_misses_component_found);
-        }
-        if attr_misses_component_missing > 0 {
-            counter!(
-                "extractor_revert_attr_miss",
-                "extractor" => self.name.clone(),
-                "chain" => self.chain.to_string(),
-                "component_found" => "false",
-            )
-            .increment(attr_misses_component_missing);
+        for (misses, state_found) in
+            [(attr_misses_state_found, "true"), (attr_misses_state_missing, "false")]
+        {
+            if misses > 0 {
+                counter!(
+                    "extractor_revert_attr_miss",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                    "component_state_found" => state_found,
+                )
+                .increment(misses);
+            }
         }
 
         let empty = HashSet::<String>::new();
@@ -4858,7 +4851,7 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_found", "false")
+                    ("component_state_found", "false")
                 ],
             ),
             2,
@@ -4871,7 +4864,7 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_found", "true")
+                    ("component_state_found", "true")
                 ],
             ),
             1,
