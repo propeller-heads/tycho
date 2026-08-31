@@ -576,7 +576,7 @@ pub struct CachedGateway {
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
     /// Height of the newest block whose staged writes reached the store.
-    flushed_block_height: Arc<Mutex<Option<u64>>>,
+    flushed_block_height: Mutex<Option<u64>>,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
     state_gateway: PostgresGateway,
@@ -589,7 +589,7 @@ impl Clone for CachedGateway {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
             // each instance tracks the flush progress of its own transactions
-            flushed_block_height: Arc::new(Mutex::new(None)),
+            flushed_block_height: Mutex::new(None),
             tx: self.tx.clone(),
             pool: self.pool.clone(),
             state_gateway: self.state_gateway.clone(),
@@ -694,7 +694,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
-            flushed_block_height: Arc::new(Mutex::new(None)),
+            flushed_block_height: Mutex::new(None),
             pool,
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
