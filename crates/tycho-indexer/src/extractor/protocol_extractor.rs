@@ -1431,11 +1431,13 @@ where
         // Handle reverted protocol state.
         // One chronological pass (blocks oldest → newest, txs in index order): the first
         // event seen for a (component, attribute) pair decides its revert. First event
-        // Creation → the attr did not exist before the range, revert it as a deletion;
-        // anything else → a prior value existed, look it up in the buffer, then the DB.
-        // Within one tx a Creation wins: a merged delta holding both a creation and a
-        // later update for the same attr started with the creation.
-        let mut created_in_range: HashMap<String, HashSet<String>> = HashMap::new();
+        // Creation → the attr did not exist before the range; anything else → a prior
+        // value existed, look it up in the buffer, then the DB. Born-in-range attrs also
+        // track whether they survive the range: one born and deleted inside it is already
+        // absent downstream, so the revert must not re-announce a deletion. Within one tx
+        // a Creation wins: a merged delta holding both a creation and a later update for
+        // the same attr started with the creation.
+        let mut born_in_range: HashMap<(&String, &String), bool> = HashMap::new();
         let mut seen: HashSet<(&String, &String)> = HashSet::new();
         let mut reverted_protocol_state_keys: HashSet<(&String, &String)> = HashSet::new();
         for block_msg in reverted_state.iter() {
@@ -1450,24 +1452,38 @@ where
                     }
                     for attr in delta.created_attributes.iter() {
                         if seen.insert((c_id, attr)) {
-                            created_in_range
-                                .entry(c_id.clone())
-                                .or_default()
-                                .insert(attr.clone());
+                            born_in_range.insert((c_id, attr), true);
+                        } else if let Some(alive) = born_in_range.get_mut(&(c_id, attr)) {
+                            *alive = true;
                         }
                     }
-                    for attr in delta
-                        .updated_attributes
-                        .keys()
-                        .chain(delta.deleted_attributes.iter())
-                    {
+                    for attr in delta.updated_attributes.keys() {
                         if seen.insert((c_id, attr)) {
                             reverted_protocol_state_keys.insert((c_id, attr));
+                        } else if let Some(alive) = born_in_range.get_mut(&(c_id, attr)) {
+                            *alive = true;
+                        }
+                    }
+                    for attr in delta.deleted_attributes.iter() {
+                        if seen.insert((c_id, attr)) {
+                            reverted_protocol_state_keys.insert((c_id, attr));
+                        } else if let Some(alive) = born_in_range.get_mut(&(c_id, attr)) {
+                            *alive = false;
                         }
                     }
                 }
             }
         }
+
+        let created_in_range: HashMap<String, HashSet<String>> = born_in_range
+            .into_iter()
+            .filter(|(_, alive)| *alive)
+            .fold(HashMap::new(), |mut acc, ((c_id, attr), _)| {
+                acc.entry(c_id.clone())
+                    .or_default()
+                    .insert(attr.clone());
+                acc
+            });
 
         let reverted_protocol_state_keys_vec = reverted_protocol_state_keys
             .into_iter()
@@ -1605,7 +1621,8 @@ where
                 });
         }
 
-        // Revert attributes born inside the range by emitting deletions — no prior state.
+        // Revert the attributes born inside the range that survived it by emitting
+        // deletions — they have no prior state to restore.
         for (c_id, created_keys) in created_in_range {
             state_deltas
                 .entry(c_id.clone())
@@ -4115,7 +4132,8 @@ mod test {
         tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: tx 0 mints a fresh tick (Creation), tx 1 burns it (Deletion) —
-        // the JIT-liquidity pattern from the production crashes.
+        // the JIT-liquidity pattern from the production crashes. The attr is already absent
+        // downstream, so the range reverts to nothing for it.
         partial_tick(
             &extractor,
             3,
@@ -4150,6 +4168,70 @@ mod test {
             .expect("revert must produce a message");
 
         assert!(revert_msg.revert);
+        // The attr was born and died inside the range: it is already absent downstream,
+        // so the revert must not re-announce a deletion for it.
+        if let Some(pool_x_delta) = revert_msg.state_deltas.get("pool_x") {
+            assert!(
+                !pool_x_delta
+                    .deleted_attributes
+                    .contains("ticks/100/net-liquidity"),
+                "attr created and deleted in range must not revert as a deletion, got: {:?}",
+                pool_x_delta.deleted_attributes
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_born_died_reborn_in_range_deletes() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+
+        // Block 1: empty anchor.
+        tick(&extractor, 1, 1, vec![]).await;
+        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
+        tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
+
+        // Partial block 3: mint a fresh tick, burn it, mint it again. The attr survives
+        // the range, so the revert must delete it.
+        partial_tick(
+            &extractor,
+            3,
+            0,
+            1,
+            vec![
+                entity_change_tx(
+                    3,
+                    0,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    5000,
+                    PbChangeType::Creation,
+                ),
+                entity_change_tx(
+                    3,
+                    1,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    0,
+                    PbChangeType::Deletion,
+                ),
+                entity_change_tx(
+                    3,
+                    2,
+                    "pool_x",
+                    "ticks/100/net-liquidity",
+                    7000,
+                    PbChangeType::Creation,
+                ),
+            ],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .unwrap()
+            .unwrap();
+
         let pool_x_delta = revert_msg
             .state_deltas
             .get("pool_x")
@@ -4158,16 +4240,12 @@ mod test {
             pool_x_delta
                 .deleted_attributes
                 .contains("ticks/100/net-liquidity"),
-            "Expected ticks/100/net-liquidity in deleted_attributes, got: {:?}",
+            "attr alive at the end of the range must revert as a deletion, got: {:?}",
             pool_x_delta.deleted_attributes
         );
-        assert!(
-            pool_x_delta
-                .updated_attributes
-                .is_empty(),
-            "Expected no updated_attributes for pool_x, got: {:?}",
-            pool_x_delta.updated_attributes
-        );
+        assert!(pool_x_delta
+            .updated_attributes
+            .is_empty());
     }
 
     #[tokio::test]
