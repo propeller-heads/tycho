@@ -70,29 +70,6 @@ struct GatewayInner<G> {
     commit_batch_size: usize,
 }
 
-impl<G> GatewayInner<G> {
-    /// Awaits the in-flight DB commit task, if any. The handle is taken even when the
-    /// task failed, so a later call does not re-await it. Returns whether an unfinished
-    /// task was actually waited on.
-    async fn join_pending_commit(&self) -> Result<bool, ExtractionError> {
-        let mut commit_handle_guard = self.commit_handle.lock().await;
-        let Some(pending_commit) = commit_handle_guard.take() else {
-            return Ok(false);
-        };
-        let needs_await = !pending_commit.inner().is_finished();
-        match pending_commit
-            .instrument(info_span!("await_previous_commit"))
-            .await
-        {
-            Ok(Ok(())) => Ok(needs_await),
-            Ok(Err(err)) => Err(err),
-            Err(join_err) => Err(ExtractionError::Storage(StorageError::Unexpected(format!(
-                "Failed to join database commit task: {join_err}"
-            )))),
-        }
-    }
-}
-
 /// Accumulates partial block changes for a single block.
 ///
 /// Each incoming partial is merged immediately via [`BlockChanges::merge_partial`].
@@ -746,8 +723,17 @@ where
             )));
         }
 
+        let flushed_block_height = self
+            .gateway
+            .inner
+            .flushed_block_height()
+            .await;
         let blocks_to_commit = {
             let mut reorg_buffer = self.reorg_buffer.lock().await;
+
+            if let Some(height) = flushed_block_height {
+                reorg_buffer.release_committed(height);
+            }
 
             reorg_buffer
                 .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.clone()))
@@ -756,15 +742,21 @@ where
             if reorg_buffer.count_blocks_before(final_block_height) >=
                 self.gateway.commit_batch_size
             {
-                reorg_buffer
+                let drained: Vec<Arc<_>> = reorg_buffer
                     .drain_blocks_until(final_block_height)
                     .map_err(ExtractionError::Storage)?
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect();
+                reorg_buffer.retain_committing(drained.iter().cloned());
+                drained
             } else {
                 Vec::new()
             }
         };
 
         if let Some(last_block) = blocks_to_commit.last() {
+            let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
             let gateway = self.gateway.inner.clone();
             let committed_block_height = self
                 .gateway
@@ -774,16 +766,34 @@ where
             let batch_size = blocks_to_commit.len();
             let (extractor_name, chain) = (self.name.clone(), self.chain);
 
-            let now = chrono::Utc::now().naive_utc();
-            if self
-                .gateway
-                .join_pending_commit()
-                .await?
-            {
-                let wait_time = chrono::Utc::now()
-                    .naive_utc()
-                    .signed_duration_since(now);
-                trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, wait_time = %wait_time, "CommitTaskAwaited");
+            if let Some(db_commit_handle_to_join) = commit_handle_guard.take() {
+                let needs_await = !db_commit_handle_to_join
+                    .inner()
+                    .is_finished();
+                let now = chrono::Utc::now().naive_utc();
+
+                let result = db_commit_handle_to_join
+                    .instrument(info_span!("await_previous_commit"))
+                    .await;
+
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(storage_err)) => {
+                        return Err(storage_err);
+                    }
+                    Err(join_err) => {
+                        return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
+                            "Failed to join database commit task: {join_err}"
+                        ))));
+                    }
+                }
+
+                if needs_await {
+                    let wait_time = chrono::Utc::now()
+                        .naive_utc()
+                        .signed_duration_since(now);
+                    trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, wait_time = %wait_time, "CommitTaskAwaited");
+                }
             }
 
             let new_handle = tokio::spawn(async move {
@@ -822,7 +832,7 @@ where
             commit_span.follows_from(tracing::Span::current().id());
             let new_handle = new_handle.instrument(commit_span);
 
-            *self.gateway.commit_handle.lock().await = Some(new_handle);
+            *commit_handle_guard = Some(new_handle);
 
             trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
         };
@@ -855,35 +865,6 @@ where
             );
         }
         Ok(Some(Arc::new(changes)))
-    }
-
-    /// Waits for the in-flight commit task and flushes the write cache, at most once per
-    /// revert (tracked via `settled`). The commit task drains blocks from the buffer
-    /// before its DB write lands, and a below-threshold batch stays staged in the write
-    /// cache after the task completes; only after both are settled does a DB miss prove
-    /// that no prior state exists.
-    async fn settle_pending_commit(&self, settled: &mut bool) -> Result<(), ExtractionError> {
-        if *settled {
-            return Ok(());
-        }
-        let now = chrono::Utc::now().naive_utc();
-        let waited = self
-            .gateway
-            .join_pending_commit()
-            .await?;
-        self.gateway
-            .inner
-            .flush()
-            .await
-            .map_err(ExtractionError::Storage)?;
-        if waited {
-            let wait_time = chrono::Utc::now()
-                .naive_utc()
-                .signed_duration_since(now);
-            trace!(extractor_id = self.name.as_str(), chain = %self.chain, wait_time = %wait_time, "RevertCommitAwaited");
-        }
-        *settled = true;
-        Ok(())
     }
 }
 
@@ -1148,10 +1129,6 @@ where
             return Ok(None);
         }
 
-        // Settled lazily: the wait + flush is only paid when a buffer lookup below
-        // misses. Covers every DB read in this revert (contracts and protocol states).
-        let mut db_settled = false;
-
         // Send revert to DCI plugin.
         // DCI reverts are hash-only: they have no height fallback and would fail on the
         // hash-miss paths handled below. Safe today because DCI cannot run on
@@ -1356,11 +1333,6 @@ where
 
         trace!(?missing_map, "Missing state keys after buffer lookup");
 
-        if !missing_map.is_empty() {
-            self.settle_pending_commit(&mut db_settled)
-                .await?;
-        }
-
         let missing_contracts = self
             .gateway
             .inner
@@ -1506,11 +1478,6 @@ where
                 });
 
         trace!("Missing state keys after buffer lookup {:?}", &missing_map);
-
-        if !missing_map.is_empty() {
-            self.settle_pending_commit(&mut db_settled)
-                .await?;
-        }
 
         let missing_components_states = self
             .gateway
@@ -1791,12 +1758,9 @@ pub trait ExtractorGateway: Send + Sync {
         force_commit: bool,
     ) -> Result<(), StorageError>;
 
-    /// Forces any block changes still staged in the write cache to be committed to the
-    /// store. No-op when nothing is staged.
-    ///
-    /// # Errors
-    /// Returns a [`StorageError`] if the flush fails.
-    async fn flush(&self) -> Result<(), StorageError>;
+    /// Returns the height of the newest block whose staged writes reached the store, or
+    /// `None` when nothing has been flushed since startup.
+    async fn flushed_block_height(&self) -> Option<u64>;
 
     /// Returns the current state of the protocol components identified by `component_ids`.
     ///
@@ -2138,8 +2102,10 @@ impl ExtractorGateway for ExtractorPgGateway {
             .await
     }
 
-    async fn flush(&self) -> Result<(), StorageError> {
-        self.state_gateway.flush().await
+    async fn flushed_block_height(&self) -> Option<u64> {
+        self.state_gateway
+            .flushed_block_height()
+            .await
     }
 
     async fn get_protocol_states<'a>(
@@ -2293,6 +2259,8 @@ mod test {
         gw.expect_advance()
             .times(1)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
@@ -2355,6 +2323,8 @@ mod test {
                 call_count_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             });
+        gw.expect_flushed_block_height()
+            .returning(|| None);
 
         let commit_batch_size = 2;
         let extractor = create_extractor_with_batch_size(gw, commit_batch_size).await;
@@ -2575,6 +2545,8 @@ mod test {
         gw.expect_advance()
             .times(1)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
@@ -3062,6 +3034,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
 
         let extractor = create_extractor(gw).await;
 
@@ -3204,6 +3178,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
 
         let extractor = create_extractor(gw).await;
 
@@ -3249,7 +3225,8 @@ mod test {
             .times(0)
             .returning(|_, _, _| Ok(()));
         // Revert lookups: contracts, protocol states, component balances, account balances.
-        gw.expect_flush().returning(|| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -3360,7 +3337,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -3568,27 +3546,6 @@ mod test {
         }
     }
 
-    /// Swaps in a fake commit handle. Joins and unwraps any displaced real handle so its
-    /// writes are observable. Returns whether a real handle was displaced.
-    async fn replace_commit_handle<G, T, E>(
-        extractor: &ProtocolExtractor<G, T, E>,
-        fake: BatchCommitHandle,
-    ) -> bool {
-        match extractor
-            .gateway
-            .commit_handle
-            .lock()
-            .await
-            .replace(fake)
-        {
-            Some(real) => {
-                real.await.unwrap().unwrap();
-                true
-            }
-            None => false,
-        }
-    }
-
     fn undo_to(n: u64) -> BlockUndoSignal {
         BlockUndoSignal {
             last_valid_block: Some(BlockRef { id: format!("0x{:0>64x}", n), number: n }),
@@ -3611,7 +3568,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
@@ -3636,6 +3594,8 @@ mod test {
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw
     }
 
@@ -4448,15 +4408,8 @@ mod test {
         );
     }
 
-    // Paused time only advances while every task is idle, i.e. only while `handle_revert`
-    // genuinely awaits the fake commit. A skipped await leaves the flag false.
-    #[tokio::test(start_paused = true)]
-    async fn test_revert_waits_for_pending_commit() {
-        use std::sync::atomic::AtomicBool;
-
-        let committed = Arc::new(AtomicBool::new(false));
-        let committed_reader = committed.clone();
-
+    #[tokio::test]
+    async fn test_revert_resolves_prior_value_from_retained_blocks() {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
             .times(1)
@@ -4469,21 +4422,20 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .returning(|_, _, _| Ok(()));
-        gw.expect_flush().returning(|| Ok(()));
+        // The write never lands: retention must keep the drained block reachable.
+        gw.expect_flushed_block_height()
+            .returning(|| None);
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
-        // The DB sees `pool_x` only after the pending commit finishes.
+        // The prior value must come from memory: a non-empty DB lookup means the
+        // retained block was not searched.
         gw.expect_get_protocol_states()
-            .returning(move |_| {
-                if committed_reader.load(Ordering::SeqCst) {
-                    Ok(vec![ProtocolComponentState::new(
-                        "pool_x",
-                        HashMap::from([("tick".to_string(), Bytes::from(100_u64).lpad(32, 0))]),
-                        HashMap::new(),
-                    )])
-                } else {
-                    Ok(Vec::new())
-                }
+            .returning(|component_ids| {
+                assert!(
+                    component_ids.is_empty(),
+                    "buffer lookup must not miss, got DB lookup for: {component_ids:?}"
+                );
+                Ok(Vec::new())
             });
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
@@ -4492,7 +4444,7 @@ mod test {
 
         let extractor = create_extractor(gw).await;
 
-        // Block 1: create `pool_x` with `tick`.
+        // Block 1: create `pool_x` with `tick` = 100.
         tick(
             &extractor,
             1,
@@ -4500,9 +4452,9 @@ mod test {
             vec![creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
         )
         .await;
-        // Block 2: finality height 2 drains block 1 and spawns the commit task.
+        // Block 2: finality 2 drains block 1 into the committing section.
         tick(&extractor, 2, 2, vec![]).await;
-        // Block 3: update `tick`. Finality height stays 2, so no drain.
+        // Block 3: update `tick`. Finality stays 2, so block 2 stays buffered.
         tick(
             &extractor,
             3,
@@ -4511,20 +4463,7 @@ mod test {
         )
         .await;
 
-        // Replace the finished commit handle with a slow in-flight commit.
-        let fake_flag = committed.clone();
-        let fake_commit = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            fake_flag.store(true, Ordering::SeqCst);
-            Ok(())
-        })
-        .instrument(tracing::info_span!("fake_commit"));
-        assert!(
-            replace_commit_handle(&extractor, fake_commit).await,
-            "block 2 must have spawned a commit task"
-        );
-
-        // Revert to block 2. `tick`'s prior value only exists in the pending commit.
+        // Revert to block 2. `tick`'s prior value only exists in the retained block 1.
         let revert_msg = extractor
             .handle_revert(undo_to(2))
             .await
@@ -4540,132 +4479,11 @@ mod test {
                 .updated_attributes
                 .get("tick"),
             Some(&Bytes::from(100_u64).lpad(32, 0)),
-            "revert must restore the committed prior value, not delete the attribute"
+            "revert must restore the prior value from the retained block"
         );
         assert!(pool_x_delta
             .deleted_attributes
             .is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_revert_resolved_from_buffer_skips_commit_wait() {
-        let extractor = create_extractor(revert_test_gateway()).await;
-
-        // Prior value in the buffer → no DB miss → the pending commit is not awaited.
-        tick(
-            &extractor,
-            1,
-            1,
-            vec![creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
-        )
-        .await;
-        tick(
-            &extractor,
-            2,
-            1,
-            vec![entity_change_tx(2, 0, "pool_r", "tick", 200, PbChangeType::Update)],
-        )
-        .await;
-
-        // A commit that never finishes: if the revert awaited it, the test would hang.
-        let (_never_tx, never_rx) = tokio::sync::oneshot::channel::<()>();
-        let fake_commit = tokio::spawn(async move {
-            let _ = never_rx.await;
-            Ok(())
-        })
-        .instrument(tracing::info_span!("fake_commit"));
-        replace_commit_handle(&extractor, fake_commit).await;
-
-        let revert_msg = extractor
-            .handle_revert(undo_to(1))
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            revert_msg
-                .state_deltas
-                .get("pool_r")
-                .unwrap()
-                .updated_attributes
-                .get("tick"),
-            Some(&Bytes::from(100_u64).lpad(32, 0)),
-        );
-        assert!(
-            extractor
-                .gateway
-                .commit_handle
-                .lock()
-                .await
-                .is_some(),
-            "a buffer-resolved revert must not consume the pending commit handle"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_revert_pending_commit_error_is_fatal() {
-        let extractor = create_extractor(revert_test_gateway()).await;
-
-        tick(&extractor, 1, 1, vec![]).await;
-        tick(
-            &extractor,
-            2,
-            1,
-            vec![entity_change_tx(2, 0, "pool_ghost", "rate", 7, PbChangeType::Update)],
-        )
-        .await;
-
-        let fake_commit = tokio::spawn(async move {
-            Err(ExtractionError::Storage(StorageError::Unexpected("boom".to_string())))
-        })
-        .instrument(tracing::info_span!("fake_commit"));
-        replace_commit_handle(&extractor, fake_commit).await;
-
-        let res = extractor
-            .handle_revert(undo_to(1))
-            .await;
-        assert!(res.is_err(), "a failed commit must surface from handle_revert");
-        assert!(
-            extractor
-                .gateway
-                .commit_handle
-                .lock()
-                .await
-                .is_none(),
-            "the handle must be taken even on failure so a later tick does not re-await it"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_revert_pending_commit_panic_is_fatal() {
-        let extractor = create_extractor(revert_test_gateway()).await;
-
-        tick(&extractor, 1, 1, vec![]).await;
-        tick(
-            &extractor,
-            2,
-            1,
-            vec![entity_change_tx(2, 0, "pool_ghost", "rate", 7, PbChangeType::Update)],
-        )
-        .await;
-
-        let fake_commit = tokio::spawn(async move { panic!("boom") })
-            .instrument(tracing::info_span!("fake_commit"));
-        replace_commit_handle(&extractor, fake_commit).await;
-
-        let res = extractor
-            .handle_revert(undo_to(1))
-            .await;
-        assert!(res.is_err(), "a panicked commit must surface from handle_revert");
-        assert!(
-            extractor
-                .gateway
-                .commit_handle
-                .lock()
-                .await
-                .is_none(),
-            "the handle must be taken even on failure so a later tick does not re-await it"
-        );
     }
 
     fn snapshot_to_map(
@@ -4737,7 +4555,8 @@ mod test {
                 gw.expect_advance()
                     .times(0)
                     .returning(|_, _, _| Ok(()));
-                gw.expect_flush().returning(|| Ok(()));
+                gw.expect_flushed_block_height()
+                    .returning(|| None);
                 gw.expect_get_contracts()
                     .returning(|_| Ok(Vec::new()));
                 gw.expect_get_protocol_states()

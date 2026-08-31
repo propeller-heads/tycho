@@ -634,42 +634,6 @@ impl CachedGateway {
         }
     }
 
-    async fn submit_batch(
-        &self,
-        mut db_txn: DBTransaction,
-        rx: oneshot::Receiver<Result<(), StorageError>>,
-    ) -> Result<(), StorageError> {
-        let flushed_block_height = db_txn.block_range.end.number;
-        let span = info_span!("DatabaseCommit", size = db_txn.size);
-        db_txn.caller_span = tracing::Span::current();
-        async move {
-            db_txn
-                .operations
-                .sort_by_key(|e| e.order_key());
-            debug!(
-                size = db_txn.size,
-                ops = ?db_txn
-                    .operations
-                    .iter()
-                    .map(WriteOp::variant_name)
-                    .collect::<Vec<_>>(),
-                "Submitting db operation batch!"
-            );
-            self.tx
-                .send(DBCacheMessage::Write(db_txn))
-                .await
-                .expect("Send message to receiver ok");
-            rx.await
-                .map_err(|_| StorageError::WriteCacheGoneAway())??;
-
-            Ok::<(), StorageError>(())
-        }
-        .instrument(span)
-        .await?;
-        *self.flushed_block_height.lock().await = Some(flushed_block_height);
-        Ok(())
-    }
-
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when this instance has not flushed anything yet.
     pub async fn flushed_block_height(&self) -> Option<u64> {
@@ -682,9 +646,36 @@ impl CachedGateway {
             None => {
                 Err(StorageError::Unexpected("Usage error: Commit without transaction".to_string()))
             }
-            Some((db_txn, rx)) => {
+            Some((mut db_txn, rx)) => {
                 if db_txn.size > min_ops_batch_size {
-                    self.submit_batch(db_txn, rx).await?;
+                    let flushed_block_height = db_txn.block_range.end.number;
+                    let span = info_span!("DatabaseCommit", size = db_txn.size);
+                    db_txn.caller_span = tracing::Span::current();
+                    async move {
+                        db_txn
+                            .operations
+                            .sort_by_key(|e| e.order_key());
+                        debug!(
+                            size = db_txn.size,
+                            ops = ?db_txn
+                                .operations
+                                .iter()
+                                .map(WriteOp::variant_name)
+                                .collect::<Vec<_>>(),
+                            "Submitting db operation batch!"
+                        );
+                        self.tx
+                            .send(DBCacheMessage::Write(db_txn))
+                            .await
+                            .expect("Send message to receiver ok");
+                        rx.await
+                            .map_err(|_| StorageError::WriteCacheGoneAway())??;
+
+                        Ok::<(), StorageError>(())
+                    }
+                    .instrument(span)
+                    .await?;
+                    *self.flushed_block_height.lock().await = Some(flushed_block_height);
                 } else {
                     // if we are not ready to commit, give the OpenTx struct back.
                     *open_tx = Some((db_txn, rx));
@@ -692,20 +683,6 @@ impl CachedGateway {
                 Ok(())
             }
         }
-    }
-
-    /// Forces any staged operations in the open transaction to the store. No-op when no
-    /// transaction is open or it holds no operations.
-    pub async fn flush(&self) -> Result<(), StorageError> {
-        let mut open_tx = self.open_tx.lock().await;
-        let Some((db_txn, rx)) = open_tx.take() else {
-            return Ok(());
-        };
-        if db_txn.size == 0 {
-            *open_tx = Some((db_txn, rx));
-            return Ok(());
-        }
-        self.submit_batch(db_txn, rx).await
     }
 
     #[allow(private_interfaces)]
