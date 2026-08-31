@@ -1451,7 +1451,12 @@ where
                         if delta.deleted_attributes.contains(attr) {
                             classify(&mut reverted_attrs, (c_id, attr), FirstSeen::Ambiguous, None);
                         } else {
-                            classify(&mut reverted_attrs, (c_id, attr), FirstSeen::Born, Some(true));
+                            classify(
+                                &mut reverted_attrs,
+                                (c_id, attr),
+                                FirstSeen::Born,
+                                Some(true),
+                            );
                         }
                     }
                     for attr in delta.updated_attributes.keys() {
@@ -4210,7 +4215,9 @@ mod test {
                     attributes: vec![
                         Attribute {
                             name: "ticks/100/net-liquidity".to_string(),
-                            value: Bytes::from(5000_u64).lpad(32, 0).to_vec(),
+                            value: Bytes::from(5000_u64)
+                                .lpad(32, 0)
+                                .to_vec(),
                             change: PbChangeType::Creation.into(),
                         },
                         Attribute {
@@ -4239,9 +4246,7 @@ mod test {
                 "same-tx create+delete must not revert as a deletion, got: {:?}",
                 delta.deleted_attributes
             );
-            assert!(delta
-                .updated_attributes
-                .is_empty());
+            assert!(delta.updated_attributes.is_empty());
         }
     }
 
@@ -4270,7 +4275,9 @@ mod test {
                         attributes: vec![
                             Attribute {
                                 name: "ticks/100/net-liquidity".to_string(),
-                                value: Bytes::from(5000_u64).lpad(32, 0).to_vec(),
+                                value: Bytes::from(5000_u64)
+                                    .lpad(32, 0)
+                                    .to_vec(),
                                 change: PbChangeType::Creation.into(),
                             },
                             Attribute {
@@ -4311,9 +4318,7 @@ mod test {
             "attr alive at range end with no prior value must revert as a deletion, got: {:?}",
             delta.deleted_attributes
         );
-        assert!(delta
-            .updated_attributes
-            .is_empty());
+        assert!(delta.updated_attributes.is_empty());
     }
 
     #[tokio::test]
@@ -4467,7 +4472,9 @@ mod test {
                         },
                         Attribute {
                             name: "tick".to_string(),
-                            value: Bytes::from(300_u64).lpad(32, 0).to_vec(),
+                            value: Bytes::from(300_u64)
+                                .lpad(32, 0)
+                                .to_vec(),
                             change: PbChangeType::Creation.into(),
                         },
                     ],
@@ -4906,7 +4913,8 @@ mod test {
 
                 // Empty anchor, then a zero-attribute creation that stays buffered.
                 full_block(&extractor, 1, 1, vec![]).await;
-                full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_y", &[])]).await;
+                full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_y", &[])])
+                    .await;
                 // fee: pool_y has a buffered creation but no attrs and no DB rows → "false".
                 // rate: pool_ghost was never created anywhere → "false".
                 // gone: pool_w has DB state rows, but not this attribute → "true".
