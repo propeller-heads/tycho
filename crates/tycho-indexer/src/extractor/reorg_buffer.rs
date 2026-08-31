@@ -60,7 +60,7 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
 /// In case of a chain reorg, we can just purge this buffer up to the common ancestor block.
 ///
 /// Drained blocks can be retained in a second, non-revertable section until their database
-/// write lands (see [`ReorgBuffer::retain_committing`]). State lookups read both sections,
+/// write lands (see [`ReorgBuffer::drain_into_committing`]). State lookups read both sections,
 /// so a lookup miss means the value can only be in the database.
 #[derive(DeepSizeOf)]
 pub(crate) struct ReorgBuffer<B>
@@ -160,10 +160,22 @@ where
         }
     }
 
-    /// Keeps drained blocks reachable by the state lookups until their database write
-    /// lands. Pass blocks in ascending block order, oldest first.
-    pub fn retain_committing(&mut self, blocks: impl IntoIterator<Item = Arc<B>>) {
-        self.committing_blocks.extend(blocks);
+    /// Drains blocks up to (excluding) `drain_upto_block_height` into the committing
+    /// section, which keeps them reachable by the state lookups until their database
+    /// write lands, and returns them for the commit task. A
+    /// [`ReorgBuffer::release_committed`] call with a flushed height drops them.
+    pub fn drain_into_committing(
+        &mut self,
+        drain_upto_block_height: u64,
+    ) -> Result<Vec<Arc<B>>, StorageError> {
+        let drained: Vec<Arc<B>> = self
+            .drain_blocks_until(drain_upto_block_height)?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        self.committing_blocks
+            .extend(drained.iter().cloned());
+        Ok(drained)
     }
 
     /// Drops every retained block at or below `flushed_block_height`: their writes
@@ -1000,10 +1012,9 @@ mod test {
             .unwrap();
 
         let drained = reorg_buffer
-            .drain_blocks_until(3)
+            .drain_into_committing(3)
             .unwrap();
         assert_eq!(drained.len(), 2);
-        reorg_buffer.retain_committing(drained.into_iter().map(Arc::new));
 
         let state1 = "State1".to_string();
         let new = "new".to_string();
@@ -1033,7 +1044,21 @@ mod test {
         // Retained blocks are not part of the revertable window.
         assert_eq!(reorg_buffer.count_blocks_before(10), 1);
 
-        // Releasing up to block 2 drops both retained blocks; the lookups now miss.
+        // A partial release keeps block 2 reachable: `new` still resolves from it,
+        // `reserve` now misses.
+        reorg_buffer.release_committed(1);
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing
+            .iter()
+            .any(|(c, a)| c == "State1" && a == "reserve"));
+        assert_eq!(
+            res.get(&(state1.clone(), new.clone())),
+            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+        );
+
+        // Releasing up to block 2 drops the rest; the lookups now miss.
         reorg_buffer.release_committed(2);
         let (res, missing) =
             reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);

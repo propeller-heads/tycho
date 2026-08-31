@@ -742,14 +742,9 @@ where
             if reorg_buffer.count_blocks_before(final_block_height) >=
                 self.gateway.commit_batch_size
             {
-                let drained: Vec<Arc<_>> = reorg_buffer
-                    .drain_blocks_until(final_block_height)
+                reorg_buffer
+                    .drain_into_committing(final_block_height)
                     .map_err(ExtractionError::Storage)?
-                    .into_iter()
-                    .map(Arc::new)
-                    .collect();
-                reorg_buffer.retain_committing(drained.iter().cloned());
-                drained
             } else {
                 Vec::new()
             }
