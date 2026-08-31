@@ -102,15 +102,17 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    fallbacks log a warning and increment `extractor_revert_hash_miss`.
 2. Pending partials are dropped only when above the target height; partials at the target
    height are the still-valid prefix of the last valid block and are kept.
-3. Previous attribute values are restored from the buffer, then the DB. Before any DB read —
-   and only when the buffer lookup left misses — the revert waits for the in-flight commit
-   task and flushes the write cache, so a DB miss proves that no prior state exists.
-   Attributes first created inside the reverted range, and attributes with no prior value in
-   either place, revert as deletions instead. The latter emit one summary warning and
-   increment `extractor_revert_attr_miss` per attribute; its `component_found` label says
-   whether the DB returned state rows for the component (rows, not the component row itself —
-   a component with zero dynamic attributes reads as `false`). Any hit means an upstream
-   module emitted an Update or Deletion for an attribute that never had a Creation.
+3. Previous attribute values are restored from the buffer, then the DB. The buffer keeps
+   drained blocks in a committing section until `CachedGateway` reports their write
+   flushed, so lookups cover every block whose write has not landed and a DB miss proves
+   that no prior state exists — the revert never waits on the commit task. Attributes
+   first created inside the reverted range revert as deletions (none at all when they
+   were also deleted inside the range), as do attributes with no prior value anywhere.
+   The latter emit one summary warning and increment `extractor_revert_attr_miss` per
+   attribute; its `component_found` label says whether the DB returned state rows for
+   the component (rows, not the component row itself — a component with zero dynamic
+   attributes reads as `false`). Any hit means an upstream module emitted an Update or
+   Deletion for an attribute that never had a Creation.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
@@ -128,6 +130,10 @@ components → state → entry points → cursor). Every mutable row is versione
 
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
 they are provably behind the finality horizon.
+
+Drained blocks stay in the buffer's committing section (shared with the commit task via
+`Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
+still see them while their write is in flight.
 
 ## Why extractor messages must be broadcast to the RPC service
 
