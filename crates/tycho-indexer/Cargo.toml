@@ -94,7 +94,6 @@ zstd = "0.13"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 rstest.workspace = true
 mockito.workspace = true
