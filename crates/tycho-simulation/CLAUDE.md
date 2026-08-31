@@ -57,8 +57,9 @@ fallback for protocols too complex to port, not a default.
 VM database. A protocol whose `delta_transition` re-reads the VM would therefore quote a pending
 block against confirmed state. Fluid and Curve close that gap the same way:
 
-1. A native processor (`protocols/crates/<protocol>`) builds `evm::simulation::PendingOverrides`
-   — storage, native balances and block environment — from the accounts a `PendingBlock` carries.
+1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
+   `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
+   accounts a `PendingBlock` carries.
 2. It reads the protocol's state under those overrides (`fluid::call_resolver`,
    `curve::read_pool_readings`) and puts the result in a state-delta attribute
    (`pool_reserves_adjusted`, `pool_state_adjusted`).

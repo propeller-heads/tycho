@@ -59,7 +59,6 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | Path | Description |
 |---|---|
 | `protocols/substreams/` | Substreams modules (WASM) producing the protobuf messages consumed by `tycho-indexer`; **separate WASM workspace** with its own toolchain — not in `[workspace.members]` |
-| [`protocols/crates/`](../protocols/CLAUDE.md) | Native processors implementing `TxDeltaIndexer` — pending-block deltas without a Substreams runtime. Root `[workspace.members]` entries; `curve` is the first VM protocol ([`curve-core`](../protocols/crates/curve/CLAUDE.md)) |
 | `protocols/testing/` (`protocol-testing`) | Simulation accuracy test harness: runs protocol state through `tycho-simulation` and compares against on-chain results |
 | `protocols/adapter-integration/` | EVM adapter integration tests |
 

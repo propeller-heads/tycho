@@ -7,6 +7,5 @@ and workspace — see the relevant `CLAUDE.md` for details.
 | Directory | Description |
 |---|---|
 | [`substreams/`](substreams/CLAUDE.md) | WASM modules extracting on-chain state → protobuf for `tycho-indexer` |
-| `crates/` | Native processors implementing `TxDeltaIndexer`, for pending-block simulation without a Substreams runtime. Root `[workspace.members]` entries, one per protocol |
 | [`testing/`](testing/CLAUDE.md) | End-to-end integration test runner for Substreams implementations |
 | [`adapter-integration/`](adapter-integration/CLAUDE.md) | Foundry fork tests for `tycho-execution` VM adapter contracts |
