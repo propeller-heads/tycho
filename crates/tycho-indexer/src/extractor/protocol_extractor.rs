@@ -3444,7 +3444,7 @@ mod test {
     type TestExtractor =
         ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>;
 
-    async fn tick(
+    async fn full_block(
         extractor: &TestExtractor,
         block: u64,
         finality: u64,
@@ -3466,7 +3466,7 @@ mod test {
             .unwrap();
     }
 
-    async fn partial_tick(
+    async fn partial_block(
         extractor: &TestExtractor,
         block: u64,
         partial_index: u32,
@@ -3492,7 +3492,7 @@ mod test {
             .unwrap();
     }
 
-    fn creation_tx(
+    fn component_creation_tx(
         block: u64,
         index: u64,
         component: &str,
@@ -4015,14 +4015,14 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        tick(&extractor, 1, 1, vec![]).await;
+        full_block(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x` with initial attributes. Non-finalized (stays in buffer).
-        tick(
+        full_block(
             &extractor,
             2,
             1,
-            vec![creation_tx(
+            vec![component_creation_tx(
                 2,
                 0,
                 "pool_x",
@@ -4035,7 +4035,7 @@ mod test {
         .await;
 
         // Partial block 3: first-ever tick attribute on `pool_x` (ChangeType::Creation).
-        partial_tick(
+        partial_block(
             &extractor,
             3,
             0,
@@ -4086,15 +4086,15 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        tick(&extractor, 1, 1, vec![]).await;
+        full_block(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
-        tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: tx 0 mints a fresh tick (Creation), tx 1 burns it (Deletion) —
         // the JIT-liquidity pattern from the production crashes. The attr is already absent
         // downstream, so the range reverts to nothing for it.
-        partial_tick(
+        partial_block(
             &extractor,
             3,
             0,
@@ -4146,13 +4146,13 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        tick(&extractor, 1, 1, vec![]).await;
+        full_block(&extractor, 1, 1, vec![]).await;
         // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
-        tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: mint a fresh tick, burn it, mint it again. The attr survives
         // the range, so the revert must delete it.
-        partial_tick(
+        partial_block(
             &extractor,
             3,
             0,
@@ -4213,22 +4213,22 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: create `pool_r` with `tick` = 100. Finality 1 keeps it in the buffer.
-        tick(
+        full_block(
             &extractor,
             1,
             1,
-            vec![creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
+            vec![component_creation_tx(1, 0, "pool_r", &[("tick", 100, PbChangeType::Creation)])],
         )
         .await;
         // Block 2: delete `tick`. Block 3: re-create it with a new value.
-        tick(
+        full_block(
             &extractor,
             2,
             1,
             vec![entity_change_tx(2, 0, "pool_r", "tick", 0, PbChangeType::Deletion)],
         )
         .await;
-        tick(
+        full_block(
             &extractor,
             3,
             1,
@@ -4267,20 +4267,20 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        tick(&extractor, 1, 1, vec![]).await;
+        full_block(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x` with attribute `fee` = 100. Stays in the buffer.
-        tick(
+        full_block(
             &extractor,
             2,
             1,
-            vec![creation_tx(2, 0, "pool_x", &[("fee", 100, PbChangeType::Creation)])],
+            vec![component_creation_tx(2, 0, "pool_x", &[("fee", 100, PbChangeType::Creation)])],
         )
         .await;
 
         // Partial block 3: delete `fee`. Its creation is OUTSIDE the reverted range, so the
         // revert must restore the previous value from the buffer.
-        partial_tick(
+        partial_block(
             &extractor,
             3,
             0,
@@ -4321,14 +4321,14 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        tick(&extractor, 1, 1, vec![]).await;
+        full_block(&extractor, 1, 1, vec![]).await;
 
         // Block 2: create `pool_x` without attributes. Non-finalized.
-        tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_x", &[])]).await;
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: first touch of the attribute, mis-marked as Update instead of
         // Creation. No history in buffer or DB.
-        partial_tick(
+        partial_block(
             &extractor,
             3,
             0,
@@ -4369,11 +4369,11 @@ mod test {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
-        tick(&extractor, 1, 1, vec![]).await;
+        full_block(&extractor, 1, 1, vec![]).await;
 
         // Block 2 (full block): attribute update on `pool_ghost`, a component that was never
         // created in the buffer and has no DB rows.
-        tick(
+        full_block(
             &extractor,
             2,
             1,
@@ -4445,17 +4445,17 @@ mod test {
         let extractor = create_extractor(gw).await;
 
         // Block 1: create `pool_x` with `tick` = 100.
-        tick(
+        full_block(
             &extractor,
             1,
             1,
-            vec![creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
+            vec![component_creation_tx(1, 0, "pool_x", &[("tick", 100, PbChangeType::Creation)])],
         )
         .await;
         // Block 2: finality 2 drains block 1 into the committing section.
-        tick(&extractor, 2, 2, vec![]).await;
+        full_block(&extractor, 2, 2, vec![]).await;
         // Block 3: update `tick`. Finality stays 2, so block 2 stays buffered.
-        tick(
+        full_block(
             &extractor,
             3,
             2,
@@ -4575,12 +4575,12 @@ mod test {
                 let extractor = create_extractor(gw).await;
 
                 // Empty anchor, then a zero-attribute creation that stays buffered.
-                tick(&extractor, 1, 1, vec![]).await;
-                tick(&extractor, 2, 1, vec![creation_tx(2, 0, "pool_y", &[])]).await;
+                full_block(&extractor, 1, 1, vec![]).await;
+                full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_y", &[])]).await;
                 // fee: pool_y has a buffered creation but no attrs and no DB rows → "false".
                 // rate: pool_ghost was never created anywhere → "false".
                 // gone: pool_w has DB state rows, but not this attribute → "true".
-                tick(
+                full_block(
                     &extractor,
                     3,
                     1,
