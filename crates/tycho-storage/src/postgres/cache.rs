@@ -575,6 +575,8 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
+    /// Height of the newest block whose staged writes reached the store.
+    flushed_block_height: Arc<Mutex<Option<u64>>>,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
     state_gateway: PostgresGateway,
@@ -586,6 +588,8 @@ impl Clone for CachedGateway {
         Self {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
+            // each instance tracks the flush progress of its own transactions
+            flushed_block_height: Arc::new(Mutex::new(None)),
             tx: self.tx.clone(),
             pool: self.pool.clone(),
             state_gateway: self.state_gateway.clone(),
@@ -635,6 +639,7 @@ impl CachedGateway {
         mut db_txn: DBTransaction,
         rx: oneshot::Receiver<Result<(), StorageError>>,
     ) -> Result<(), StorageError> {
+        let flushed_block_height = db_txn.block_range.end.number;
         let span = info_span!("DatabaseCommit", size = db_txn.size);
         db_txn.caller_span = tracing::Span::current();
         async move {
@@ -660,7 +665,15 @@ impl CachedGateway {
             Ok::<(), StorageError>(())
         }
         .instrument(span)
-        .await
+        .await?;
+        *self.flushed_block_height.lock().await = Some(flushed_block_height);
+        Ok(())
+    }
+
+    /// Returns the height of the newest block whose staged writes reached the store, or
+    /// `None` when this instance has not flushed anything yet.
+    pub async fn flushed_block_height(&self) -> Option<u64> {
+        *self.flushed_block_height.lock().await
     }
 
     pub async fn commit_transaction(&self, min_ops_batch_size: usize) -> Result<(), StorageError> {
@@ -704,6 +717,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
+            flushed_block_height: Arc::new(Mutex::new(None)),
             pool,
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
@@ -1644,7 +1658,7 @@ mod test_serial_db {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_cached_gateway_flush() {
+    async fn test_cached_gateway_flushed_block_height() {
         run_against_db(|connection_pool| async move {
             let mut connection = connection_pool
                 .get()
@@ -1675,6 +1689,7 @@ mod test_serial_db {
 
             let handle = write_executor.run();
             let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
+            assert_eq!(cached_gw.flushed_block_height().await, None);
 
             let block_1 = get_sample_block(1);
             cached_gw
@@ -1684,27 +1699,26 @@ mod test_serial_db {
                 .upsert_block(slice::from_ref(&block_1))
                 .await
                 .expect("Upsert block 1 ok");
-            // Below the batch threshold: the op stays staged in the write cache.
+
+            // Below the batch threshold: the op stays staged and the height stays unset.
             cached_gw
                 .commit_transaction(100)
                 .await
                 .expect("committing tx failed");
+            assert_eq!(cached_gw.flushed_block_height().await, None);
 
+            // Forcing the commit flushes the staged op and records the block height.
             cached_gw
-                .flush()
+                .commit_transaction(0)
                 .await
-                .expect("flush failed");
+                .expect("committing tx failed");
+            assert_eq!(cached_gw.flushed_block_height().await, Some(block_1.number));
 
             let fetched_block = gateway
                 .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
                 .await
                 .expect("Failed to fetch block");
             assert_eq!(fetched_block, block_1);
-
-            cached_gw
-                .flush()
-                .await
-                .expect("flush without an open transaction must be a no-op");
 
             handle.abort();
         })
