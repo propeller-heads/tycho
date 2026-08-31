@@ -68,7 +68,7 @@ where
     B: BlockScoped + DeepSizeOf,
 {
     block_messages: VecDeque<B>,
-    committing: VecDeque<Arc<B>>,
+    committing_blocks: VecDeque<Arc<B>>,
     strict: bool,
 }
 
@@ -101,7 +101,7 @@ where
     B: BlockScoped + std::fmt::Debug + DeepSizeOf,
 {
     pub(crate) fn new() -> Self {
-        Self { block_messages: VecDeque::new(), committing: VecDeque::new(), strict: false }
+        Self { block_messages: VecDeque::new(), committing_blocks: VecDeque::new(), strict: false }
     }
 
     /// Inserts a new block into the buffer. Ensures the new block is the expected next block,
@@ -163,18 +163,18 @@ where
     /// Keeps drained blocks reachable by the state lookups until their database write
     /// lands. Pass blocks in ascending block order, oldest first.
     pub fn retain_committing(&mut self, blocks: impl IntoIterator<Item = Arc<B>>) {
-        self.committing.extend(blocks);
+        self.committing_blocks.extend(blocks);
     }
 
     /// Drops every retained block at or below `flushed_block_height`: their writes
     /// reached the store, so the database covers them from here on.
     pub fn release_committed(&mut self, flushed_block_height: u64) {
         while self
-            .committing
+            .committing_blocks
             .front()
             .is_some_and(|b| b.block().number <= flushed_block_height)
         {
-            self.committing.pop_front();
+            self.committing_blocks.pop_front();
         }
     }
 
@@ -182,7 +182,7 @@ where
     /// retained committing blocks.
     fn history(&self) -> impl Iterator<Item = &B> + '_ {
         self.block_messages.iter().rev().chain(
-            self.committing
+            self.committing_blocks
                 .iter()
                 .rev()
                 .map(|block| block.as_ref()),
