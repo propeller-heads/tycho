@@ -901,8 +901,10 @@ pub struct PaginationResponse {
 
 /// Current pagination information
 impl PaginationResponse {
-    pub fn new(page: i64, page_size: i64, total: i64) -> Self {
-        Self { page, page_size, total }
+    /// `total` is a row count; the wire field stays `i64` until the next
+    /// breaking DTO release.
+    pub fn new(page: i64, page_size: i64, total: u64) -> Self {
+        Self { page, page_size, total: total as i64 }
     }
 
     pub fn total_pages(&self) -> i64 {
