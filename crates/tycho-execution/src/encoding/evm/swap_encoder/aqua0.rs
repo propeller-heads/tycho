@@ -159,6 +159,7 @@ mod tests {
             quote_amount_in: Some(amount_in.clone()),
             quote_amount_out: BigUint::from(2_000u32),
             quote_data: HashMap::from([("hook_data".into(), hook_data.clone())]),
+            delay: Default::default(),
         };
         let swap = Swap::new(
             component,
