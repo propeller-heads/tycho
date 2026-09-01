@@ -875,29 +875,40 @@ where
     }
 }
 
-/// How an attribute first appeared inside a reverted range. The first event decides the
-/// revert: `Born` attrs have no prior value, `PreExisting` attrs restore one.
-enum FirstSeen {
-    Born,
-    PreExisting,
+/// Revert class of one (component, attribute) pair, decided by its event history inside
+/// the reverted range. The first event picks the variant: a creation means the attr did
+/// not exist before the range (`CreatedInRange`), anything else means it did
+/// (`ExistedBefore`).
+enum AttrRevert {
+    /// A prior value exists: restore it from the buffer, then the DB.
+    ExistedBefore,
+    /// No prior value: revert as a deletion when still alive at the end of the range,
+    /// otherwise revert to nothing.
+    CreatedInRange { alive: bool },
 }
 
-/// Revert classification of one (component, attribute) pair.
-struct RevertedAttr {
-    first: FirstSeen,
-    /// Whether the attr is alive at the end of the range.
-    alive: bool,
+/// One event on a (component, attribute) pair, in chronological order.
+enum AttrEvent {
+    Created,
+    Updated,
+    Deleted,
 }
 
 fn classify<'a>(
-    map: &mut HashMap<(&'a String, &'a String), RevertedAttr>,
+    map: &mut HashMap<(&'a String, &'a String), AttrRevert>,
     key: (&'a String, &'a String),
-    first: FirstSeen,
-    alive: bool,
+    event: AttrEvent,
 ) {
     map.entry(key)
-        .and_modify(|attr| attr.alive = alive)
-        .or_insert(RevertedAttr { first, alive });
+        .and_modify(|class| {
+            if let AttrRevert::CreatedInRange { alive } = class {
+                *alive = !matches!(event, AttrEvent::Deleted);
+            }
+        })
+        .or_insert(match event {
+            AttrEvent::Created => AttrRevert::CreatedInRange { alive: true },
+            AttrEvent::Updated | AttrEvent::Deleted => AttrRevert::ExistedBefore,
+        });
 }
 
 #[async_trait]
@@ -1433,12 +1444,9 @@ where
                 });
 
         // Handle reverted protocol state.
-        // One chronological pass (blocks oldest → newest, txs in index order): the first
-        // event seen for a (component, attribute) pair decides its revert. First event
-        // Creation → the attr did not exist before the range; it reverts as a deletion
-        // only when it is still alive at the end of the range. Anything else → a prior
-        // value existed, look it up in the buffer, then the DB.
-        let mut reverted_attrs: HashMap<(&String, &String), RevertedAttr> = HashMap::new();
+        // One chronological pass (blocks oldest → newest, txs in index order) classifies
+        // every touched (component, attribute) pair — see `AttrRevert`.
+        let mut reverted_attrs: HashMap<(&String, &String), AttrRevert> = HashMap::new();
         for block_msg in reverted_state.iter() {
             for update in block_msg
                 .block_update()
@@ -1453,35 +1461,20 @@ where
                         if delta.deleted_attributes.contains(attr) {
                             // Both sets hold the attr: malformed module output, the order
                             // is lost in the same-tx merge. Restoring a prior value is the
-                            // safe read.
-                            classify(
-                                &mut reverted_attrs,
-                                (c_id, attr),
-                                FirstSeen::PreExisting,
-                                true,
-                            );
+                            // safe read, so classify it as an update.
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Updated);
                         } else {
-                            classify(&mut reverted_attrs, (c_id, attr), FirstSeen::Born, true);
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Created);
                         }
                     }
                     for attr in delta.updated_attributes.keys() {
                         if !delta.created_attributes.contains(attr) {
-                            classify(
-                                &mut reverted_attrs,
-                                (c_id, attr),
-                                FirstSeen::PreExisting,
-                                true,
-                            );
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Updated);
                         }
                     }
                     for attr in delta.deleted_attributes.iter() {
                         if !delta.created_attributes.contains(attr) {
-                            classify(
-                                &mut reverted_attrs,
-                                (c_id, attr),
-                                FirstSeen::PreExisting,
-                                false,
-                            );
+                            classify(&mut reverted_attrs, (c_id, attr), AttrEvent::Deleted);
                         }
                     }
                 }
@@ -1490,7 +1483,7 @@ where
 
         let reverted_protocol_state_keys_vec: Vec<(&String, &String)> = reverted_attrs
             .iter()
-            .filter(|(_, attr)| matches!(attr.first, FirstSeen::PreExisting))
+            .filter(|(_, class)| matches!(class, AttrRevert::ExistedBefore))
             .map(|(&key, _)| key)
             .collect();
 
@@ -1618,7 +1611,7 @@ where
         // Revert the attributes born inside the range that survived it by emitting
         // deletions — they have no prior state to restore.
         for (&(c_id, attr), class) in reverted_attrs.iter() {
-            if !(matches!(class.first, FirstSeen::Born) && class.alive) {
+            if !matches!(class, AttrRevert::CreatedInRange { alive: true }) {
                 continue;
             }
             state_deltas
