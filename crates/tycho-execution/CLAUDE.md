@@ -116,7 +116,10 @@ queryable via RPC:
 **Positive slippage** (`_positiveSlippageEnabled`, toggled via `setPositiveSlippageEnabled`): when enabled, the router
 takes the entire surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
 `expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap.
+also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
+stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
+with no fees skips the forced router hop.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.

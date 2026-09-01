@@ -1,3 +1,20 @@
+## [0.374.0](https://github.com/propeller-heads/tycho/compare/0.373.1...0.374.0) (2026-09-01)
+
+
+### Features
+
+* **execution:** add per-client positive slippage exemptions ([d4cbc23](https://github.com/propeller-heads/tycho/commit/d4cbc23af5054f18437096da84879582605d36f5))
+* **execution:** add per-client positive slippage exemptions ([#1371](https://github.com/propeller-heads/tycho/issues/1371)) ([015dac1](https://github.com/propeller-heads/tycho/commit/015dac153a28d9fc747bb726ba6f44cfd1c2152f))
+
+## [0.373.1](https://github.com/propeller-heads/tycho/compare/0.373.0...0.373.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* decouple partition retention from partition creation ([16b496a](https://github.com/propeller-heads/tycho/commit/16b496ac84182ea1c36ced3521aee15fa88d127f))
+* decouple partition retention from partition creation ([#1323](https://github.com/propeller-heads/tycho/issues/1323)) ([3c04de4](https://github.com/propeller-heads/tycho/commit/3c04de46d307b9c78e9147de14875eb75a2dd193))
+* share the retention setting between drop and cleanup jobs ([152b561](https://github.com/propeller-heads/tycho/commit/152b561831c83a580a05c13a5f535865852a1371))
+
 ## [0.373.0](https://github.com/propeller-heads/tycho/compare/0.372.0...0.373.0) (2026-09-01)
 
 

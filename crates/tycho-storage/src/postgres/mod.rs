@@ -1618,3 +1618,68 @@ mod tests_transaction_cleanup {
         .await;
     }
 }
+
+#[cfg(test)]
+mod tests_partition_retention {
+    use diesel::prelude::*;
+    use diesel_async::{AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
+
+    use super::testing::run_against_db;
+
+    #[derive(QueryableByName)]
+    struct Presence {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        present: bool,
+    }
+
+    /// Whether the daily component_balance partition covering now() - 3 months exists.
+    async fn expired_partition_exists(conn: &mut AsyncPgConnection) -> bool {
+        diesel::sql_query(
+            "SELECT to_regclass('public.component_balance_p' ||
+                 to_char(now() - interval '3 months', 'YYYYMMDD')) IS NOT NULL AS present",
+        )
+        .get_result::<Presence>(conn)
+        .await
+        .expect("querying partition existence failed")
+        .present
+    }
+
+    #[tokio::test]
+    async fn test_drop_expired_partitions_serial_db() {
+        run_against_db(|connection_pool| async move {
+            let mut conn = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+
+            // Plant a partition well past the 1-month retention in partition_retention_config.
+            conn.batch_execute(
+                "SELECT partman.create_partition_time(
+                     'public.component_balance',
+                     ARRAY[now() - interval '3 months']);",
+            )
+            .await
+            .expect("creating expired partition failed");
+            assert!(expired_partition_exists(&mut conn).await, "planted partition must exist");
+
+            // The procedure commits internally, so it must run as a single autocommit
+            // statement rather than inside a transaction. p_retention is left at its default
+            // to cover the resolution from partition_retention_config; p_max_attempts is 1 so
+            // a real failure surfaces immediately instead of after 30s retry backoffs (there
+            // is no concurrent lock holder to retry past here).
+            conn.batch_execute("CALL drop_expired_partitions(p_max_attempts => 1);")
+                .await
+                .expect("drop procedure should run");
+            assert!(
+                !expired_partition_exists(&mut conn).await,
+                "expired partition must be dropped"
+            );
+
+            // A run with nothing to drop must succeed as a no-op.
+            conn.batch_execute("CALL drop_expired_partitions(p_max_attempts => 1);")
+                .await
+                .expect("no-work run should succeed");
+        })
+        .await;
+    }
+}
