@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -575,8 +578,9 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
-    /// Height of the newest block whose staged writes reached the store.
-    flushed_block_height: Mutex<Option<u64>>,
+    /// Height of the newest block whose staged writes reached the store. `0` means
+    /// nothing flushed yet, so a real flushed height of 0 reads as `None`.
+    flushed_block_height: AtomicU64,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
     state_gateway: PostgresGateway,
@@ -589,7 +593,7 @@ impl Clone for CachedGateway {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
             // each instance tracks the flush progress of its own transactions
-            flushed_block_height: Mutex::new(None),
+            flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
             pool: self.pool.clone(),
             state_gateway: self.state_gateway.clone(),
@@ -636,8 +640,14 @@ impl CachedGateway {
 
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when this instance has not flushed anything yet.
-    pub async fn flushed_block_height(&self) -> Option<u64> {
-        *self.flushed_block_height.lock().await
+    pub fn flushed_block_height(&self) -> Option<u64> {
+        match self
+            .flushed_block_height
+            .load(Ordering::Acquire)
+        {
+            0 => None,
+            height => Some(height),
+        }
     }
 
     pub async fn commit_transaction(&self, min_ops_batch_size: usize) -> Result<(), StorageError> {
@@ -675,7 +685,8 @@ impl CachedGateway {
                     }
                     .instrument(span)
                     .await?;
-                    *self.flushed_block_height.lock().await = Some(flushed_block_height);
+                    self.flushed_block_height
+                        .store(flushed_block_height, Ordering::Release);
                 } else {
                     // if we are not ready to commit, give the OpenTx struct back.
                     *open_tx = Some((db_txn, rx));
@@ -694,7 +705,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
-            flushed_block_height: Mutex::new(None),
+            flushed_block_height: AtomicU64::new(0),
             pool,
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
@@ -1666,7 +1677,7 @@ mod test_serial_db {
 
             let handle = write_executor.run();
             let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
-            assert_eq!(cached_gw.flushed_block_height().await, None);
+            assert_eq!(cached_gw.flushed_block_height(), None);
 
             let block_1 = get_sample_block(1);
             cached_gw
@@ -1682,7 +1693,7 @@ mod test_serial_db {
                 .commit_transaction(100)
                 .await
                 .expect("committing tx failed");
-            assert_eq!(cached_gw.flushed_block_height().await, None);
+            assert_eq!(cached_gw.flushed_block_height(), None);
 
             // Stage a second block so the open transaction spans blocks 1–2: the
             // recorded height must be the range end, not its start.
@@ -1700,7 +1711,7 @@ mod test_serial_db {
                 .commit_transaction(0)
                 .await
                 .expect("committing tx failed");
-            assert_eq!(cached_gw.flushed_block_height().await, Some(block_2.number));
+            assert_eq!(cached_gw.flushed_block_height(), Some(block_2.number));
 
             let fetched_block = gateway
                 .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)

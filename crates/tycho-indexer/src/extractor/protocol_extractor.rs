@@ -2123,7 +2123,6 @@ impl ExtractorGateway for ExtractorPgGateway {
     async fn flushed_block_height(&self) -> Option<u64> {
         self.state_gateway
             .flushed_block_height()
-            .await
     }
 
     async fn get_protocol_states<'a>(
