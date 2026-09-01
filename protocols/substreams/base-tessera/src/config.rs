@@ -23,6 +23,11 @@ pub struct DeploymentConfig {
     pub tracked: String,
     /// TesseraSwap storage slot holding the treasury (inventory custodian).
     pub treasury_slot: u64,
+    /// Fallback treasury for runs whose initial block is patched past the constructor write
+    /// (the protocol-testing harness does this). A production sync from the package's real
+    /// initial block witnesses every treasury write, so this value is never read there.
+    #[serde(with = "hex::serde")]
+    pub treasury: Vec<u8>,
     /// Store slot holding the book's base token.
     pub book_token_slot: u64,
     /// Store slot holding the packed `decimals ‖ quote token`.
@@ -56,6 +61,7 @@ mod tests {
              &usdc=833589fcd6edb6e08f4c7c32d4f71b54bda02913\
              &tracked=f3be571a3a73201033b43bec1d1a566d45f590956d9dd143e42b6338f4f6a7c0c26d124658f641cb\
              &treasury_slot=1\
+             &treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae\
              &book_token_slot=48\
              &book_quote_slot=49\
              &book_lib_slot=51",
@@ -64,6 +70,7 @@ mod tests {
         assert_eq!(config.tesseraswap.len(), 20);
         assert_eq!(config.engine.len(), 20);
         assert_eq!(config.treasury_slot, 1);
+        assert_eq!(hex::encode(&config.treasury), "3dbe077e7986657e95e1cc50089f17a5a4af0aae");
         assert_eq!(config.book_token_slot, 48);
         assert_eq!(config.book_lib_slot, 51);
         let tracked = config.tracked_addresses();
@@ -80,6 +87,7 @@ mod tests {
              &usdc=833589fcd6edb6e08f4c7c32d4f71b54bda02913\
              &tracked=\
              &treasury_slot=1\
+             &treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae\
              &book_token_slot=48\
              &book_quote_slot=49\
              &book_lib_slot=51",

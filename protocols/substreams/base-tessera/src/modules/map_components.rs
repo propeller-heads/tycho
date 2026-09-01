@@ -148,7 +148,7 @@ mod tests {
                           &engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17\
                           &usdc=833589fcd6edb6e08f4c7c32d4f71b54bda02913\
                           &tracked=\
-                          &treasury_slot=1&book_token_slot=48&book_quote_slot=49&book_lib_slot=51";
+                          &treasury_slot=1&treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae&book_token_slot=48&book_quote_slot=49&book_lib_slot=51";
     const ENGINE: [u8; 20] = hex!("31e99e05fee3dce580af777c3fd63ee1b3b40c17");
     // The NVDAc book creation (Base block 50,526,653) as ground truth.
     const STORE: [u8; 20] = hex!("ede940cdf2a9c5620cbf97e45947594723e29c14");

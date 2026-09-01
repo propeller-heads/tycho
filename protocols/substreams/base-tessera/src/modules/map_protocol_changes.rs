@@ -35,11 +35,14 @@ pub fn map_protocol_changes(
     let config: DeploymentConfig = serde_qs::from_str(&params)?;
     let mut transaction_changes: HashMap<u64, TransactionChangesBuilder> = HashMap::new();
 
+    // The params fallback covers runs whose initial block is patched past the constructor
+    // write (the testing harness); a real sync always has the store populated.
     let treasury = treasury_store
         .get_last("treasury")
-        .and_then(|t| hex::decode(t).ok());
+        .and_then(|t| hex::decode(t).ok())
+        .unwrap_or_else(|| config.treasury.clone());
 
-    add_new_components(&grouped_components, treasury.as_deref(), &mut transaction_changes);
+    add_new_components(&grouped_components, &treasury, &mut transaction_changes);
 
     aggregate_balances_changes(balance_store, deltas)
         .into_iter()
@@ -106,7 +109,7 @@ pub fn map_protocol_changes(
 /// Adds newly created book components and their default dynamic attributes.
 fn add_new_components(
     grouped_components: &BlockTransactionProtocolComponents,
-    treasury: Option<&[u8]>,
+    treasury: &[u8],
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
     for tx_component in &grouped_components.tx_components {
@@ -116,23 +119,20 @@ fn add_new_components(
             .or_insert_with(|| TransactionChangesBuilder::new(tx));
         for component in &tx_component.components {
             builder.add_protocol_component(component);
-            let mut attributes = vec![Attribute {
-                name: "update_marker".to_string(),
-                value: vec![1u8],
-                change: ChangeType::Creation.into(),
-            }];
-            // The treasury is written in TesseraSwap's constructor, so it is always known by
-            // the time the first book exists; the guard is defensive.
-            if let Some(treasury) = treasury {
-                attributes.push(Attribute {
-                    name: "balance_owner".to_string(),
-                    value: treasury.to_vec(),
-                    change: ChangeType::Creation.into(),
-                });
-            }
             builder.add_entity_change(&EntityChanges {
                 component_id: component.id.clone(),
-                attributes,
+                attributes: vec![
+                    Attribute {
+                        name: "update_marker".to_string(),
+                        value: vec![1u8],
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "balance_owner".to_string(),
+                        value: treasury.to_vec(),
+                        change: ChangeType::Creation.into(),
+                    },
+                ],
             });
         }
     }

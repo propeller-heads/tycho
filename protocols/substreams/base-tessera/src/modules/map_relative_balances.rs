@@ -63,10 +63,12 @@ pub fn map_relative_balances(
     treasury_store: StoreGetString,
 ) -> Result<BlockBalanceDeltas> {
     let config: DeploymentConfig = serde_qs::from_str(&params)?;
-    let Some(treasury_hex) = treasury_store.get_last("treasury") else {
-        return Ok(BlockBalanceDeltas::default());
-    };
-    let treasury = hex::decode(treasury_hex)?;
+    // The params fallback covers runs whose initial block is patched past the constructor
+    // write (the testing harness); a real sync always has the store populated.
+    let treasury = treasury_store
+        .get_last("treasury")
+        .and_then(|t| hex::decode(t).ok())
+        .unwrap_or_else(|| config.treasury.clone());
 
     let mut balance_deltas = Vec::new();
     let mut seeded: SeededSet = HashSet::new();
