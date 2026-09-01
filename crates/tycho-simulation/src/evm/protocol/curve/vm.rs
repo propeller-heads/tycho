@@ -430,16 +430,7 @@ where
 }
 
 fn params(to: AlloyAddress, data: Vec<u8>) -> SimulationParameters {
-    SimulationParameters {
-        caller: AlloyAddress::ZERO,
-        to,
-        data,
-        value: U256::ZERO,
-        overrides: None,
-        gas_limit: None,
-        transient_storage: None,
-        block_overrides: None,
-    }
+    SimulationParameters { caller: AlloyAddress::ZERO, to, data, ..Default::default() }
 }
 
 fn call<D, C, R>(

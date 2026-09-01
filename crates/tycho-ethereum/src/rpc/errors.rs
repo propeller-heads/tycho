@@ -90,11 +90,57 @@ impl RPCError {
             source: error,
         }))
     }
+
+    /// Returns true when the error is a JSON-RPC "execution reverted" response, i.e. the EVM
+    /// executed the call and reverted. Such failures are deterministic properties of the called
+    /// contract, not transport or provider issues.
+    pub fn is_execution_reverted(&self) -> bool {
+        let RPCError::RequestError(RequestError::Reqwest(e)) = self else {
+            return false;
+        };
+        let AlloyRpcError::ErrorResp(payload) = &e.source else {
+            return false;
+        };
+        // EIP-1474 reserves code 3 for eth_call reverts; some providers surface reverts
+        // under generic codes (e.g. -32000) with an "execution reverted" message instead.
+        payload.code == 3 ||
+            payload
+                .message
+                .to_lowercase()
+                .contains("execution reverted")
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::redact_url_paths;
+    use alloy::rpc::json_rpc::ErrorPayload;
+    use rstest::rstest;
+
+    use super::{redact_url_paths, AlloyRpcError, RPCError, TransportErrorKind};
+
+    #[rstest]
+    #[case::eip_1474_revert_code(3, "execution reverted", true)]
+    #[case::revert_under_generic_code(-32000, "execution reverted: something", true)]
+    #[case::header_not_found(-32000, "header not found", false)]
+    #[case::invalid_request(-32600, "invalid request", false)]
+    fn is_execution_reverted_classification(
+        #[case] code: i64,
+        #[case] message: &str,
+        #[case] expected: bool,
+    ) {
+        let payload = ErrorPayload { code, message: message.to_string().into(), data: None };
+        let err = RPCError::from_alloy(
+            "eth_call failed",
+            AlloyRpcError::<TransportErrorKind>::ErrorResp(payload),
+        );
+        assert_eq!(err.is_execution_reverted(), expected);
+    }
+
+    #[test]
+    fn is_execution_reverted_false_for_non_request_errors() {
+        assert!(!RPCError::SetupError("bad url".to_string()).is_execution_reverted());
+        assert!(!RPCError::UnknownError("boom".to_string()).is_execution_reverted());
+    }
 
     #[test]
     fn redacts_path_component() {

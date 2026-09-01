@@ -428,10 +428,7 @@ where
             to: parsed_address,
             overrides: Some(HashMap::new()),
             caller: *EXTERNAL_ACCOUNT,
-            value: U256::from(0u64),
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         };
 
         let sim_result = engine

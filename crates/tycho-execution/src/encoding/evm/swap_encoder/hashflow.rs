@@ -105,6 +105,10 @@ impl SwapEncoder for HashflowSwapEncoder {
         &self.executor_address
     }
 
+    fn blocks_on_quote(&self) -> bool {
+        true
+    }
+
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
     }
@@ -230,10 +234,12 @@ mod test {
                 });
         let hashflow_calldata = Bytes::from(hashflow_quote_data_values);
         let hashflow_state = MockRFQState {
+            quote_amount_in: None,
             quote_amount_out,
             quote_data: hashflow_quote_data
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
 
         let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC

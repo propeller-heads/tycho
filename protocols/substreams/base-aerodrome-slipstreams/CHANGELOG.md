@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.1.4
+
+### Added
+
+- Index the third Slipstream factory `0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef` (deployed at
+  block 44,394,724) and its dynamic swap fee module
+  `0x87D8f999BBa9343E8099552426775B51C338E8CB` (block 44,394,736). Both reuse the
+  second-generation code: the factory differs only in its `poolImplementation` immutable, the pool
+  implementation only in its metadata hash, and the fee module only in its `factory` immutable. Pool
+  discovery, storage slot decoding, balance tracking, and the fee module ABI are unchanged.
+
+### Changed
+
+- Key the tick spacing fee store by factory (`{factory}:tick_spacing_{tick_spacing}`) and carry the
+  emitting factory on `TickSpacingFee`. Under the previous global key, a `TickSpacingEnabled` event
+  from one factory overwrote another factory's fee for the same tick spacing. The three deployed
+  factories currently agree on every enabled tick spacing, so no indexed `default_fee` changes.
+- Skip a pool whose factory has no stored fee for its tick spacing instead of panicking. A factory
+  enables a tick spacing before it can create a pool on it, so a module started at the package's
+  initial block always has the fee; a module started later — an initial-block override, as the
+  range test runner uses — previously killed the stream with a deterministic wasm panic.
+
+### Deployment notes
+
+- The added parameters change every module hash, including modules that take no parameters, so the
+  package back-processes from initial block 13,843,704.
+- Components are only emitted on their `PoolCreated` block. An extractor whose cursor is already
+  past block 44,394,724 will pick up new pools of the third factory but not the ones it created
+  before that cursor.
+
 ## v0.1.3
 
 ### Changed
