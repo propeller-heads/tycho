@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use chrono::NaiveDateTime;
 use deepsize::DeepSizeOf;
@@ -55,12 +58,17 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
 /// they are drained to the database.
 ///
 /// In case of a chain reorg, we can just purge this buffer up to the common ancestor block.
+///
+/// Drained blocks can be retained in a second, non-revertable section until their database
+/// write lands (see [`ReorgBuffer::drain_into_committing`]). State lookups read both sections,
+/// so a lookup miss means the value can only be in the database.
 #[derive(DeepSizeOf)]
 pub(crate) struct ReorgBuffer<B>
 where
     B: BlockScoped + DeepSizeOf,
 {
     block_messages: VecDeque<B>,
+    committing_blocks: VecDeque<Arc<B>>,
     strict: bool,
 }
 
@@ -93,7 +101,7 @@ where
     B: BlockScoped + std::fmt::Debug + DeepSizeOf,
 {
     pub(crate) fn new() -> Self {
-        Self { block_messages: VecDeque::new(), strict: false }
+        Self { block_messages: VecDeque::new(), committing_blocks: VecDeque::new(), strict: false }
     }
 
     /// Inserts a new block into the buffer. Ensures the new block is the expected next block,
@@ -150,6 +158,47 @@ where
             );
             Err(StorageError::NotFound("block".into(), drain_upto_block_height.to_string()))
         }
+    }
+
+    /// Drains blocks up to (excluding) `drain_upto_block_height` into the committing
+    /// section, which keeps them reachable by the state lookups until their database
+    /// write lands, and returns them for the commit task. A
+    /// [`ReorgBuffer::release_committed`] call with a flushed height drops them.
+    pub fn drain_into_committing(
+        &mut self,
+        drain_upto_block_height: u64,
+    ) -> Result<Vec<Arc<B>>, StorageError> {
+        let drained: Vec<Arc<B>> = self
+            .drain_blocks_until(drain_upto_block_height)?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        self.committing_blocks
+            .extend(drained.iter().cloned());
+        Ok(drained)
+    }
+
+    /// Drops every retained block at or below `flushed_block_height`: their writes
+    /// reached the store, so the database covers them from here on.
+    pub fn release_committed(&mut self, flushed_block_height: u64) {
+        while self
+            .committing_blocks
+            .front()
+            .is_some_and(|b| b.block().number <= flushed_block_height)
+        {
+            self.committing_blocks.pop_front();
+        }
+    }
+
+    /// Iterates the buffered history newest to oldest: buffered blocks first, then
+    /// retained committing blocks.
+    fn history(&self) -> impl Iterator<Item = &B> + '_ {
+        self.block_messages.iter().rev().chain(
+            self.committing_blocks
+                .iter()
+                .rev()
+                .map(|block| block.as_ref()),
+        )
     }
 
     fn find_index<F: Fn(&B) -> bool>(&self, predicate: F) -> Option<usize> {
@@ -415,7 +464,7 @@ where
                     .map(|&(c_id, attr)| (c_id.clone(), attr.clone())),
             );
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaining_keys.is_empty() {
                 break;
             }
@@ -452,7 +501,7 @@ where
                     .map(|&(c_id, attr)| (c_id.clone(), attr.clone())),
             );
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaining_keys.is_empty() {
                 break;
             }
@@ -486,7 +535,7 @@ where
             .map(|(c_id, token)| (c_id.to_string(), token.to_owned().to_owned()))
             .collect();
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaning_keys.is_empty() {
                 break;
             }
@@ -524,7 +573,7 @@ where
             .map(|(account, token)| (account.to_owned().to_owned(), token.to_owned().to_owned()))
             .collect::<HashSet<_>>();
 
-        for block_message in self.block_messages.iter().rev() {
+        for block_message in self.history() {
             if remaning_keys.is_empty() {
                 break;
             }
@@ -947,6 +996,74 @@ mod test {
                 )
             ])
         );
+    }
+
+    #[test]
+    fn test_lookup_reads_retained_committing_blocks() {
+        let mut reorg_buffer = ReorgBuffer::new();
+        reorg_buffer
+            .insert_block(get_block_changes(1))
+            .unwrap();
+        reorg_buffer
+            .insert_block(get_block_changes(2))
+            .unwrap();
+        reorg_buffer
+            .insert_block(get_block_changes(3))
+            .unwrap();
+
+        let drained = reorg_buffer
+            .drain_into_committing(3)
+            .unwrap();
+        assert_eq!(drained.len(), 2);
+
+        let state1 = "State1".to_string();
+        let new = "new".to_string();
+        let reserve = "reserve".to_string();
+
+        // `reserve` only exists in retained block 1; `new` was updated in retained
+        // block 2, which must win over block 1 (newest-first within the section).
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert!(missing.is_empty());
+        assert_eq!(
+            res.get(&(state1.clone(), new.clone())),
+            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+        );
+        assert_eq!(
+            res.get(&(state1.clone(), reserve.clone())),
+            Some(&Bytes::from(10_u64.to_be_bytes().to_vec()))
+        );
+
+        // Balances resolve through the same history.
+        let balance2 = "Balance2".to_string();
+        let dai = Bytes::from_str(DAI_ADDRESS).unwrap();
+        let (res, missing) = reorg_buffer.lookup_component_balances(&[(&balance2, &dai)]);
+        assert!(missing.is_empty());
+        assert_eq!(res.len(), 1);
+
+        // Retained blocks are not part of the revertable window.
+        assert_eq!(reorg_buffer.count_blocks_before(10), 1);
+
+        // A partial release keeps block 2 reachable: `new` still resolves from it,
+        // `reserve` now misses.
+        reorg_buffer.release_committed(1);
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing
+            .iter()
+            .any(|(c, a)| c == "State1" && a == "reserve"));
+        assert_eq!(
+            res.get(&(state1.clone(), new.clone())),
+            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+        );
+
+        // Releasing up to block 2 drops the rest; the lookups now miss.
+        reorg_buffer.release_committed(2);
+        let (res, missing) =
+            reorg_buffer.lookup_protocol_state(&[(&state1, &new), (&state1, &reserve)]);
+        assert!(res.is_empty());
+        assert_eq!(missing.len(), 2);
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use num_bigint::BigUint;
 
-use super::{constants::PRICE_LEVEL_STREAM_PREFIX, group_swaps::group_swaps};
+use super::{
+    constants::{PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX},
+    group_swaps::group_swaps,
+};
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
 
 /// Default gas usage for an ERC-20 `transferFrom` or `transfer`. Used as fallback when the token
@@ -44,9 +47,11 @@ pub fn optimizable_transfer_in(protocol_system: &str) -> bool {
         protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX)
 }
 
-/// ProtocolWillDebit: the router must `approve(protocol)` before swapping.
-/// The protocol's `transferFrom` is inside `swap()` and already in the gas computation of
-/// `get_amount_out`, but the approval is not.
+/// Exact-name protocols where the router must `approve(protocol)` before swapping
+/// (ProtocolWillDebit). The protocol's `transferFrom` is inside `swap()` and already in the gas
+/// computation of `get_amount_out`, but the approval is not.
+///
+/// Incomplete on its own — use `needs_approval` for the full classification.
 pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "vm:balancer_v2",
     "vm:curve",
@@ -58,6 +63,29 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "ring_swap_v2",
     "sky",
 ];
+
+/// Whether the router must approve the protocol before swapping (see
+/// `PROTOCOLS_NEEDING_APPROVAL`). The PropAMMRouter pulls `tokenIn` with `transferFrom`, so the
+/// whole `propammfallback:` family needs the approval.
+pub fn needs_approval(protocol_system: &str) -> bool {
+    PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system) ||
+        protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX)
+}
+
+/// Extra gas the PropAMMRouter adds around the venue swap: the `transferFrom` that pulls `tokenIn`
+/// out of the TychoRouter, the venue whitelist read, and its own accounting. Measured on mainnet
+/// forks by the router authors at +48,972 (FermiSwap) and +69,952 (Kipseli) over a direct venue
+/// call; the higher figure is used so the estimate is not optimistic.
+///
+/// The pull is inside this figure, which is why `estimate_transfer_overhead` charges no separate
+/// input transfer for the family.
+///
+/// The Uniswap V3 retry is not included, and it costs far more than this: the whole router call on
+/// the retry path measures 249,895 gas against 106,784 for the same Uniswap V3 swap called
+/// directly (`PropAMMFallbackExecutorTest.testFallbackPathGas` and `testDirectUniswapV3Gas`, block
+/// 25682938). A leg that actually falls back therefore costs about 180k more than estimated here.
+/// The estimate prices the venue path because that is the path a fresh quote takes.
+pub const PROPAMM_FALLBACK_OVERHEAD_GAS: u64 = 70_000;
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
@@ -190,14 +218,23 @@ fn estimate_transfer_overhead(
     // - Callback protocols handle it inside the callback (part of swap gas).
     // - Protocols that can have an optimizable transfer in should not be included here either
     //   because the extra transfer is skipped but only if the strategy is not Split
+    // - The PropAMMRouter pulls tokenIn itself and PROPAMM_FALLBACK_OVERHEAD_GAS already prices
+    //   that pull, so charging a transfer here would count it twice.
     if !PROTOCOLS_CALLBACK.contains(&protocol_system) &&
+        !protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) &&
         (!optimizable_transfer_in(protocol_system) || *strategy == Strategy::Split)
     {
         overhead += transfer_token_gas(token_in);
     }
 
-    if PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system) {
+    if needs_approval(protocol_system) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
+    }
+
+    // The venue swap gas from `get_amount_out` prices a direct call to an already-funded venue,
+    // not one wrapped by the PropAMMRouter.
+    if protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) {
+        overhead += BigUint::from(PROPAMM_FALLBACK_OVERHEAD_GAS);
     }
 
     // Output transfer: router -> receiver/next pool (only when outputToRouter).
@@ -285,6 +322,42 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
         assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_single_propamm_fallback() {
+        // Routing the same venue through the PropAMMRouter switches the leg to ProtocolWillDebit:
+        // the router approves, then the PropAMMRouter pulls tokenIn itself.
+        let solution = make_solution(vec![make_swap("propammfallback:fermiswap")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← the PropAMMRouter pulls, see below
+        // approval                             25_000  ← TOKEN_APPROVAL_GAS
+        // PropAMMRouter overhead               70_000  ← PROPAMM_FALLBACK_OVERHEAD_GAS, which
+        //                                                prices the pull
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(295_000u64));
+    }
+
+    #[test]
+    fn test_split_propamm_fallback() {
+        // Split does not reintroduce the input transfer: the leg is still ProtocolWillDebit, so
+        // the PropAMMRouter pulls from the router either way.
+        let solution = make_solution(vec![
+            make_swap("propammfallback:fermiswap").with_split(0.5),
+            make_swap("propammfallback:kipseli").with_split(0.5),
+        ]);
+        let gas = estimate_gas_usage(&solution, Strategy::Split);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // leg1 approval + router overhead      95_000
+        // leg1 pool gas                       100_000
+        // leg2 approval + router overhead      95_000
+        // leg2 pool gas                       100_000
+        // extra output transfer (→ router)     60_000  ← TOKEN_GAS
+        assert_eq!(gas, BigUint::from(490_000u64));
     }
 
     #[test]

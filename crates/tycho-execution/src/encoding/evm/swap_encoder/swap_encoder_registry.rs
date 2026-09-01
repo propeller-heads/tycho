@@ -7,7 +7,7 @@ use crate::encoding::{
     evm::{
         constants::{
             DEFAULT_EXECUTORS_JSON, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG,
+            PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -99,6 +99,7 @@ impl SwapEncoderRegistry {
     /// Price-level-stream protocols (`pricelevelstream:{venue}`) without an exact entry fall
     /// back to the family entry registered under `pricelevelstream`, so a single configured
     /// executor address serves every pAMM — including auto-detected, address-named ones.
+    /// `propammfallback:{venue}` resolves the same way against `propammfallback`.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
@@ -108,6 +109,9 @@ impl SwapEncoderRegistry {
             return self
                 .encoders
                 .get(PRICE_LEVEL_STREAM_KEY);
+        }
+        if protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) {
+            return self.encoders.get(PROPAMM_FALLBACK_KEY);
         }
         None
     }
@@ -219,7 +223,13 @@ impl SwapEncoderRegistry {
             // executor; the concrete venue is identified by the component, not the encoder. The
             // bare family key serves every venue via the `get_encoder` fallback; venue-specific
             // `pricelevelstream:{venue}` entries override it per venue.
-            pls if pls == PRICE_LEVEL_STREAM_KEY || pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+            // The PropAMMRouter path takes the same calldata, so it reuses the same encoder and
+            // differs only in the executor address configured for the family.
+            pls if pls == PRICE_LEVEL_STREAM_KEY ||
+                pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) ||
+                pls == PROPAMM_FALLBACK_KEY ||
+                pls.starts_with(PROPAMM_FALLBACK_PREFIX) =>
+            {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             _ => Err(EncodingError::FatalError(format!(
@@ -257,6 +267,36 @@ mod tests {
         assert!(registry
             .get_encoder("unknown_protocol")
             .is_none());
+    }
+
+    /// The PropAMMRouter family resolves the same way, and to a different executor than the direct
+    /// path — same calldata, different call target.
+    #[test]
+    fn test_propamm_fallback_protocol_resolution() {
+        let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors))
+            .unwrap();
+
+        for protocol in [
+            PROPAMM_FALLBACK_KEY,
+            "propammfallback:fermiswap",
+            "propammfallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
+        ] {
+            assert!(registry.get_encoder(protocol).is_some(), "no encoder resolved for {protocol}");
+        }
+
+        let direct = registry
+            .get_encoder("pricelevelstream:fermiswap")
+            .unwrap()
+            .executor_address()
+            .clone();
+        let via_router = registry
+            .get_encoder("propammfallback:fermiswap")
+            .unwrap()
+            .executor_address()
+            .clone();
+        assert_ne!(direct, via_router);
     }
 
     #[test]

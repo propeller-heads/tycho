@@ -14,7 +14,18 @@ cargo run --release --example quickstart
 ```
 
 By default, the example will trade 10 USDC -> WETH on Ethereum Mainnet. Setting the chain will by default trade 10
-USDC -> WETH on that chain.
+units of that chain's main stablecoin into its wrapped native token:
+
+| Chain | Default trade |
+|---|---|
+| `ethereum` | USDC -> WETH |
+| `base` | USDC -> WETH |
+| `unichain` | USDC -> WETH |
+| `arbitrum` | USDC -> WETH |
+| `bsc` | USDC -> WBNB |
+| `polygon` | USDC -> WPOL |
+| `robinhood` | USDG -> WETH |
+
 If you want a different trade or chain, you can do:
 
 ```bash

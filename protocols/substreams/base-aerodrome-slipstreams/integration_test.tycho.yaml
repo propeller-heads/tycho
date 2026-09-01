@@ -5,7 +5,27 @@ protocol_type_names:
 module_name: "map_protocol_changes"
 skip_balance_check: true
 initialized_accounts:
-tests: []
+tests:
+  # The range runner forces every module to start at start_block, so a test only works when the
+  # factory's TickSpacingEnabled event for the pool's tick spacing falls inside the range. The third
+  # factory enabled tick spacing 10 at block 44,439,787 and created this pool at 44,440,158; the
+  # stop block is the last one before it creates pools on tick spacings enabled earlier. Within the
+  # range the pool is initialized, minted into, and swapped 4 times.
+  - name: test_third_factory_weth_usdc
+    start_block: 44439787
+    stop_block: 44440867
+    expected_components:
+      - id: "0x493e74eda2720e127baccc1a19b2d567bc14ab43"
+        tokens:
+          - "0x4200000000000000000000000000000000000006" # WETH
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+        static_attributes:
+          default_fee: "0x01f4"
+          tick_spacing: "0x0a"
+        creation_tx: "0x107e8160b39e8a24feec22ea937f191413b31a8c16250775473992767edf0218"
+        skip_simulation: false
+        skip_execution: false
+
   # The new fee module first sets dfc_baseFee at block 44,221,840, then updates
   # dfc_feeCap and dfc_scalingFactor independently at block 44,227,070.
   # - name: test_new_fee_module_partial_updates

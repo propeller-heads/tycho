@@ -138,8 +138,7 @@ pub struct Solution {
     #[serde(with = "biguint_string")]
     expected_amount_out: BigUint,
     /// Smallest output the swap may return. Passed to the router as `minAmountOut`, the revert
-    /// guardrail. `TychoRouter` rejects a value above `expected_amount_out` or further than
-    /// `MAX_SLIPPAGE_TOLERANCE_BPS` below it, which also excludes zero.
+    /// guardrail. `TychoRouter` rejects a value of zero or above `expected_amount_out`.
     #[serde(with = "biguint_string")]
     min_amount_out: BigUint,
     /// List of swaps to fulfill the solution.

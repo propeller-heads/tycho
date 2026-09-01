@@ -55,9 +55,9 @@ Follow this checklist when using TychoRouterV3. It covers essential security req
 
 * **Always set `expectedAmountOut` and `minAmountOut`** on TychoRouterV3's `swap...` functions. `expectedAmountOut` is your quoted output; `minAmountOut` is the amount below which the swap reverts.
   * Example: if you expect 1000 USDC and accept 5% slippage, set `expectedAmountOut` to `1000 * 10**6` and `minAmountOut` to `950 * 10**6`.
-  * `minAmountOut` must land between 80% of `expectedAmountOut` and `expectedAmountOut` itself — see [Slippage bounds](encoding/#slippage-bounds).
-  * Setting `minAmountOut` near the bottom of that range still leaves you exposed: a faulty swap sequence, slippage or an attack can leave you with far less than you quoted.
-* **Verify the price data behind `expectedAmountOut`** against at least one other independent price source. Bad price data moves your quote and your slippage floor together, so both guardrails fail at once and the losses can be large.
+  * `minAmountOut` must be non-zero and no greater than `expectedAmountOut` — see [Slippage bounds](encoding/#slippage-bounds).
+  * The router sets no lower bound, so a `minAmountOut` far below your quote still passes: a faulty swap sequence, slippage or an attack can then leave you with far less than you quoted.
+* **Verify the price data behind `minAmountOut`** against at least one other independent price source. A `minAmountOut` derived from a bad quote can sit far below the fair output, so the guardrail fails to protect you and the losses can be large.
 * **Never approve infinite allowances**, including those for Permit2.
 * **Set Permit2 allowance and deadline as low as is practical.**
 

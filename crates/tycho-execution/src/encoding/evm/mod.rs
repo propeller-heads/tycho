@@ -1,7 +1,8 @@
 pub mod approvals;
 mod constants;
 pub use constants::{
-    get_router_address, DEFAULT_ROUTER_ADDRESSES, PRICE_LEVEL_STREAM_PREFIX, ROUTER_ETH_ADDRESS,
+    get_router_address, DEFAULT_ROUTER_ADDRESSES, PRICE_LEVEL_STREAM_PREFIX,
+    PROPAMM_FALLBACK_PREFIX, ROUTER_ETH_ADDRESS,
 };
 pub mod encoder_builders;
 mod encoding_utils;

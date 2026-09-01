@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -575,6 +578,9 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
+    /// Height of the newest block whose staged writes reached the store. `0` means
+    /// nothing flushed yet, so a real flushed height of 0 reads as `None`.
+    flushed_block_height: AtomicU64,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
     state_gateway: PostgresGateway,
@@ -586,6 +592,8 @@ impl Clone for CachedGateway {
         Self {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
+            // each instance tracks the flush progress of its own transactions
+            flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
             pool: self.pool.clone(),
             state_gateway: self.state_gateway.clone(),
@@ -630,6 +638,18 @@ impl CachedGateway {
         }
     }
 
+    /// Returns the height of the newest block whose staged writes reached the store, or
+    /// `None` when this instance has not flushed anything yet.
+    pub fn flushed_block_height(&self) -> Option<u64> {
+        match self
+            .flushed_block_height
+            .load(Ordering::Acquire)
+        {
+            0 => None,
+            height => Some(height),
+        }
+    }
+
     pub async fn commit_transaction(&self, min_ops_batch_size: usize) -> Result<(), StorageError> {
         let mut open_tx = self.open_tx.lock().await;
         match open_tx.take() {
@@ -638,6 +658,7 @@ impl CachedGateway {
             }
             Some((mut db_txn, rx)) => {
                 if db_txn.size > min_ops_batch_size {
+                    let flushed_block_height = db_txn.block_range.end.number;
                     let span = info_span!("DatabaseCommit", size = db_txn.size);
                     db_txn.caller_span = tracing::Span::current();
                     async move {
@@ -664,6 +685,8 @@ impl CachedGateway {
                     }
                     .instrument(span)
                     .await?;
+                    self.flushed_block_height
+                        .store(flushed_block_height, Ordering::Release);
                 } else {
                     // if we are not ready to commit, give the OpenTx struct back.
                     *open_tx = Some((db_txn, rx));
@@ -682,6 +705,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
+            flushed_block_height: AtomicU64::new(0),
             pool,
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
@@ -1617,6 +1641,85 @@ mod test_serial_db {
             assert_eq!(fetched_block_2, block_2);
             // Assert block 3 is still pending in cache
             assert_eq!(fetched_block_3, block_3);
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_cached_gateway_flushed_block_height() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            // `from_connection` builds the native-token cache and panics without this row.
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+
+            let handle = write_executor.run();
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
+            assert_eq!(cached_gw.flushed_block_height(), None);
+
+            let block_1 = get_sample_block(1);
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+
+            // Below the batch threshold: the op stays staged and the height stays unset.
+            cached_gw
+                .commit_transaction(100)
+                .await
+                .expect("committing tx failed");
+            assert_eq!(cached_gw.flushed_block_height(), None);
+
+            // Stage a second block so the open transaction spans blocks 1–2: the
+            // recorded height must be the range end, not its start.
+            let block_2 = get_sample_block(2);
+            cached_gw
+                .start_transaction(&block_2, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_2))
+                .await
+                .expect("Upsert block 2 ok");
+
+            // Forcing the commit flushes the staged ops and records the range-end height.
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            assert_eq!(cached_gw.flushed_block_height(), Some(block_2.number));
+
+            let fetched_block = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("Failed to fetch block");
+            assert_eq!(fetched_block, block_1);
+
+            handle.abort();
         })
         .await;
     }

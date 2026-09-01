@@ -58,10 +58,16 @@ impl PriceLevelStreamProcessor {
         info!("Starting price level stream processor for chain {:?}", self.chain);
         // The default venues are served under their names, auto-detection additionally serves
         // any newly streamed pAMM under its address.
+        //
+        // The PropAMMRouter path is off here: this test measures how well a venue's own quote
+        // matches its own fill. Through the router a stale quote silently executes on the
+        // Uniswap V3 fallback instead of reverting, which reads as a quote mismatch and hides
+        // the staleness the revert classification below records.
         let stream = PriceLevelStreamBuilder::new()
             .with_known_pamms()
             .auto_detect(true)
             .with_tokens(all_tokens.clone())
+            .without_fallback_router()
             .build();
 
         let mut emitter = SampledEmitter::new(self.sample_size, self.block_interval);

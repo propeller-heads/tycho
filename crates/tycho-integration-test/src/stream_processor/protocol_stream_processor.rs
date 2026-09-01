@@ -16,6 +16,7 @@ use tycho_simulation::{
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
+            balancer_v3::BalancerV3State,
             cowamm::state::CowAMMState,
             curve::CurveState,
             ekubo::state::EkuboState,
@@ -211,6 +212,7 @@ impl ProtocolStreamProcessor {
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
+                "sushiswap_v2".to_string(),
                 "uniswap_v3".to_string(),
                 "uniswap_v4".to_string(),
                 "pancakeswap_v3".to_string(),
@@ -400,11 +402,8 @@ impl ProtocolStreamProcessor {
                     stream.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None);
             }
             "vm:balancer_v3" => {
-                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:balancer_v3",
-                    tvl_filter.clone(),
-                    None,
-                );
+                stream =
+                    stream.exchange::<BalancerV3State>("vm:balancer_v3", tvl_filter.clone(), None);
             }
             _ => {
                 return Err(miette::miette!("Unknown protocol: {}", protocol));

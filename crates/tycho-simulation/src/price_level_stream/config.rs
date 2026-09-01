@@ -11,6 +11,13 @@ use tycho_common::Bytes;
 /// details.
 pub const PRICE_LEVEL_STREAM_FAMILY: &str = "pricelevelstream";
 
+/// Protocol system family of components executed through Titan's PropAMMRouter instead of the
+/// venue directly, so a stale maker quote falls back to a single-hop Uniswap V3 pool instead of
+/// reverting the route.
+///
+/// Must match `tycho-execution`'s `PROPAMM_FALLBACK_KEY`.
+pub const PROPAMM_FALLBACK_FAMILY: &str = "propammfallback";
+
 /// Configuration of a single pAMM to be served from the price level stream.
 #[derive(Debug, Clone)]
 pub struct PriceLevelStreamConfig {
@@ -39,6 +46,11 @@ impl PriceLevelStreamConfig {
     /// The protocol system identifier of components emitted for this pAMM.
     pub fn protocol_system(&self) -> String {
         format!("{PRICE_LEVEL_STREAM_FAMILY}:{}", self.protocol)
+    }
+
+    /// The protocol system identifier when this pAMM executes through Titan's PropAMMRouter.
+    pub fn fallback_protocol_system(&self) -> String {
+        format!("{PROPAMM_FALLBACK_FAMILY}:{}", self.protocol)
     }
 }
 

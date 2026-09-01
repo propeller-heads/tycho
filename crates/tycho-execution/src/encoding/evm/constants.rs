@@ -46,7 +46,7 @@ pub static ROUTER_ETH_ADDRESS: LazyLock<Bytes> = LazyLock::new(|| {
 /// It is important to note that fetching more blocks will send more attestations to the
 /// Tycho Router, resulting in a higher gas usage. Fetching fewer blocks may result in attestations
 /// expiring if the transaction is not sent fast enough.
-pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 5;
+pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 10;
 
 /// The endpoint serving Angstrom pool unlock attestations.
 pub(crate) const ANGSTROM_DEFAULT_API_URL: &str =
@@ -137,9 +137,27 @@ pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// so a single configured executor address covers every pAMM, including auto-detected ones.
 pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 
+/// Protocol system prefix for pAMM components executed through the PropAMMRouter, so a stale maker
+/// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
+/// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct
+/// path, so both prefixes share `PropAMMSwapEncoder` and differ only in the executor.
+pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
+
+/// The executor-config key serving the whole PropAMMRouter protocol family, mirroring
+/// `PRICE_LEVEL_STREAM_KEY`.
+pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `get_encoder` matches on the prefix but looks the executor up under the key, so the two
+    /// must name the same family.
+    #[test]
+    fn test_family_keys_and_prefixes_agree() {
+        assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
+        assert_eq!(format!("{PROPAMM_FALLBACK_KEY}:"), PROPAMM_FALLBACK_PREFIX);
+    }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus
     /// the retry that follows it still fit inside the maximum window age.

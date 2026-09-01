@@ -84,6 +84,7 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>(
                     "aerodrome_slipstreams",
                     tvl_filter.clone(),
@@ -105,7 +106,18 @@ fn register_exchanges(
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
-            builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
+        Chain::Robinhood => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
         _ => {}
     }
