@@ -12,14 +12,16 @@ import {
 
 /// @title TesseraSwapAdapter
 /// @notice Adapter for swapping tokens on Tessera V (Wintermute's propAMM).
-/// @dev Each pool is a `base/USDC` book backed by a per-book price store; a
-/// single treasury holds all inventory and settles by allowance through the
-/// verified `TesseraSwap` entrypoint. The pool id packs
-/// `tesseraswap (20 bytes) | base token low 12 bytes`, matching the substreams
-/// component id. Quotes are a pure function of tracked storage (engine +
-/// per-book store) plus a freshness gate on the age of the last price post
-/// relative to `block.number`; simulating with the indexed block's environment
-/// always passes the gate because prices post every block.
+/// @dev Each pool is a Tessera pair: a dedicated contract (an EIP-1967 proxy)
+/// holding that pair's price state and identity, registered on the pricing
+/// engine. The pool id is the pair's contract address (high 20 bytes of the
+/// bytes32), matching the substreams component id; the pair's tokens are read
+/// from its own `baseToken()`/`quoteToken()` getters. A single treasury holds
+/// all inventory and settles by allowance through the verified `TesseraSwap`
+/// entrypoint. Quotes are a pure function of tracked storage plus a freshness
+/// gate on the age of the last price post relative to `block.number`;
+/// simulating with the indexed block's environment always passes the gate
+/// because prices post every block.
 contract TesseraSwapAdapter is ISwapAdapter {
     using SafeERC20 for IERC20;
 
@@ -31,13 +33,9 @@ contract TesseraSwapAdapter is ISwapAdapter {
     uint256 constant MIN_QUOTABLE_SCAN_ROUNDS = 13;
 
     ITesseraSwap public immutable tesseraSwap;
-    ITesseraPairs public immutable pairHelper;
-    address public immutable usdc;
 
-    constructor(address tesseraSwap_, address pairHelper_, address usdc_) {
+    constructor(address tesseraSwap_) {
         tesseraSwap = ITesseraSwap(tesseraSwap_);
-        pairHelper = ITesseraPairs(pairHelper_);
-        usdc = usdc_;
     }
 
     /// @inheritdoc ISwapAdapter
@@ -118,8 +116,8 @@ contract TesseraSwapAdapter is ISwapAdapter {
 
     /// @inheritdoc ISwapAdapter
     /// @dev The maximum sellable amount is found by bisecting the view quote:
-    /// above the book's quote-ladder capacity the venue returns a zero output
-    /// instead of reverting, and a disabled or stale book quotes zero at every
+    /// above the pair's quote-ladder capacity the venue returns a zero output
+    /// instead of reverting, and a disabled or stale pair quotes zero at every
     /// size (so its limits read zero and it drops out of routing on its own).
     function getLimits(bytes32 poolId, address sellToken, address buyToken)
         external
@@ -171,53 +169,36 @@ contract TesseraSwapAdapter is ISwapAdapter {
     }
 
     /// @inheritdoc ISwapAdapter
-    /// @dev Resolved through the pair-list helper: the pool id carries only
-    /// the base token's low 12 bytes, which cannot be expanded to an address
-    /// on-chain. Only used for testing; the hot paths (price/swap/limits)
-    /// receive full token addresses and never touch the helper.
+    /// @dev The pool id is the pair's contract address; the pair exposes its
+    /// own token getters.
     function getTokens(bytes32 poolId)
         external
         view
         override
         returns (address[] memory tokens)
     {
-        address base = _baseTokenFromHelper(poolId);
-        if (base == address(0)) {
-            revert InvalidOrder("Unknown pool");
-        }
+        ITesseraPair pair = _pair(poolId);
         tokens = new address[](2);
-        tokens[0] = base;
-        tokens[1] = usdc;
+        tokens[0] = pair.baseToken();
+        tokens[1] = pair.quoteToken();
     }
 
     /// @inheritdoc ISwapAdapter
-    /// @dev Enumerates the live pair list from the helper. Delisted books
-    /// (which still exist as components but quote zero) are not returned.
-    function getPoolIds(uint256 offset, uint256 limit)
+    /// @dev Tessera exposes no on-chain enumeration from tokens to pair
+    /// contracts (the public helper returns token pairs only, and the
+    /// engine's registry is a mapping without a getter). Pool ids come from
+    /// the substreams component ids.
+    function getPoolIds(uint256, uint256)
         external
-        view
+        pure
         override
-        returns (bytes32[] memory ids)
+        returns (bytes32[] memory)
     {
-        address[][] memory pairs = pairHelper.getTesseraPairs();
-        if (offset >= pairs.length) {
-            return new bytes32[](0);
-        }
-        uint256 end = offset + limit;
-        if (end > pairs.length) {
-            end = pairs.length;
-        }
-        ids = new bytes32[](end - offset);
-        for (uint256 i = 0; i < ids.length; i++) {
-            ids[i] = _poolId(pairs[offset + i][0]);
-        }
+        revert NotImplemented("TesseraSwapAdapter.getPoolIds");
     }
 
-    /// @notice Pool id for a book: `tesseraswap (20 bytes) | base token low 12
-    /// bytes`.
-    function _poolId(address baseToken) internal view returns (bytes32) {
-        return bytes32(bytes20(address(tesseraSwap)))
-            | bytes32(uint256(uint160(baseToken)) & type(uint96).max);
+    function _pair(bytes32 poolId) internal pure returns (ITesseraPair) {
+        return ITesseraPair(address(bytes20(poolId)));
     }
 
     function _validatePoolTokens(
@@ -225,38 +206,14 @@ contract TesseraSwapAdapter is ISwapAdapter {
         address sellToken,
         address buyToken
     ) internal view {
-        if (address(bytes20(poolId)) != address(tesseraSwap)) {
-            revert InvalidOrder("Pool id entrypoint mismatch");
-        }
-        address base;
-        if (sellToken == usdc) {
-            base = buyToken;
-        } else if (buyToken == usdc) {
-            base = sellToken;
-        } else {
-            revert InvalidOrder("One side must be the quote token");
-        }
-        uint256 suffix = uint256(poolId) & type(uint96).max;
-        if (uint256(uint160(base)) & type(uint96).max != suffix) {
+        ITesseraPair pair = _pair(poolId);
+        address base = pair.baseToken();
+        address quote = pair.quoteToken();
+        bool validPair = (sellToken == base && buyToken == quote)
+            || (sellToken == quote && buyToken == base);
+        if (!validPair) {
             revert InvalidOrder("Pool/token mismatch");
         }
-    }
-
-    /// @dev Base token for a pool id, from the helper's live pair list.
-    function _baseTokenFromHelper(bytes32 poolId)
-        internal
-        view
-        returns (address)
-    {
-        uint256 suffix = uint256(poolId) & type(uint96).max;
-        address[][] memory pairs = pairHelper.getTesseraPairs();
-        for (uint256 i = 0; i < pairs.length; i++) {
-            address base = pairs[i][0];
-            if (uint256(uint160(base)) & type(uint96).max == suffix) {
-                return base;
-            }
-        }
-        return address(0);
     }
 
     function _quoteView(address sellToken, address buyToken, int256 amount)
@@ -289,8 +246,7 @@ contract TesseraSwapAdapter is ISwapAdapter {
         view
         returns (uint256)
     {
-        uint256 amount =
-            10 ** IERC20Metadata(sellToken).decimals() / 1e6;
+        uint256 amount = 10 ** IERC20Metadata(sellToken).decimals() / 1e6;
         if (amount == 0) {
             amount = 1;
         }
@@ -338,6 +294,8 @@ interface ITesseraSwap {
     ) external;
 }
 
-interface ITesseraPairs {
-    function getTesseraPairs() external view returns (address[][] memory);
+interface ITesseraPair {
+    function baseToken() external view returns (address);
+
+    function quoteToken() external view returns (address);
 }

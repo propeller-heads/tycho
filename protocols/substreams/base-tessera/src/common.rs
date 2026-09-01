@@ -3,6 +3,7 @@
 //! Deployment-specific values (addresses, storage slots) come from
 //! [`crate::config::DeploymentConfig`]; the constants here are fixed by standards or by the
 //! contract code itself.
+use keccak_hash::keccak;
 use substreams::{
     hex,
     store::{StoreGet, StoreGetProto, StoreGetString},
@@ -10,23 +11,38 @@ use substreams::{
 use tycho_substreams::prelude::ProtocolComponent;
 
 /// EIP-1967 implementation slot (`keccak256("eip1967.proxy.implementation") - 1`). Every
-/// per-book price store is a proxy whose init writes this slot in its creation transaction.
+/// Tessera pair contract is a proxy whose init writes this slot in its creation transaction.
 pub const EIP1967_IMPL_SLOT: [u8; 32] =
     hex!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
 
-/// Deterministic component id for a book: 32 bytes = `tesseraswap (20) ‖ base token low 12`,
-/// hex-encoded.
+/// Component id for a pair: its contract address, hex-encoded.
 ///
-/// The id must hex-decode to at most 32 bytes: `tycho-simulation` converts it into the swap
-/// adapter's `bytes32 poolId` via `string_to_bytes32`. The adapter validates the sell/buy
-/// tokens it is given against the low-12-byte token suffix; it never needs to reconstruct the
-/// full token address from the id. Keyed by token (not by store address) so the id survives a
-/// store re-deploy for the same book.
-pub fn component_id(tesseraswap: &[u8], base_token: &[u8]) -> String {
-    let mut id = [0u8; 32];
-    id[..20].copy_from_slice(tesseraswap);
-    id[20..].copy_from_slice(&base_token[8..20]);
-    format!("0x{}", hex::encode(id))
+/// The id must hex-decode to at most 32 bytes: `tycho-simulation` left-pads it into the swap
+/// adapter's `bytes32 poolId` via `string_to_bytes32`, so the adapter recovers the pair with
+/// `address(bytes20(poolId))`. Using the contract address (rather than a token-derived key)
+/// keeps ids unique when one base token trades against several quote tokens — WETH/USDC and
+/// WETH/USDbC are distinct registered pairs — and makes a re-deployed pair a new component.
+pub fn component_id(pair: &[u8]) -> String {
+    format!("0x{}", hex::encode(pair))
+}
+
+/// The engine storage slot holding a pair's contract address:
+/// `keccak256(abi.encode(pairKey, pair_map_slot))` with
+/// `pairKey = keccak256(abi.encode(tokenLo, tokenHi))`, tokens sorted ascending.
+///
+/// Verified against all 15 registered pairs on Base (HANDOVER §2).
+pub fn engine_pair_slot(token_a: &[u8], token_b: &[u8], pair_map_slot: u64) -> Vec<u8> {
+    let (lo, hi) = if token_a < token_b { (token_a, token_b) } else { (token_b, token_a) };
+    let mut encoded = [0u8; 64];
+    encoded[12..32].copy_from_slice(lo);
+    encoded[44..64].copy_from_slice(hi);
+    let key = keccak(encoded.as_slice());
+    let mut input = [0u8; 64];
+    input[..32].copy_from_slice(key.as_bytes());
+    input[56..].copy_from_slice(&pair_map_slot.to_be_bytes());
+    keccak(input.as_slice())
+        .as_bytes()
+        .to_vec()
 }
 
 /// A `u64` slot number as the 32-byte big-endian storage key used by firehose storage changes.
@@ -51,24 +67,25 @@ pub fn address_from_word(word: &[u8]) -> Vec<u8> {
     address.to_vec()
 }
 
-/// Store key indexing a book component by its price-store address.
-pub fn store_key(store_addr: &[u8]) -> String {
-    format!("store:{}", hex::encode(store_addr))
+/// Store key indexing a pair component by its contract address.
+pub fn pair_store_key(pair: &[u8]) -> String {
+    format!("pair:{}", hex::encode(pair))
 }
 
-/// Store key indexing a book component by a token address.
-pub fn token_key(token: &[u8]) -> String {
+/// Store key indexing pair components by a token address (append store — one token can back
+/// several pairs: USDC backs most of them, and WETH trades against both USDC and USDbC).
+pub fn token_store_key(token: &[u8]) -> String {
     format!("token:{}", hex::encode(token))
 }
 
-/// All known book price-store addresses, from the append-only books store.
+/// All known pair-contract addresses, from the append-only pairs store.
 ///
-/// Entries are hex store addresses appended at component creation, `;`-separated by
-/// `StoreAppend`. Duplicates cannot occur: a store address is appended exactly once, in the
-/// transaction that creates its component.
-pub fn all_book_stores(books_store: &StoreGetString) -> Vec<Vec<u8>> {
-    books_store
-        .get_last("books")
+/// Entries are hex pair addresses appended at component creation, `;`-separated by
+/// `StoreAppend`. A pair address is appended exactly once, in the transaction that creates
+/// its component.
+pub fn all_pair_addresses(pairs_store: &StoreGetString) -> Vec<Vec<u8>> {
+    pairs_store
+        .get_last("pairs")
         .map(|joined| {
             joined
                 .split(';')
@@ -79,62 +96,63 @@ pub fn all_book_stores(books_store: &StoreGetString) -> Vec<Vec<u8>> {
         .unwrap_or_default()
 }
 
-/// All known book components, resolved through the books list and the components store.
-///
-/// Deduplicated by component id: a store re-deploy for an existing base token appends a second
-/// store address that resolves to the same component (the id is keyed by token, not by store),
-/// and duplicated ids would double every fanned-out balance delta.
-pub fn all_books(
+/// All known pair components, resolved through the pairs list and the components store.
+pub fn all_pairs(
     components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
 ) -> Vec<ProtocolComponent> {
-    let mut seen = std::collections::HashSet::new();
-    all_book_stores(books_store)
+    all_pair_addresses(pairs_store)
         .iter()
-        .filter_map(|addr| components_store.get_last(store_key(addr)))
-        .filter(|c| seen.insert(c.id.clone()))
+        .filter_map(|addr| components_store.get_last(pair_store_key(addr)))
         .collect()
 }
 
-/// Component ids a token backs: USDC (the hub) backs every book; a base token backs exactly
-/// its own book.
-pub fn books_for_token(
-    token: &[u8],
-    usdc: &[u8],
-    components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
-) -> Vec<String> {
-    if token == usdc {
-        all_books(components_store, books_store)
-            .into_iter()
-            .map(|c| c.id)
-            .collect()
-    } else {
-        components_store
-            .get_last(token_key(token))
-            .map(|c| vec![c.id])
-            .unwrap_or_default()
-    }
+/// Component ids a token backs: every pair whose token set contains it. Resolved through the
+/// token index, which is append-valued — a quote token (USDC) backs many pairs and a base
+/// token can trade against several quotes.
+pub fn pairs_for_token(token: &[u8], token_index: &StoreGetString) -> Vec<String> {
+    token_index
+        .get_last(token_store_key(token))
+        .map(|joined| {
+            joined
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const TESSERASWAP: [u8; 20] = hex!("55555522005bcae1c2424d474bfd5ed477749e3e");
+    #[test]
+    fn component_id_is_the_pair_address() {
+        let pair = hex::decode("f524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c").unwrap();
+        assert_eq!(component_id(&pair), "0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c");
+    }
 
     #[test]
-    fn component_id_is_tesseraswap_scoped_bytes32() {
+    fn engine_pair_slot_matches_onchain_values() {
+        // WETH/USDC on Base: slot verified via `cast index bytes32 $(cast keccak $(cast
+        // abi-encode "f(address,address)" WETH USDC)) 8` and eth_getStorageAt (HANDOVER §2).
         let weth = hex::decode("4200000000000000000000000000000000000006").unwrap();
+        let usdc = hex::decode("833589fcd6edb6e08f4c7c32d4f71b54bda02913").unwrap();
+        let slot = engine_pair_slot(&weth, &usdc, 8);
         assert_eq!(
-            component_id(&TESSERASWAP, &weth),
-            // tesseraswap (20 bytes) ‖ WETH low 12 bytes
-            "0x55555522005bcae1c2424d474bfd5ed477749e3e000000000000000000000006"
+            hex::encode(&slot),
+            "7de34ae1e8ba739875fb9abb94e6baebe5cefd45e23d860202def0971a284fe7"
         );
-        let cbbtc = hex::decode("cbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap();
+        // Order-independent.
+        assert_eq!(engine_pair_slot(&usdc, &weth, 8), slot);
+
+        // ZORA/USDT — a non-USDC-quoted pair resolves through the same formula.
+        let zora = hex::decode("1111111111166b7fe7bd91427724b487980afc69").unwrap();
+        let usdt = hex::decode("fde4c96c8593536e31f229ea8f37b2ada2699bb2").unwrap();
         assert_eq!(
-            component_id(&TESSERASWAP, &cbbtc),
-            "0x55555522005bcae1c2424d474bfd5ed477749e3e3b1f5afd9ef808440eed33bf"
+            hex::encode(engine_pair_slot(&zora, &usdt, 8)),
+            "8c09028ad8dbd6bcc77e9754c4adad03da90e13f78e0e2912906cf8ae58033fb"
         );
     }
 

@@ -1,5 +1,13 @@
 # Tessera V (Base) — Integration Research Handover (Phase 1)
 
+> **Terminology (revised 2026-09-01)**: the protocol's own name for a market is a **pair**
+> (`getTesseraPairs()`, and the engine's decompiled `registerPair`/`allPairs`/`pairKey`
+> surface), and each pair is a **dedicated deployed contract**. Earlier revisions of this
+> document called pairs "books" and their contracts "price stores" — both were borrowed from
+> the BopAMM handover and are wrong for Tessera. Sections below may still carry the old words;
+> where they do, read book = pair and price store = pair contract. §11 records the full
+> revision.
+
 Everything learned about Tessera's on-chain design on Base, verified against mainnet state via
 archive `eth_call` / `eth_createAccessList` / storage probing (RPC: `base.gateway.tenderly.co`),
 2026-08-28. Extends the phase-0 assessment (`docs/research/tessera-base-assessment.md`) and the plan
@@ -261,3 +269,57 @@ An independent review of the Phase 2–4 diff found and the package now fixes:
   attributes move.
 - Whether the two per-book pricing libs (`0xfdb7…`, `0x9f924c…`) are generations or book-class
   variants (majors vs tail) — watch which lib new books get.
+
+## 11. Revision 2026-09-01 — engine decompilation, pair-address ids, quote-token constraint removed
+
+A community decompilation of the engine (dedaub AI reconstruction, cross-checked on-chain) plus a
+full enumeration of the engine's pair registry revised the package:
+
+### Engine layout (verified against live storage)
+
+| Slot | Content | Verified value |
+|---|---|---|
+| 0 | packed `flag ‖ owner` — owner is TesseraSwap (explains the `T37` caller gate) | `0x…01 ‖ 0x5555…9e3e` |
+| 1 | **bridge token** — the 2-hop routing intermediate; the decompiled `_route` falls back to `(in, bridge)+(bridge, out)` only when no direct pair exists (verified: WETH→cbBTC quotes through it with no direct pair registered) | USDC |
+| 2 | pair implementation used for upgrades (`upgradeAllTo`) | `0x6d9d…41cb` (gen 3) |
+| 3 | operator (writes slot 10 block-number heartbeat) | `0x2435…5bb6` |
+| 4 | killSwitch — can `disableTrading`/`enableTrading` on every pair | `0xae09…f66e` |
+| 5 | scalar `0x77359400` (2e9) — role open | |
+| 6 | **pair array length** (registration order; keys at `keccak(6) + i`) | 15 |
+| 8 | base slot of `pairKey => pair contract` mapping | |
+
+**The pair-mapping slot formula** (verified 15/15, including the disabled USDT pair):
+`slot = keccak256(abi.encode(pairKey, 8))` with
+`pairKey = keccak256(abi.encode(tokenLo, tokenHi))`, tokens sorted ascending. Implemented as
+`common::engine_pair_slot` and unit-tested; `cast` recipe:
+`cast index bytes32 $(cast keccak $(cast abi-encode "f(address,address)" $LO $HI)) 8`.
+
+The admin selector `0xb8744eb4` (owner Safe → engine) is the **pair creation** call: args are
+`(baseToken, quoteToken, baseDecimals, quoteDecimals, 1e6, …ladder config…)`; the engine CREATEs
+the pair contract internally. The decompiled `registerPair(address,address,address)` (register an
+externally created pair) exists but has never been used.
+
+### The registry holds 15 pairs — two are not USDC-quoted
+
+Full enumeration via slot 6 + the mapping formula: WETH, cbBTC, VIRTUAL, AERO, THQ, VVV, EURC,
+USDT, deSPXA, NVDAc, AAPLc, GOOGLc, METAc — all vs USDC — **plus WETH/USDbC
+(`0xfcb771ff…`) and ZORA/USDT (`0xe77ed480…`)**. Both non-USDC pairs quote zero today, but they
+prove the venue is not single-quote by construction; only ~half the registry is enumerated by
+`getTesseraPairs()` (live pairs only).
+
+### Package changes
+
+1. **Component id = the pair's contract address** (was `TesseraSwap ‖ base-token low 12B`, which
+   collides for WETH/USDC vs WETH/USDbC). A re-deployed pair is a new component.
+2. **Quote-token constraint removed**: discovery accepts any quote token; the engine registry
+   write is now matched at the **exact** derived mapping slot (was: any engine write carrying the
+   pair address). `quote_token` joins `base_token` as a static attribute.
+3. **Token index is append-valued** (`store_pairs`): one token can back several pairs. Balance
+   fan-out is now uniform — a token's treasury balance is duplicated under every pair containing
+   it; the USDC special case is gone.
+4. **Adapter**: pool id is the pair address; tokens come from the pair's own
+   `baseToken()`/`quoteToken()` getters (verified selectors `0xc55dae63`/`0x217a4b70`); the
+   pair-list helper and the USDC constructor argument are dropped; `getPoolIds` reverts
+   `NotImplemented` (no on-chain token→pair enumeration exists).
+5. Attributes renamed: `store_impl` → `pair_impl`; `price_store` dropped (redundant with the id);
+   `book_lib` → `pair_lib`; protocol type `tessera_book` → `tessera_pair`.

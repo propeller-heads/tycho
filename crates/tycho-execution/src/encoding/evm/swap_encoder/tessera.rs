@@ -69,8 +69,8 @@ mod tests {
 
     fn weth_usdc_component() -> ProtocolComponent {
         ProtocolComponent {
-            // tesseraswap (20 bytes) ‖ WETH low 12 bytes, matching the substreams id.
-            id: String::from("0x55555522005bcae1c2424d474bfd5ed477749e3e000000000000000000000006"),
+            // The WETH/USDC pair contract address, matching the substreams id.
+            id: String::from("0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c"),
             protocol_system: String::from("vm:tessera"),
             ..Default::default()
         }

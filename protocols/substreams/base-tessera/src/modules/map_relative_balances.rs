@@ -12,14 +12,14 @@ use tycho_substreams::{
 };
 
 use crate::{
-    common::{address_from_word, all_books, books_for_token, is_zero, slot_key},
+    common::{address_from_word, all_pairs, is_zero, pairs_for_token, slot_key},
     config::DeploymentConfig,
 };
 
 /// A `(token, component)` pair already covered by a `balanceOf` snapshot this block; its plain
 /// event deltas must be skipped to avoid double-counting the snapshot. The granularity is per
-/// component: a new book's USDC seed must not suppress the same USDC event deltas on the other
-/// books, which are not covered by that seed.
+/// component: a new pair's quote-token seed must not suppress the same token's event deltas on
+/// the other pairs, which are not covered by that seed.
 type SeededSet = HashSet<(Vec<u8>, Vec<u8>)>;
 
 /// A treasury rotation observed this block: the custodian before the first write and after the
@@ -32,34 +32,34 @@ struct Rotation {
     tx: Transaction,
 }
 
-/// Emits the treasury's inventory balance deltas as per-book TVL.
+/// Emits the treasury's inventory balance deltas as per-pair TVL.
 ///
-/// One treasury backs every book, so per-book reserves do not exist; the venue's inventory is
-/// attributed per book instead (USDC — the shared quote inventory — is duplicated under every
-/// book, not split: downstream consumers do not dedupe and under-reporting risks min-TVL
-/// filtering). Three sources are combined so the accumulated balance tracks the treasury's
-/// true holdings:
+/// One treasury backs every pair, so per-pair reserves do not exist; the venue's inventory is
+/// attributed per pair instead. A token's balance is attributed to **every pair whose token
+/// set contains it** — duplicated, not split: USDC backs most pairs, WETH backs two
+/// (WETH/USDC and WETH/USDbC), and downstream consumers do not dedupe while under-reporting
+/// risks min-TVL filtering. Three sources are combined so the accumulated balance tracks the
+/// treasury's true holdings:
 ///
-/// * **Seeding a new book** — `balanceOf(treasury)` is snapshotted via eth_call (end-of-block
-///   state) for the book's base token and for USDC, both emitted under the new book only. USDC
-///   under the new book gives it the same baseline the older books accumulated; their own event
-///   deltas still apply to them.
+/// * **Seeding a new pair** — `balanceOf(treasury)` is snapshotted via eth_call (end-of-block
+///   state) for both of its tokens, emitted under the new pair only; older pairs sharing a token
+///   already carry their own copy and their event deltas still apply to them.
 /// * **Re-seeding on a treasury rotation** — when TesseraSwap's treasury slot is written, every
 ///   tracked token is re-seeded by `balanceOf(new) - balanceOf(old)` at end-of-block state, fanned
-///   to its book(s). Event deltas in the rotation block are matched against the **old** custodian:
+///   to its pairs. Event deltas in the rotation block are matched against the **old** custodian:
 ///   they carry the accumulated balance to `balanceOf(old)` at end of block, which the re-seed then
 ///   replaces with `balanceOf(new)` — exact even when inventory migrates within the rotation block.
 ///   (On Base the treasury rotated once, at block 37,737,344, with no in-block migration.)
-/// * **Existing tokens** — ERC20 `Transfer`s touching the treasury, plus WETH
-///   `Deposit`/`Withdrawal` on the treasury (which change its WETH balance without a `Transfer`
-///   log).
+/// * **Existing tokens** — ERC20 `Transfer`s touching the treasury (self-transfers net zero), plus
+///   WETH `Deposit`/`Withdrawal` on the treasury (which change its WETH balance without a
+///   `Transfer` log).
 #[substreams::handlers::map]
 pub fn map_relative_balances(
     params: String,
     block: eth::v2::Block,
     new_components: BlockTransactionProtocolComponents,
     components_store: StoreGetProto<ProtocolComponent>,
-    books_store: StoreGetString,
+    pairs_store: StoreGetString,
     treasury_store: StoreGetString,
 ) -> Result<BlockBalanceDeltas> {
     let config: DeploymentConfig = serde_qs::from_str(&params)?;
@@ -73,15 +73,14 @@ pub fn map_relative_balances(
     let mut balance_deltas = Vec::new();
     let mut seeded: SeededSet = HashSet::new();
 
-    seed_new_books(&new_components, &treasury, &mut balance_deltas, &mut seeded);
+    seed_new_pairs(&new_components, &treasury, &mut balance_deltas, &mut seeded);
 
     let rotation = find_rotation(&block, &config);
     if let Some(rotation) = &rotation {
         reseed_on_rotation(
             rotation,
-            &config,
             &components_store,
-            &books_store,
+            &pairs_store,
             &mut balance_deltas,
             &mut seeded,
         );
@@ -95,15 +94,7 @@ pub fn map_relative_balances(
         .filter(|old| !is_zero(old))
         .unwrap_or(treasury);
 
-    apply_event_deltas(
-        &block,
-        &event_treasury,
-        &config,
-        &components_store,
-        &books_store,
-        &seeded,
-        &mut balance_deltas,
-    );
+    apply_event_deltas(&block, &event_treasury, &pairs_store, &seeded, &mut balance_deltas);
 
     // Deltas of one transaction must stay contiguous after sorting: the downstream aggregation
     // groups consecutive same-transaction runs, and the seeds' ordinals live in a different
@@ -121,9 +112,9 @@ pub fn map_relative_balances(
     Ok(BlockBalanceDeltas { balance_deltas })
 }
 
-/// Snapshots `balanceOf(treasury)` (end-of-block state) for every book created this block: its
-/// base token and its USDC baseline, both emitted under the new book only.
-fn seed_new_books(
+/// Snapshots `balanceOf(treasury)` (end-of-block state) for both tokens of every pair created
+/// this block, emitted under the new pair only.
+fn seed_new_pairs(
     new_components: &BlockTransactionProtocolComponents,
     treasury: &[u8],
     balance_deltas: &mut Vec<BalanceDelta>,
@@ -186,22 +177,21 @@ fn find_rotation(block: &eth::v2::Block, config: &DeploymentConfig) -> Option<Ro
             }
         }
     }
-    // The constructor's initial write has a zero old value and no books exist yet — it is not
+    // The constructor's initial write has a zero old value and no pairs exist yet — it is not
     // a rotation to re-seed.
     rotation.filter(|r| r.old != r.new)
 }
 
 /// Re-seeds every tracked token on a treasury rotation with
-/// `balanceOf(new) - balanceOf(old)` at end-of-block state, fanned to the token's book(s).
+/// `balanceOf(new) - balanceOf(old)` at end-of-block state, fanned to the token's pairs.
 fn reseed_on_rotation(
     rotation: &Rotation,
-    config: &DeploymentConfig,
     components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
     balance_deltas: &mut Vec<BalanceDelta>,
     seeded: &mut SeededSet,
 ) {
-    for token in tracked_tokens(config, components_store, books_store) {
+    for token in tracked_tokens(components_store, pairs_store) {
         let new_balance = erc20::functions::BalanceOf { owner: rotation.new.clone() }
             .call(token.clone())
             .unwrap_or_else(BigInt::zero);
@@ -213,10 +203,10 @@ fn reseed_on_rotation(
                 .unwrap_or_else(BigInt::zero)
         };
         let delta = new_balance - old_balance;
-        for comp_id in books_for_token(&token, &config.usdc, components_store, books_store) {
+        for comp_id in pairs_for_token(&token, pairs_store) {
             let comp_id = comp_id.into_bytes();
-            // A (token, book) pair snapshotted by `seed_new_books` this block (a book created
-            // in the block the treasury rotates) already carries the new custodian's
+            // A (token, pair) already snapshotted by `seed_new_pairs` this block (a pair
+            // created in the block the treasury rotates) already carries the new custodian's
             // end-of-block balance and must not be re-seeded on top.
             if !seeded.insert((token.clone(), comp_id.clone())) {
                 continue;
@@ -232,25 +222,23 @@ fn reseed_on_rotation(
     }
 }
 
-/// Applies `Transfer` and WETH `Deposit`/`Withdrawal` deltas for `(token, book)` pairs that
+/// Applies `Transfer` and WETH `Deposit`/`Withdrawal` deltas for `(token, pair)` pairs that
 /// were not snapshotted this block.
 fn apply_event_deltas(
     block: &eth::v2::Block,
     treasury: &[u8],
-    config: &DeploymentConfig,
-    components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
     seeded: &SeededSet,
     balance_deltas: &mut Vec<BalanceDelta>,
 ) {
     for log in block.logs() {
         let token = log.address().to_vec();
         let Some(delta) = event_delta(log.log, treasury) else { continue };
-        let books = books_for_token(&token, &config.usdc, components_store, books_store);
-        if books.is_empty() {
+        let components = pairs_for_token(&token, pairs_store);
+        if components.is_empty() {
             continue;
         }
-        for comp_id in books {
+        for comp_id in components {
             let comp_id = comp_id.into_bytes();
             if seeded.contains(&(token.clone(), comp_id.clone())) {
                 continue;
@@ -300,16 +288,14 @@ fn event_delta(log: &eth::v2::Log, treasury: &[u8]) -> Option<BigInt> {
     None
 }
 
-/// All currently-tracked tokens: USDC plus every known book's base side.
+/// All currently-tracked tokens: the union of every known pair's token set.
 fn tracked_tokens(
-    config: &DeploymentConfig,
     components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
 ) -> Vec<Vec<u8>> {
-    let mut tokens = vec![config.usdc.clone()];
+    let mut tokens = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
-    seen.insert(config.usdc.clone());
-    for component in all_books(components_store, books_store) {
+    for component in all_pairs(components_store, pairs_store) {
         for token in component.tokens {
             if seen.insert(token.clone()) {
                 tokens.push(token);
@@ -426,24 +412,14 @@ mod tests {
 
     #[test]
     fn seed_skip_is_per_token_and_component() {
-        // A new book's USDC seed must not suppress the same USDC event delta on another book.
+        // A new pair's quote-token seed must not suppress the same token's event delta on
+        // another pair.
         let usdc = hex::decode("833589fcd6edb6e08f4c7c32d4f71b54bda02913").unwrap();
-        let new_book = b"0xnew".to_vec();
-        let other_book = b"0xold".to_vec();
+        let new_pair = b"0xnew".to_vec();
+        let other_pair = b"0xold".to_vec();
         let mut seeded: SeededSet = HashSet::new();
-        seeded.insert((usdc.clone(), new_book.clone()));
-        assert!(seeded.contains(&(usdc.clone(), new_book)));
-        assert!(!seeded.contains(&(usdc, other_book)));
-    }
-
-    #[test]
-    fn multi_hop_rotation_collapses_to_first_old_and_last_new() {
-        // A -> B -> C in one block: events match A, the reseed jumps to C, B is transient.
-        let a = vec![0xaa; 20];
-        let c = vec![0xcc; 20];
-        let rotation =
-            Rotation { old: a.clone(), new: c.clone(), ord: 7, tx: Transaction::default() };
-        assert_eq!(rotation.old, a);
-        assert_eq!(rotation.new, c);
+        seeded.insert((usdc.clone(), new_pair.clone()));
+        assert!(seeded.contains(&(usdc.clone(), new_pair)));
+        assert!(!seeded.contains(&(usdc, other_pair)));
     }
 }

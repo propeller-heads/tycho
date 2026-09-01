@@ -10,8 +10,10 @@ contract TesseraSwapAdapterTest is AdapterTest {
     TesseraSwapAdapter adapter;
 
     address constant TESSERA_SWAP = 0x55555522005BcAE1c2424D474BfD5ed477749E3e;
-    address constant PAIR_HELPER = 0x505352DA2918C6a06f12F3d59FFb79905d43439f;
     address constant TREASURY = 0x3dBE077e7986657E95e1CC50089f17a5a4AF0AaE;
+    // Pair contracts (EIP-1967 proxies registered on the engine).
+    address constant WETH_PAIR = 0xf524C1Bc1C64A2C99bc7eccf19EDe9a1d89d5a7C;
+    address constant CBBTC_PAIR = 0xED57BacDc2a990B631F8817853935791C122c356;
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -24,41 +26,31 @@ contract TesseraSwapAdapterTest is AdapterTest {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
-        adapter = new TesseraSwapAdapter(TESSERA_SWAP, PAIR_HELPER, USDC);
+        adapter = new TesseraSwapAdapter(TESSERA_SWAP);
 
         vm.label(address(adapter), "TesseraSwapAdapter");
         vm.label(TESSERA_SWAP, "TesseraSwap");
-        vm.label(PAIR_HELPER, "TesseraPairs");
+        vm.label(WETH_PAIR, "WETH/USDC pair");
+        vm.label(CBBTC_PAIR, "cbBTC/USDC pair");
         vm.label(TREASURY, "Treasury");
         vm.label(WETH, "WETH");
         vm.label(CBBTC, "cbBTC");
         vm.label(USDC, "USDC");
     }
 
-    function _wethPoolId() internal view returns (bytes32) {
-        return bytes32(bytes20(TESSERA_SWAP))
-            | bytes32(uint256(uint160(WETH)) & type(uint96).max);
+    function _wethPoolId() internal pure returns (bytes32) {
+        return bytes32(bytes20(WETH_PAIR));
     }
 
     function testConstructorConfig() public view {
         assertEq(address(adapter.tesseraSwap()), TESSERA_SWAP);
-        assertEq(address(adapter.pairHelper()), PAIR_HELPER);
-        assertEq(adapter.usdc(), USDC);
     }
 
-    function testGetPoolIds() public view {
-        // 8 live books at the fork block (the NVDAc book was listed at
-        // block 50,526,653, three days before it).
-        bytes32[] memory poolIds = adapter.getPoolIds(0, 10);
-        assertEq(poolIds.length, 8);
-        // WETH is the first pair returned by the helper at the fork block.
-        assertEq(poolIds[0], _wethPoolId());
-
-        bytes32[] memory offsetPoolIds = adapter.getPoolIds(5, 10);
-        assertEq(offsetPoolIds.length, 3);
-
-        bytes32[] memory emptyPoolIds = adapter.getPoolIds(8, 10);
-        assertEq(emptyPoolIds.length, 0);
+    function testGetPoolIdsIsNotImplemented() public {
+        // No on-chain enumeration from tokens to pair contracts exists; pool
+        // ids come from the substreams component ids.
+        vm.expectRevert();
+        adapter.getPoolIds(0, 10);
     }
 
     function testGetTokens() public view {
@@ -66,6 +58,11 @@ contract TesseraSwapAdapterTest is AdapterTest {
         assertEq(tokens.length, 2);
         assertEq(tokens[0], WETH);
         assertEq(tokens[1], USDC);
+
+        address[] memory cbbtcTokens =
+            adapter.getTokens(bytes32(bytes20(CBBTC_PAIR)));
+        assertEq(cbbtcTokens[0], CBBTC);
+        assertEq(cbbtcTokens[1], USDC);
     }
 
     function testGetCapabilities() public view {
@@ -170,16 +167,16 @@ contract TesseraSwapAdapterTest is AdapterTest {
     }
 
     function testValidationRejectsWrongPool() public {
-        bytes32 cbbtcPool = bytes32(bytes20(TESSERA_SWAP))
-            | bytes32(uint256(uint160(CBBTC)) & type(uint96).max);
+        // The cbBTC pair does not trade WETH.
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 1 ether;
 
         vm.expectRevert();
-        adapter.price(cbbtcPool, WETH, USDC, amounts);
+        adapter.price(bytes32(bytes20(CBBTC_PAIR)), WETH, USDC, amounts);
     }
 
-    function testValidationRejectsNonUsdcPair() public {
+    function testValidationRejectsForeignToken() public {
+        // cbBTC is not a token of the WETH/USDC pair.
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 1 ether;
 

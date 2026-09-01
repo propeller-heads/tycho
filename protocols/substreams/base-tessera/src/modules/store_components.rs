@@ -1,15 +1,11 @@
 use substreams::store::{StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsProto};
 use tycho_substreams::prelude::*;
 
-use crate::common::{store_key, token_key};
+use crate::common::pair_store_key;
 
-/// Indexes discovered books by their price-store address and by every token, so the
-/// tracked-contract predicate can resolve a store address and balance logic can resolve a
-/// token back to its component.
-///
-/// Every token is indexed (not just the base side) so lookups are independent of token
-/// ordering; the USDC key is harmless because USDC resolves through its own hub branch in
-/// `books_for_token` and never reads it.
+/// Indexes discovered pairs by their contract address, so the tracked-contract predicate and
+/// per-pair lookups (admin-mutation attribution, re-simulation marks) can resolve a storage
+/// change back to its component.
 #[substreams::handlers::store]
 pub fn store_components(
     map: BlockTransactionProtocolComponents,
@@ -17,12 +13,8 @@ pub fn store_components(
 ) {
     for tx_pc in map.tx_components {
         for pc in tx_pc.components {
-            if let Some(store_addr) = pc.get_attribute_value("price_store") {
-                store.set_if_not_exists(0, store_key(&store_addr), &pc);
-            }
-            for token in &pc.tokens {
-                store.set_if_not_exists(0, token_key(token), &pc);
-            }
+            let pair = hex::decode(pc.id.trim_start_matches("0x")).unwrap_or_default();
+            store.set_if_not_exists(0, pair_store_key(&pair), &pc);
         }
     }
 }

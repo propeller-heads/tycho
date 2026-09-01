@@ -12,7 +12,7 @@ use tycho_substreams::{
 };
 
 use crate::{
-    common::{address_from_word, all_books, is_zero, slot_key, store_key, EIP1967_IMPL_SLOT},
+    common::{address_from_word, all_pairs, is_zero, pair_store_key, slot_key, EIP1967_IMPL_SLOT},
     config::DeploymentConfig,
 };
 
@@ -28,7 +28,7 @@ pub fn map_protocol_changes(
     grouped_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
     components_store: StoreGetProto<ProtocolComponent>,
-    books_store: StoreGetString,
+    pairs_store: StoreGetString,
     treasury_store: StoreGetString,
     balance_store: StoreDeltas,
 ) -> Result<BlockChanges> {
@@ -60,9 +60,9 @@ pub fn map_protocol_changes(
         });
 
     // Full storage + code of the venue contracts. The set is dynamic: the stable addresses and
-    // the code-only satellites come from params; each book's price store is discovered at
-    // component creation and resolved through the components store (visible in-block, so a
-    // store's creation code and init storage are captured in its creation transaction).
+    // the code-only satellites come from params; each pair contract is discovered at component
+    // creation and resolved through the components store (visible in-block, so a pair's
+    // creation code and init storage are captured in its creation transaction).
     let tracked = config.tracked_addresses();
     extract_contract_changes_builder(
         &block,
@@ -73,7 +73,7 @@ pub fn map_protocol_changes(
                     .iter()
                     .any(|t| t.as_slice() == addr) ||
                 components_store
-                    .get_last(store_key(addr))
+                    .get_last(pair_store_key(addr))
                     .is_some()
         },
         &mut transaction_changes,
@@ -83,17 +83,17 @@ pub fn map_protocol_changes(
         &block,
         &config,
         &components_store,
-        &books_store,
+        &pairs_store,
         &mut transaction_changes,
     );
     extract_admin_mutations(
         &block,
         &config,
         &components_store,
-        &books_store,
+        &pairs_store,
         &mut transaction_changes,
     );
-    mark_books_updated(&config, &components_store, &books_store, &mut transaction_changes);
+    mark_pairs_updated(&config, &components_store, &pairs_store, &mut transaction_changes);
 
     Ok(BlockChanges {
         block: Some((&block).into()),
@@ -106,7 +106,7 @@ pub fn map_protocol_changes(
     })
 }
 
-/// Adds newly created book components and their default dynamic attributes.
+/// Adds newly created pair components and their default dynamic attributes.
 fn add_new_components(
     grouped_components: &BlockTransactionProtocolComponents,
     treasury: &[u8],
@@ -138,18 +138,18 @@ fn add_new_components(
     }
 }
 
-/// Refreshes the `balance_owner` attribute on every book whenever TesseraSwap's treasury slot
+/// Refreshes the `balance_owner` attribute on every pair whenever TesseraSwap's treasury slot
 /// is written (rotation — observed once on Base, block 37,737,344).
 fn extract_treasury_changes(
     block: &eth::v2::Block,
     config: &DeploymentConfig,
     components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
     let treasury_slot = slot_key(config.treasury_slot);
     // Computed lazily on the first treasury write so blocks without one do nothing.
-    let mut books: Option<Vec<String>> = None;
+    let mut pairs: Option<Vec<String>> = None;
     for tx in block.transactions() {
         for call in tx
             .calls
@@ -164,29 +164,29 @@ fn extract_treasury_changes(
                     continue;
                 }
                 let treasury = address_from_word(&change.new_value);
-                let books = books.get_or_insert_with(|| {
-                    all_books(components_store, books_store)
+                let pairs = pairs.get_or_insert_with(|| {
+                    all_pairs(components_store, pairs_store)
                         .into_iter()
                         .map(|c| c.id)
                         .collect()
                 });
-                if books.is_empty() {
+                if pairs.is_empty() {
                     continue;
                 }
                 let transaction: Transaction = tx.into();
                 let builder = transaction_changes
                     .entry(transaction.index)
                     .or_insert_with(|| TransactionChangesBuilder::new(&transaction));
-                for book in books.iter() {
+                for pair in pairs.iter() {
                     builder.add_entity_change(&EntityChanges {
-                        component_id: book.clone(),
+                        component_id: pair.clone(),
                         attributes: vec![Attribute {
                             name: "balance_owner".to_string(),
                             value: treasury.clone(),
                             change: ChangeType::Update.into(),
                         }],
                     });
-                    builder.mark_component_as_updated(book);
+                    builder.mark_component_as_updated(pair);
                 }
             }
         }
@@ -197,22 +197,21 @@ fn extract_treasury_changes(
 /// monitoring to alert on (the runbook then adds the new address to `params` and re-releases
 /// the spkg — see HANDOVER §9.3):
 ///
-/// * an engine hot-swap (TesseraSwap `slot0` write) → `engine` attribute on every book;
-/// * a store implementation upgrade (EIP-1967 slot write on a tracked store) → `store_impl`
-///   attribute on that store's book;
-/// * a pricing-lib (re)assignment (store lib-slot write) → `book_lib` attribute on that store's
-///   book — a lib generation not in the `tracked` params would otherwise break that book with no
-///   signal.
+/// * an engine hot-swap (TesseraSwap `slot0` write) → `engine` attribute on every pair;
+/// * a pair implementation upgrade (EIP-1967 slot write on a tracked pair) → `pair_impl` attribute
+///   on that pair;
+/// * a pricing-lib (re)assignment (pair lib-slot write) → `pair_lib` attribute on that pair — a lib
+///   generation not in the `tracked` params would otherwise break that pair with no signal.
 fn extract_admin_mutations(
     block: &eth::v2::Block,
     config: &DeploymentConfig,
     components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
     let engine_slot = slot_key(ENGINE_SLOT);
-    let lib_slot = slot_key(config.book_lib_slot);
-    let mut books: Option<Vec<String>> = None;
+    let lib_slot = slot_key(config.pair_lib_slot);
+    let mut pairs: Option<Vec<String>> = None;
     for tx in block.transactions() {
         for call in tx
             .calls
@@ -224,10 +223,10 @@ fn extract_admin_mutations(
                     change.key == engine_slot &&
                     !is_zero(&change.old_value)
                 {
-                    // old_value == 0 is the constructor write, before any book exists.
+                    // old_value == 0 is the constructor write, before any pair exists.
                     let engine = address_from_word(&change.new_value);
-                    let books = books.get_or_insert_with(|| {
-                        all_books(components_store, books_store)
+                    let pairs = pairs.get_or_insert_with(|| {
+                        all_pairs(components_store, pairs_store)
                             .into_iter()
                             .map(|c| c.id)
                             .collect()
@@ -236,22 +235,22 @@ fn extract_admin_mutations(
                     let builder = transaction_changes
                         .entry(transaction.index)
                         .or_insert_with(|| TransactionChangesBuilder::new(&transaction));
-                    for book in books.iter() {
+                    for pair in pairs.iter() {
                         builder.add_entity_change(&EntityChanges {
-                            component_id: book.clone(),
+                            component_id: pair.clone(),
                             attributes: vec![Attribute {
                                 name: "engine".to_string(),
                                 value: engine.clone(),
                                 change: ChangeType::Update.into(),
                             }],
                         });
-                        builder.mark_component_as_updated(book);
+                        builder.mark_component_as_updated(pair);
                     }
                 } else if change.key == EIP1967_IMPL_SLOT.as_slice() && !is_zero(&change.old_value)
                 {
-                    // old_value == 0 is store init, already covered by component creation.
-                    emit_store_attribute(
-                        "store_impl",
+                    // old_value == 0 is pair init, already covered by component creation.
+                    emit_pair_attribute(
+                        "pair_impl",
                         change,
                         tx,
                         components_store,
@@ -260,8 +259,8 @@ fn extract_admin_mutations(
                 } else if change.key == lib_slot && !is_zero(&change.new_value) {
                     // Includes the post-creation first assignment: the lib is not part of the
                     // component's static attributes, so every write is surfaced.
-                    emit_store_attribute(
-                        "book_lib",
+                    emit_pair_attribute(
+                        "pair_lib",
                         change,
                         tx,
                         components_store,
@@ -273,17 +272,16 @@ fn extract_admin_mutations(
     }
 }
 
-/// Emits a monitoring attribute (an address-valued update) on the book owning the store the
-/// storage change belongs to, and marks the book for re-simulation. No-op for addresses that
-/// are not a known book store.
-fn emit_store_attribute(
+/// Emits a monitoring attribute (an address-valued update) on the pair the storage change
+/// belongs to, and marks it for re-simulation. No-op for addresses that are not a known pair.
+fn emit_pair_attribute(
     name: &str,
     change: &eth::v2::StorageChange,
     tx: &eth::v2::TransactionTrace,
     components_store: &StoreGetProto<ProtocolComponent>,
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
-    let Some(component) = components_store.get_last(store_key(&change.address)) else {
+    let Some(component) = components_store.get_last(pair_store_key(&change.address)) else {
         return;
     };
     let transaction: Transaction = tx.into();
@@ -301,18 +299,18 @@ fn emit_store_attribute(
     builder.mark_component_as_updated(&component.id);
 }
 
-/// Marks books for re-simulation from tracked-contract changes: a change to a shared contract
-/// (TesseraSwap, engine, any code-only satellite) marks every book; a change to a book's price
-/// store marks that book. Prices post into each store every block, so in steady state every
-/// book re-simulates every block — that is the venue repricing, not noise.
-fn mark_books_updated(
+/// Marks pairs for re-simulation from tracked-contract changes: a change to a shared contract
+/// (TesseraSwap, engine, any code-only satellite) marks every pair; a change to a pair
+/// contract marks that pair. Prices post into each pair every block, so in steady state every
+/// pair re-simulates every block — that is the venue repricing, not noise.
+fn mark_pairs_updated(
     config: &DeploymentConfig,
     components_store: &StoreGetProto<ProtocolComponent>,
-    books_store: &StoreGetString,
+    pairs_store: &StoreGetString,
     transaction_changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) {
     let tracked = config.tracked_addresses();
-    let mut books: Option<Vec<String>> = None;
+    let mut pairs: Option<Vec<String>> = None;
     for builder in transaction_changes.values_mut() {
         let mut mark_all = false;
         let mut mark_ids: Vec<String> = Vec::new();
@@ -326,19 +324,19 @@ fn mark_books_updated(
                 mark_all = true;
                 break;
             }
-            if let Some(component) = components_store.get_last(store_key(addr)) {
+            if let Some(component) = components_store.get_last(pair_store_key(addr)) {
                 mark_ids.push(component.id);
             }
         }
         if mark_all {
-            let books = books.get_or_insert_with(|| {
-                all_books(components_store, books_store)
+            let pairs = pairs.get_or_insert_with(|| {
+                all_pairs(components_store, pairs_store)
                     .into_iter()
                     .map(|c| c.id)
                     .collect()
             });
-            for book in books.iter() {
-                builder.mark_component_as_updated(book);
+            for pair in pairs.iter() {
+                builder.mark_component_as_updated(pair);
             }
         } else {
             for id in mark_ids {
