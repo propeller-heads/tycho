@@ -1,3 +1,4 @@
+pub mod price_level_stream_processor;
 pub mod protocol_stream_processor;
 pub mod rfq_stream_processor;
 
@@ -17,6 +18,7 @@ pub struct StreamUpdate {
 pub enum UpdateType {
     Protocol,
     Rfq,
+    PriceLevelStream,
 }
 
 impl Display for UpdateType {
@@ -24,6 +26,7 @@ impl Display for UpdateType {
         match self {
             UpdateType::Protocol => write!(f, "Protocol"),
             UpdateType::Rfq => write!(f, "RFQ"),
+            UpdateType::PriceLevelStream => write!(f, "PriceLevelStream"),
         }
     }
 }

@@ -173,7 +173,7 @@ Now you know the best protocol component (i.e., pool), you can put the swap into
 The `Solution` carries two values that set your slippage protection. `expected_amount_out` is the output your simulation quoted, and `min_amount_out` is the smallest output you will accept. The router receives them as `expectedAmountOut` and `minAmountOut`, the two guardrails that protect your funds from MEV during execution. This quickstart sets `min_amount_out` 0.25% below the quote.
 
 {% hint style="warning" %}
-For maximum security, you should determine the quoted amount from a **third-party source.** Note that inflating `expected_amount_out` does not buy you more room: the router bounds `minAmountOut` against the quote from both sides, so a higher quote raises your slippage floor with it.
+For maximum security, determine the quoted amount from a **third-party source.** The router only requires `minAmountOut` to be non-zero and no greater than `expectedAmountOut`; it sets no lower bound, so your slippage protection is only as good as the `min_amount_out` you compute. A `min_amount_out` derived from a bad quote can sit far below the fair output and leave you exposed.
 {% endhint %}
 
 You can now create the Swap and Solution objects. For more info about the `Swap` and `Solution` models, see [here](for-solvers/execution/encoding/#models).

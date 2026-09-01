@@ -63,7 +63,7 @@ pub fn uniswap_v4_angstrom_hook_pool_filter(component: &ComponentWithState) -> b
 /// authenticated with `ANGSTROM_API_KEY`. Without the key the swap fails at encoding time —
 /// after route selection — so consumers without the key should exclude these pools up front.
 /// [`ProtocolStreamBuilder`](crate::evm::stream::ProtocolStreamBuilder) applies this filter to
-/// `uniswap_v4_hooks` automatically when no filter function is provided and the key is unset.
+/// `uniswap_v4_hooks` whenever the key is unset, alongside any filter function the caller passes.
 pub fn uniswap_v4_non_angstrom_hook_pool_filter(component: &ComponentWithState) -> bool {
     !uniswap_v4_angstrom_hook_pool_filter(component)
 }

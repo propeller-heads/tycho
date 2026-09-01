@@ -11,6 +11,10 @@ license.workspace = true
 categories.workspace = true
 readme = "README.md"
 rust-version = "1.91.0"
+exclude = [
+    "benches/fixtures",
+    "tests/assets",
+]
 
 [package.metadata.cargo-machete]
 ignored = ["ruint"]
@@ -40,6 +44,7 @@ tracing = { workspace = true }
 dotenv = { workspace = true }
 enum_delegate = "0.2.0"
 itertools = { workspace = true }
+rustc-hash = "2.1.2"
 lunarbase-pmm-math = "0.2.4"
 num-traits = { workspace = true }
 
@@ -76,6 +81,9 @@ ruint = { workspace = true }
 ekubo_sdk = { version = "3", features = ["evm", "serde"] }
 evm_ekubo_sdk = { version = "0.6.5", features = ["serde"] }
 
+# Balancer V3 — Balancer's own reference maths (MIT), used by the native decoder.
+balancer-maths-rust = "0.5.0"
+
 # rfq
 alloy-chains = "0.2.37"
 async-stream = { workspace = true, optional = true }
@@ -106,10 +114,18 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
+criterion = "0.8.2"
 
 [features]
-default = ["evm", "rfq"]
+default = ["evm", "rfq", "price-level-stream"]
 network_tests = []
+price-level-stream = [
+    "dep:async-stream",
+    "dep:tokio-tungstenite",
+    # The PropAMMRouter whitelist read (`price_level_stream::fallback_router`).
+    "dep:alloy",
+    "dep:reqwest",
+]
 evm = [
     "dep:foundry-block-explorers",
     "dep:revm",
@@ -127,3 +143,11 @@ rfq = [
     "dep:http",
     "dep:prost",
 ]
+
+[[bench]]
+name = "get_amount_out"
+harness = false
+
+[[bench]]
+name = "concurrency_throughput"
+harness = false

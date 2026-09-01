@@ -1,4 +1,7 @@
-use crate::{abi::factory::events::PoolCreated, modules::utils::Params};
+use crate::{
+    abi::factory::events::PoolCreated,
+    modules::utils::{tick_spacing_fee_key, Params},
+};
 use ethabi::ethereum_types::Address;
 use std::str::FromStr;
 use substreams::{
@@ -37,10 +40,14 @@ fn get_new_pools(
     // Extract new pools from PoolCreated events
     let mut on_pool_created = |event: PoolCreated, _tx: &eth::TransactionTrace, log: &eth::Log| {
         let tycho_tx: Transaction = _tx.into();
-        // Get default fee for tick spacing
-        let default_fee = tick_spacing_to_fee_store
-            .get_last(format!("tick_spacing_{}", event.tick_spacing))
-            .expect("Failed to get default fee");
+        let fee_key = tick_spacing_fee_key(&log.address, event.tick_spacing.to_i32());
+        // A factory enables a tick spacing before it can create a pool on it, so a module started
+        // at the package's initial block always has the fee. A module started later misses the
+        // enabling event; skipping keeps the stream alive and avoids publishing a wrong
+        // default_fee, and any test asserting the pool still fails on the missing component.
+        let Some(default_fee) = tick_spacing_to_fee_store.get_last(&fee_key) else {
+            return;
+        };
         new_pools.push(TransactionChanges {
             tx: Some(tycho_tx.clone()),
             contract_changes: vec![],
