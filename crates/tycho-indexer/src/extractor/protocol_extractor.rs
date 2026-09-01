@@ -1530,8 +1530,10 @@ where
         // both sets and it never existed before the range. Either way no prior value
         // exists and the revert deletes it. Substreams output is external input — a miss
         // is a data-quality signal, not a reason to kill the extractor.
-        let mut attr_misses_state_found = 0_u64;
-        let mut attr_misses_state_missing = 0_u64;
+        // Both count per attribute. attr_misses: the component has state rows in the DB,
+        // just not this attribute. component_misses: no state rows for the component at all.
+        let mut attr_misses = 0_u64;
+        let mut component_misses = 0_u64;
         for (component_id, keys) in missing_map {
             let state = states_by_id
                 .get(component_id.as_str())
@@ -1542,9 +1544,9 @@ where
                     continue;
                 }
                 if state.is_some() {
-                    attr_misses_state_found += 1;
+                    attr_misses += 1;
                 } else {
-                    attr_misses_state_missing += 1;
+                    component_misses += 1;
                 }
                 not_found
                     .entry(component_id.clone())
@@ -1559,14 +1561,12 @@ where
                 .collect();
             warn!(
                 components = ?missed,
-                total = attr_misses_state_found + attr_misses_state_missing,
+                total = attr_misses + component_misses,
                 "Attributes with no prior state in buffer or DB during revert; \
                  reverting them as deletions"
             );
         }
-        for (misses, state_found) in
-            [(attr_misses_state_found, "true"), (attr_misses_state_missing, "false")]
-        {
+        for (misses, state_found) in [(attr_misses, "true"), (component_misses, "false")] {
             if misses > 0 {
                 counter!(
                     "extractor_revert_attr_miss",
