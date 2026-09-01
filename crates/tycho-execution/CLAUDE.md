@@ -202,6 +202,22 @@ Returns either:
 
 Last swap's receiver is the final user/vault address.
 
+### Per-hop fallback executors
+
+Any hop may carry a fallback executor. The hop's executor slot holds `LibSwap.FALLBACK_MARKER` (`address(0)`, never an
+approved executor) followed by `uint16 primaryLength || primary || fallback`, where primary and fallback are each
+`executor (20 bytes) || protocolData`. Hops without a fallback are byte-identical to the plain layout.
+
+`Dispatcher._dispatchSwap` routes every hop: a plain hop goes straight to `_callSwapOnExecutor`; a fallback hop runs the
+primary through `trySwapOnExecutor` (an external self-call, `msg.sender == address(this)` only) wrapped in try/catch. A
+revert in the primary rolls back the whole sub-call — transfers, delta accounting, transient storage — and the fallback
+executor re-runs the full swap flow (its own `getTransferData`, transfer, delegatecall) on clean state. Primary and
+fallback may therefore be any protocol types; there are no compatibility constraints between them.
+
+Two invariants keep funds safe: sequential receiver resolution sends a fallback hop's input to the router (never
+pre-positioned at the primary pool, where a primary revert would strand them), and both legs run with
+`isSplitSwap = true` so the transfer-from-router path executes instead of the pre-positioning optimization.
+
 ## Rust Encoding Pipeline (`src/encoding/`)
 
 Encodes a `Solution` into EVM calldata through three trait layers:
@@ -232,6 +248,12 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 **Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol (UniswapV4, BalancerV3,
 Ekubo) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
 encode an entire multi-pool route as a single swap if all hops are on the same groupable protocol.
+
+**Fallback swaps**: `Swap::with_fallback_swap(Swap)` attaches a fallback executed by the router when the primary's
+executor reverts. The fallback must swap the same token pair, carry no split, and not nest another fallback. A
+fallback-carrying swap is never grouped. All three strategy encoders emit the fallback bundle
+(`FALLBACK_MARKER || uint16 primaryLength || primary || fallback`); `TychoExecutorEncoder` rejects fallback swaps
+(they need the TychoRouter's try/catch).
 
 ### SwapEncoder
 
