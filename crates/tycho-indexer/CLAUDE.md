@@ -112,8 +112,9 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
    emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
    `component_state_found` label says whether the DB returned state rows for the
-   component. Any hit means an upstream module emitted an Update or Deletion for an
-   attribute that never had a Creation.
+   component. The extractor registers both label sets at zero at startup so the first
+   miss is visible to `increase()`. Any hit means an upstream module emitted an Update
+   or Deletion for an attribute that never had a Creation.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted

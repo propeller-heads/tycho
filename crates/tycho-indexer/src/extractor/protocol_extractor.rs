@@ -116,6 +116,18 @@ where
     ) -> Result<Self, ExtractionError> {
         let dci_plugin = dci_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
 
+        // Register both label sets at zero so the first miss registers as a rise for
+        // increase(); a series born at a nonzero value looks flat and no alert fires.
+        for state_found in ["true", "false"] {
+            counter!(
+                "extractor_revert_attr_miss",
+                "extractor" => name.to_string(),
+                "chain" => chain.to_string(),
+                "component_state_found" => state_found,
+            )
+            .increment(0);
+        }
+
         // check if this extractor has state
         let res = match gateway.get_cursor().await {
             Err(StorageError::NotFound(_, _)) => {
@@ -4863,6 +4875,55 @@ mod test {
             1,
             "pool_w has state rows but not the reverted attribute"
         );
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
+    // #[tokio::test]; it drives its own current-thread runtime instead.
+    #[test]
+    fn test_revert_attr_miss_counter_registered_at_start() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let mut gw = MockExtractorGateway::new();
+                gw.expect_ensure_protocol_types()
+                    .times(1)
+                    .returning(|_| Ok(()));
+                gw.expect_get_cursor()
+                    .times(1)
+                    .returning(|| Ok(("cursor".into(), Bytes::default())));
+                gw.expect_get_block()
+                    .times(1)
+                    .returning(|_| Ok(Block::default()));
+
+                let _extractor = create_extractor(gw).await;
+            })
+        });
+
+        let map = snapshot_to_map(snapshotter.snapshot());
+        for state_found in ["true", "false"] {
+            let labels = std::collections::BTreeMap::from([
+                ("extractor".to_string(), EXTRACTOR_NAME.to_string()),
+                ("chain".to_string(), "ethereum".to_string()),
+                ("component_state_found".to_string(), state_found.to_string()),
+            ]);
+            assert!(
+                map.contains_key(&(
+                    metrics_util::MetricKind::Counter,
+                    "extractor_revert_attr_miss".to_string(),
+                    labels,
+                )),
+                "series with component_state_found={state_found} must exist at startup; \
+                 a series born on the first miss looks flat to increase() and no alert fires"
+            );
+        }
     }
 }
 
