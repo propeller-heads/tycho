@@ -63,7 +63,20 @@ pub fn group_swaps(swaps: &[Swap]) -> Vec<SwapGroup> {
             .as_ref()
             .is_none_or(|g| swap.token_out().address != g.token_in);
 
-        if current_swap_protocol == last_swap_protocol && groupable_protocol && no_split && no_cycle
+        // A swap with a fallback is its own router hop (the fallback bundle wraps exactly
+        // one executor call), so it can neither join a group nor be joined.
+        let no_fallback = swap.fallback_swap().is_none() &&
+            current_group.as_ref().is_none_or(|g| {
+                g.swaps
+                    .last()
+                    .is_none_or(|s| s.fallback_swap().is_none())
+            });
+
+        if current_swap_protocol == last_swap_protocol &&
+            groupable_protocol &&
+            no_split &&
+            no_cycle &&
+            no_fallback
         {
             // Second or later groupable pool in a sequence of groupable pools. Merge to the
             // current group.

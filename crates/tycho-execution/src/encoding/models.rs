@@ -240,6 +240,10 @@ pub struct Swap {
     estimated_amount_in: Option<BigUint>,
     /// Estimated gas usage for this swap by simulation
     estimated_gas: BigUint,
+    /// Optional fallback swap the router executes when this swap's executor reverts. Must swap
+    /// the same token pair. Only supported when encoding through the TychoRouter.
+    #[serde(default)]
+    fallback_swap: Option<Box<Swap>>,
 }
 
 impl Swap {
@@ -258,6 +262,7 @@ impl Swap {
             protocol_state: None,
             estimated_amount_in: None,
             estimated_gas,
+            fallback_swap: None,
         }
     }
 
@@ -282,6 +287,12 @@ impl Swap {
     /// Sets the estimated amount in for RFQ protocols
     pub fn with_estimated_amount_in(mut self, estimated_amount_in: BigUint) -> Self {
         self.estimated_amount_in = Some(estimated_amount_in);
+        self
+    }
+
+    /// Sets the fallback swap the router executes when this swap's executor reverts
+    pub fn with_fallback_swap(mut self, fallback_swap: Swap) -> Self {
+        self.fallback_swap = Some(Box::new(fallback_swap));
         self
     }
 
@@ -316,6 +327,10 @@ impl Swap {
     pub fn estimated_gas(&self) -> &BigUint {
         &self.estimated_gas
     }
+
+    pub fn fallback_swap(&self) -> Option<&Swap> {
+        self.fallback_swap.as_deref()
+    }
 }
 
 impl PartialEq for Swap {
@@ -326,7 +341,8 @@ impl PartialEq for Swap {
             self.split() == other.split() &&
             self.user_data() == other.user_data() &&
             self.estimated_amount_in() == other.estimated_amount_in() &&
-            self.estimated_gas() == other.estimated_gas()
+            self.estimated_gas() == other.estimated_gas() &&
+            self.fallback_swap() == other.fallback_swap()
     }
 }
 

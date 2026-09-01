@@ -171,6 +171,17 @@ impl TychoExecutorEncoder {
         &self,
         solution: &Solution,
     ) -> Result<EncodedSolution, EncodingError> {
+        if solution
+            .swaps()
+            .iter()
+            .any(|swap| swap.fallback_swap().is_some())
+        {
+            return Err(EncodingError::InvalidInput(
+                "Fallback swaps require the TychoRouter; they are not supported when calling \
+                 an executor directly"
+                    .to_string(),
+            ));
+        }
         let grouped_swaps = group_swaps(solution.swaps());
         let number_of_groups = grouped_swaps.len();
         if number_of_groups > 1 {
