@@ -5555,7 +5555,7 @@ mod test_serial_db {
                             token: Bytes::from_str(USDC_ADDRESS).unwrap(),
                             balance: Bytes::from("0x00000001"),
                             balance_float: 1.0,
-                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000002711").unwrap(),
                             component_id: "pc_1".to_string(),
                         }),
                         (Bytes::from_str(WETH_ADDRESS).unwrap(), ComponentBalance {
@@ -5747,7 +5747,7 @@ mod test_serial_db {
                             token: Bytes::from_str(WETH_ADDRESS).unwrap(),
                             balance: Bytes::from("0x00000001"),
                             balance_float: 1.0,
-                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+                            modify_tx: Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000002711").unwrap(),
                             component_id: "pc_1".to_string(),
                         }),
                     ])),
@@ -5757,7 +5757,7 @@ mod test_serial_db {
                         (Bytes::from_str(WETH_ADDRESS).unwrap(), AccountBalance {
                         token: Bytes::from_str(WETH_ADDRESS).unwrap(),
                         balance: Bytes::from("0x00000001"),
-                        modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+                        modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000002711").unwrap(),
                         account: account1.clone(),
                         }),
                         (Bytes::from_str(USDC_ADDRESS).unwrap(), AccountBalance {
