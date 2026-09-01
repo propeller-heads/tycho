@@ -7,6 +7,7 @@
 use std::{collections::HashMap, sync::LazyLock};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
+use tycho_simulation::tycho_common::models::Chain;
 use tycho_test::execution::models::RouterOverwritesData;
 pub const ROUTER_BYTECODE_JSON: &str = include_str!("../fixtures/TychoRouterV3.runtime.json");
 const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculator.runtime.json");
@@ -14,6 +15,7 @@ const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculat
 // Include all executor bytecode files at compile time
 const UNISWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV2.runtime.json");
 const RING_SWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2.runtime.json");
+const RING_SWAP_V2_BSC_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2Bsc.runtime.json");
 const UNISWAP_V3_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV3.runtime.json");
 const UNISWAP_V4_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV4.runtime.json");
 const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
@@ -54,8 +56,16 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map
 });
 
+static CHAIN_SPECIFIC_EXECUTOR_MAPPING: LazyLock<HashMap<(Chain, &'static str), &'static str>> =
+    LazyLock::new(|| {
+        HashMap::from([((Chain::Bsc, "ring_swap_v2"), RING_SWAP_V2_BSC_BYTECODE_JSON)])
+    });
+
 /// Get executor bytecode JSON based on protocol system
-fn get_executor_bytecode_json(protocol_system: &str) -> miette::Result<&'static str> {
+fn get_executor_bytecode_json(protocol_system: &str, chain: Chain) -> miette::Result<&'static str> {
+    if let Some(executor_json) = CHAIN_SPECIFIC_EXECUTOR_MAPPING.get(&(chain, protocol_system)) {
+        return Ok(executor_json);
+    }
     for (pattern, executor_json) in EXECUTOR_MAPPING.iter() {
         if protocol_system == *pattern {
             return Ok(executor_json);
@@ -86,8 +96,8 @@ fn decode_runtime_bytecode(bytecode_json: &str, label: &str) -> miette::Result<V
 }
 
 /// Load executor bytecode from embedded constants based on the protocol system
-pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> {
-    let executor_json = get_executor_bytecode_json(protocol_system)?;
+pub fn load_executor_bytecode(protocol_system: &str, chain: Chain) -> miette::Result<Vec<u8>> {
+    let executor_json = get_executor_bytecode_json(protocol_system, chain)?;
     decode_runtime_bytecode(executor_json, "executor")
 }
 
@@ -100,6 +110,7 @@ pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> 
 ///
 /// # Arguments
 /// * `protocol_system` - The protocol system identifier (e.g., "uniswap_v2", "balancer_v2")
+/// * `chain` - The chain whose executor deployment configuration should be used
 ///
 /// # Returns
 /// A `RouterOverwritesData` struct containing the router, executor, and fee calculator bytecode.
@@ -111,11 +122,33 @@ pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> 
 /// - Bytecode hex decoding fails
 pub fn create_router_overwrites_data(
     protocol_system: &str,
+    chain: Chain,
 ) -> miette::Result<RouterOverwritesData> {
     let router_bytecode = decode_runtime_bytecode(ROUTER_BYTECODE_JSON, "router")?;
-    let executor_bytecode = load_executor_bytecode(protocol_system)?;
+    let executor_bytecode = load_executor_bytecode(protocol_system, chain)?;
     let fee_calculator_bytecode =
         decode_runtime_bytecode(FEE_CALCULATOR_BYTECODE_JSON, "fee calculator")?;
 
     Ok(RouterOverwritesData { router_bytecode, executor_bytecode, fee_calculator_bytecode })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_swap_v2_uses_chain_specific_runtime_bytecode() {
+        let ethereum = load_executor_bytecode("ring_swap_v2", Chain::Ethereum).unwrap();
+        let bsc = load_executor_bytecode("ring_swap_v2", Chain::Bsc).unwrap();
+
+        assert_ne!(ethereum, bsc);
+    }
+
+    #[test]
+    fn chain_agnostic_executor_uses_default_runtime_bytecode() {
+        let ethereum = load_executor_bytecode("uniswap_v2", Chain::Ethereum).unwrap();
+        let bsc = load_executor_bytecode("uniswap_v2", Chain::Bsc).unwrap();
+
+        assert_eq!(ethereum, bsc);
+    }
 }

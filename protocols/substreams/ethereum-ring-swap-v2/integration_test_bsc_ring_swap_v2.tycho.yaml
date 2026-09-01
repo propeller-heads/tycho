@@ -1,0 +1,28 @@
+substreams_yaml_path: ./bsc-ring-swap-v2.yaml
+protocol_system: "ring_swap_v2"
+protocol_type_names:
+  - "ring_swap_v2_pool"
+module_name: "map_pool_events"
+# Ring exposes underlying ERC-20 component tokens to solvers, while pair balances are held as
+# FewTokens. The generic raw balance check compares component token.balanceOf(pair), so it is not
+# applicable for this abstraction.
+skip_balance_check: true
+initialized_accounts:
+tests:
+  - name: test_bsc_ring_swap_v2_wbnb_usdt_pair
+    start_block: 46793445
+    stop_block: 46793446
+    expected_components:
+      - id: "0x653Cd6B4F72585647aC9F7086550CA7E5C8E8a4c"
+        tokens:
+          - "0x55d398326f99059fF775485246999027B3197955"
+          - "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+        static_attributes:
+          fee: "0x1e"
+          fw_token0: "0x7f0172b75d3823D8aF04feE3A3f6a14aBD68EFE1"
+          fw_token1: "0x95b5aEfbcC9e6E462f21E0847e2d90b89b7Cd028"
+          underlying_token0: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+          underlying_token1: "0x55d398326f99059fF775485246999027B3197955"
+          reserves_inverted: "0x01"
+        creation_tx: "0xf3dc0d95b00a2467ca84c8cd705b914ef358816d71310e6ef8d4adc48402df66"
+        skip_simulation: false

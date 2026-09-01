@@ -73,6 +73,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("unichain-curve", "ethereum-curve"),
+        ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
     ])
 });
 
@@ -1331,7 +1332,7 @@ impl TestRunner {
 
         // Prepare router overwrites data
         let router_overwrites_data =
-            Some(execution::create_router_overwrites_data(protocol_system)?);
+            Some(execution::create_router_overwrites_data(protocol_system, chain_model)?);
 
         info!("Executing {} simulations in batches ...", filtered_execution_data.len());
 
@@ -1632,6 +1633,32 @@ mod tests {
         })
         .unwrap()
     }
+
+    #[test]
+    fn bsc_ring_swap_v2_uses_shared_package_config() {
+        let root_path = PathBuf::from("/tmp/tycho-protocol-sdk");
+        let runner = TestRunner::new(RunnerConfig {
+            test_type: TestType::Range(TestTypeRange { match_test: None }),
+            root_path: root_path.clone(),
+            chain: Chain::Bsc,
+            protocol: "bsc-ring-swap-v2".to_string(),
+            db_url: String::new(),
+            rpc_url: "http://localhost:8545".to_string(),
+            tycho_server_port: 4242,
+            vm_simulation_traces: false,
+            reuse_last_sync: false,
+            prebuilt_wasm: false,
+        })
+        .unwrap();
+
+        let package_path = root_path.join("substreams/ethereum-ring-swap-v2");
+        assert_eq!(runner.substreams_path, package_path);
+        assert_eq!(
+            runner.config_file_path,
+            package_path.join("integration_test_bsc_ring_swap_v2.tycho.yaml")
+        );
+    }
+
     #[test]
     fn test_token_balance_validation() {
         let runner = get_mocked_runner();
