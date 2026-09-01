@@ -864,30 +864,24 @@ where
 }
 
 /// How an attribute first appeared inside a reverted range. The first event decides the
-/// revert: `Born` attrs have no prior value, `PreExisting` attrs restore one, and
-/// `Ambiguous` attrs go through the lookup because the truth is unrecoverable.
+/// revert: `Born` attrs have no prior value, `PreExisting` attrs restore one.
 enum FirstSeen {
     Born,
     PreExisting,
-    /// The first delta held the attr in both `created_attributes` and
-    /// `deleted_attributes`: create-then-delete and delete-then-recreate inside one tx
-    /// merge to the same shape.
-    Ambiguous,
 }
 
 /// Revert classification of one (component, attribute) pair.
 struct RevertedAttr {
     first: FirstSeen,
-    /// Whether the attr is alive at the end of the range. `None` when the last event is
-    /// an ambiguous same-tx create+delete.
-    alive: Option<bool>,
+    /// Whether the attr is alive at the end of the range.
+    alive: bool,
 }
 
 fn classify<'a>(
     map: &mut HashMap<(&'a String, &'a String), RevertedAttr>,
     key: (&'a String, &'a String),
     first: FirstSeen,
-    alive: Option<bool>,
+    alive: bool,
 ) {
     map.entry(key)
         .and_modify(|attr| attr.alive = alive)
@@ -1431,11 +1425,7 @@ where
         // event seen for a (component, attribute) pair decides its revert. First event
         // Creation → the attr did not exist before the range; it reverts as a deletion
         // only when it is still alive at the end of the range. Anything else → a prior
-        // value existed, look it up in the buffer, then the DB. A same-tx create+delete
-        // merges into one delta holding the attr in both sets; the true order is
-        // unrecoverable, so those attrs go through the lookup too: a hit proves a
-        // pre-range value to restore, a miss reverts to nothing unless a later event
-        // proves the attr alive.
+        // value existed, look it up in the buffer, then the DB.
         let mut reverted_attrs: HashMap<(&String, &String), RevertedAttr> = HashMap::new();
         for block_msg in reverted_state.iter() {
             for update in block_msg
@@ -1449,14 +1439,17 @@ where
                     }
                     for attr in delta.created_attributes.iter() {
                         if delta.deleted_attributes.contains(attr) {
-                            classify(&mut reverted_attrs, (c_id, attr), FirstSeen::Ambiguous, None);
-                        } else {
+                            // Both sets hold the attr: malformed module output, the order
+                            // is lost in the same-tx merge. Restoring a prior value is the
+                            // safe read.
                             classify(
                                 &mut reverted_attrs,
                                 (c_id, attr),
-                                FirstSeen::Born,
-                                Some(true),
+                                FirstSeen::PreExisting,
+                                true,
                             );
+                        } else {
+                            classify(&mut reverted_attrs, (c_id, attr), FirstSeen::Born, true);
                         }
                     }
                     for attr in delta.updated_attributes.keys() {
@@ -1465,7 +1458,7 @@ where
                                 &mut reverted_attrs,
                                 (c_id, attr),
                                 FirstSeen::PreExisting,
-                                Some(true),
+                                true,
                             );
                         }
                     }
@@ -1475,7 +1468,7 @@ where
                                 &mut reverted_attrs,
                                 (c_id, attr),
                                 FirstSeen::PreExisting,
-                                Some(false),
+                                false,
                             );
                         }
                     }
@@ -1485,7 +1478,7 @@ where
 
         let reverted_protocol_state_keys_vec: Vec<(&String, &String)> = reverted_attrs
             .iter()
-            .filter(|(_, attr)| matches!(attr.first, FirstSeen::PreExisting | FirstSeen::Ambiguous))
+            .filter(|(_, attr)| matches!(attr.first, FirstSeen::PreExisting))
             .map(|(&key, _)| key)
             .collect();
 
@@ -1528,12 +1521,12 @@ where
             .collect();
 
         // Misses below mean an upstream module emitted an Update/Deletion for an
-        // attribute that never had a Creation, so no prior value exists and the revert
-        // deletes it. Substreams output is external input — a miss is a data-quality
-        // signal, not a reason to kill the extractor.
+        // attribute that never had a Creation, or a malformed delta held the attribute in
+        // both sets and it never existed before the range. Either way no prior value
+        // exists and the revert deletes it. Substreams output is external input — a miss
+        // is a data-quality signal, not a reason to kill the extractor.
         let mut attr_misses_state_found = 0_u64;
         let mut attr_misses_state_missing = 0_u64;
-        let mut ambiguous_survivor_deletions: HashMap<String, HashSet<String>> = HashMap::new();
         for (component_id, keys) in missing_map {
             let state = states_by_id
                 .get(component_id.as_str())
@@ -1541,21 +1534,6 @@ where
             for key in keys {
                 if let Some(value) = state.and_then(|s| s.attributes.get(&key)) {
                     db_states.insert((component_id.clone(), key), value.clone());
-                    continue;
-                }
-                let class = reverted_attrs
-                    .get(&(&component_id, &key))
-                    .expect("missed lookup keys come from the classification pass");
-                if matches!(class.first, FirstSeen::Ambiguous) {
-                    // No prior value proves the attr was born inside the ambiguous tx.
-                    // Only an attr a later event shows alive needs a deletion. No
-                    // warn/counter: the shape carries a Creation.
-                    if class.alive == Some(true) {
-                        ambiguous_survivor_deletions
-                            .entry(component_id.clone())
-                            .or_default()
-                            .insert(key);
-                    }
                     continue;
                 }
                 if state.is_some() {
@@ -1626,10 +1604,9 @@ where
         }
 
         // Revert the attributes born inside the range that survived it by emitting
-        // deletions — they have no prior state to restore. Ambiguous-shape attrs that a
-        // later event proved alive and that miss the lookup get the same treatment.
+        // deletions — they have no prior state to restore.
         for (&(c_id, attr), class) in reverted_attrs.iter() {
-            if !(matches!(class.first, FirstSeen::Born) && class.alive == Some(true)) {
+            if !(matches!(class.first, FirstSeen::Born) && class.alive) {
                 continue;
             }
             state_deltas
@@ -1639,15 +1616,6 @@ where
                 })
                 .deleted_attributes
                 .insert(attr.clone());
-        }
-        for (c_id, keys) in ambiguous_survivor_deletions {
-            state_deltas
-                .entry(c_id.clone())
-                .or_insert_with(|| {
-                    ProtocolComponentStateDelta::new(&c_id, HashMap::new(), HashSet::new())
-                })
-                .deleted_attributes
-                .extend(keys);
         }
 
         // Handle component balance changes
@@ -4192,7 +4160,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_revert_attr_created_and_deleted_same_tx() {
+    async fn test_revert_same_tx_create_delete_without_history_deletes() {
         let extractor = create_extractor(revert_test_gateway()).await;
 
         // Block 1: empty anchor.
@@ -4200,9 +4168,9 @@ mod test {
         // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
         full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
 
-        // Partial block 3: ONE tx mints and burns a fresh tick. The merged delta holds
-        // the attr in created, updated, and deleted at once — the same shape as a
-        // delete-then-recreate, but with no prior value anywhere.
+        // Partial block 3: ONE delta holds the attr in both created and deleted —
+        // malformed module output. It goes through the lookup like a pre-existing attr,
+        // misses, and reverts as a deletion.
         partial_block(
             &extractor,
             3,
@@ -4238,75 +4206,6 @@ mod test {
             .expect("revert must not error")
             .expect("revert must produce a message");
 
-        if let Some(delta) = revert_msg.state_deltas.get("pool_x") {
-            assert!(
-                !delta
-                    .deleted_attributes
-                    .contains("ticks/100/net-liquidity"),
-                "same-tx create+delete must not revert as a deletion, got: {:?}",
-                delta.deleted_attributes
-            );
-            assert!(delta.updated_attributes.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_revert_same_tx_create_delete_then_recreate_deletes() {
-        let extractor = create_extractor(revert_test_gateway()).await;
-
-        // Block 1: empty anchor.
-        full_block(&extractor, 1, 1, vec![]).await;
-        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
-        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
-
-        // Partial block 3: tx 0 mints and burns the tick in one tx (ambiguous shape),
-        // tx 1 mints it again. It is alive at range end with no prior value anywhere,
-        // so the revert must delete it.
-        partial_block(
-            &extractor,
-            3,
-            0,
-            1,
-            vec![
-                TransactionChanges {
-                    tx: Some(pb_fixtures::pb_transactions(3, 0)),
-                    entity_changes: vec![EntityChanges {
-                        component_id: "pool_x".to_string(),
-                        attributes: vec![
-                            Attribute {
-                                name: "ticks/100/net-liquidity".to_string(),
-                                value: Bytes::from(5000_u64)
-                                    .lpad(32, 0)
-                                    .to_vec(),
-                                change: PbChangeType::Creation.into(),
-                            },
-                            Attribute {
-                                name: "ticks/100/net-liquidity".to_string(),
-                                value: Bytes::from(0_u64).lpad(32, 0).to_vec(),
-                                change: PbChangeType::Deletion.into(),
-                            },
-                        ],
-                    }],
-                    ..Default::default()
-                },
-                entity_change_tx(
-                    3,
-                    1,
-                    "pool_x",
-                    "ticks/100/net-liquidity",
-                    7000,
-                    PbChangeType::Creation,
-                ),
-            ],
-        )
-        .await;
-
-        let revert_msg = extractor
-            .handle_revert(undo_to(2))
-            .await
-            .unwrap()
-            .unwrap();
-
         let delta = revert_msg
             .state_deltas
             .get("pool_x")
@@ -4315,7 +4214,7 @@ mod test {
             delta
                 .deleted_attributes
                 .contains("ticks/100/net-liquidity"),
-            "attr alive at range end with no prior value must revert as a deletion, got: {:?}",
+            "malformed both-sets attr with no prior value must revert as a deletion, got: {:?}",
             delta.deleted_attributes
         );
         assert!(delta.updated_attributes.is_empty());

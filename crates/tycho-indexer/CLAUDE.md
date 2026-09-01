@@ -107,11 +107,10 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    flushed, so lookups cover every block whose write has not landed and a DB miss proves
    that no prior state exists — the revert never waits on the commit task. Attributes
    first created inside the reverted range revert as deletions when they survive the
-   range, and revert to nothing otherwise. A same-tx create+delete merges into one
-   ambiguous delta, so those attributes go through the lookup: a hit restores the
-   pre-range value, a miss reverts to nothing unless a later event proves the attribute
-   alive. Attributes with no prior value anywhere revert as deletions, emit one summary
-   warning, and increment `extractor_revert_attr_miss` per attribute; its
+   range, and revert to nothing otherwise. A delta that holds an attribute as both
+   created and deleted is malformed module output, so it goes through the lookup like a
+   pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
+   emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
    `component_state_found` label says whether the DB returned state rows for the
    component. Any hit means an upstream module emitted an Update or Deletion for an
    attribute that never had a Creation.
