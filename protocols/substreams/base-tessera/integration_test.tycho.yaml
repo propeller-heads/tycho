@@ -1,0 +1,54 @@
+substreams_yaml_path: ./base-tessera.yaml
+protocol_system: "vm:tessera"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "tessera_pair"
+
+adapter_contract: "TesseraSwapAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e"
+
+# Balances are validated: the range is self-consistent (the NVDAc book is created and seeded
+# inside it) and the treasury never idles.
+skip_balance_check: false
+
+# The stable venue contracts and the code-only satellites were all deployed before this test's
+# range, so the substreams only emit their storage updates here, never their account creations.
+# Bootstrap them from RPC so slot updates have something to attach to and the quote path has
+# code to run. (The NVDAc book's own price store is created inside the range.)
+initialized_accounts:
+  - "0x55555522005BcAE1c2424D474BfD5ed477749E3e" # TesseraSwap (entrypoint)
+  - "0x31e99e05fee3dce580af777c3fd63ee1b3b40c17" # engine
+  - "0x6d9dd143e42b6338f4f6a7c0c26d124658f641cb" # store impl (gen 3)
+  - "0x9f924c0765815851d9f4982c7030e2189a7828a9" # pricing lib (tail books, incl. NVDAc)
+  - "0xfdb7fa3f95e47624b7423b48462564107aa4e684" # pricing lib (WETH/cbBTC books)
+  - "0x7034c5c74f66d3337777772c2964db31765db23e" # write-path contract
+
+tests:
+  - name: test_nvdac_pair_discovery_and_simulation
+    # Covers the NVDAc/USDC pair lifecycle: creation at block 50,526,653 (the owner Safe calls
+    # the engine — tx 0x3447f2ec…a5cb — which internally CREATEs the pair contract; the pair's
+    # init writes of the EIP-1967 impl slot + base/quote token slots plus the engine's registry
+    # write at the derived mapping slot are the discovery signal), the pricing-lib assignment
+    # at 50,527,583, and the first price post at 50,528,239. The stop block sits just after the
+    # first post so the pair quotes at simulation time — Tessera's freshness gate zeroes quotes
+    # when the last post is older than ~20 blocks, and posts only begin ~26 minutes after
+    # creation. That transaction created four pairs at once; the other three are asserted by
+    # the same discovery rule and only NVDAc is enumerated here.
+    start_block: 50526640
+    stop_block: 50528260
+    expected_components:
+      - id: "0xede940cdf2a9c5620cbf97e45947594723e29c14"
+        tokens:
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+          - "0xb20000000000000000000078ee7ce2fe4908108c" # NVDAc
+        static_attributes:
+          base_token: "0xb20000000000000000000078ee7ce2fe4908108c"
+          quote_token: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          manual_updates: "0x01"
+          self_contained_tokens: "0x5b22307838333335383966636436656462366530386634633763333264346637316235346264613032393133222c22307862323030303030303030303030303030303030303030373865653763653266653439303831303863225d"
+        creation_tx: "0x3447f2ec3b4e6aa38a6d5f50968df46b9c7d492dc0a8022981dd71cc2063a5cb"
+        # No vm:tessera executor is deployed on Base yet; execution is
+        # validated in Foundry (crates/tycho-execution/contracts/test/
+        # protocols/Tessera.t.sol) until the rollout phase deploys one.
+        skip_execution: true

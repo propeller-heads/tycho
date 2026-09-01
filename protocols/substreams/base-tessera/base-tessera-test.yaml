@@ -1,0 +1,104 @@
+specVersion: v0.1.0
+package:
+  name: "base_tessera_test"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-tessera"
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_tessera.wasm
+
+network: base
+
+# Deployment config (addresses + storage slots) is passed as params so the module can be
+# re-pointed at another Tessera deployment (e.g. BSC) or a new pair-implementation generation
+# without code changes. Hex, no `0x` prefix. `tracked` is the concatenated 20-byte addresses of
+# the code-only satellites (pair implementation generations, pricing libs, the write-path
+# contract) — they are deployed top-level by rotating EOAs and cannot be discovered at creation
+# time; a new generation is appended here and the spkg re-released (HANDOVER §9.3).
+params:
+  map_components: &config "tesseraswap=55555522005bcae1c2424d474bfd5ed477749e3e&engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17&tracked=f3be571a3a73201033b43bec1d1a566d45f5909510182fdad9f530332eb0ccd28edefc83a23b2c426d9dd143e42b6338f4f6a7c0c26d124658f641cbfdb7fa3f95e47624b7423b48462564107aa4e6849f924c0765815851d9f4982c7030e2189a7828a97034c5c74f66d3337777772c2964db31765db23e&treasury_slot=1&treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51"
+  store_treasury: *config
+  map_relative_balances: *config
+  map_protocol_changes: *config
+
+modules:
+  - name: map_components
+    kind: map
+    initialBlock: 50526600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_components
+    kind: store
+    initialBlock: 50526600
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_components
+
+  - name: store_pairs
+    kind: store
+    initialBlock: 50526600
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_components
+
+  - name: store_treasury
+    kind: store
+    initialBlock: 50526600
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_relative_balances
+    kind: map
+    initialBlock: 50526600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - store: store_components
+      - store: store_pairs
+      - store: store_treasury
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 50526600
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 50526600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - map: map_relative_balances
+      - store: store_components
+      - store: store_pairs
+      - store: store_treasury
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

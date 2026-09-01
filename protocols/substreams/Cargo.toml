@@ -26,6 +26,7 @@ members = [
     "base-aerodrome-v1",
     "base-aerodrome-slipstreams",
     "base-lunarbase",
+    "base-tessera",
     "ethereum-erc4626",
     "ethereum-rocketpool",
     "unichain-velodrome",

@@ -1,0 +1,41 @@
+{
+  "../../../crates/tycho-execution/contracts/lib/balancer-v2-monorepo": {
+    "rev": "36d282374b457dddea828be7884ee0d185db06ba"
+  },
+  "../../../crates/tycho-execution/contracts/lib/balancer-v3-monorepo": {
+    "rev": "84cfb0d9d0bd024f92c7a95c64ab7ab8b4c12f4b"
+  },
+  "../../../crates/tycho-execution/contracts/lib/ekubo-v3": {
+    "rev": "82ce93183f68f9ead10f182fe78395845100ab0c"
+  },
+  "../../../crates/tycho-execution/contracts/lib/openzeppelin-contracts": {
+    "rev": "a1a0a67a2050f5b0edac2bb64ba679cb07a88943"
+  },
+  "../../../crates/tycho-execution/contracts/lib/permit2": {
+    "rev": "cc56ad0f3439c502c246fc5cfcc3db92bb8b7219"
+  },
+  "../../../crates/tycho-execution/contracts/lib/solady": {
+    "rev": "c9e079c0ca836dcc52777a1fa7227ef28e3537b3"
+  },
+  "../../../crates/tycho-execution/contracts/lib/v2-core": {
+    "rev": "4dd59067c76dea4a0e8e4bfdda41877a6b16dedc"
+  },
+  "../../../crates/tycho-execution/contracts/lib/v3-core": {
+    "rev": "d8b1c635c275d2a9450bd6a78f3fa2484fef73eb"
+  },
+  "../../../crates/tycho-execution/contracts/lib/v4-core": {
+    "rev": "59d3ecf53afa9264a16bba0e38f4c5d2231f80bc"
+  },
+  "../../../crates/tycho-execution/contracts/lib/v4-periphery": {
+    "rev": "ad04c9f24a170accf5ea1b2836bbafd514537ca6"
+  },
+  "../../../crates/tycho-simulation/token-proxy-contracts/lib/forge-std": {
+    "rev": "3b20d60d14b343ee4f908cb8079495c07f5e8981"
+  },
+  "lib/forge-std": {
+    "rev": "e4aef94c1768803a16fe19f7ce8b65defd027cfd"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "11dc5e3809ebe07d5405fe524385cbe4f890a08b"
+  }
+}
