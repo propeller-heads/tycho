@@ -798,7 +798,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         {
             (address executor, bytes calldata protocolData) =
                 swap_.decodeSingleSwap();
-            actualAmountOut = _callSwapOnExecutor(
+            actualAmountOut = _dispatchSwap(
                 executor,
                 amountIn,
                 protocolData,
@@ -1069,7 +1069,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 swapReceiver = receiver;
             }
 
-            uint256 currentAmountOut = _callSwapOnExecutor(
+            uint256 currentAmountOut = _dispatchSwap(
                 executor,
                 currentAmountIn,
                 protocolData,
@@ -1127,11 +1127,15 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 (nextSwap,) = remainingSwaps.next();
                 (address nextExecutor, bytes calldata nextProtocolData) =
                     nextSwap.decodeSequentialSwap();
-                receiver =
-                    _callFundsExpectedAddress(nextExecutor, nextProtocolData);
+                // A fallback hop's input must stay at the router: if it were
+                // pre-positioned at the primary pool and the primary
+                // reverted, the tokens would be stranded there.
+                receiver = nextExecutor == LibSwap.FALLBACK_MARKER
+                    ? address(this)
+                    : _callFundsExpectedAddress(nextExecutor, nextProtocolData);
             }
 
-            calculatedAmount = _callSwapOnExecutor(
+            calculatedAmount = _dispatchSwap(
                 executor,
                 calculatedAmount,
                 protocolData,

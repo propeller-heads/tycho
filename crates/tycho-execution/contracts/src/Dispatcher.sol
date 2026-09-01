@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "./TransferManager.sol";
+import {LibSwap} from "../lib/LibSwap.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
@@ -17,6 +18,7 @@ error Dispatcher__UnsupportedSingleHopCycle(address token);
 error Dispatcher__ExecutorAlreadyExists(address executor);
 error Dispatcher__SwapReverted(address executor);
 error Dispatcher__CallbackReverted(address executor);
+error Dispatcher__OnlySelf();
 
 /**
  * @title Dispatcher - Dispatch execution to external contracts
@@ -31,6 +33,7 @@ error Dispatcher__CallbackReverted(address executor);
  */
 contract Dispatcher is TransferManager {
     using SafeERC20 for IERC20;
+    using LibSwap for bytes;
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
@@ -83,6 +86,75 @@ contract Dispatcher is TransferManager {
     function _removeExecutor(address target) internal {
         delete executorsActivationTimestamp[target];
         emit ExecutorRemoved(target);
+    }
+
+    /**
+     * @dev External self-call wrapper around `_callSwapOnExecutor` so a swap
+     * can run inside try/catch. A revert in the primary executor rolls back
+     * the whole sub-call — transfers, delta accounting, and transient
+     * storage writes — leaving clean state for the fallback executor.
+     * Only callable by the router itself; this is an internal mechanism,
+     * not a user-facing entry point, so it skips the reentrancy guard.
+     */
+    function trySwapOnExecutor(
+        address executor,
+        uint256 amount,
+        bytes calldata data,
+        bool isFirstSwap,
+        bool isSplitSwap,
+        address receiver
+    ) external returns (uint256) {
+        if (msg.sender != address(this)) {
+            revert Dispatcher__OnlySelf();
+        }
+        return _callSwapOnExecutor(
+            executor, amount, data, isFirstSwap, isSplitSwap, receiver
+        );
+    }
+
+    /**
+     * @dev Routes a hop to its executor. A hop whose executor slot holds
+     * `LibSwap.FALLBACK_MARKER` carries a fallback bundle: the primary
+     * executor runs in try/catch via `trySwapOnExecutor`, and on any revert
+     * the fallback executor re-runs the full swap flow on clean state.
+     *
+     * Fallback hops always pass `isSplitSwap = true`: their input tokens are
+     * always held by the router (receiver resolution never pre-positions
+     * them at the primary pool), so the transfer-from-router path must run
+     * instead of the sequential-swap pre-positioning optimization.
+     */
+    function _dispatchSwap(
+        address executor,
+        uint256 amount,
+        bytes calldata data,
+        bool isFirstSwap,
+        bool isSplitSwap,
+        address receiver
+    ) internal returns (uint256) {
+        if (executor != LibSwap.FALLBACK_MARKER) {
+            return _callSwapOnExecutor(
+                executor, amount, data, isFirstSwap, isSplitSwap, receiver
+            );
+        }
+
+        (
+            address primaryExecutor,
+            bytes calldata primaryData,
+            address fallbackExecutor,
+            bytes calldata fallbackData
+        ) = data.decodeFallbackSwap();
+
+        try this.trySwapOnExecutor(
+            primaryExecutor, amount, primaryData, isFirstSwap, true, receiver
+        ) returns (
+            uint256 amountOut
+        ) {
+            return amountOut;
+        } catch {}
+
+        return _callSwapOnExecutor(
+            fallbackExecutor, amount, fallbackData, isFirstSwap, true, receiver
+        );
     }
 
     /**

@@ -82,4 +82,38 @@ contract LibSwapTest is Test {
         assertEq(decodedExecutor, executor);
         assertEq(decodedProtocolData, protocolData);
     }
+
+    function testFallbackSwap() public view {
+        address executor = 0x1234567890123456789012345678901234567890;
+        bytes memory protocolData = abi.encodePacked(uint256(567));
+        address fallbackExecutor = 0xabCDEF1234567890ABcDEF1234567890aBCDeF12;
+        bytes memory fallbackData = abi.encodePacked(uint128(890));
+
+        bytes memory primary = abi.encodePacked(executor, protocolData);
+        bytes memory data = abi.encodePacked(
+            uint16(primary.length), primary, fallbackExecutor, fallbackData
+        );
+        this.assertFallbackSwap(
+            data, executor, protocolData, fallbackExecutor, fallbackData
+        );
+    }
+
+    function assertFallbackSwap(
+        bytes calldata data,
+        address executor,
+        bytes calldata protocolData,
+        address fallbackExecutor,
+        bytes calldata fallbackData
+    ) public pure {
+        (
+            address decodedExecutor,
+            bytes memory decodedProtocolData,
+            address decodedFallbackExecutor,
+            bytes memory decodedFallbackData
+        ) = data.decodeFallbackSwap();
+        assertEq(decodedExecutor, executor);
+        assertEq(decodedProtocolData, protocolData);
+        assertEq(decodedFallbackExecutor, fallbackExecutor);
+        assertEq(decodedFallbackData, fallbackData);
+    }
 }
