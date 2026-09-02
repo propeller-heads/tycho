@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_uniswap_v4_with_hooks"
-  version: v0.7.0
+  version: v0.9.0
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v4/with-hooks"
 
 protobuf:
@@ -192,6 +192,15 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
+  - name: map_nftx_enriched_protocol_changes
+    kind: map
+    initialBlock: 21688329
+    inputs:
+      - params: string
+      - map: map_angstrom_enriched_block_changes
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
 
 params:
   map_pools_created: "000000000004444c5dc75cB358380D2e3dE08A90"
@@ -199,3 +208,4 @@ params:
   map_euler_enriched_protocol_changes: "0xb013be1D0D380C13B58e889f412895970A2Cf228"
   store_tokens_to_pool_id_angstrom: "0x0000000aa232009084bd71a5797d089aa4edfad4" # angstrom hook address
   map_angstrom_enriched_block_changes: controller_address=0x1746484ea5e11c75e009252c102c8c33e0315fd4&angstrom_address=0x0000000aa232009084bd71a5797d089aa4edfad4
+  map_nftx_enriched_protocol_changes: "d2094b5cdb1a12b6274e4a4d3a252cd94c51efcc" # NFTXV4Hook

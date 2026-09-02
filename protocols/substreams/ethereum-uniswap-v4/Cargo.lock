@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
