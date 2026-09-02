@@ -369,6 +369,7 @@ fn chain_to_chain_id(chain: Chain) -> Result<u64, RFQError> {
     match chain {
         Chain::Ethereum => Ok(1),
         Chain::Base => Ok(8453),
+        Chain::Robinhood => Ok(4663),
         unsupported => Err(RFQError::FatalError(format!(
             "Metric does not support chain in this integration: {unsupported:?}"
         ))),
@@ -449,6 +450,8 @@ mod tests {
     fn test_chain_to_chain_id() {
         assert_eq!(chain_to_chain_id(Chain::Ethereum).unwrap(), 1);
         assert_eq!(chain_to_chain_id(Chain::Base).unwrap(), 8453);
+        assert_eq!(chain_to_chain_id(Chain::Robinhood).unwrap(), 4663);
+        // Metric lists Arbitrum, but it carries no price-provider layer yet.
         assert!(chain_to_chain_id(Chain::Arbitrum).is_err());
     }
 
