@@ -43,14 +43,20 @@ contract TempestAdapterTest is AdapterTest {
         assertEq(address(adapter.tempest()), TEMPEST_ROUTER);
     }
 
-    /// The adapter's pool id must equal the router's own `laneFor`, which is
-    /// also the component id the substreams package emits.
-    function testPoolIdMatchesLaneFor() public pure {
+    /// The pool id must be router-scoped, matching the component id the
+    /// substreams package emits. It must therefore NOT equal the router's own
+    /// `laneFor`, which is only keccak(token0, token1) and so would collide
+    /// with any other pAMM quoting the same pair.
+    function testPoolIdIsRouterScoped() public pure {
+        assertTrue(
+            _poolId(USDC, WETH)
+                != bytes32(ITempest(TEMPEST_ROUTER).laneFor(USDC, WETH))
+        );
         assertEq(
             _poolId(USDC, WETH),
-            bytes32(ITempest(TEMPEST_ROUTER).laneFor(USDC, WETH))
+            keccak256(abi.encodePacked(TEMPEST_ROUTER, USDC, WETH))
         );
-        // Direction-independent, because the router sorts the pair.
+        // Direction-independent, because the pair is sorted.
         assertEq(_poolId(USDC, WETH), _poolId(WETH, USDC));
     }
 
@@ -201,8 +207,10 @@ contract TempestAdapterTest is AdapterTest {
     /// router's freshness window. Mirrors what the builder does by ordering the
     /// maker's quote tx immediately ahead of the fill in the same block.
     function _refreshLane(address tokenA, address tokenB) internal {
+        // The registry keys lanes by the router's own `laneFor`, which is not
+        // the (router-scoped) pool id.
         bytes32 laneSlot = keccak256(
-            abi.encode(TEMPEST_ROUTER, uint256(_poolId(tokenA, tokenB)))
+            abi.encode(TEMPEST_ROUTER, uint256(_laneFor(tokenA, tokenB)))
         );
         uint256 storedLane = uint256(vm.load(PRIO_UPDATE_REGISTRY, laneSlot));
         uint256 storedSlotCount = (storedLane >> 216) & 0xff;
@@ -221,8 +229,21 @@ contract TempestAdapterTest is AdapterTest {
         );
     }
 
-    /// Mirrors `Tempest.laneFor`: keccak of the ascending-sorted packed pair.
+    /// Mirrors the component id the substreams package emits: keccak of the
+    /// router followed by the ascending-sorted packed pair.
     function _poolId(address tokenA, address tokenB)
+        internal
+        pure
+        returns (bytes32)
+    {
+        (address token0, address token1) =
+            tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        return keccak256(abi.encodePacked(TEMPEST_ROUTER, token0, token1));
+    }
+
+    /// Mirrors `Tempest.laneFor`: keccak of the ascending-sorted packed pair.
+    /// This is the registry's lane key, distinct from the pool id above.
+    function _laneFor(address tokenA, address tokenB)
         internal
         pure
         returns (bytes32)

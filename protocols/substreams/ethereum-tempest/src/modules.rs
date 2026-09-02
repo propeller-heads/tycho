@@ -34,12 +34,13 @@ use crate::{
         registry::functions::{BatchUpdateStateWithSignature, UpdateState},
         tempest::{
             self,
-            events::{PairRegistered, Paused, Unpaused},
+            events::{PairRegistered, Paused, Unpaused, VaultUpdated},
         },
     },
     utils::{
-        component_id, lane_index_to_component_id, sort_tokens, Config, ALL_COMPONENTS_KEY,
-        BALANCE_OWNER_ATTRIBUTE, OVERRIDE_BLOCK_TIMESTAMP_ATTRIBUTE,
+        component_id, lane_for, lane_index_to_lane_key, lane_key, sort_tokens, Config,
+        ALL_COMPONENTS_KEY, BALANCE_OWNER_ATTRIBUTE, LANE_KEY_PREFIX,
+        OVERRIDE_BLOCK_TIMESTAMP_ATTRIBUTE, PAUSED_KEY, VAULT_KEY,
     },
 };
 
@@ -48,10 +49,20 @@ fn map_protocol_components(
     params: String,
     block: Block,
     pair_registered_deltas: StoreDeltas,
+    router_state_store: StoreGetString,
 ) -> Result<BlockEntityChanges> {
     let config: Config = serde_qs::from_str(params.as_str())?;
     let mut changes: Vec<TransactionEntityChanges> = vec![];
-    get_new_pairs(&config, &block, first_registrations(pair_registered_deltas), &mut changes);
+    let Some(vault) = vault_address(&router_state_store) else {
+        return Ok(BlockEntityChanges { block: Some((&block).into()), changes });
+    };
+    get_new_pairs(
+        &config,
+        &vault,
+        &block,
+        first_registrations(pair_registered_deltas),
+        &mut changes,
+    );
     Ok(BlockEntityChanges { block: Some((&block).into()), changes })
 }
 
@@ -66,6 +77,9 @@ fn first_registrations(pair_registered_deltas: StoreDeltas) -> HashSet<String> {
         .into_iter()
         .filter(|delta| delta.old_value.is_empty())
         .map(|delta| delta.key)
+        // The store also holds lane -> component id entries, which are not component ids and
+        // must not be mistaken for one.
+        .filter(|key| !key.starts_with(LANE_KEY_PREFIX))
         .collect()
 }
 
@@ -104,6 +118,7 @@ fn pause_transition(
 /// flips the component's pause state instead — Tycho components are immutable once created.
 fn get_new_pairs(
     config: &Config,
+    vault: &[u8],
     block: &Block,
     mut pending_creation: HashSet<String>,
     changes: &mut Vec<TransactionEntityChanges>,
@@ -112,11 +127,7 @@ fn get_new_pairs(
     // component's contract set is frozen at creation, so a hardcoded implementation goes stale on
     // the next `upgradeToAndCall` and leaves the proxy delegatecalling a codeless account. DCI
     // discovers it instead — see `add_entrypoints`.
-    let contracts = [
-        config.router_address.as_slice(),
-        config.vault_address.as_slice(),
-        config.registry_address.as_slice(),
-    ];
+    let contracts = [config.router_address.as_slice(), vault, config.registry_address.as_slice()];
 
     let mut on_pair_registered = |event: PairRegistered, tx: &TransactionTrace, _log: &Log| {
         if !event.registered {
@@ -125,7 +136,7 @@ fn get_new_pairs(
 
         let tycho_tx: Transaction = tx.into();
         let (token0, token1) = sort_tokens(&event.token0, &event.token1);
-        let id = component_id(token0, token1);
+        let id = component_id(&config.router_address, token0, token1);
 
         // A re-registered pair already has a component; `map_protocol_changes` unpauses it
         // instead. The entry is consumed so that an add/remove/add within one block — which
@@ -156,7 +167,7 @@ fn get_new_pairs(
                 component_id: id,
                 attributes: vec![Attribute {
                     name: BALANCE_OWNER_ATTRIBUTE.to_string(),
-                    value: config.vault_address.clone(),
+                    value: vault.to_vec(),
                     change: ChangeType::Creation.into(),
                 }],
             }],
@@ -171,6 +182,51 @@ fn get_new_pairs(
     eh.handle_events();
 }
 
+/// Tracks router-level state the rest of the package needs: the vault address and the pause flag.
+///
+/// The vault is read from `VaultUpdated` rather than hardcoded, because the router can migrate it
+/// and a stale address would silently stop balance tracking. The proxy emits `VaultUpdated` when
+/// it initialises, which is the package's `initialBlock`, so the key is populated from the first
+/// block the package sees.
+#[substreams::handlers::store]
+fn store_router_state(params: String, block: Block, store: StoreSetString) {
+    let Ok(config) = serde_qs::from_str::<Config>(params.as_str()) else {
+        return;
+    };
+
+    for trx in block.transactions() {
+        for (log, _) in trx.logs_with_calls() {
+            if log.address != config.router_address {
+                continue;
+            }
+            if let Some(ev) = VaultUpdated::match_and_decode(log) {
+                store.set(log.ordinal, VAULT_KEY, &hex::encode(&ev.new_vault));
+            } else if Paused::match_and_decode(log).is_some() {
+                store.set(log.ordinal, PAUSED_KEY, &"1".to_string());
+            } else if Unpaused::match_and_decode(log).is_some() {
+                store.set(log.ordinal, PAUSED_KEY, &"0".to_string());
+            }
+        }
+    }
+}
+
+/// The `TempestVault` address recorded by [`store_router_state`], if the package has seen it.
+fn vault_address(router_state_store: &StoreGetString) -> Option<Vec<u8>> {
+    let Some(raw) = router_state_store.get_last(VAULT_KEY) else {
+        substreams::log::info!("no VaultUpdated seen yet; vault-dependent output is skipped");
+        return None;
+    };
+    hex::decode(raw).ok()
+}
+
+/// Whether the router is currently paused, per [`store_router_state`].
+fn router_paused(router_state_store: &StoreGetString) -> bool {
+    router_state_store
+        .get_last(PAUSED_KEY)
+        .as_deref() ==
+        Some("1")
+}
+
 /// Tracks whether each component's pair is currently registered on the router.
 ///
 /// Keyed by component id: `"1"` while registered, `"0"` after `removePair`. Presence of the key
@@ -183,7 +239,10 @@ fn store_pair_registered(params: String, block: Block, store: StoreSetString) {
     };
 
     let mut on_pair_registered = |event: PairRegistered, _tx: &TransactionTrace, log: &Log| {
-        let id = component_id(&event.token0, &event.token1);
+        let id = component_id(&config.router_address, &event.token0, &event.token1);
+        // The component id is router-scoped and so cannot be derived from a registry lane index.
+        // Record the mapping here so `add_override_block_timestamp` can resolve one.
+        store.set(log.ordinal, lane_key(&lane_for(&event.token0, &event.token1)), &id);
         store.set(log.ordinal, id, &if event.registered { "1" } else { "0" }.to_string());
     };
 
@@ -223,13 +282,15 @@ fn token_key(token: &[u8]) -> String {
 /// events touching the vault.
 #[substreams::handlers::map]
 fn map_vault_balance_deltas(
-    params: String,
     block: Block,
     token_component_deltas: StoreDeltas,
     token_components_store: StoreGetString,
+    router_state_store: StoreGetString,
 ) -> Result<BlockBalanceDeltas> {
-    let config: Config = serde_qs::from_str(params.as_str())?;
     let mut balance_deltas = Vec::new();
+    let Some(vault) = vault_address(&router_state_store) else {
+        return Ok(BlockBalanceDeltas { balance_deltas });
+    };
 
     // Only `token:` keys carry a token to snapshot; the catch-all component index shares this
     // store and must be skipped.
@@ -257,7 +318,7 @@ fn map_vault_balance_deltas(
         // A failed `balanceOf` means the token is not a conforming ERC20. Seeding zero keeps the
         // stream alive for the other pairs rather than halting every component on one bad token,
         // but it under-reports this token's reserve, so make the reason findable in the logs.
-        let balance = erc20::functions::BalanceOf { owner: config.vault_address.clone() }
+        let balance = erc20::functions::BalanceOf { owner: vault.clone() }
             .call(token.clone())
             .unwrap_or_else(|| {
                 substreams::log::info!("balanceOf failed for token 0x{token_hex}; seeding zero");
@@ -272,7 +333,6 @@ fn map_vault_balance_deltas(
         });
     }
 
-    let vault = config.vault_address.clone();
     // `extract_balance_deltas_from_tx` credits and debits independently, so a vault-to-vault
     // transfer nets to zero instead of only debiting, and WETH `Deposit`/`Withdrawal` are covered
     // the same way. It tags each delta with the transactor address; the fan-out to components
@@ -415,6 +475,7 @@ fn map_protocol_changes(
     pair_registered_store: StoreGetString,
     pair_registered_deltas: StoreDeltas,
     component_index_store: StoreGetString,
+    router_state_store: StoreGetString,
     // Component-scoped, despite being derived from the shared vault's token balances: the deltas
     // arrive from `map_balance_deltas`/`store_balances`, which have already fanned the vault's
     // per-token movements out to every component that trades the token.
@@ -424,6 +485,8 @@ fn map_protocol_changes(
     let config: Config = serde_qs::from_str(params.as_str())?;
     let mut pending_creation = first_registrations(pair_registered_deltas);
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
+    let vault = vault_address(&router_state_store);
+    let paused = router_paused(&router_state_store);
 
     for tx_changes in components.changes {
         let Some(tycho_tx) = tx_changes.tx else {
@@ -471,15 +534,25 @@ fn map_protocol_changes(
                 // immutable, so a delisting is surfaced as a pause rather than a removal — and a
                 // later `addPair` for the same pair has to lift that pause, because no new
                 // component is created for it.
-                let id = component_id(&ev.token0, &ev.token1);
+                let id = component_id(&config.router_address, &ev.token0, &ev.token1);
                 if pair_registered_store
                     .get_last(&id)
                     .is_none()
                 {
                     continue;
                 }
-                if let Some(paused) = pause_transition(&mut pending_creation, &id, ev.registered) {
-                    builder.change_component_pause_state(&id, paused);
+                // Consume the creation entry either way, so the router's pause flag cannot
+                // leave a stale entry behind and make a later event look like a creation.
+                let transition = pause_transition(&mut pending_creation, &id, ev.registered);
+                // Every quote and settlement entrypoint is `whenNotPaused`, so a pair is not
+                // quotable while the router is paused however it came to be registered. Whether
+                // `addPair` itself is reachable during a pause is a property of the router's
+                // admin functions and is not observable from here, so this is defensive: if it
+                // is reachable the component is correctly reported paused, and if it is not the
+                // branch is simply never taken. The later `Unpaused` lifts it either way.
+                let transition = if paused { Some(true) } else { transition };
+                if let Some(state) = transition {
+                    builder.change_component_pause_state(&id, state);
                 }
             } else if Paused::match_and_decode(log).is_some() {
                 // The router is `Pausable` and every settlement and quote entrypoint is
@@ -546,7 +619,10 @@ fn map_protocol_changes(
             let builder = transaction_changes
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(&tx));
-            let mut contract_change = InterimContractChange::new(&config.vault_address, false);
+            let Some(vault) = vault.as_ref() else {
+                return;
+            };
+            let mut contract_change = InterimContractChange::new(vault, false);
             for token_balance_map in balances.values() {
                 for balance_change in token_balance_map.values() {
                     contract_change
@@ -561,7 +637,9 @@ fn map_protocol_changes(
         &block,
         |addr| {
             addr == config.router_address ||
-                addr == config.vault_address ||
+                vault
+                    .as_ref()
+                    .is_some_and(|vault| addr == *vault) ||
                 addr == config.registry_address
         },
         &mut transaction_changes,
@@ -639,23 +717,21 @@ fn known_component_ids(component_index_store: &StoreGetString) -> Vec<String> {
 
 /// Pins a component's simulation timestamp to the quote the maker just committed for its lane.
 ///
-/// The lane index is the component id, so the store lookup only confirms the component is one of
-/// ours; unknown lanes belong to another router sharing the registry and are ignored.
+/// Component ids are router-scoped, so the lane index is resolved through the mapping
+/// `store_pair_registered` records at registration. An unmapped lane belongs to another router
+/// sharing the registry and is ignored.
 fn add_override_block_timestamp(
     builder: &mut TransactionChangesBuilder,
     pair_registered_store: &StoreGetString,
     lane_index: &BigInt,
     update_timestamp: u64,
 ) {
-    let Some(id) = lane_index_to_component_id(lane_index) else {
+    let Some(key) = lane_index_to_lane_key(lane_index) else {
         return;
     };
-    if pair_registered_store
-        .get_last(&id)
-        .is_none()
-    {
+    let Some(id) = pair_registered_store.get_last(&key) else {
         return;
-    }
+    };
 
     builder.add_entity_change(&EntityChanges {
         component_id: id,
@@ -729,6 +805,19 @@ mod tests {
     }
 
     /// A delisting also writes the store, and must not be mistaken for a creation.
+    /// The pair-registered store also carries lane -> component id entries. Those are not
+    /// component ids and must not be treated as pending creations.
+    #[test]
+    fn test_first_registrations_excludes_lane_mappings() {
+        let lane = lane_key(&[0u8; 32]);
+        let deltas =
+            StoreDeltas { deltas: vec![delta("0xabc", "", "1"), delta(&lane, "", "0xabc")] };
+        let first = first_registrations(deltas);
+        assert!(first.contains("0xabc"));
+        assert!(!first.contains(&lane), "lane mapping leaked into pending creations");
+        assert_eq!(first.len(), 1);
+    }
+
     #[test]
     fn test_first_registrations_excludes_delistings() {
         let deltas = StoreDeltas { deltas: vec![delta("0xremoved", "1", "0")] };

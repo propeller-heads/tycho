@@ -27,7 +27,7 @@ tests:
     # at 25637575 (WETH/USDT), 25637589 (USDC/WETH) and 25637601 (USDC/USDT).
     stop_block: 25637601
     expected_components:
-      - id: "0x2b2f5776e38002e0c013d0d89828fdb06fee595ea2d5ed4b194e3883e823e350"
+      - id: "0x2de07e5537a6bd50791ca38fd3dda74a0f7b8f196ecdb2f7f1e48ef06bfa4930"
         tokens:
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
           - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
@@ -37,7 +37,7 @@ tests:
         # No lane has ever been written for this pair, so `getState` reverts `StaleUpdate`.
         skip_simulation: true
         skip_execution: true
-      - id: "0x85053f65cd1ece2bb37b70c13d66eadebf2779df5ddd68cf12f3ccfdc6bfe760"
+      - id: "0x6b7d03b47715d0315ccb75d25300c242e26b51f5202e1a32df20f239e1d9de35"
         tokens:
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
@@ -47,7 +47,7 @@ tests:
         # Indexing-only here; simulation and execution are covered by test_pair_simulation.
         skip_simulation: true
         skip_execution: true
-      - id: "0x4aafb64a36177dc82e7ace74cf60cc655659bc049da9533b5f7a6881bea995c6"
+      - id: "0xaa38ac7134033b9084b8e812bf2477c066fa4946fe22133f77cd2e48b429fa0e"
         tokens:
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
           - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
@@ -67,7 +67,7 @@ tests:
     # window. Stopping earlier reverts with `StaleUpdate`.
     stop_block: 25673321
     expected_components:
-      - id: "0x85053f65cd1ece2bb37b70c13d66eadebf2779df5ddd68cf12f3ccfdc6bfe760"
+      - id: "0x6b7d03b47715d0315ccb75d25300c242e26b51f5202e1a32df20f239e1d9de35"
         tokens:
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
@@ -87,14 +87,14 @@ tests:
       # USDC/WETH above is the only pair the maker has ever quoted. The other two are registered
       # and indexed, so they must be listed here to be skipped — `run_simulation` walks every
       # decoded component, not just the ones under test.
-      - id: "0x2b2f5776e38002e0c013d0d89828fdb06fee595ea2d5ed4b194e3883e823e350"
+      - id: "0x2de07e5537a6bd50791ca38fd3dda74a0f7b8f196ecdb2f7f1e48ef06bfa4930"
         tokens:
           - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
           - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
         creation_tx: "0x84ee526d01f198575c653afc6ae14993af4de4dfb72780a21597371805e8c676"
         skip_simulation: true
         skip_execution: true
-      - id: "0x4aafb64a36177dc82e7ace74cf60cc655659bc049da9533b5f7a6881bea995c6"
+      - id: "0xaa38ac7134033b9084b8e812bf2477c066fa4946fe22133f77cd2e48b429fa0e"
         tokens:
           - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
           - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT

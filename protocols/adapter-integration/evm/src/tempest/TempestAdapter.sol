@@ -234,22 +234,26 @@ contract TempestAdapter is ISwapAdapter {
         bytes32 poolId,
         address sellToken,
         address buyToken
-    ) internal pure {
+    ) internal view {
         if (poolId != _poolId(sellToken, buyToken)) {
             revert InvalidOrder("Pool/token mismatch");
         }
     }
 
-    /// @dev Mirrors `Tempest.laneFor`, which the substreams package also uses
+    /// @dev Mirrors the component id the substreams package emits, which uses
     /// as the component id, so a pool id is direction-independent.
     function _poolId(address tokenA, address tokenB)
         internal
-        pure
+        view
         returns (bytes32)
     {
         (address token0, address token1) =
             tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        return keccak256(abi.encodePacked(token0, token1));
+        // Router-scoped, matching the substreams component id. The router's own
+        // `laneFor` is only keccak(token0, token1) and so is not deployment
+        // specific: two pAMMs quoting the same pair would collide on a
+        // chain-global component id.
+        return keccak256(abi.encodePacked(address(tempest), token0, token1));
     }
 }
 

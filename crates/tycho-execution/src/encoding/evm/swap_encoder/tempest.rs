@@ -67,10 +67,11 @@ mod tests {
     const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    /// The live USDC/WETH pair: id is `Tempest.laneFor(USDC, WETH)`.
+    /// The live USDC/WETH pair: id is `keccak(router, USDC, WETH)`, as emitted by the
+    /// substreams package.
     fn usdc_weth_component() -> ProtocolComponent {
         ProtocolComponent {
-            id: String::from("0x85053f65cd1ece2bb37b70c13d66eadebf2779df5ddd68cf12f3ccfdc6bfe760"),
+            id: String::from("0x6b7d03b47715d0315ccb75d25300c242e26b51f5202e1a32df20f239e1d9de35"),
             protocol_system: String::from("vm:tempest"),
             ..Default::default()
         }
