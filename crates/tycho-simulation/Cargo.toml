@@ -92,10 +92,10 @@ hex-literal = { workspace = true }
 http = { version = "1.0", optional = true }
 prost = { version = "0.13", optional = true }
 reqwest = { version = "0.12.22", default-features = false, features = [
-    "native-tls",
+    "rustls-tls-native-roots",
 ], optional = true }
 tokio-tungstenite = { version = "0.28.0", features = [
-    "native-tls",
+    "rustls-tls-native-roots",
 ], optional = true }
 
 [dev-dependencies]

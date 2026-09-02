@@ -28,7 +28,7 @@ serde_with = "3.16.1"
 
 # Required dependencies
 alloy = { workspace = true, default-features = false, features = [
-    "reqwest-default-tls",
+    "reqwest-rustls-tls",
     "rpc-client",
     "json-rpc",
     "sol-types",
