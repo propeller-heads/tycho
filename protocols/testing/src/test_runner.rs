@@ -1144,6 +1144,24 @@ impl TestRunner {
             .map(|c| c.base.id.to_lowercase())
             .collect();
 
+        // The decoder is built with `skip_state_decode_failures(true)`, so a component whose state
+        // cannot be decoded is dropped with a warning rather than raising. The loop below iterates
+        // what survived, so without this check a dropped component is simply never simulated and
+        // the test still passes. Anything the test claims to simulate must have reached the
+        // decoder intact.
+        let undecoded: Vec<String> = expected_components
+            .iter()
+            .filter(|c| !c.skip_simulation)
+            .map(|c| c.base.id.to_lowercase())
+            .filter(|id| !update.states.contains_key(id))
+            .collect();
+        if !undecoded.is_empty() {
+            return Err(miette!(
+                "Components were indexed but produced no simulation state, so they were never \
+                 simulated: {undecoded:?}. Look for StateDecodingFailure warnings above."
+            ));
+        }
+
         let mut execution_data = HashMap::new();
 
         for (id, state) in update.states.iter() {

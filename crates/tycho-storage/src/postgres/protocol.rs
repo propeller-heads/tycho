@@ -436,15 +436,27 @@ impl PostgresGateway {
         }
         .instrument(debug_span!("resolve_tx_ids"))
         .await?;
-        let pt_id = orm::ProtocolType::id_by_name(&new[0].protocol_type_name, conn)
-            .await
-            .map_err(|err| {
-                storage_error_from_diesel(err, "ProtocolType", &new[0].protocol_type_name, None)
-            })?;
+
+        let mut pt_ids: HashMap<&str, i64> = HashMap::new();
+        for pc in new {
+            if pt_ids.contains_key(pc.protocol_type_name.as_str()) {
+                continue;
+            }
+            let pt_id = orm::ProtocolType::id_by_name(&pc.protocol_type_name, conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(err, "ProtocolType", &pc.protocol_type_name, None)
+                })?;
+            pt_ids.insert(pc.protocol_type_name.as_str(), pt_id);
+        }
+
         for pc in new {
             let txh = tx_hash_id_mapping
                 .get::<TxHash>(&pc.creation_tx.clone())
                 .ok_or(StorageError::DecodeError("TxHash not found".to_string()))?;
+            let pt_id = *pt_ids
+                .get(pc.protocol_type_name.as_str())
+                .expect("every distinct type name was resolved above");
 
             let new_pc = orm::NewProtocolComponent::new(
                 &pc.id,
@@ -3536,6 +3548,67 @@ mod test {
             .await;
 
         assert!(contract.is_ok())
+    }
+
+    /// A batch carrying more than one component type must keep each component's own type.
+    ///
+    /// The type used to be resolved once from `new[0]`, so every component in a batch inherited
+    /// whichever type happened to be first. Protocols that create two kinds of component in one
+    /// transaction hit this — Pendle emits a market and its SY wrapper together — and the damage is
+    /// silent: the component is stored and served, just under the wrong type, so it decodes against
+    /// the wrong state and fails much later with a confusing missing-attribute error.
+    #[tokio::test]
+    async fn test_add_protocol_components_with_mixed_types() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+
+        let first_type = String::from("Test_Type_1");
+        let second_type = String::from("Test_Type_2");
+        let first_type_id =
+            db_fixtures::insert_protocol_type(&mut conn, &first_type, None, None, None).await;
+        let second_type_id =
+            db_fixtures::insert_protocol_type(&mut conn, &second_type, None, None, None).await;
+        assert_ne!(first_type_id, second_type_id);
+
+        let component = |id: &str, type_name: &str| {
+            ProtocolComponent::new(
+                id,
+                "ambient",
+                type_name,
+                Chain::Ethereum,
+                vec![Bytes::from(WETH)],
+                vec![Bytes::from(WETH)],
+                HashMap::new(),
+                ChangeType::Creation,
+                Bytes::from("0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945"),
+                Default::default(),
+            )
+        };
+
+        // Both orderings, because the bug took the type of whichever came first: with only one
+        // ordering the test would pass for the component that happens to lead the batch.
+        let batch =
+            [component("mixed_first", &first_type), component("mixed_second", &second_type)];
+        gw.add_protocol_components(&batch, &mut conn)
+            .await
+            .expect("adding components failed");
+
+        let first_stored = schema::protocol_component::table
+            .filter(schema::protocol_component::external_id.eq("mixed_first"))
+            .select(orm::ProtocolComponent::as_select())
+            .first::<orm::ProtocolComponent>(&mut conn)
+            .await
+            .expect("failed to read back the first component");
+        let second_stored = schema::protocol_component::table
+            .filter(schema::protocol_component::external_id.eq("mixed_second"))
+            .select(orm::ProtocolComponent::as_select())
+            .first::<orm::ProtocolComponent>(&mut conn)
+            .await
+            .expect("failed to read back the second component");
+
+        assert_eq!(first_stored.protocol_type_id, first_type_id);
+        assert_eq!(second_stored.protocol_type_id, second_type_id);
     }
 
     fn create_test_protocol_component(id: &str) -> ProtocolComponent {
