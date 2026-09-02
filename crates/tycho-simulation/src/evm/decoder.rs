@@ -1059,9 +1059,8 @@ where
     /// `DecoderState`. Calling this method twice with the same input produces identical results.
     ///
     /// Every state is rebuilt from `state_deltas` alone; nothing here writes to the VM database.
-    /// A protocol decoding into the generic VM adapter therefore cannot take part: it re-reads
-    /// pool state from that database, so its storage-derived values stay at the confirmed block —
-    /// even though the delta's balance and block-environment attributes do get applied.
+    /// A state that reports `transitions_from_delta_alone() == false` for its delta therefore
+    /// cannot take part, and this method fails rather than quote it against confirmed data.
     ///
     /// # Parameters
     /// * `pending_deltas` — map from extractor name to the `BlockAggregatedChanges` produced by the
@@ -1070,6 +1069,10 @@ where
     ///   returned [`Update`]; its `block_number` and `block_timestamp` are injected into each state
     ///   delta so that protocols relying on block context (e.g. aerodrome slipstreams, etherfi)
     ///   receive correct values.
+    ///
+    /// # Errors
+    /// Returns [`StreamDecodeError::Fatal`] if any delta targets a pool whose state cannot be
+    /// transitioned from that delta alone. Pools with no decoded state yet are skipped.
     pub async fn apply_deltas_ephemeral(
         &self,
         pending_deltas: &HashMap<String, BlockAggregatedChanges>,
@@ -1083,7 +1086,7 @@ where
 
         let mut updated_states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
 
-        for deltas in pending_deltas.values() {
+        for (extractor, deltas) in pending_deltas {
             let all_balances = Balances {
                 component_balances: deltas
                     .component_balances
@@ -1104,6 +1107,19 @@ where
                     ProtocolStateDelta::from(state_delta.clone()),
                     current_block.clone(),
                 );
+
+                let reads_beyond_delta = updated_states
+                    .get(id)
+                    .or_else(|| state_guard.states.get(id))
+                    .is_some_and(|state| !state.transitions_from_delta_alone(&dto_delta));
+                if reads_beyond_delta {
+                    return Err(StreamDecodeError::Fatal(format!(
+                        "extractor '{extractor}': pool {id} cannot be transitioned from this \
+                         delta alone, so it would quote confirmed state. Have its indexer supply \
+                         the attributes the state needs, or stop registering one for it."
+                    )));
+                }
+
                 if let Err(e) = Self::apply_update(
                     id,
                     dto_delta,
@@ -1805,5 +1821,88 @@ mod tests {
         assert!(!decoder.admits("x", &component_with_id("b")));
         assert!(decoder.admits("x", &component_with_id("c")));
         assert!(decoder.admits("y", &component_with_id("a")));
+    }
+
+    const EPHEMERAL_POOL: &str = "0x0000000000000000000000000000000000000bad1";
+
+    fn reserve_deltas() -> HashMap<String, BlockAggregatedChanges> {
+        use tycho_common::models::protocol::ProtocolComponentStateDelta;
+
+        let attributes = HashMap::from([
+            ("reserve0".to_string(), Bytes::from(1_000_u64.to_be_bytes().to_vec())),
+            ("reserve1".to_string(), Bytes::from(2_000_u64.to_be_bytes().to_vec())),
+        ]);
+        HashMap::from([(
+            "uniswap_v2".to_string(),
+            BlockAggregatedChanges {
+                state_deltas: HashMap::from([(
+                    EPHEMERAL_POOL.to_string(),
+                    ProtocolComponentStateDelta::new(EPHEMERAL_POOL, attributes, HashSet::new()),
+                )]),
+                ..Default::default()
+            },
+        )])
+    }
+
+    async fn decoder_holding(state: Box<dyn ProtocolSim>) -> TychoStreamDecoder<BlockHeader> {
+        let decoder = setup_decoder(true).await;
+        decoder
+            .state
+            .write()
+            .await
+            .states
+            .insert(EPHEMERAL_POOL.to_string(), state);
+        decoder
+    }
+
+    #[tokio::test]
+    async fn test_apply_deltas_ephemeral_transitions_a_state_that_needs_only_the_delta() {
+        let decoder =
+            decoder_holding(Box::new(UniswapV2State::new(U256::from(1), U256::from(1)))).await;
+
+        let update = decoder
+            .apply_deltas_ephemeral(&reserve_deltas(), BlockHeader::default())
+            .await
+            .expect("a state carrying its reserves in the delta must transition");
+
+        let state = update
+            .states
+            .get(EPHEMERAL_POOL)
+            .expect("the pool must appear in the ephemeral update")
+            .as_any()
+            .downcast_ref::<UniswapV2State>()
+            .expect("the pool keeps its type");
+        assert_eq!(state, &UniswapV2State::new(U256::from(1_000), U256::from(2_000)));
+    }
+
+    /// A state that reads past its delta would quote the confirmed block while reporting the
+    /// pending one. `MockProtocolSim` does not override the capability, so it takes the
+    /// conservative default and must be refused.
+    #[tokio::test]
+    async fn test_apply_deltas_ephemeral_refuses_a_state_that_reads_past_the_delta() {
+        let decoder = decoder_holding(Box::new(MockProtocolSim::new())).await;
+
+        let error = decoder
+            .apply_deltas_ephemeral(&reserve_deltas(), BlockHeader::default())
+            .await
+            .expect_err("a state that reads past the delta must be refused");
+
+        let message = error.to_string();
+        assert!(message.contains(EPHEMERAL_POOL), "{message}");
+        assert!(message.contains("uniswap_v2"), "{message}");
+    }
+
+    /// Pools the decoder has no state for yet are not the caller's mistake — they are skipped,
+    /// as on the confirmed path.
+    #[tokio::test]
+    async fn test_apply_deltas_ephemeral_skips_pools_with_no_state() {
+        let decoder = setup_decoder(true).await;
+
+        let update = decoder
+            .apply_deltas_ephemeral(&reserve_deltas(), BlockHeader::default())
+            .await
+            .expect("an unknown pool must not fail the update");
+
+        assert!(update.states.is_empty());
     }
 }

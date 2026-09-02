@@ -82,6 +82,15 @@ block against confirmed state. Fluid and Curve close that gap the same way:
 Reading under the pending block's own number and timestamp matters: anything with on-chain time
 math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
 
+`ProtocolSim::transitions_from_delta_alone(delta)` is how a state reports which side of that
+branch it lands on, and `apply_deltas_ephemeral` fails the whole update when a delta targets a
+state that reports `false`. It defaults to `false`, so a new protocol is refused from the pending
+path until its author has checked that both the transition and the quote depend on the delta
+alone. Native states return `true`; Fluid and Curve return `true` only when their attribute is
+present; `EVMPoolState`, ERC4626, Balancer V3 and VM-backed V4 hook handlers keep the default.
+The property is per state and per delta, not per protocol name — `uniswap_v4` and
+`uniswap_v4_hooks` decode into the same type and differ only in whether a hook is attached.
+
 ## Features
 
 | Feature | Default | Contents |
