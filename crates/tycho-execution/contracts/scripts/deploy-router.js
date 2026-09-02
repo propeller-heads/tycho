@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const {resolveRolesNetwork} = require("./utils");
+const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
@@ -52,13 +52,23 @@ async function main() {
     const computedAddress = ethers.utils.getCreate2Address(create2FactoryAddress, salt, bytecodeHash);
     console.log(`TychoRouterV3 will be deployed to: ${computedAddress}`);
 
-    const deploymentData = ethers.utils.concat([salt, bytecode]);
-    const tx = await deployer.sendTransaction({
-        to: create2FactoryAddress,
-        data: deploymentData,
-    });
-    await tx.wait();
-    console.log(`TychoRouterV3 deployed to: ${computedAddress}`);
+    // The address is derived from the bytecode and the constructor arguments, so
+    // an existing contract there is this exact build. Skipping the deployment
+    // makes the script re-runnable, which matters when verification has to be
+    // retried.
+    const deployed =
+        (await ethers.provider.getCode(computedAddress)) !== "0x";
+    if (deployed) {
+        console.log("TychoRouterV3 already deployed, skipping deployment");
+    } else {
+        const deploymentData = ethers.utils.concat([salt, bytecode]);
+        const tx = await deployer.sendTransaction({
+            to: create2FactoryAddress,
+            data: deploymentData,
+        });
+        await tx.wait();
+        console.log(`TychoRouterV3 deployed to: ${computedAddress}`);
+    }
 
     // Verify on Tenderly
     try {
@@ -72,14 +82,18 @@ async function main() {
         console.error("Error during contract verification:", error);
     }
 
-    console.log("Waiting for 1 minute before verifying the contract...");
-    await new Promise(resolve => setTimeout(resolve, 60000));
+    if (!deployed) {
+        console.log("Waiting for 1 minute before verifying the contract...");
+        await new Promise(resolve => setTimeout(resolve, 60000));
+    }
 
-    // Verify on Etherscan
+    // Verify on the block explorer
     try {
-        await hre.run("verify:verify", {
+        await verifyOnExplorer({
+            network,
             address: computedAddress,
-            constructorArguments: [
+            contractFqn: "src/TychoRouterV3.sol:TychoRouterV3",
+            constructorArgs: [
                 permit2,
                 feeCalculator,
                 unpauser,

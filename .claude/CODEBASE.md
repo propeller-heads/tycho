@@ -45,7 +45,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 | Crate | Description |
 |---|---|
-| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; `evm` module for EVM storage-based protocols, `protocol` module for custom implementations, `rfq` for request-for-quote protocols |
+| `tycho-simulation` | DEX swap simulation library: protocol-specific state machines (`ProtocolSim`) for 20+ DEXs; `evm` module for EVM storage-based protocols, `protocol` module for custom implementations, `rfq` for request-for-quote protocols, `price_level_stream` for the Titan pAMM price level stream |
 | `tycho-execution` | Swap encoding and execution: Solidity TychoRouterV3 contract + Rust encoding library; multi-hop swaps with fee-taking, vault-based accounting, delegatecall executor dispatch |
 | `tycho-router-model` (`tycho-execution/model`) | Rust security model that explores caller-controlled TychoRouterV3 swap parameters and flags suspicious outcomes |
 
@@ -80,7 +80,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    - `PartialBlockBuffer` accumulates sub-block messages until full-block signal arrives
    - `TokenPreProcessor` fetches metadata (symbol, decimals) via Ethereum RPC for unknown tokens
 3. `BlockChanges` inserted into `ReorgBuffer` (one per `ProtocolExtractor`)
-   - On `BlockUndoSignal`: purge blocks after reverted hash, emit revert messages — no DB rollback needed
+   - On `BlockUndoSignal`: purge blocks after the reverted hash (falling back to the target height when the hash is unknown), emit revert messages — no DB rollback needed
    - Drain to DB when `count_blocks_before(finalized_block_height) >= commit_batch_size` — only finalized blocks ever reach DB
 4. Drained blocks: `BlockChanges` → `BlockAggregatedChanges` (merge all tx-level deltas into one state per component/account)
 5. DB write via `CachedGateway` → Postgres (upsert blocks, tokens, components, state, balances); sets `db_committed_block_height` on outgoing message
@@ -173,7 +173,7 @@ Configurable via `EXTRACTION_WORKER_THREADS` (default 2) and `MAIN_WORKER_THREAD
 |---|---|
 | `index` | Run all extractors from `extractors.yaml` + HTTP/WS server |
 | `run` | Run a single extractor (testing / debugging) |
-| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) |
+| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) and `--recovery-lookback-days <N>` (default 1: re-check quality-5 tokens traded within N days; Bad keeps 5) |
 | `rpc` | HTTP RPC server only (no extractors) |
 
 ### Feature flags

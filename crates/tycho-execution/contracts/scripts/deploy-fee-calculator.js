@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const {resolveRolesNetwork} = require("./utils");
+const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
@@ -41,14 +41,23 @@ async function main() {
     );
     console.log(`FeeCalculator will be deployed to: ${computedAddress}`);
 
-    const deploymentData = ethers.utils.concat([salt, bytecode]);
-    const tx = await deployer.sendTransaction({
-        to: create2FactoryAddress,
-        data: deploymentData,
-        gasLimit: 3_000_000,
-    });
-    await tx.wait();
-    console.log(`FeeCalculator deployed to: ${computedAddress}`);
+    // The address is derived from the bytecode, so an existing contract there is
+    // this exact build. Skipping the deployment makes the script re-runnable,
+    // which matters when verification has to be retried.
+    const deployed =
+        (await ethers.provider.getCode(computedAddress)) !== "0x";
+    if (deployed) {
+        console.log("FeeCalculator already deployed, skipping deployment");
+    } else {
+        const deploymentData = ethers.utils.concat([salt, bytecode]);
+        const tx = await deployer.sendTransaction({
+            to: create2FactoryAddress,
+            data: deploymentData,
+            gasLimit: 3_000_000,
+        });
+        await tx.wait();
+        console.log(`FeeCalculator deployed to: ${computedAddress}`);
+    }
 
     // Verify on Tenderly
     try {
@@ -61,16 +70,20 @@ async function main() {
         console.error("Error during contract verification:", error);
     }
 
-    console.log(
-        "Waiting for 1 minute before verifying the contract..."
-    );
-    await new Promise(resolve => setTimeout(resolve, 60000));
+    if (!deployed) {
+        console.log(
+            "Waiting for 1 minute before verifying the contract..."
+        );
+        await new Promise(resolve => setTimeout(resolve, 60000));
+    }
 
-    // Verify on Etherscan
+    // Verify on the block explorer
     try {
-        await hre.run("verify:verify", {
+        await verifyOnExplorer({
+            network,
             address: computedAddress,
-            constructorArguments: [routerFeeSetter],
+            contractFqn: "src/FeeCalculator.sol:FeeCalculator",
+            constructorArgs: [routerFeeSetter],
         });
         console.log(
             "FeeCalculator verified successfully on blockchain explorer!"

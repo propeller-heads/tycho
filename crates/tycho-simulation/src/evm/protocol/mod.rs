@@ -1,5 +1,6 @@
 pub mod aerodrome_slipstreams;
 pub mod aerodrome_v1;
+pub mod balancer_v3;
 mod clmm;
 pub mod cowamm;
 mod cpmm;
@@ -17,6 +18,7 @@ pub mod ramses_v3;
 pub mod ring_swap_v2;
 pub mod rocketpool;
 pub mod safe_math;
+pub mod sky;
 pub mod u256_num;
 pub mod uniswap_v2;
 pub mod uniswap_v3;

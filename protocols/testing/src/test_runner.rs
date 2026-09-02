@@ -1362,6 +1362,7 @@ impl TestRunner {
                 batch.clone(),
                 block,
                 router_overwrites_data.clone(),
+                None,
             )
             .await;
 

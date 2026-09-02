@@ -139,9 +139,9 @@ where
             overrides,
             caller: caller.unwrap_or(*EXTERNAL_ACCOUNT),
             value,
-            gas_limit: None,
             transient_storage,
             block_overrides,
+            ..Default::default()
         };
 
         let sim_result = self.simulate(params)?;

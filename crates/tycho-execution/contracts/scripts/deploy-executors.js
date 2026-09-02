@@ -1,6 +1,7 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
+const {verifyOnExplorer} = require("./utils");
 
 // Constructor args for each executor live in the shared config.
 // See config/executor_deployments.json.
@@ -29,8 +30,12 @@ const deploy_protocols = {
         "native_wrapper",
         "rfq:liquorice",
         "vm:fermiswap",
+        "vm:liquidityparty",
         "vm:bopamm",
         "rfq:metric",
+        "pricelevelstream",
+        "propammfallback",
+        "sky",
     ],
     "base": [
         "uniswap_v2",
@@ -119,6 +124,8 @@ async function main() {
         }
         const {contract: contractName, args} = deployment;
         const Executor = await ethers.getContractFactory(contractName);
+        // The Blockscout verification path needs the fully qualified name.
+        const {sourceName} = await hre.artifacts.readArtifact(contractName);
 
         // Get bytecode with constructor arguments
         const deployTx = Executor.getDeployTransaction(...args);
@@ -133,13 +140,23 @@ async function main() {
         const computedAddress = ethers.utils.getCreate2Address(create2FactoryAddress, salt, bytecodeHash);
         console.log(`${contractName} (${protocol}) will be deployed to: ${computedAddress}`);
 
-        const deploymentData = ethers.utils.concat([salt, bytecode]);
-        const tx = await deployer.sendTransaction({
-            to: create2FactoryAddress,
-            data: deploymentData,
-        });
-        await tx.wait();
-        console.log(`${contractName} deployed to: ${computedAddress}`);
+        // The address is derived from the bytecode and the constructor
+        // arguments, so an existing contract there is this exact build.
+        // Skipping the deployment makes the script re-runnable, which matters
+        // when verification has to be retried.
+        const deployed =
+            (await ethers.provider.getCode(computedAddress)) !== "0x";
+        if (deployed) {
+            console.log(`${contractName} already deployed, skipping deployment`);
+        } else {
+            const deploymentData = ethers.utils.concat([salt, bytecode]);
+            const tx = await deployer.sendTransaction({
+                to: create2FactoryAddress,
+                data: deploymentData,
+            });
+            await tx.wait();
+            console.log(`${contractName} deployed to: ${computedAddress}`);
+        }
 
         // Verify on Tenderly
         try {
@@ -152,13 +169,18 @@ async function main() {
             console.error("Error during contract verification:", error);
         }
 
-        console.log("Waiting for 1 minute before verifying the contract...");
-        await new Promise(resolve => setTimeout(resolve, 60000));
-        // Verify on Etherscan
+        if (!deployed) {
+            console.log("Waiting for 1 minute before verifying the contract...");
+            await new Promise(resolve => setTimeout(resolve, 60000));
+        }
+
+        // Verify on the block explorer
         try {
-            await hre.run("verify:verify", {
+            await verifyOnExplorer({
+                network,
                 address: computedAddress,
-                constructorArguments: args,
+                contractFqn: `${sourceName}:${contractName}`,
+                constructorArgs: args,
             });
             console.log(`${contractName} verified successfully on blockchain explorer!`);
         } catch (error) {

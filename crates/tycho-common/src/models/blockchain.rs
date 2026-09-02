@@ -150,6 +150,36 @@ impl TxInput {
     }
 }
 
+/// A block under construction with ordered transactions and post-execution account state.
+#[derive(Debug, Clone, Default)]
+pub struct PendingBlock {
+    block: Block,
+    txs: Vec<TxInput>,
+    accounts: HashMap<Address, AccountDelta>,
+}
+
+impl PendingBlock {
+    pub fn new(block: Block, txs: Vec<TxInput>, accounts: HashMap<Address, AccountDelta>) -> Self {
+        Self { block, txs, accounts }
+    }
+
+    /// The block being assembled; its number and timestamp are the transaction execution clock.
+    pub fn block(&self) -> &Block {
+        &self.block
+    }
+
+    /// Transactions in execution order.
+    pub fn txs(&self) -> &[TxInput] {
+        &self.txs
+    }
+
+    /// Post-execution state for accounts touched by the transactions.
+    /// May be empty when no consuming indexer needs account state.
+    pub fn accounts(&self) -> &HashMap<Address, AccountDelta> {
+        &self.accounts
+    }
+}
+
 pub struct BlockTransactionDeltas<T> {
     pub extractor: String,
     pub chain: Chain,

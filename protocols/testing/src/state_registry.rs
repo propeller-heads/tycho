@@ -2,9 +2,10 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
-            ekubo::state::EkuboState, fluid::FluidV1, lunarbase::LunarBaseState,
-            pancakeswap_v2::state::PancakeswapV2State, ramses_v3::state::RamsesV3State,
-            ring_swap_v2::state::RingSwapV2State, rocketpool::state::RocketpoolState,
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState, ekubo::state::EkuboState,
+            fluid::FluidV1, lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State, ring_swap_v2::state::RingSwapV2State,
+            rocketpool::state::RocketpoolState, sky::state::SkyState,
             uniswap_v2::state::UniswapV2State, uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State, vm::state::EVMPoolState,
         },
@@ -83,12 +84,25 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
+        "sky" => stream_builder.exchange_with_decoder_context::<SkyState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
         "lunarbase" => stream_builder.exchange_with_decoder_context::<LunarBaseState>(
             protocol_system,
             tvl_filter,
             None,
             decoder_context,
         ),
+        "aerodrome_slipstreams" => stream_builder
+            .exchange_with_decoder_context::<AerodromeSlipstreamsState>(
+                protocol_system,
+                tvl_filter,
+                None,
+                decoder_context,
+            ),
         // Default to EVMPoolState for all other protocols
         _ => stream_builder.exchange_with_decoder_context::<EVMPoolState<PreCachedDB>>(
             protocol_system,
