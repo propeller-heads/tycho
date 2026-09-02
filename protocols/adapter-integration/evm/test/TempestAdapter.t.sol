@@ -92,33 +92,38 @@ contract TempestAdapterTest is AdapterTest {
         Capability[] memory capabilities =
             adapter.getCapabilities(_poolId(USDC, WETH), WETH, USDC);
 
-        assertEq(capabilities.length, 3);
+        assertEq(capabilities.length, 2);
         assertEq(uint256(capabilities[0]), uint256(Capability.SellOrder));
         assertEq(uint256(capabilities[1]), uint256(Capability.BuyOrder));
-        assertEq(uint256(capabilities[2]), uint256(Capability.PriceFunction));
 
-        // ConstantPrice must NOT be declared: the lane is a VWAP spread ladder,
-        // so an amount crossing a breakpoint gets a worse rate. The impact
-        // itself is not asserted here -- see the note on `getCapabilities` in
-        // TempestAdapter for why it is unreachable at this block.
+        // Neither ConstantPrice nor PriceFunction may be declared: the lane is
+        // a VWAP spread ladder, so an amount crossing a breakpoint gets a worse
+        // rate, and the adapter has no way to report a marginal price. Leaving
+        // PriceFunction off makes simulation derive it numerically from `swap`.
         for (uint256 i = 0; i < capabilities.length; i++) {
             assertTrue(capabilities[i] != Capability.ConstantPrice);
+            assertTrue(capabilities[i] != Capability.PriceFunction);
         }
     }
 
-    function testPrice() public view {
-        uint256[] memory amounts = new uint256[](2);
+    function testPriceReverts() public {
+        uint256[] memory amounts = new uint256[](1);
         amounts[0] = SELL_WETH_AMOUNT;
-        amounts[1] = SELL_WETH_AMOUNT * 2;
 
-        Fraction[] memory prices =
-            adapter.price(_poolId(USDC, WETH), WETH, USDC, amounts);
+        vm.expectRevert();
+        adapter.price(_poolId(USDC, WETH), WETH, USDC, amounts);
+    }
 
-        assertEq(prices.length, 2);
-        for (uint256 i = 0; i < prices.length; i++) {
-            assertGt(prices[i].numerator, 0);
-            assertGt(prices[i].denominator, 0);
-        }
+    /// `swap` must report no marginal price, but with a non-zero denominator:
+    /// simulation divides the fraction and treats a zero denominator as a fatal
+    /// error, which would fail the swap.
+    function testSwapReportsUnsetPrice() public view {
+        Trade memory trade = adapter.swap(
+            _poolId(USDC, WETH), WETH, USDC, OrderSide.Sell, SELL_WETH_AMOUNT
+        );
+
+        assertEq(trade.price.numerator, 0);
+        assertEq(trade.price.denominator, 1);
     }
 
     function testSwapSell() public view {

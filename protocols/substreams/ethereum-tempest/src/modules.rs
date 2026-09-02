@@ -19,9 +19,9 @@ use substreams_ethereum::{
 };
 use substreams_helper::event_handler::EventHandler;
 use tycho_substreams::{
-    abi::{erc20, weth},
+    abi::erc20,
     attributes::json_serialize_address_list,
-    balances::aggregate_balances_changes,
+    balances::{aggregate_balances_changes, extract_balance_deltas_from_tx},
     block_storage::get_block_storage_changes,
     contract::extract_contract_changes_builder,
     entrypoint::create_entrypoint,
@@ -51,7 +51,7 @@ fn map_protocol_components(
 ) -> Result<BlockEntityChanges> {
     let config: Config = serde_qs::from_str(params.as_str())?;
     let mut changes: Vec<TransactionEntityChanges> = vec![];
-    get_new_pairs(&config, &block, &first_registrations(pair_registered_deltas), &mut changes);
+    get_new_pairs(&config, &block, first_registrations(pair_registered_deltas), &mut changes);
     Ok(BlockEntityChanges { block: Some((&block).into()), changes })
 }
 
@@ -105,7 +105,7 @@ fn pause_transition(
 fn get_new_pairs(
     config: &Config,
     block: &Block,
-    first_registrations: &HashSet<String>,
+    mut pending_creation: HashSet<String>,
     changes: &mut Vec<TransactionEntityChanges>,
 ) {
     // The router's implementation is deliberately absent: it is an upgradeable ERC1967 proxy, and a
@@ -127,8 +127,11 @@ fn get_new_pairs(
         let (token0, token1) = sort_tokens(&event.token0, &event.token1);
         let id = component_id(token0, token1);
 
-        // A re-registered pair already has a component; `map_protocol_changes` unpauses it instead.
-        if !first_registrations.contains(&id) {
+        // A re-registered pair already has a component; `map_protocol_changes` unpauses it
+        // instead. The entry is consumed so that an add/remove/add within one block — which
+        // leaves the id looking like a first registration for both `registered` events — emits
+        // the component exactly once.
+        if !pending_creation.remove(&id) {
             return;
         }
 
@@ -269,51 +272,20 @@ fn map_vault_balance_deltas(
         });
     }
 
-    let vault = config.vault_address.as_slice();
-    let mut vault_token_deltas = Vec::new();
-    for raw_tx in block.transactions() {
-        let tycho_tx: Transaction = raw_tx.into();
-        for (log, _) in raw_tx.logs_with_calls() {
-            if let Some(transfer) = erc20::events::Transfer::match_and_decode(log) {
-                if transfer.from.as_slice() == vault {
-                    vault_token_deltas.push((
-                        tycho_tx.clone(),
-                        log.ordinal,
-                        log.address.clone(),
-                        BigInt::zero() - transfer.value,
-                    ));
-                } else if transfer.to.as_slice() == vault {
-                    vault_token_deltas.push((
-                        tycho_tx.clone(),
-                        log.ordinal,
-                        log.address.clone(),
-                        transfer.value,
-                    ));
-                }
-            } else if let Some(deposit) = weth::events::Deposit::match_and_decode(log) {
-                // Wrapping ETH credits the vault's WETH balance without emitting a `Transfer`.
-                if deposit.dst.as_slice() == vault {
-                    vault_token_deltas.push((
-                        tycho_tx.clone(),
-                        log.ordinal,
-                        log.address.clone(),
-                        deposit.wad,
-                    ));
-                }
-            } else if let Some(withdrawal) = weth::events::Withdrawal::match_and_decode(log) {
-                if withdrawal.src.as_slice() == vault {
-                    vault_token_deltas.push((
-                        tycho_tx.clone(),
-                        log.ordinal,
-                        log.address.clone(),
-                        BigInt::zero() - withdrawal.wad,
-                    ));
-                }
-            }
-        }
-    }
+    let vault = config.vault_address.clone();
+    // `extract_balance_deltas_from_tx` credits and debits independently, so a vault-to-vault
+    // transfer nets to zero instead of only debiting, and WETH `Deposit`/`Withdrawal` are covered
+    // the same way. It tags each delta with the transactor address; the fan-out to components
+    // happens in `map_balance_deltas`, so the tag is dropped here.
+    let vault_token_deltas: Vec<_> = block
+        .transactions()
+        .flat_map(|trx| {
+            extract_balance_deltas_from_tx(trx, |_token, address| address == vault.as_slice())
+        })
+        .collect();
 
-    for (tx, ord, token, delta) in vault_token_deltas {
+    for delta in vault_token_deltas {
+        let BalanceDelta { ord, tx, token, delta, .. } = delta;
         // Tokens tracked for the first time in this block were snapshotted with `balanceOf` above,
         // which already reflects this block's movements. Applying the deltas too would
         // double-count.
@@ -332,9 +304,9 @@ fn map_vault_balance_deltas(
 
         balance_deltas.push(BalanceDelta {
             ord,
-            tx: Some(tx),
+            tx,
             token,
-            delta: delta.to_signed_bytes_be(),
+            delta,
             // Global vault deltas are not component-scoped yet; `map_balance_deltas` fans them out.
             component_id: vec![],
         });
@@ -471,6 +443,19 @@ fn map_protocol_changes(
     }
 
     for trx in block.transactions() {
+        // Most transactions in a block touch neither the router nor the registry. Skipping them
+        // here avoids allocating a builder per transaction just to drop it again at `build()`.
+        let touches_router = trx
+            .logs_with_calls()
+            .any(|(log, _)| log.address == config.router_address);
+        let touches_registry = trx
+            .calls
+            .iter()
+            .any(|call| !call.state_reverted && call.address == config.registry_address);
+        if !touches_router && !touches_registry {
+            continue;
+        }
+
         let tx: Transaction = trx.into();
         let builder = transaction_changes
             .entry(tx.index)

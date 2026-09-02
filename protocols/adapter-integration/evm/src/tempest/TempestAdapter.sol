@@ -27,12 +27,6 @@ contract TempestAdapter is ISwapAdapter {
     /// 8 iterations resolve the limit to within ~0.4% of the vault balance.
     uint256 private constant LIMIT_SEARCH_ITERATIONS = 8;
 
-    /// Fraction of the traded size used to probe the post-trade marginal
-    /// price. Tempest prices from a flat-segment spread ladder, so a
-    /// small probe reads the current segment's rate rather than the
-    /// size-weighted average a full re-quote would return.
-    uint256 private constant PRICE_PROBE_DIVISOR = 1000;
-
     /// Measured cost of a `swapWithAllowances` fill: two ERC20 transfers plus
     /// the registry lane read and ladder walk. Reported instead of this call's
     /// own `gasleft()` delta, which would understate a real fill because the
@@ -46,37 +40,19 @@ contract TempestAdapter is ISwapAdapter {
     }
 
     /// @inheritdoc ISwapAdapter
-    function price(
-        bytes32 poolId,
-        address sellToken,
-        address buyToken,
-        uint256[] memory specifiedAmounts
-    ) external view override returns (Fraction[] memory calculatedPrices) {
-        _validatePoolTokens(poolId, sellToken, buyToken);
-        calculatedPrices = new Fraction[](specifiedAmounts.length);
-
-        for (uint256 i = 0; i < specifiedAmounts.length; i++) {
-            calculatedPrices[i] =
-                priceAt(sellToken, buyToken, specifiedAmounts[i]);
-        }
-    }
-
-    /// @notice The Tempest quote price for an exact input amount.
-    function priceAt(address sellToken, address buyToken, uint256 sellAmount)
-        public
-        view
-        returns (Fraction memory calculatedPrice)
+    /// @dev Not implemented, and `PriceFunction` is not advertised. Tempest
+    /// prices from a spread ladder, so `quote(x) / x` is the executed rate for
+    /// `x`, not the marginal rate after trading `x` — the two only coincide
+    /// for
+    /// a constant-price venue. Rather than report the wrong one, let simulation
+    /// derive the marginal price numerically from `swap`.
+    function price(bytes32, address, address, uint256[] memory)
+        external
+        pure
+        override
+        returns (Fraction[] memory)
     {
-        if (sellAmount == 0) {
-            revert TooSmall(0);
-        }
-
-        uint256 amountOut = tempest.quote(sellToken, buyToken, sellAmount);
-        if (amountOut == 0) {
-            revert TooSmall(0);
-        }
-
-        calculatedPrice = Fraction(amountOut, sellAmount);
+        revert NotImplemented("TempestAdapter.price");
     }
 
     /// @inheritdoc ISwapAdapter
@@ -109,24 +85,12 @@ contract TempestAdapter is ISwapAdapter {
 
         trade.gasUsed = SETTLEMENT_GAS;
 
-        // Marginal price after the trade. The ladder is flat within a segment
-        // and Tempest holds no reserves that a fill would move, so probing a
-        // small size reads the rate the next trade would get. A probe that
-        // falls under the ladder's minimum quotable size reverts; report zero
-        // rather than failing a trade that priced fine.
-        uint256 tradedAmount =
-            side == OrderSide.Sell ? specifiedAmount : trade.calculatedAmount;
-        uint256 probeAmount = tradedAmount / PRICE_PROBE_DIVISOR;
-        if (probeAmount == 0) {
-            probeAmount = tradedAmount;
-        }
-        try this.priceAt(sellToken, buyToken, probeAmount) returns (
-            Fraction memory postTradePrice
-        ) {
-            trade.price = postTradePrice;
-        } catch {
-            trade.price = Fraction(0, 1);
-        }
+        // No marginal price is reported; see the note on `price`. It is not
+        // left at the Fraction(0, 0) default because simulation runs the
+        // fraction through a division that rejects a zero denominator, which
+        // would fail the swap itself. Without `PriceFunction` the value is
+        // unused and the price is derived numerically.
+        trade.price = Fraction(0, 1);
     }
 
     /// @inheritdoc ISwapAdapter
@@ -216,10 +180,9 @@ contract TempestAdapter is ISwapAdapter {
         override
         returns (Capability[] memory capabilities)
     {
-        capabilities = new Capability[](3);
+        capabilities = new Capability[](2);
         capabilities[0] = Capability.SellOrder;
         capabilities[1] = Capability.BuyOrder;
-        capabilities[2] = Capability.PriceFunction;
     }
 
     /// @inheritdoc ISwapAdapter
