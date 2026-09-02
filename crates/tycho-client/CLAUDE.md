@@ -7,6 +7,7 @@ Consumer library implementing the snapshot + deltas pattern for real-time protoc
 ```
 rpc.rs              HTTP snapshot client — fetches protocol state at a block height
 deltas.rs           WebSocket client — streams real-time state deltas
+retry.rs            RetryConfiguration — how the WS reconnect and sync retry loops space attempts
 stream.rs           Builder entry point — wires RPC + WS clients into a TychoStream
 feed/
   mod.rs            BlockSynchronizer — aligns N synchronizers by block, emits FeedMessage
@@ -39,6 +40,15 @@ TychoStreamBuilder (stream.rs)
    block, then promoted to `InFlight`.
 3. `BlockSynchronizer` waits for all synchronizers, then emits a `FeedMessage` per block
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are kept but skipped
+
+## Retries
+
+Both the WS reconnect loop (`deltas.rs`) and the sync retry loop (`synchronizer.rs`) are paced by a
+`RetryConfiguration` (`retry.rs`). The defaults are exponential with full jitter, capped at 60s:
+a failed sync run re-requests the entire snapshot, so retrying at a fixed rate — in lockstep with
+every other client dropped by the same event — is what turns a brief server outage into sustained
+load. Configure via `TychoStreamBuilder::websockets_retry_config` /
+`state_synchronizer_retry_config`.
 
 ## CLI
 

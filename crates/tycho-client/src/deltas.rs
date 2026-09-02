@@ -47,7 +47,7 @@ use tokio::{
         oneshot, Mutex, MutexGuard, Notify,
     },
     task::JoinHandle,
-    time::sleep,
+    time::{sleep, Instant},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -65,7 +65,28 @@ use tycho_common::{
 use uuid::Uuid;
 use zstd;
 
-use crate::{client_metadata::CLIENT_METADATA_HEADER, TYCHO_SERVER_VERSION};
+use crate::{
+    client_metadata::CLIENT_METADATA_HEADER, retry::RetryConfiguration, TYCHO_SERVER_VERSION,
+};
+
+/// Ceiling for a single reconnect delay, see `stream::MAX_RETRY_COOLDOWN`.
+const DEFAULT_MAX_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// A connection that stayed up at least this long counts as a success: the next drop starts the
+/// backoff from scratch. Without such a threshold, a server that accepts connections and
+/// immediately drops them (a crash loop) would reset the backoff on every attempt and be
+/// reconnected to at full rate.
+const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Number of consecutive failures to pace the next reconnect with, given how long the connection
+/// that just dropped had been up. Uses tokio's clock so tests can drive it without waiting.
+fn next_consecutive_failures(current: u64, connected_at: Instant) -> u64 {
+    if connected_at.elapsed() >= STABLE_CONNECTION_THRESHOLD {
+        0
+    } else {
+        current + 1
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum DeltasError {
@@ -176,10 +197,8 @@ pub struct WsDeltasClient {
     uri: Uri,
     /// Authorization key for the websocket connection.
     auth_key: Option<String>,
-    /// Maximum amount of reconnects to try before giving up.
-    max_reconnects: u64,
-    /// Duration to wait before attempting to reconnect
-    retry_cooldown: Duration,
+    /// How many reconnects to attempt before giving up, and how long to wait between them.
+    retry_config: RetryConfiguration,
     /// The client will buffer this many messages incoming from the websocket
     /// before starting to drop them.
     ws_buffer_size: usize,
@@ -443,7 +462,8 @@ fn build_ws_handshake_request(
 
 /// Tycho client websocket implementation.
 impl WsDeltasClient {
-    // Construct a new client with 5 reconnection attempts.
+    /// Constructs a new client with 5 reconnection attempts, backing off exponentially with
+    /// jitter from 500ms.
     pub fn new(ws_uri: &str, auth_key: Option<&str>) -> Result<Self, DeltasError> {
         let uri = ws_uri
             .parse::<Uri>()
@@ -455,19 +475,39 @@ impl WsDeltasClient {
             ws_buffer_size: 256,
             subscription_buffer_size: 256,
             conn_notify: Arc::new(Notify::new()),
-            max_reconnects: 5,
-            retry_cooldown: Duration::from_millis(500),
+            retry_config: RetryConfiguration::exponential(
+                5,
+                Duration::from_millis(500),
+                DEFAULT_MAX_RETRY_COOLDOWN,
+            ),
             dead: Arc::new(AtomicBool::new(false)),
             client_metadata_header: None,
         })
     }
 
-    // Construct a new client with a custom number of reconnection attempts.
+    /// Constructs a new client that waits a fixed `retry_cooldown` between reconnects.
+    ///
+    /// Prefer [`Self::new_with_retry_config`] with
+    /// [`RetryConfiguration::exponential`]: a fixed cooldown keeps every client of a fleet
+    /// reconnecting in lockstep for the whole duration of a server outage.
     pub fn new_with_reconnects(
         ws_uri: &str,
         auth_key: Option<&str>,
         max_reconnects: u64,
         retry_cooldown: Duration,
+    ) -> Result<Self, DeltasError> {
+        Self::new_with_retry_config(
+            ws_uri,
+            auth_key,
+            RetryConfiguration::constant(max_reconnects, retry_cooldown),
+        )
+    }
+
+    /// Constructs a new client with custom reconnect pacing.
+    pub fn new_with_retry_config(
+        ws_uri: &str,
+        auth_key: Option<&str>,
+        retry_config: RetryConfiguration,
     ) -> Result<Self, DeltasError> {
         let uri = ws_uri
             .parse::<Uri>()
@@ -480,8 +520,7 @@ impl WsDeltasClient {
             ws_buffer_size: 128,
             subscription_buffer_size: 128,
             conn_notify: Arc::new(Notify::new()),
-            max_reconnects,
-            retry_cooldown,
+            retry_config,
             dead: Arc::new(AtomicBool::new(false)),
             client_metadata_header: None,
         })
@@ -511,8 +550,7 @@ impl WsDeltasClient {
             ws_buffer_size,
             subscription_buffer_size,
             conn_notify: Arc::new(Notify::new()),
-            max_reconnects: 5,
-            retry_cooldown: Duration::from_millis(0),
+            retry_config: RetryConfiguration::constant(5, Duration::ZERO),
             dead: Arc::new(AtomicBool::new(false)),
             client_metadata_header: None,
         })
@@ -908,12 +946,19 @@ impl DeltasClient for WsDeltasClient {
         let this = self.clone();
         let jh = tokio::spawn(async move {
             let mut retry_count = 0;
+            // Counts only *consecutive* failures, so the backoff decays once the server is healthy
+            // again. `retry_count` keeps its lifetime-budget meaning against `max_attempts`.
+            let mut consecutive_failures = 0;
             let mut result = Err(DeltasError::NotConnected);
 
-            'retry: while retry_count < this.max_reconnects {
+            'retry: while retry_count < this.retry_config.max_attempts() {
                 info!(?ws_uri, retry_count, "Connecting to WebSocket server");
                 if retry_count > 0 {
-                    sleep(this.retry_cooldown).await;
+                    let cooldown = this
+                        .retry_config
+                        .delay(consecutive_failures);
+                    debug!(?cooldown, consecutive_failures, "Waiting before reconnecting");
+                    sleep(cooldown).await;
                 }
 
                 let request = build_ws_handshake_request(
@@ -927,6 +972,7 @@ impl DeltasClient for WsDeltasClient {
                     Err(e) => {
                         // Prepare for reconnection
                         retry_count += 1;
+                        consecutive_failures += 1;
                         let mut guard = this.inner.as_ref().lock().await;
                         *guard = None;
 
@@ -963,6 +1009,7 @@ impl DeltasClient for WsDeltasClient {
                 info!("Connection Successful: TychoWebsocketClient started");
                 this.conn_notify.notify_waiters();
                 result = Ok(());
+                let connected_at = Instant::now();
 
                 // If no WS frame arrives within this window the TCP connection is
                 // considered stalled (e.g. network cut without a TCP RST/FIN). The OS
@@ -977,6 +1024,8 @@ impl DeltasClient for WsDeltasClient {
                                     warn!("No WS frame received for {IDLE_TIMEOUT:?}, \
                                            treating connection as stalled; Reconnecting...");
                                     retry_count += 1;
+                                    consecutive_failures =
+                                        next_consecutive_failures(consecutive_failures, connected_at);
                                     let mut guard = this.inner.as_ref().lock().await;
                                     *guard = None;
                                     break; // break inner loop → reconnect
@@ -1001,12 +1050,15 @@ impl DeltasClient for WsDeltasClient {
                         ) {
                             // Prepare for reconnection
                             retry_count += 1;
+                            consecutive_failures =
+                                next_consecutive_failures(consecutive_failures, connected_at);
                             let mut guard = this.inner.as_ref().lock().await;
                             *guard = None;
 
                             warn!(
                                 ?error,
                                 ?retry_count,
+                                consecutive_failures,
                                 "Connection dropped unexpectedly; Reconnecting..."
                             );
                             break;
@@ -1021,7 +1073,7 @@ impl DeltasClient for WsDeltasClient {
             }
             debug!(
                 retry_count,
-                max_reconnects=?this.max_reconnects,
+                max_reconnects = this.retry_config.max_attempts(),
                 "Reconnection loop ended"
             );
             // Clean up before exiting
@@ -1029,7 +1081,7 @@ impl DeltasClient for WsDeltasClient {
             *guard = None;
 
             // Check if max retries has been reached.
-            if retry_count >= this.max_reconnects {
+            if retry_count >= this.retry_config.max_attempts() {
                 error!("Max reconnection attempts reached; Exiting");
                 this.dead.store(true, Ordering::SeqCst);
                 this.conn_notify.notify_waiters(); // Notify that the task is done
@@ -1708,6 +1760,52 @@ mod tests {
 
         // Should not take too long (max ~300ms for 3 attempts with some tolerance)
         assert!(elapsed < Duration::from_millis(500), "Took too long: {:?}", elapsed);
+    }
+
+    /// Runs on tokio's paused clock: the reconnect sleeps are auto-advanced, so the elapsed
+    /// virtual time is exactly the sum of the cooldowns the loop asked for, measured without
+    /// waiting for them.
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_ws_client_exponential_backoff_grows_and_caps() {
+        let (addr, _) = mock_bad_connection_tycho_ws(false).await;
+        // 5 attempts means 4 cooldowns, bounded by 1s, 2s, 4s and 4s (capped).
+        let client = WsDeltasClient::new_with_retry_config(
+            &format!("ws://{addr}"),
+            None,
+            RetryConfiguration::exponential(5, Duration::from_secs(1), Duration::from_secs(4)),
+        )
+        .unwrap();
+
+        let start = Instant::now();
+        let connect_result = client.connect().await;
+        let elapsed = start.elapsed();
+
+        assert!(connect_result.is_err(), "Expected connection to fail after retries");
+        // Full jitter draws from [0, bound], so only the upper bound is deterministic. A constant
+        // 1s cooldown would take 4s; the growth is what pushes the ceiling to 11s.
+        assert!(
+            elapsed <= Duration::from_secs(11),
+            "cooldowns must stay within the configured bounds, waited {elapsed:?}"
+        );
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_stable_connection_resets_backoff() {
+        let connected_at = Instant::now();
+        tokio::time::advance(STABLE_CONNECTION_THRESHOLD).await;
+        assert_eq!(
+            next_consecutive_failures(7, connected_at),
+            0,
+            "a connection that stayed up must reset the backoff"
+        );
+
+        let connected_at = Instant::now();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            next_consecutive_failures(7, connected_at),
+            8,
+            "a connection that dropped straight away must keep backing off"
+        );
     }
 
     #[test_log::test(tokio::test)]

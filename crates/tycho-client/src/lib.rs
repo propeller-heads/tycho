@@ -29,6 +29,7 @@ pub mod cli;
 pub mod client_metadata;
 pub mod deltas;
 pub mod feed;
+pub mod retry;
 pub mod rpc;
 pub mod stream;
 
@@ -37,4 +38,5 @@ pub mod stream;
 extern crate pretty_assertions;
 
 pub use deltas::{DeltasError, WsDeltasClient};
+pub use retry::RetryConfiguration;
 pub use rpc::{HttpRPCClient, RPCError, SnapshotParameters};
