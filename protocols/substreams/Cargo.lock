@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-bopamm"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
