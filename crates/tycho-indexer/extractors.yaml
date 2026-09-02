@@ -95,6 +95,24 @@ extractors:
     spkg: "substreams/ethereum-uniswap-v4/ethereum-uniswap-v4-v0.2.1.spkg"
     module_name: "map_protocol_changes"
 
+  # Base Uniswap V4 hooks: indexes all swap-hooked pools on Base; the Flaunch
+  # enrichment tags Flaunch pools with hook_identifier=flaunch_v1 so the hooks DCI
+  # and GenericVMHookHandler can simulate them.
+  uniswap_v4_hooks_base:
+    name: "uniswap_v4_hooks"
+    chain: "base"
+    implementation_type: "Custom"
+    sync_batch_size: 1000
+    start_block: 25350988
+    protocol_types:
+      - name: "uniswap_v4_pool"
+        financial_type: "Swap"
+    spkg: "substreams/ethereum-uniswap-v4/with-hooks/base-uniswap-v4-with-hooks-v0.8.0.spkg"
+    module_name: "map_flaunch_enriched_protocol_changes"
+    dci_plugin:
+      type: "uniswap_v4_hooks"
+      pool_manager_address: "0x498581fF718922c3f8e6a244956aF099B2652b2b"
+
   ekubo_v2:
     name: "ekubo_v2"
     chain: "ethereum"

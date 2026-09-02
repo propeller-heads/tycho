@@ -1,0 +1,33 @@
+substreams_yaml_path: ./base-uniswap-v4-with-hooks.yaml
+# The balance check does not support vault-like contracts such as the Uniswap V4
+# PoolManager (a single contract holds the reserves of every pool).
+skip_balance_check: true
+protocol_type_names:
+  - "uniswap_v4_pool"
+protocol_system: "uniswap_v4_hooks"
+module_name: "map_flaunch_enriched_protocol_changes"
+initialized_accounts:
+  - "0x498581fF718922c3f8e6a244956aF099B2652b2b" # Uniswap V4 PoolManager (Base)
+  - "0x23321f11a6d44Fd1ab790044FdFDE5758c902FDc" # Flaunch PositionManager v1.3 (hook)
+tests:
+  # Real Base-mainnet Flaunch v1.3 pool (flETH / memecoin), verified against the
+  # PoolManager Initialize log. Created ~2h before selection, so its 1h fair-launch
+  # window has closed (swaps are unrestricted). The component is emitted by the
+  # shared with-hooks pipeline and tagged hook_identifier=flaunch_v1 by the
+  # enrichment module.
+  - name: test_flaunch_pool_creation
+    start_block: 48014462
+    stop_block: 48014500
+    expected_components:
+      - id: "0x662c65f4d37538fd2841aa5e40c6cbed5679c53578367f4961f4ef440cb5e1d7"
+        tokens:
+          - "0x000000000d564d5be76f7f0d28fe52605afc7cf8" # flETH
+          - "0x207c9e2544a782bcfef2f47c0316e297c851a935" # memecoin
+        static_attributes:
+          tick_spacing: "0x3c" # 60
+          hooks: "0x23321f11a6d44fd1ab790044fdfde5758c902fdc"
+          key_lp_fee: "0x00" # static fee 0
+          hook_identifier: "0x666c61756e63685f7631" # flaunch_v1
+        creation_tx: "0x44694eb8419e2ccb944eb874c283f296d56763122f867d3e2e4fe558fa358500"
+        skip_simulation: false
+        skip_execution: true
