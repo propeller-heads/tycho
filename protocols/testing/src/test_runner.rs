@@ -335,19 +335,19 @@ impl TestRunner {
         info!("Starting live testing for protocol {}", &config.protocol_system);
 
         let chain = self.chain;
-        // Load tokens for the stream
-        let all_tokens = tycho_simulation::utils::load_all_tokens(
-            &self.tycho_host(),
-            true,
-            Some("dummy"),
-            true,
-            chain,
-            None,
-            None,
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err("Failed to load tokens from Tycho RPC")?;
+        // Load tokens without quality or last-traded filters: the local harness
+        // never runs the token analyzer, so substreams-discovered tokens keep
+        // their insertion quality and production-style filters would drop them
+        // all — silently excluding every component from the stream as
+        // undecodable ("unknown token").
+        let tycho_client = TychoClient::new(&self.tycho_http_url(), Some("dummy".to_string()))
+            .into_diagnostic()
+            .wrap_err("Failed to create Tycho client for token loading")?;
+        let all_tokens = tycho_client
+            .get_tokens(chain, None, None)
+            .await
+            .into_diagnostic()
+            .wrap_err("Failed to load tokens from Tycho RPC")?;
 
         let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
 
