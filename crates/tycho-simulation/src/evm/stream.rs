@@ -142,7 +142,8 @@ use crate::{
     utils::default_blocklist,
 };
 
-const EXCHANGES_REQUIRING_FILTER: [&str; 4] = ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3"];
+const EXCHANGES_REQUIRING_FILTER: [&str; 5] =
+    ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3", "vm:curve"];
 
 /// The client-side filter applied to exchange `name` when the caller provides none.
 ///
