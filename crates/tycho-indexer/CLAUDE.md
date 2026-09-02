@@ -94,17 +94,30 @@ When no DCI is configured the call is a no-op.
 On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
 1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
-   match purges strictly after the target; when the hash is absent, a buffered target
-   height purges from that height inclusive (stale copy). A hash miss is fatal when the
-   target is below the buffer, at the buffer's oldest block (no predecessor left to anchor
-   the revert), or above the buffer without a pending partial at exactly that height (the
-   flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
+   match purges strictly after the target; when the hash is absent, a buffered target height
+   purges from that height inclusive (stale copy). A hash miss is fatal when the
+   target is below the buffer, at the buffer's oldest block (no predecessor left to
+   anchor the revert), or above the buffer without a pending partial at exactly that height
+   (the flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
    fallbacks log a warning and increment `extractor_revert_hash_miss`.
 2. Pending partials are dropped only when above the target height; partials at the target
-   height are the valid prefix of the last valid block and are kept.
-3. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
+   height are the still-valid prefix of the last valid block and are kept.
+3. Previous attribute values are restored from the buffer, then the DB. The buffer keeps
+   drained blocks in a committing section until `CachedGateway` reports their write
+   flushed, so lookups cover every block whose write has not landed and a DB miss proves
+   that no prior state exists — the revert never waits on the commit task. Attributes
+   first created inside the reverted range revert as deletions when they survive the
+   range, and revert to nothing otherwise. A delta that holds an attribute as both
+   created and deleted is malformed module output, so it goes through the lookup like a
+   pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
+   emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
+   `component_state_found` label says whether the DB returned state rows for the
+   component. The extractor registers both label sets at zero at startup so the first
+   miss is visible to `increase()`. Any hit means an upstream module emitted an Update
+   or Deletion for an attribute that never had a Creation.
+4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
-4. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
+5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
    state is always on the canonical chain.
 
 `PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
@@ -119,6 +132,10 @@ components → state → entry points → cursor). Every mutable row is versione
 
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
 they are provably behind the finality horizon.
+
+Drained blocks stay in the buffer's committing section (shared with the commit task via
+`Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
+still see them while their write is in flight.
 
 ## Why extractor messages must be broadcast to the RPC service
 

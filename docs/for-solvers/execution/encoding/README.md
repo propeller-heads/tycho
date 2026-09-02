@@ -44,9 +44,9 @@ The router takes two output guardrails, and the solution supplies both:
 </table>
 
 Both are absolute amounts, so refreshing a quote means updating both — apply your slippage
-tolerance to the new quote and set `min_amount_out` to the result. The router bounds
-`minAmountOut` against `expectedAmountOut` on both sides (see [Slippage bounds](#slippage-bounds)),
-so it rejects a floor that no longer matches the quote.
+tolerance to the new quote and set `min_amount_out` to the result. The router caps `minAmountOut`
+at `expectedAmountOut` (see [Slippage bounds](#slippage-bounds)), so it rejects a floor above the
+quote.
 {% endtab %}
 
 {% tab title="UserTransferType" %}
@@ -222,7 +222,7 @@ creation and signing yourself using the public `Permit2` utility (see [Token tra
 The full method call includes the following parameters, which act as **execution guardrails:**
 
 * `amountIn` and `tokenIn` — the amount and token you transfer into the TychoRouterV3. For native ETH, use `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`. The router reverts if the token is `address(0)` or the amount is zero.
-* `expectedAmountOut` — your quoted output amount, taken from `solution.expected_amount_out()`. This is the baseline the router measures slippage against, and the value it bounds `minAmountOut` against (see [Slippage bounds](#slippage-bounds)). It must be greater than zero.
+* `expectedAmountOut` — your quoted output amount, taken from `solution.expected_amount_out()`. The router measures positive slippage against it and caps `minAmountOut` at it (see [Slippage bounds](#slippage-bounds)). It must be greater than zero.
 * `minAmountOut` and `tokenOut` — the smallest output you are willing to accept once fees are deducted, taken from `solution.min_amount_out()`. The same native ETH address rule applies. For maximum security, derive the underlying quote from a **third-party source**.
 * `receiver` — who receives the final output. Set this to the TychoRouterV3 address to credit output tokens to the vault.
 * `nTokens` — _(split swaps only)_ the number of distinct tokens in the split routing graph.
@@ -278,18 +278,16 @@ example to your use case. See the `TychoRouterV3` contract functions for referen
 
 #### Slippage bounds <a href="#slippage-bounds" id="slippage-bounds"></a>
 
-`minAmountOut` must sit inside a window anchored on `expectedAmountOut`:
+`minAmountOut` must be non-zero and no greater than `expectedAmountOut`:
 
 ```
-expectedAmountOut * (10_000 - MAX_SLIPPAGE_TOLERANCE_BPS) / 10_000  <=  minAmountOut  <=  expectedAmountOut
+0  <  minAmountOut  <=  expectedAmountOut
 ```
 
-`MAX_SLIPPAGE_TOLERANCE_BPS` is `2_000`, which puts the floor 20% below your quote. A quote of 1000 USDC
-therefore accepts any `minAmountOut` between `800 * 10**6` and `1000 * 10**6`. The router reverts with
-`TychoRouter__InvalidMinAmountOut` for anything outside that window, zero included.
-
-`expectedAmountOut` sets both ends of the window, so raising it also raises the floor. Pass the amount
-your simulation returned.
+The router reverts with `TychoRouter__InvalidMinAmountOut` for a zero `minAmountOut` or one above
+`expectedAmountOut`. There is no lower cap on how far below the quote you may set it, so compute a
+real floor from your slippage tolerance — a `minAmountOut` set too low exposes the swap to MEV
+attacks. Pass the amount your simulation returned as `expectedAmountOut`.
 
 {% hint style="info" %}
 The router may capture output above `expectedAmountOut` as positive slippage, so it does not guarantee

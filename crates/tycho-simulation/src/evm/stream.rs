@@ -145,12 +145,14 @@ use crate::{
 const EXCHANGES_REQUIRING_FILTER: [&str; 5] =
     ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3", "vm:curve"];
 
-/// The client-side filter applied to exchange `name` when the caller provides none.
+/// The client-side filter exchange `name` always gets, in addition to any filter the caller
+/// provides.
 ///
 /// `uniswap_v4_hooks`: without `ANGSTROM_API_KEY`, Angstrom swaps cannot be encoded (they carry
 /// per-block attestations from the Angstrom API), so Angstrom pools are excluded up front rather
-/// than failing every route that selects them at encoding time.
-fn default_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
+/// than failing every route that selects them at encoding time. A caller's own hook filter does
+/// not replace this one: the encoder still has no key.
+fn mandatory_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
     if name == "uniswap_v4_hooks" && std::env::var("ANGSTROM_API_KEY").is_err() {
         warn!(
             "ANGSTROM_API_KEY is not set: excluding Angstrom pools from '{name}'. \
@@ -326,7 +328,8 @@ impl ProtocolStreamBuilder {
         if let Some(predicate) = filter_fn {
             self.decoder
                 .register_filter(name, predicate);
-        } else if let Some(predicate) = default_filter_fn(name) {
+        }
+        if let Some(predicate) = mandatory_filter_fn(name) {
             self.decoder
                 .register_filter(name, predicate);
         }
@@ -386,7 +389,8 @@ impl ProtocolStreamBuilder {
         if let Some(predicate) = filter_fn {
             self.decoder
                 .register_filter(name, predicate);
-        } else if let Some(predicate) = default_filter_fn(name) {
+        }
+        if let Some(predicate) = mandatory_filter_fn(name) {
             self.decoder
                 .register_filter(name, predicate);
         }

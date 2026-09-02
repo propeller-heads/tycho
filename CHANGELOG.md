@@ -1,3 +1,126 @@
+## [0.376.0](https://github.com/propeller-heads/tycho/compare/0.375.0...0.376.0) (2026-09-01)
+
+
+### Features
+
+* reduce fee calculator timelock to 1 day ([7134968](https://github.com/propeller-heads/tycho/commit/7134968f94a6abb643f56113eba1a6c3bf4412c3))
+* reduce fee calculator timelock to 1 day ([#1373](https://github.com/propeller-heads/tycho/issues/1373)) ([a19c795](https://github.com/propeller-heads/tycho/commit/a19c79541e9c895e9fe6a5bcb11632cdc90d2a42))
+
+## [0.375.0](https://github.com/propeller-heads/tycho/compare/0.374.0...0.375.0) (2026-09-01)
+
+
+### Features
+
+* add write-cache flush to CachedGateway and ExtractorGateway ([1fab0b0](https://github.com/propeller-heads/tycho/commit/1fab0b08fa4d4926e1b882189ae895baad063ee8))
+* count revert misses per attribute with component_found label ([c1dfef2](https://github.com/propeller-heads/tycho/commit/c1dfef29251bd161c46a3ca591405a1809ccb786))
+* **indexer:** retain committing blocks in ReorgBuffer until released ([d8cab45](https://github.com/propeller-heads/tycho/commit/d8cab456b1dbfbe6a6d0328679ce6096418fb492))
+* label revert component-not-found counter by cause ([6eb5ee8](https://github.com/propeller-heads/tycho/commit/6eb5ee8e0da8e93552b4eaed90176dd72b90c6c4))
+* register revert attr miss counter at zero ([8936ffb](https://github.com/propeller-heads/tycho/commit/8936ffb06ff4bd4ecdc401386b98cb73251de471))
+* **storage:** track the flushed block height in CachedGateway ([e784648](https://github.com/propeller-heads/tycho/commit/e7846489a5cb5d176a71fc7df7e6640cd28f436e))
+
+
+### Bug Fixes
+
+* exclude born-in-range deleted attrs from revert lookups ([d9aa66e](https://github.com/propeller-heads/tycho/commit/d9aa66e682dc53bbf0e9f46e94968ab450b76bec))
+* resolve revert lookups from retained blocks instead of awaiting commits ([bd553f3](https://github.com/propeller-heads/tycho/commit/bd553f36fb2bc403842db0bf3212ea3206215ae0))
+* restore pre-range value for same-tx delete-then-recreate reverts ([950be01](https://github.com/propeller-heads/tycho/commit/950be014a9cd4c465f3b9d1333c26f624f89ca97))
+* restore prior value for attrs deleted then recreated in reverted range ([5f9609f](https://github.com/propeller-heads/tycho/commit/5f9609f33e48998f635bc401f3c746107ab04350))
+* revert missing-component attrs as deletions, not fatal ([cf8dfee](https://github.com/propeller-heads/tycho/commit/cf8dfeefb394ba13493f76edeeb41a7c0aabd04f))
+* settle pending DB commit on revert only when buffer lookups miss ([6c751b5](https://github.com/propeller-heads/tycho/commit/6c751b5c818e076a0c189b65980a525fc5398bb3))
+* skip revert deletions for attrs created and deleted inside the range ([cd7ee8b](https://github.com/propeller-heads/tycho/commit/cd7ee8bcbe284a12e7201e88a27fc117ed9ee001))
+* wait for pending DB commit before revert lookups ([fcf8721](https://github.com/propeller-heads/tycho/commit/fcf8721c56549efe5a3d677c921acdf20fe1c189))
+
+## [0.374.0](https://github.com/propeller-heads/tycho/compare/0.373.1...0.374.0) (2026-09-01)
+
+
+### Features
+
+* **execution:** add per-client positive slippage exemptions ([d4cbc23](https://github.com/propeller-heads/tycho/commit/d4cbc23af5054f18437096da84879582605d36f5))
+* **execution:** add per-client positive slippage exemptions ([#1371](https://github.com/propeller-heads/tycho/issues/1371)) ([015dac1](https://github.com/propeller-heads/tycho/commit/015dac153a28d9fc747bb726ba6f44cfd1c2152f))
+
+## [0.373.1](https://github.com/propeller-heads/tycho/compare/0.373.0...0.373.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* decouple partition retention from partition creation ([16b496a](https://github.com/propeller-heads/tycho/commit/16b496ac84182ea1c36ced3521aee15fa88d127f))
+* decouple partition retention from partition creation ([#1323](https://github.com/propeller-heads/tycho/issues/1323)) ([3c04de4](https://github.com/propeller-heads/tycho/commit/3c04de46d307b9c78e9147de14875eb75a2dd193))
+* share the retention setting between drop and cleanup jobs ([152b561](https://github.com/propeller-heads/tycho/commit/152b561831c83a580a05c13a5f535865852a1371))
+
+## [0.373.0](https://github.com/propeller-heads/tycho/compare/0.372.0...0.373.0) (2026-09-01)
+
+
+### Features
+
+* prepare for the router redeploy ([#1368](https://github.com/propeller-heads/tycho/issues/1368)) ([91161f2](https://github.com/propeller-heads/tycho/commit/91161f2f871da28557275f583d29bd860a415430))
+* remove minAmountOut slippage cap ([6acbb85](https://github.com/propeller-heads/tycho/commit/6acbb85a68db90cf326b73336993448bfff9484b))
+
+
+### Bug Fixes
+
+* reduce executor activation timelock to 1 day ([0da9e68](https://github.com/propeller-heads/tycho/commit/0da9e6818cb4041c77f79beaa28c0330f5d4987d))
+
+## [0.372.0](https://github.com/propeller-heads/tycho/compare/0.371.1...0.372.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **execution:** TychoExecutorEncoderBuilder is removed from the public API.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+### Features
+
+* **execution:** remove the TychoExecutorEncoder ([fd14a7b](https://github.com/propeller-heads/tycho/commit/fd14a7b9d4579cde3c8ec7d09b3e78c000910704))
+
+
+### Bug Fixes
+
+* **execution:** report the panic message from encoding threads ([f60ed7b](https://github.com/propeller-heads/tycho/commit/f60ed7baabb947a5f2d79e021e8ff69a175286f4))
+
+
+### Performance Improvements
+
+* **execution:** encode swap groups and solutions in parallel ([7f6620c](https://github.com/propeller-heads/tycho/commit/7f6620ca861150b3a63cb539edeb85f0e5712c26))
+* **execution:** spawn encoding threads only for quote requests ([5dcd2dc](https://github.com/propeller-heads/tycho/commit/5dcd2dc761db87a0153c2cded9d49cb3f83540d0))
+* **execution:** validate solutions before requesting quotes ([5420627](https://github.com/propeller-heads/tycho/commit/5420627af73f8991f082b777981213a224d4b18e))
+
+## [0.371.1](https://github.com/propeller-heads/tycho/compare/0.371.0...0.371.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* classify token analysis reverts as bad tokens ([63334ed](https://github.com/propeller-heads/tycho/commit/63334ed3f6b5a9536859188706271eed5d2ef44e))
+
+## [0.371.0](https://github.com/propeller-heads/tycho/compare/0.370.2...0.371.0) (2026-08-31)
+
+
+### Features
+
+* re-analyze recently traded quality-5 tokens ([d769f12](https://github.com/propeller-heads/tycho/commit/d769f12dc30567fe46211590528a7da449f97c00))
+
+
+### Bug Fixes
+
+* fetch all pages before analysis and log pass outcomes ([b653a85](https://github.com/propeller-heads/tycho/commit/b653a859c0edc6740f90cf68c2711db168ca459b))
+* replace unwrap_or_else with unwrap_or_default for clippy ([ce79bbf](https://github.com/propeller-heads/tycho/commit/ce79bbf878f13c22783b37ec68d1eece664dc4e3))
+
+## [0.370.2](https://github.com/propeller-heads/tycho/compare/0.370.1...0.370.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* republish crates after partial 0.370.1 publish ([c619d1f](https://github.com/propeller-heads/tycho/commit/c619d1f476e6fb61bb6908ae07e379850e77d82e))
+* republish crates after partial 0.370.1 publish ([#1367](https://github.com/propeller-heads/tycho/issues/1367)) ([0871f4e](https://github.com/propeller-heads/tycho/commit/0871f4eb73d4ee658b13571198c0d2aae88ca406))
+
+## [0.370.1](https://github.com/propeller-heads/tycho/compare/0.370.0...0.370.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **simulation:** keep the Angstrom filter when a caller filter is set ([5119ea7](https://github.com/propeller-heads/tycho/commit/5119ea774148712bdfb3eda62dc3d445b0a69e94))
+* **simulation:** keep the Angstrom filter when a caller filter is set ([#1366](https://github.com/propeller-heads/tycho/issues/1366)) ([a54c6dc](https://github.com/propeller-heads/tycho/commit/a54c6dc3a54951f5a7f7c2d0086e511c395be366))
+
 ## [0.370.0](https://github.com/propeller-heads/tycho/compare/0.369.0...0.370.0) (2026-08-28)
 
 

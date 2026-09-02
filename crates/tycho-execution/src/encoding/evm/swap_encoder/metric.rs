@@ -144,6 +144,10 @@ impl SwapEncoder for MetricSwapEncoder {
         &self.executor_address
     }
 
+    fn blocks_on_quote(&self) -> bool {
+        true
+    }
+
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
     }
@@ -323,6 +327,7 @@ mod tests {
                 (ORACLE_UPDATE_ARGS_ATTR.to_string(), first_oracle_args.clone()),
                 ("oracle_update_1_args".to_string(), second_oracle_args.clone()),
             ]),
+            ..Default::default()
         };
         let swap = Swap::new(
             component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::Always),
@@ -353,6 +358,7 @@ mod tests {
             quote_amount_in: None,
             quote_amount_out: BigUint::from(1u64),
             quote_data: HashMap::from([(ORACLE_UPDATE_ARGS_ATTR.to_string(), oracle_args.clone())]),
+            ..Default::default()
         };
         let swap = Swap::new(
             component_with_policy(&token_in, &token_out, MetricOracleUpdatePolicy::RetryOnRevert),

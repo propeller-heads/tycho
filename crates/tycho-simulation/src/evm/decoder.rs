@@ -100,7 +100,7 @@ where
     skip_state_decode_failures: bool,
     min_token_quality: u32,
     registry: HashMap<String, Box<RegistryFn<H>>>,
-    inclusion_filters: HashMap<String, FilterFn>,
+    inclusion_filters: HashMap<String, Vec<FilterFn>>,
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
@@ -265,9 +265,23 @@ where
     /// For example, you might use a filter to exclude pools that are not fully supported in the
     /// protocol, or to ignore pools with certain attributes that are irrelevant to your
     /// application.
+    ///
+    /// Filters accumulate: registering a second predicate for the same exchange keeps the first,
+    /// and a component is admitted only when every registered predicate accepts it.
     pub fn register_filter(&mut self, exchange: &str, predicate: FilterFn) {
         self.inclusion_filters
-            .insert(exchange.to_string(), predicate);
+            .entry(exchange.to_string())
+            .or_default()
+            .push(predicate);
+    }
+
+    /// Whether every filter registered for `exchange` accepts `snapshot`. An exchange with no
+    /// registered filter admits every component.
+    fn admits(&self, exchange: &str, snapshot: &ComponentWithState) -> bool {
+        let Some(predicates) = self.inclusion_filters.get(exchange) else { return true };
+        predicates
+            .iter()
+            .all(|predicate| predicate(snapshot))
     }
 
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
@@ -516,11 +530,7 @@ where
                     .clone()
                 {
                     // Skip any unsupported pools
-                    if self
-                        .inclusion_filters
-                        .get(protocol.as_str())
-                        .is_some_and(|predicate| !predicate(&snapshot))
-                    {
+                    if !self.admits(protocol.as_str(), &snapshot) {
                         continue;
                     }
 
@@ -1527,5 +1537,38 @@ mod tests {
             .expect("Get amount out failed");
 
         assert_eq!(amount_out.amount, BigUint::from_str("1216190190361759119").unwrap());
+    }
+
+    fn component_with_id(id: &str) -> ComponentWithState {
+        use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { id: id.to_string(), ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
+    fn rejects_a(component: &ComponentWithState) -> bool {
+        component.component.id != "a"
+    }
+
+    fn rejects_b(component: &ComponentWithState) -> bool {
+        component.component.id != "b"
+    }
+
+    #[test]
+    fn test_admits_requires_every_registered_filter() {
+        // Two filters on one exchange both apply: the second registration does not replace the
+        // first, and a component must pass both. An exchange without filters admits everything.
+        let mut decoder = TychoStreamDecoder::<BlockHeader>::new();
+        decoder.register_filter("x", rejects_a);
+        decoder.register_filter("x", rejects_b);
+
+        assert!(!decoder.admits("x", &component_with_id("a")));
+        assert!(!decoder.admits("x", &component_with_id("b")));
+        assert!(decoder.admits("x", &component_with_id("c")));
+        assert!(decoder.admits("y", &component_with_id("a")));
     }
 }

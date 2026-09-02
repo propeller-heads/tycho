@@ -8,7 +8,7 @@ use tycho_common::{hex_bytes::Bytes, models::Chain};
 use tycho_execution::encoding::{
     errors::EncodingError,
     evm::{
-        encoder_builders::{TychoExecutorEncoderBuilder, TychoRouterEncoderBuilder},
+        encoder_builders::TychoRouterEncoderBuilder,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
     models::{Solution, UserTransferType},
@@ -62,8 +62,6 @@ pub struct Cli {
 pub enum Commands {
     /// Use Tycho router encoding
     TychoRouter,
-    /// Use direct execution encoding
-    TychoExecutor,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,13 +98,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 builder = builder.router_address(router_address);
             }
             builder.build()?
-        }
-        Commands::TychoExecutor => {
-            let swap_encoder_registry =
-                SwapEncoderRegistry::new(chain).add_default_encoders(None)?;
-            TychoExecutorEncoderBuilder::new()
-                .swap_encoder_registry(swap_encoder_registry)
-                .build()?
         }
     };
 

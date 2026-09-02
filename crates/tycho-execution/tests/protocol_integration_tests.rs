@@ -993,6 +993,7 @@ fn test_single_encoding_strategy_bebop() {
                 Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
+        ..Default::default()
     };
 
     let bebop_component = ProtocolComponent {
@@ -1078,6 +1079,7 @@ fn test_single_encoding_strategy_bebop_aggregate() {
                 Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
+        ..Default::default()
     };
 
     let bebop_component = ProtocolComponent {
@@ -1167,6 +1169,7 @@ fn test_single_encoding_strategy_bebop_partial_fill() {
                 Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
+        ..Default::default()
     };
     let bebop_component = ProtocolComponent {
         id: String::from("bebop-rfq"),
@@ -1273,6 +1276,7 @@ fn test_single_encoding_strategy_hashflow() {
             ),
             ("signature".to_string(), Bytes::from_str("0xdedc8a21a00afdac18e0a62b3f0d641d21de75e1fa0bb8f402ccf047923274fe40df9e249f693d88be4a005f4217d21ed920eac7373fd23d8329d3c6b0c873f71c").unwrap()),
         ]),
+        ..Default::default()
     };
 
     let hashflow_component = ProtocolComponent {
@@ -2857,6 +2861,7 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
                 ),
             ),
         ]),
+        ..Default::default()
     };
 
     let liquorice_component = ProtocolComponent {
@@ -3159,6 +3164,7 @@ fn test_single_encoding_strategy_liquorice_settle() {
                 ),
             ),
         ]),
+        ..Default::default()
     };
 
     let liquorice_component = ProtocolComponent {

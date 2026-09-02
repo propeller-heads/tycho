@@ -150,6 +150,10 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         &self.executor_address
     }
 
+    fn blocks_on_quote(&self) -> bool {
+        true
+    }
+
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
     }
@@ -217,6 +221,7 @@ mod tests {
                 ("min_base_token_amount".to_string(), Bytes::from(min_base_token_amount)),
                 ("partial_fill_offset".to_string(), Bytes::from(vec![12u8])),
             ]),
+            ..Default::default()
         };
 
         let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
