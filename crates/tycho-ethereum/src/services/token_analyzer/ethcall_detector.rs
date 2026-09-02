@@ -442,6 +442,32 @@ mod tests {
         assert_eq!(tax, Some(U256::ZERO));
     }
 
+    #[tokio::test]
+    #[ignore = "require RPC connection"]
+    async fn test_detect_impl_frxusd() {
+        use std::collections::HashMap;
+        let fixture = TestFixture::new();
+        let rpc = fixture.create_rpc_client(false);
+        // Holder: pmUSD/frxUSD Curve stableswap-NG pool, balance set to 1000 frxUSD
+        let finder = TokenOwnerStore::new(HashMap::from([(
+            Bytes::from_str("0xCAcd6fd266aF91b8AeD52aCCc382b4e165586E29").unwrap(),
+            (
+                Bytes::from_str("0xbF5047039f2980C21EB5692c790Bad8A9533b900").unwrap(),
+                Bytes::from_str("0x3635c9adc5dea00000").unwrap(),
+            ),
+        )]));
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+        let frxusd = address!("CAcd6fd266aF91b8AeD52aCCc382b4e165586E29");
+
+        let (quality, gas, tax) = detector
+            .detect_impl(frxusd, BlockTag::Latest)
+            .await
+            .expect("detect_impl failed");
+
+        println!("frxUSD quality: {quality:?}, gas: {gas:?}, tax: {tax:?}");
+        assert_eq!(quality, TokenQuality::Good);
+    }
+
     mod arbitrum {
         use super::*;
         use crate::test_fixtures::{ARB_ARB_STR, ARB_TOKEN_HOLDERS, ARB_USDC_STR, ARB_WETH_STR};
