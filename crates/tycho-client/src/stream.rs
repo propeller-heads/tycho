@@ -23,7 +23,7 @@ use crate::{
         component_tracker::ComponentFilter, synchronizer::ProtocolStateSynchronizer, BlockHeader,
         BlockSynchronizer, BlockSynchronizerError, FeedMessage,
     },
-    rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
+    rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient, RPCError},
     HttpRPCClient, WsDeltasClient,
 };
 
@@ -86,6 +86,7 @@ pub struct TychoStreamBuilder {
     no_tls: bool,
     include_tvl: bool,
     compression: bool,
+    http1_only: bool,
     partial_blocks: bool,
     max_messages: Option<usize>,
     client_metadata: HashMap<String, String>,
@@ -118,6 +119,7 @@ impl TychoStreamBuilder {
             no_tls: true,
             include_tvl: false,
             compression: true,
+            http1_only: false,
             partial_blocks: false,
             max_messages: None,
             client_metadata: HashMap::new(),
@@ -258,6 +260,14 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Configures HTTP RPC requests to use HTTP/1 only instead of the default HTTP/2 mode.
+    ///
+    /// This setting does not affect the WebSocket connection.
+    pub fn http1_only(mut self, http1_only: bool) -> Self {
+        self.http1_only = http1_only;
+        self
+    }
+
     /// Enables the client to receive partial block updates (flashblocks).
     pub fn enable_partial_blocks(mut self) -> Self {
         self.partial_blocks = true;
@@ -288,6 +298,23 @@ impl TychoStreamBuilder {
     pub fn blocklisted_ids(mut self, ids: impl IntoIterator<Item = String>) -> Self {
         self.blocklisted_ids.extend(ids);
         self
+    }
+
+    fn rpc_client(
+        &self,
+        rpc_url: &str,
+        auth_key: Option<String>,
+        metadata_header: Option<String>,
+    ) -> Result<HttpRPCClient, RPCError> {
+        let options = HttpRPCClientOptions::new()
+            .with_auth_key(auth_key)
+            .with_compression(self.compression)
+            .with_client_metadata_header(metadata_header);
+        if self.http1_only {
+            HttpRPCClient::new_http1_only(rpc_url, options)
+        } else {
+            HttpRPCClient::new(rpc_url, options)
+        }
     }
 
     /// Builds and starts the Tycho client, connecting to the Tycho server and
@@ -347,14 +374,9 @@ impl TychoStreamBuilder {
         }
         .map_err(|e| StreamError::SetUpError(e.to_string()))?
         .with_client_metadata_header(metadata_header.clone());
-        let rpc_client = HttpRPCClient::new(
-            &tycho_rpc_url,
-            HttpRPCClientOptions::new()
-                .with_auth_key(auth_key)
-                .with_compression(self.compression)
-                .with_client_metadata_header(metadata_header),
-        )
-        .map_err(|e| StreamError::SetUpError(e.to_string()))?;
+        let rpc_client = self
+            .rpc_client(&tycho_rpc_url, auth_key, metadata_header)
+            .map_err(|e| StreamError::SetUpError(e.to_string()))?;
         let ws_jh = ws_client
             .connect()
             .await
@@ -533,7 +555,46 @@ impl ProtocolSystemsInfo {
 
 #[cfg(test)]
 mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
     use super::*;
+
+    async fn start_http1_only_server() -> (String, tokio::task::JoinHandle<[u8; 24]>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind HTTP/1.1 test server");
+        let address = listener
+            .local_addr()
+            .expect("get HTTP/1.1 test server address");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept test connection");
+            let mut prefix = [0_u8; 24];
+            stream
+                .read_exact(&mut prefix)
+                .await
+                .expect("read request prefix");
+            let body =
+                r#"{"protocol_systems":[],"pagination":{"page":0,"page_size":20,"total":0}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write HTTP/1.1 response");
+            prefix
+        });
+
+        (format!("http://{address}"), handle)
+    }
 
     #[test]
     fn test_validate_chain_config_errors_on_broken_file() {
@@ -597,6 +658,29 @@ mod tests {
         let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
         assert!(builder.compression, "Compression should be enabled by default.");
         assert!(!builder.partial_blocks, "partial_blocks should be disabled by default.");
+        assert!(!builder.http1_only, "HTTP/1-only RPC should be disabled by default.");
+    }
+
+    #[tokio::test]
+    async fn test_stream_builder_enables_http1_only_rpc() {
+        let (url, request) = start_http1_only_server().await;
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum).http1_only(true);
+        let client = builder
+            .rpc_client(&url, None, None)
+            .expect("create HTTP/1-only stream RPC client");
+
+        let result = client
+            .get_protocol_systems(ProtocolSystemsParams::new(Chain::Ethereum))
+            .await;
+
+        assert!(result.is_ok(), "stream builder must propagate HTTP/1-only to RPC snapshots");
+        assert!(
+            request
+                .await
+                .expect("HTTP/1.1 test server task")
+                .starts_with(b"POST "),
+            "stream RPC client must send an HTTP/1.1 request"
+        );
     }
 
     #[tokio::test]

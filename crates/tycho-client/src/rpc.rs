@@ -1278,7 +1278,21 @@ pub struct HttpRPCClient {
 }
 
 impl HttpRPCClient {
+    /// Creates a client that uses HTTP/2 prior knowledge.
     pub fn new(base_uri: &str, options: HttpRPCClientOptions) -> Result<Self, RPCError> {
+        Self::new_with_http_version(base_uri, options, false)
+    }
+
+    /// Creates a client that uses HTTP/1 instead of HTTP/2 prior knowledge.
+    pub fn new_http1_only(base_uri: &str, options: HttpRPCClientOptions) -> Result<Self, RPCError> {
+        Self::new_with_http_version(base_uri, options, true)
+    }
+
+    fn new_with_http_version(
+        base_uri: &str,
+        options: HttpRPCClientOptions,
+        http1_only: bool,
+    ) -> Result<Self, RPCError> {
         let uri = base_uri
             .parse::<Url>()
             .map_err(|e| RPCError::UrlParsing(base_uri.to_string(), e.to_string()))?;
@@ -1314,9 +1328,12 @@ impl HttpRPCClient {
             headers.insert(header::HeaderName::from_static(CLIENT_METADATA_HEADER), value);
         }
 
-        let mut client_builder = ClientBuilder::new()
-            .default_headers(headers)
-            .http2_prior_knowledge();
+        let client_builder = ClientBuilder::new().default_headers(headers);
+        let mut client_builder = if http1_only {
+            client_builder.http1_only()
+        } else {
+            client_builder.http2_prior_knowledge()
+        };
 
         // When compression is disabled, turn off all automatic compression
         if !options.compression {
@@ -1991,6 +2008,10 @@ mod tests {
 
     use mockito::Server;
     use rstest::rstest;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use tycho_common::models::blockchain::AddressStorageLocation;
 
     use super::*;
@@ -2054,6 +2075,84 @@ mod tests {
             }
         }
         "#;
+
+    async fn start_http1_only_server() -> (String, tokio::task::JoinHandle<[u8; 24]>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind HTTP/1.1 test server");
+        let address = listener
+            .local_addr()
+            .expect("get HTTP/1.1 test server address");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept test connection");
+            let mut prefix = [0_u8; 24];
+            stream
+                .read_exact(&mut prefix)
+                .await
+                .expect("read request prefix");
+
+            if prefix.starts_with(b"POST ") {
+                let body =
+                    r#"{"protocol_systems":[],"pagination":{"page":0,"page_size":20,"total":0}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write HTTP/1.1 response");
+            }
+
+            prefix
+        });
+
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_default_cleartext_client_rejects_http1_only_server() {
+        let (url, request) = start_http1_only_server().await;
+        let client = HttpRPCClient::new(&url, HttpRPCClientOptions::default())
+            .expect("create default client")
+            .with_test_backoff_policy();
+
+        let result = client
+            .get_protocol_systems(ProtocolSystemsParams::new(Chain::Ethereum))
+            .await;
+
+        assert!(result.is_err(), "default cleartext client must retain h2c prior knowledge");
+        assert_eq!(
+            request
+                .await
+                .expect("HTTP/1.1 test server task"),
+            *b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http1_only_client_works_with_http1_only_server() {
+        let (url, request) = start_http1_only_server().await;
+        let client = HttpRPCClient::new_http1_only(&url, HttpRPCClientOptions::default())
+            .expect("create HTTP/1-only client");
+
+        let result = client
+            .get_protocol_systems(ProtocolSystemsParams::new(Chain::Ethereum))
+            .await;
+
+        assert!(result.is_ok(), "HTTP/1-only client must support an HTTP/1.1-only service");
+        assert!(
+            request
+                .await
+                .expect("HTTP/1.1 test server task")
+                .starts_with(b"POST "),
+            "HTTP/1-only client must send an HTTP/1.1 request"
+        );
+    }
 
     #[rstest]
     #[case::string_input(vec![
