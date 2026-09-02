@@ -1254,7 +1254,9 @@ impl ProtocolSim for MockProtocolSim {
     }
 
     fn typetag_name(&self) -> &'static str {
-        unreachable!()
+        // typetag asks for the tag name before running Serialize. Return one so that
+        // serializing a boxed mock fails with Serialize's error instead of panicking.
+        "MockProtocolSim"
     }
 
     fn typetag_deserialize(&self) {
