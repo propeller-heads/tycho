@@ -126,6 +126,138 @@ fn check_solver_domain(x: &[U256; 3], d: U256, i: usize) -> Option<()> {
     Some(())
 }
 
+/// EVM `unsafe_div` semantics: division by zero yields zero instead of reverting.
+fn unsafe_div(a: U256, b: U256) -> U256 {
+    if b.is_zero() {
+        U256::ZERO
+    } else {
+        a / b
+    }
+}
+
+/// Vyper `_sort`: three balances in descending order.
+fn sort_3_desc(unsorted_x: [U256; 3]) -> [U256; 3] {
+    let mut x = unsorted_x;
+    x.sort_unstable_by(|a, b| b.cmp(a));
+    x
+}
+
+/// Vyper `_geometric_mean` for three sorted balances (1e18-scaled), via `cbrt`.
+/// Returns `None` where the deployed contract would revert on overflow.
+fn geometric_mean_3(x: [U256; 3]) -> Option<U256> {
+    let prod = x[0].checked_mul(x[1])? / WAD;
+    let prod = prod.checked_mul(x[2])? / WAD;
+    if prod.is_zero() {
+        return Some(U256::ZERO);
+    }
+    Some(cbrt(prod))
+}
+
+/// Invariant solver ported from the deployed TriCrypto-NG MATH contract
+/// (`CurveTricryptoMathOptimized.vy` v2.0.0, mainnet `0xcBFf3004a20dBfE2731543AA38599A526e0fD6eE`),
+/// `newton_D` with `K0_prev = 0` (the only form the pool and views contracts use for
+/// ramp-time D recomputation).
+///
+/// Wei-exact transcription: Vyper `unsafe_*` operations map to wrapping arithmetic (with
+/// division-by-zero yielding zero), checked Vyper operations map to `checked_*` returning
+/// `None` where the contract would revert, and the convergence bound is the contract's
+/// `diff * 10**14 < max(10**16, D)`.
+pub fn newton_d_3(ann: U256, gamma: U256, x_unsorted: [U256; 3]) -> Option<U256> {
+    let p = |exp: u32| -> U256 { U256::from(10u64).pow(U256::from(exp)) };
+    let n = U256::from(3u64);
+    let x = sort_3_desc(x_unsorted);
+    // assert x[0] < max_value(uint256) / 10**18 * N_COINS**N_COINS  # dev: out of limits
+    if x[0] >= U256::MAX / WAD * U256::from(27u64) {
+        return None;
+    }
+    // assert x[0] > 0  # dev: empty pool
+    if x[0].is_zero() {
+        return None;
+    }
+    let s = x[0]
+        .wrapping_add(x[1])
+        .wrapping_add(x[2]);
+    let mut d = n.wrapping_mul(geometric_mean_3(x)?);
+    for _ in 0..MAX_ITERATIONS {
+        let d_prev = d;
+        // K0 = 10**18 * x[0] * N / D * x[1] * N / D * x[2] * N / D (all unsafe math)
+        let k0 = unsafe_div(
+            unsafe_div(
+                unsafe_div(WAD.wrapping_mul(x[0]).wrapping_mul(n), d)
+                    .wrapping_mul(x[1])
+                    .wrapping_mul(n),
+                d,
+            )
+            .wrapping_mul(x[2])
+            .wrapping_mul(n),
+            d,
+        );
+        let _g1k0 = {
+            let g = gamma.wrapping_add(WAD);
+            if g > k0 {
+                g.wrapping_sub(k0)
+                    .wrapping_add(U256::from(1))
+            } else {
+                k0.wrapping_sub(g)
+                    .wrapping_add(U256::from(1))
+            }
+        };
+        // mul1 = 10**18 * D / gamma * _g1k0 / gamma * _g1k0 * A_MULTIPLIER / ANN
+        let mul1 = unsafe_div(
+            unsafe_div(unsafe_div(WAD.wrapping_mul(d), gamma).wrapping_mul(_g1k0), gamma)
+                .wrapping_mul(_g1k0)
+                .wrapping_mul(A_MULTIPLIER),
+            ann,
+        );
+        // mul2 = (2 * 10**18) * N_COINS * K0 / _g1k0
+        let mul2 = unsafe_div(
+            U256::from(2u64)
+                .wrapping_mul(WAD)
+                .wrapping_mul(n)
+                .wrapping_mul(k0),
+            _g1k0,
+        );
+        // neg_fprime = (S + S * mul2 / 10**18) + mul1 * N_COINS / K0 - mul2 * D / 10**18
+        let neg_fprime = s
+            .wrapping_add(unsafe_div(s.wrapping_mul(mul2), WAD))
+            .wrapping_add(unsafe_div(mul1.wrapping_mul(n), k0))
+            .wrapping_sub(unsafe_div(mul2.wrapping_mul(d), WAD));
+        // D_plus = D * (neg_fprime + S) / neg_fprime  (outer mul is checked in Vyper)
+        let d_plus = unsafe_div(d.checked_mul(neg_fprime.wrapping_add(s))?, neg_fprime);
+        // D_minus = D * D / neg_fprime
+        let mut d_minus = unsafe_div(d.checked_mul(d)?, neg_fprime);
+        // The += / -= adjustments and the `D * ...` products are checked in Vyper.
+        let adj = unsafe_div(
+            d.checked_mul(unsafe_div(mul1, neg_fprime))?
+                .wrapping_div(WAD)
+                .wrapping_mul(if WAD > k0 { WAD - k0 } else { k0 - WAD }),
+            k0,
+        );
+        if WAD > k0 {
+            d_minus = d_minus.checked_add(adj)?;
+        } else {
+            d_minus = d_minus.checked_sub(adj)?;
+        }
+        d = if d_plus > d_minus {
+            d_plus.wrapping_sub(d_minus)
+        } else {
+            d_minus.wrapping_sub(d_plus) / U256::from(2)
+        };
+        let diff = if d > d_prev { d - d_prev } else { d_prev - d };
+        if diff.wrapping_mul(p(14)) < d.max(p(16)) {
+            // Final domain guard mirrors `assert frac >= 10**16 - 1 and frac < 10**20 + 1`.
+            for x_i in x {
+                let frac = unsafe_div(x_i.wrapping_mul(WAD), d);
+                if frac < p(16) - U256::from(1) || frac >= p(20) + U256::from(1) {
+                    return None;
+                }
+            }
+            return Some(d);
+        }
+    }
+    None
+}
+
 pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Option<U256> {
     if j >= 3 {
         return None;
@@ -338,6 +470,46 @@ mod tests {
         let x = [balance, balance, balance];
         let d = U256::from(30_000u64) * wad;
         (ann, gamma, x, d)
+    }
+
+    /// Wei-exact against the deployed v2.0.0 MATH contract
+    /// (`0xcBFf3004a20dBfE2731543AA38599A526e0fD6eE.newton_D(A, gamma, xp, 0)` via `eth_call`).
+    /// First case is TricryptoUSDT (`0xf5f5b976…`) at block 25708548, mid A/gamma ramp — the
+    /// exact state whose stored `D()` (11488973604915154442528465) had gone stale.
+    #[test]
+    fn newton_d_3_matches_deployed_math() {
+        let u = |s: &str| s.parse::<U256>().unwrap();
+        let d = newton_d_3(
+            U256::from(357827u64),
+            U256::from(130_900_344_682_889u64),
+            [
+                u("3990103228866000000000000"),
+                u("3852702800372147876026991"),
+                u("3651547413737580194425789"),
+            ],
+        );
+        assert_eq!(d, Some(u("11488947540905734661415623")));
+        let d = newton_d_3(
+            U256::from(1707629u64),
+            U256::from(11_809_167_828_997u64),
+            [
+                u("3000000000000000000000000"),
+                u("2400000000000000000000000"),
+                u("2600000000000000000000000"),
+            ],
+        );
+        assert_eq!(d, Some(u("7966893883621358300290061")));
+    }
+
+    #[test]
+    fn newton_d_3_rejects_out_of_domain_balances() {
+        let (_, gamma, ..) = realistic_params();
+        let ann = U256::from(1707629u64);
+        assert!(newton_d_3(ann, gamma, [U256::ZERO, U256::ZERO, U256::ZERO]).is_none());
+        // Wildly lopsided balances fail the final `Unsafe values x[i]` guard.
+        let wad = WAD;
+        let x = [U256::from(1u64) * wad, U256::from(10u64).pow(U256::from(40u64)), wad];
+        assert!(newton_d_3(ann, gamma, x).is_none());
     }
 
     #[test]

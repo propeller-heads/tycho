@@ -3,8 +3,34 @@
 use alloy_primitives::U256;
 
 use crate::evm::protocol::curve::math::core::tricrypto_ng::{
-    crypto_fee, get_y_3_ng, FEE_DENOMINATOR, WAD,
+    crypto_fee, get_y_3_ng, newton_d_3, FEE_DENOMINATOR, WAD,
 };
+
+/// Recompute the invariant D from the current balances, as the deployed views contract does
+/// while an A/gamma ramp is active (`CurveCryptoViews3Optimized._calc_D_ramp`):
+/// `xp` is built exactly like [`get_amount_out`]'s (without any swap input), then
+/// `newton_D(A, gamma, xp, 0)`.
+pub fn recompute_d(
+    balances: &[U256; 3],
+    precisions: &[U256; 3],
+    price_scale: &[U256; 2],
+    ann: U256,
+    gamma: U256,
+) -> Option<U256> {
+    let wad = U256::from(WAD);
+    let xp: [U256; 3] = [
+        balances[0].checked_mul(precisions[0])?,
+        balances[1]
+            .checked_mul(price_scale[0])?
+            .checked_mul(precisions[1])? /
+            wad,
+        balances[2]
+            .checked_mul(price_scale[1])?
+            .checked_mul(precisions[2])? /
+            wad,
+    ];
+    newton_d_3(ann, gamma, xp)
+}
 
 pub fn get_amount_out(
     balances: &[U256; 3],

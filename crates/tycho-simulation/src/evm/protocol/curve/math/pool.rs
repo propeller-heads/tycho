@@ -860,6 +860,32 @@ impl Pool {
         }
     }
 
+    /// Recompute the invariant D from the current balances with the variant's own `newton_D`,
+    /// as the deployed contracts do while an A/gamma ramp is active (the stored `D` is stale
+    /// then). Returns the recomputed D for the CryptoSwap variants whose on-chain `get_dy`
+    /// performs this recomputation, and `None` for:
+    /// - all StableSwap variants (D is never stored — it is recomputed on every quote);
+    /// - `TriCryptoV1`, whose deployed views contract (`0x40745803…`, used by `get_dy`) always
+    ///   reads the stored `D()` even during a ramp;
+    /// - inputs on which the on-chain `newton_D` would revert.
+    pub fn recompute_d(&self) -> Option<U256> {
+        match self {
+            Pool::TwoCryptoV1 { balances, precisions, price_scale, ann, gamma, .. } => {
+                swap::twocrypto_v1::recompute_d(balances, precisions, *price_scale, *ann, *gamma)
+            }
+            Pool::TwoCryptoNG { balances, precisions, price_scale, ann, gamma, .. } => {
+                swap::twocrypto_ng::recompute_d(balances, precisions, *price_scale, *ann, *gamma)
+            }
+            Pool::TwoCryptoStable { balances, precisions, price_scale, ann, .. } => {
+                swap::twocrypto_stable::recompute_d(balances, precisions, *price_scale, *ann)
+            }
+            Pool::TriCryptoNG { balances, precisions, price_scale, ann, gamma, .. } => {
+                swap::tricrypto_ng::recompute_d(balances, precisions, price_scale, *ann, *gamma)
+            }
+            _ => None,
+        }
+    }
+
     /// Set balance for coin at `index`. **Per-block update.**
     pub fn set_balance(&mut self, index: usize, value: U256) -> Result<(), PoolError> {
         let bal = match self {

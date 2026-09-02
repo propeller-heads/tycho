@@ -6,7 +6,7 @@
 
 use alloy_primitives::U256;
 
-use crate::evm::protocol::curve::math::core::twocrypto_stable::get_y;
+use crate::evm::protocol::curve::math::core::twocrypto_stable::{get_d, get_y};
 
 pub const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 pub const FEE_DENOMINATOR: U256 = U256::from_limbs([10_000_000_000, 0, 0, 0]);
@@ -33,6 +33,31 @@ fn crypto_fee(xp: &[U256], mid_fee: U256, out_fee: U256, fee_gamma: U256) -> Opt
     let f =
         if fee_gamma > U256::ZERO { fee_gamma * k / (fee_gamma * k / wad + wad - k) } else { k };
     Some((mid_fee * f + out_fee * (wad - f)) / wad)
+}
+
+/// Recompute the invariant D from the current balances, as the deployed views contract does
+/// while an A ramp is active. The pool template is TwoCrypto-NG, so the ramp branch calls
+/// `MATH.newton_D` — here the StableswapMath flavour (`get_d`), guarded by its `!balance`
+/// assert (`xp[0] > 0 and xp[1] > 0 and max/min < 10_000`).
+pub fn recompute_d(
+    balances: &[U256; 2],
+    precisions: &[U256; 2],
+    price_scale: U256,
+    ann: U256,
+) -> Option<U256> {
+    let wad = WAD;
+    let price_scale_local = price_scale.checked_mul(precisions[1])?;
+    let xp: [U256; 2] = [
+        balances[0].checked_mul(precisions[0])?,
+        balances[1].checked_mul(price_scale_local)? / wad,
+    ];
+    if xp[0].is_zero() ||
+        xp[1].is_zero() ||
+        xp[0].max(xp[1]) / xp[0].min(xp[1]) >= U256::from(10_000u64)
+    {
+        return None;
+    }
+    get_d(&xp, ann)
 }
 
 pub fn get_amount_out(

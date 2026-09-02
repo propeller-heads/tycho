@@ -85,6 +85,122 @@ pub fn newton_y_2(
     None
 }
 
+/// Vyper `geometric_mean(x, False)` from the legacy 2-coin CryptoSwap: Newton iteration on
+/// `D = (D + x[0] * x[1] / D) / 2` starting from `x[0]` (caller passes descending-sorted x).
+fn geometric_mean_2(x: [U256; 2]) -> Option<U256> {
+    let mut d = x[0];
+    for _ in 0..MAX_ITERATIONS {
+        let d_prev = d;
+        d = d
+            .checked_add(x[0].checked_mul(x[1])?.checked_div(d)?)?
+            .checked_div(U256::from(2))?;
+        let diff = if d > d_prev { d - d_prev } else { d_prev - d };
+        if diff <= U256::from(1) || diff.checked_mul(WAD)? < d {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Invariant solver ported from the deployed legacy 2-coin CryptoSwap
+/// (`newton_D` in the CRV/ETH pool `0x8301AE4fc9c624d1D396cbDAa1ed877821D7C511`,
+/// `CurveCryptoSwap2ETH.vy` flavour). The ETH/non-ETH flavour split affects only `newton_y`'s
+/// `mul2` grouping; `newton_D` is shared, and every in-scope pool uses the ETH flavour anyway
+/// (see `adapter::detect_eth_variant`).
+///
+/// The legacy source uses checked Vyper arithmetic throughout, so every operation maps to
+/// `checked_*` returning `None` where the contract would revert. Unlike the NG solver, the
+/// initial guess is `N_COINS * geometric_mean(x)` via Newton square root, not `isqrt` — the
+/// two can stop on different iterates, so they are ported separately.
+pub fn newton_d_2_v1(ann: U256, gamma: U256, x_unsorted: [U256; 2]) -> Option<U256> {
+    let p = |exp: u32| -> U256 { U256::from(10u64).pow(U256::from(exp)) };
+    let n = U256::from(2u64);
+    // assert ANN > MIN_A - 1 and ANN < MAX_A + 1; assert gamma in [MIN_GAMMA, MAX_GAMMA]
+    let (min_a, max_a) = (U256::from(4_000u64), U256::from(4_000_000_000u64));
+    let (min_gamma, max_gamma) = (p(10), U256::from(2u64) * p(16));
+    if ann < min_a || ann > max_a || gamma < min_gamma || gamma > max_gamma {
+        return None;
+    }
+    let x = if x_unsorted[0] < x_unsorted[1] { [x_unsorted[1], x_unsorted[0]] } else { x_unsorted };
+    // assert x[0] > 10**9 - 1 and x[0] < 10**15 * 10**18 + 1  # dev: unsafe values x[0]
+    if x[0] < p(9) || x[0] > p(15) * WAD {
+        return None;
+    }
+    // assert x[1] * 10**18 / x[0] > 10**14 - 1  # dev: unsafe values x[i] (input)
+    if x[1].checked_mul(WAD)? / x[0] < p(14) {
+        return None;
+    }
+    let mut d = n * geometric_mean_2(x)?;
+    let s = x[0] + x[1];
+    for _ in 0..MAX_ITERATIONS {
+        let d_prev = d;
+        // K0 = (10**18 * N_COINS**2) * x[0] / D * x[1] / D
+        let k0 = p(18)
+            .checked_mul(U256::from(4u64))?
+            .checked_mul(x[0])?
+            .checked_div(d)?
+            .checked_mul(x[1])?
+            .checked_div(d)?;
+        let _g1k0 = {
+            let g = gamma + WAD;
+            if g > k0 {
+                g - k0 + U256::from(1)
+            } else {
+                k0 - g + U256::from(1)
+            }
+        };
+        // mul1 = 10**18 * D / gamma * _g1k0 / gamma * _g1k0 * A_MULTIPLIER / ANN
+        let mul1 = WAD
+            .checked_mul(d)?
+            .checked_div(gamma)?
+            .checked_mul(_g1k0)?
+            .checked_div(gamma)?
+            .checked_mul(_g1k0)?
+            .checked_mul(A_MULTIPLIER)?
+            .checked_div(ann)?;
+        // mul2 = (2 * 10**18) * N_COINS * K0 / _g1k0
+        let mul2 = p(18)
+            .checked_mul(U256::from(4u64))?
+            .checked_mul(k0)?
+            .checked_div(_g1k0)?;
+        // neg_fprime = (S + S * mul2 / 10**18) + mul1 * N_COINS / K0 - mul2 * D / 10**18
+        let neg_fprime = s
+            .checked_add(s.checked_mul(mul2)?.checked_div(WAD)?)?
+            .checked_add(mul1.checked_mul(n)?.checked_div(k0)?)?
+            .checked_sub(mul2.checked_mul(d)?.checked_div(WAD)?)?;
+        // D_plus = D * (neg_fprime + S) / neg_fprime; D_minus = D * D / neg_fprime
+        let d_plus = d
+            .checked_mul(neg_fprime.checked_add(s)?)?
+            .checked_div(neg_fprime)?;
+        let mut d_minus = d
+            .checked_mul(d)?
+            .checked_div(neg_fprime)?;
+        let adj = d
+            .checked_mul(mul1.checked_div(neg_fprime)?)?
+            .checked_div(WAD)?
+            .checked_mul(if WAD > k0 { WAD - k0 } else { k0 - WAD })?
+            .checked_div(k0)?;
+        if WAD > k0 {
+            d_minus = d_minus.checked_add(adj)?;
+        } else {
+            d_minus = d_minus.checked_sub(adj)?;
+        }
+        d = if d_plus > d_minus { d_plus - d_minus } else { (d_minus - d_plus) / n };
+        let diff = if d > d_prev { d - d_prev } else { d_prev - d };
+        if diff.checked_mul(p(14))? < d.max(p(16)) {
+            // Final domain guard mirrors `assert frac > 10**16 - 1 and frac < 10**20 + 1`.
+            for x_i in x {
+                let frac = x_i.checked_mul(WAD)?.checked_div(d)?;
+                if frac < p(16) || frac >= p(20) + U256::from(1) {
+                    return None;
+                }
+            }
+            return Some(d);
+        }
+    }
+    None
+}
+
 pub fn crypto_fee(xp: &[U256], mid_fee: U256, out_fee: U256, fee_gamma: U256) -> Option<U256> {
     let s: U256 = xp
         .iter()
@@ -122,6 +238,39 @@ mod tests {
         let x1 = U256::from(5000u64) * wad; // price_scale-normalized
         let d = U256::from(10000u64) * wad;
         (ann, gamma, [x0, x1], d)
+    }
+
+    /// The legacy `newton_D` is `@internal`, so there is no `eth_call` oracle for it; it is
+    /// validated end-to-end against on-chain `get_dy` on ever-ramped pools (see the ignored
+    /// differential tests in `curve::vm`). These unit tests pin the solver's basic behaviour.
+    #[test]
+    fn newton_d_2_v1_converges_on_balanced_pool() {
+        let wad = WAD;
+        let ann = U256::from(400_000u64);
+        let gamma = U256::from(145_000_000_000_000u64);
+        let bal = U256::from(5000u64) * wad;
+        let d = newton_d_2_v1(ann, gamma, [bal, bal]).expect("converge");
+        let expected = U256::from(10_000u64) * wad;
+        let diff = if d > expected { d - expected } else { expected - d };
+        // Balanced pool: D converges to the sum of balances within the solver tolerance.
+        assert!(diff * U256::from(10u64).pow(U256::from(14u64)) < expected, "D={d}");
+    }
+
+    #[test]
+    fn newton_d_2_v1_rejects_out_of_domain_inputs() {
+        let wad = WAD;
+        let x = [U256::from(5000u64) * wad, U256::from(5000u64) * wad];
+        let gamma = U256::from(145_000_000_000_000u64);
+        let ann = U256::from(400_000u64);
+        // ANN and gamma outside the deployed contract's asserted bounds (legacy MAX_A is 4e9).
+        assert!(newton_d_2_v1(U256::from(3_999u64), gamma, x).is_none());
+        assert!(newton_d_2_v1(U256::from(4_000_000_001u64), gamma, x).is_none());
+        assert!(newton_d_2_v1(ann, U256::from(10u64).pow(U256::from(9u64)), x).is_none());
+        // x[0] below 10**9 and balance ratio below 10**14 / 10**18.
+        assert!(newton_d_2_v1(ann, gamma, [U256::from(10u64), U256::from(10u64)]).is_none());
+        assert!(
+            newton_d_2_v1(ann, gamma, [x[0], U256::from(10u64).pow(U256::from(9u64))]).is_none()
+        );
     }
 
     #[test]

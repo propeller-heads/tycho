@@ -3,8 +3,30 @@
 use alloy_primitives::U256;
 
 use crate::evm::protocol::curve::math::core::twocrypto_v1::{
-    crypto_fee, newton_y_2, FEE_DENOMINATOR, WAD,
+    crypto_fee, newton_d_2_v1, newton_y_2, FEE_DENOMINATOR, WAD,
 };
+
+/// Recompute the invariant D from the current balances, as the deployed legacy pool's `get_dy`
+/// does whenever `future_A_gamma_time > 0`:
+/// `D = self.newton_D(A, gamma, self.xp())` with
+/// `xp() = [balances[0] * PRECISIONS[0], balances[1] * PRECISIONS[1] * price_scale / PRECISION]`.
+pub fn recompute_d(
+    balances: &[U256; 2],
+    precisions: &[U256; 2],
+    price_scale: U256,
+    ann: U256,
+    gamma: U256,
+) -> Option<U256> {
+    let wad = U256::from(WAD);
+    let xp: [U256; 2] = [
+        balances[0].checked_mul(precisions[0])?,
+        balances[1]
+            .checked_mul(precisions[1])?
+            .checked_mul(price_scale)? /
+            wad,
+    ];
+    newton_d_2_v1(ann, gamma, xp)
+}
 
 pub fn get_amount_out(
     balances: &[U256; 2],
