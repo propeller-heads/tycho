@@ -149,7 +149,14 @@ impl VelodromeSlipstreamsState {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::Empty => {
+                        return Err(SimulationError::RecoverableError("No liquidity".to_string()))
+                    }
+                    TickListErrorKind::NotFound |
+                    TickListErrorKind::BelowSmallest |
+                    TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -498,6 +505,52 @@ mod tests {
             MIN_TICK,
         },
     };
+
+    #[test]
+    fn test_empty_tick_list_with_liquidity_errors_instead_of_panicking() {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let pool = VelodromeSlipstreamsState::new(
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            3000,
+            0,
+            1,
+            0,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+        let amount =
+            I256::checked_from_sign_and_abs(Sign::Positive, U256::from(100_000_000_000_000_000u64))
+                .unwrap();
+
+        let result = pool.swap(true, amount, None);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_limits_on_empty_tick_list_returns_zero() {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
+        let pool = VelodromeSlipstreamsState::new(
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            3000,
+            0,
+            1,
+            0,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+
+        let limits = pool
+            .get_limits(Bytes::from([0_u8; 20]), Bytes::from([1_u8; 20]))
+            .expect("limits of a pool without ticks are computable");
+
+        assert_eq!(limits, (BigUint::zero(), BigUint::zero()));
+    }
 
     fn create_basic_test_pool() -> VelodromeSlipstreamsState {
         let sqrt_price = get_sqrt_ratio_at_tick(0).expect("Failed to calculate sqrt price");
