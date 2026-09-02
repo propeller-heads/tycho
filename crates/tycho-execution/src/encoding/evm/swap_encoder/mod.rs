@@ -1,4 +1,5 @@
 mod aerodrome_v1;
+mod aqua0;
 mod angstrom;
 mod balancer_v2;
 mod balancer_v3;

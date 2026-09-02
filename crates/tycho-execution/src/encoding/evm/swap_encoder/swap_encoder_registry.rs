@@ -10,7 +10,8 @@ use crate::encoding::{
             PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
         },
         swap_encoder::{
-            aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
+            aerodrome_v1::AerodromeV1SwapEncoder, aqua0::Aqua0SwapEncoder,
+            balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, fermiswap::FermiSwapEncoder,
@@ -140,6 +141,9 @@ impl SwapEncoderRegistry {
             }
             "uniswap_v4" => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "rfq:aqua0" => {
+                Ok(Box::new(Aqua0SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))

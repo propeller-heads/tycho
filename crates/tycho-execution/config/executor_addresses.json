@@ -33,6 +33,7 @@
     "uniswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
     "pancakeswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
     "uniswap_v4": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
+    "rfq:aqua0": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
     "rfq:bebop": "0xF35839C54A33FE88867ACB3deac9dB3AdB9bFA78",
     "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
     "native_wrapper": "0x68AF9cDcc2e177e9D75c60f132b8DC52EAF1adBf",
@@ -53,6 +54,7 @@
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
+    "rfq:aqua0": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
     "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
     "rfq:metric": "0xCe5af637bFfe0C34A37f34471Ab6a3E90adf8Ffb"
   },
@@ -71,6 +73,7 @@
     "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "ramses_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
+    "rfq:aqua0": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
     "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
     "rfq:metric": "0x746Cdaf8Ef08A9d023155Dddc95291Ab8C9A7936"
   },
@@ -84,6 +87,7 @@
     "uniswap_v2": "0x81aFB56E21AB0744330ACf400E2A65e6B64D495E",
     "uniswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
+    "rfq:aqua0": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
     "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F"
   }
 }
