@@ -52,6 +52,7 @@
     "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
+    "ramses_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
     "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
     "rfq:metric": "0xCe5af637bFfe0C34A37f34471Ab6a3E90adf8Ffb"
