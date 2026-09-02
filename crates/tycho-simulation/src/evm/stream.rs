@@ -584,18 +584,16 @@ impl ProtocolStreamBuilder {
     /// `"uniswap_v3"`). Use [`build_with_pending`](Self::build_with_pending) to obtain both
     /// the confirmed stream and the pending processor.
     ///
-    /// Returns an error if `extractor` names a VM protocol (prefix `"vm:"`), which requires
-    /// `update_engine()` and cannot be simulated natively.
+    /// The exchange must decode into a state whose `delta_transition` can rebuild it from the
+    /// `state_deltas` the indexer produces, because that is all
+    /// [`apply_deltas_ephemeral`](crate::evm::decoder::TychoStreamDecoder::apply_deltas_ephemeral)
+    /// applies. Native and hybrid states qualify; the generic VM adapter does not, and an indexer
+    /// registered for one would have its deltas ignored without an error.
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,
         indexer: Box<dyn TxDeltaIndexer>,
     ) -> Result<Self, StreamError> {
-        if extractor.starts_with("vm:") {
-            return Err(StreamError::SetUpError(format!(
-                "extractor '{extractor}' is a VM protocol; TxDeltaIndexer only supports native protocols"
-            )));
-        }
         self.pending_indexers
             .insert(extractor.to_string(), indexer);
         Ok(self)
