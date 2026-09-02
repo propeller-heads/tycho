@@ -11,7 +11,8 @@ use crate::encoding::{
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
-            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
+            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
+            biconomy_propamm::BiconomySwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
@@ -170,6 +171,9 @@ impl SwapEncoderRegistry {
             }
             "rfq:metric" => {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "rfq:biconomy_propamm" => {
+                Ok(Box::new(BiconomySwapEncoder::new(executor_address, self.chain, config)?))
             }
             "fluid_v1" => {
                 Ok(Box::new(FluidV1SwapEncoder::new(executor_address, self.chain, config)?))
