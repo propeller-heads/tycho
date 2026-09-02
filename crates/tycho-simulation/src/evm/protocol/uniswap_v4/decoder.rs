@@ -9,7 +9,10 @@ use super::state::UniswapV4State;
 use crate::{
     evm::protocol::{
         uniswap_v4::{
-            hooks::hook_handler_creator::{instantiate_hook_handler, HookCreationParams},
+            hooks::{
+                hook_handler_creator::{instantiate_hook_handler, HookCreationParams},
+                utils::{has_permission, HookOptions},
+            },
             state::UniswapV4Fees,
         },
         utils::uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
@@ -99,7 +102,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("tick".to_string()))?,
         );
 
-        let ticks: Result<Vec<_>, _> = snapshot
+        let ticks: Vec<_> = snapshot
             .state
             .attributes
             .iter()
@@ -120,31 +123,45 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     None
                 }
             })
-            .collect();
+            .try_collect()?;
 
-        let hook_address = snapshot
+        let hook_bytes: [u8; 20] = snapshot
             .component
             .static_attributes
-            .get("hooks");
+            .get("hooks")
+            .ok_or_else(|| InvalidSnapshotError::MissingAttribute("hooks".to_string()))?
+            .as_ref()
+            .try_into()
+            .map_err(|_| {
+                InvalidSnapshotError::ValueError(
+                    "hooks attribute must be a 20-byte address".to_string(),
+                )
+            })?;
+        let hook_address = Address::from(hook_bytes);
 
-        let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
+        // A hook can reshape swaps or manage the pool's liquidity only if it exposes a
+        // before/after-swap permission — which also covers the *ReturnsDelta variants (v4 requires
+        // the base swap flag to be set for those) and any protocol-specific handler (e.g. Angstrom,
+        // Euler), since those hooks necessarily intercept swaps.
+        let hook_affects_swaps = has_permission(hook_address, HookOptions::BeforeSwap) ||
+            has_permission(hook_address, HookOptions::AfterSwap);
+
+        let ticks = if ticks.is_empty() {
+            // An empty tick set is legitimate when the pool holds no active liquidity (a
+            // freshly-created or fully-drained pool) or when a hook manages swaps/liquidity.
+            // Active liquidity with no tick data, on the other hand, is a malformed snapshot.
+            if hook_affects_swaps || liquidity == 0 {
+                Vec::new()
+            } else {
+                return Err(InvalidSnapshotError::MissingAttribute("tick_liquidities".to_string()));
+            }
+        } else {
+            ticks
                 .into_iter()
                 .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
-            _ => {
-                // there might be pools where the liquidity is managed by the hook
-                if hook_address.is_some() {
-                    Vec::new()
-                } else {
-                    return Err(InvalidSnapshotError::MissingAttribute(
-                        "tick_liquidities".to_string(),
-                    ));
-                }
-            }
+                .sorted_unstable_by_key(|t| t.index)
+                .collect()
         };
-
-        ticks.sort_by_key(|tick| tick.index);
 
         let mut state = UniswapV4State::new(liquidity, sqrt_price, fees, tick, tick_spacing, ticks)
             .map_err(|err| {
@@ -156,9 +173,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 InvalidSnapshotError::ValueError(err.to_string())
             })?;
 
-        if let Some(hook_address) = hook_address {
-            let hook_address = Address::from_slice(&hook_address.0);
-
+        if hook_affects_swaps {
             // Merge state attributes into static_attributes for hook creation
             let mut merged_attributes = snapshot
                 .component
@@ -178,7 +193,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
 
             let hook_handler = instantiate_hook_handler(&hook_address, hook_params)?;
             state.set_hook_handler(hook_handler);
-        };
+        }
 
         for tokens in snapshot
             .component
@@ -222,6 +237,7 @@ mod tests {
         let static_attributes: HashMap<String, Bytes> = HashMap::from([
             ("key_lp_fee".to_string(), Bytes::from(500_i32.to_be_bytes().to_vec())),
             ("tick_spacing".to_string(), Bytes::from(60_i32.to_be_bytes().to_vec())),
+            ("hooks".to_string(), Bytes::from(vec![0u8; 20])),
         ]);
 
         ProtocolComponent {
@@ -288,6 +304,123 @@ mod tests {
 
     #[tokio::test]
     #[rstest]
+    // The zero address (no-op hook) and any non-zero address without before/after-swap permission
+    // bits must NOT get a hook handler attached: the pool prices via the sqrt-price branch.
+    #[case::zero_address(vec![0u8; 20])]
+    #[case::non_zero_without_swap_permissions({
+        let mut a = vec![0u8; 20];
+        a[19] = 0x01; // low permission byte with BeforeSwap (bit 7) / AfterSwap (bit 6) clear
+        a
+    })]
+    async fn test_usv4_no_handler_for_permissionless_hook(#[case] hook_bytes: Vec<u8>) {
+        let mut component = usv4_component();
+        component
+            .static_attributes
+            .insert("hooks".to_string(), Bytes::from(hook_bytes));
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes: usv4_attributes(),
+                balances: HashMap::new(),
+            },
+            component,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .unwrap();
+
+        assert!(result.hook.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_usv4_tick_decode_error_propagates() {
+        // A malformed tick attribute must surface as a decoding (ValueError) error, not be
+        // masked as missing/empty tick liquidity.
+        let mut attributes = usv4_attributes();
+        attributes.insert(
+            "ticks/not_an_int/net_liquidity".to_string(),
+            Bytes::from(400_i128.to_be_bytes().to_vec()),
+        );
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot).await;
+        assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_usv4_malformed_hooks_length_errors() {
+        // A `hooks` attribute that is not a 20-byte address must error, not panic.
+        let mut component = usv4_component();
+        component
+            .static_attributes
+            .insert("hooks".to_string(), Bytes::from(vec![0u8; 19]));
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes: usv4_attributes(),
+                balances: HashMap::new(),
+            },
+            component,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot).await;
+        assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_usv4_empty_hookless_pool_decodes() {
+        // A hookless pool with zero active liquidity and no tick data is valid (e.g. a freshly
+        // created or fully-drained pool) and must decode as an empty pool, not be rejected.
+        let mut attributes = usv4_attributes();
+        attributes.insert("liquidity".to_string(), Bytes::from(0_u64.to_be_bytes().to_vec()));
+        attributes.remove("ticks/60/net_liquidity");
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_component(), // hooks = zero address
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .unwrap();
+
+        let expected = UniswapV4State::new(
+            0,
+            U256::from(79228162514264337593543950336_u128),
+            UniswapV4Fees::new(0, 0, 500),
+            300,
+            60,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    #[rstest]
     #[case::missing_liquidity("liquidity")]
     #[case::missing_sqrt_price("sqrt_price")]
     #[case::missing_tick("tick")]
@@ -295,6 +428,7 @@ mod tests {
     #[case::missing_fee("key_lp_fee")]
     #[case::missing_fee("protocol_fees/one2zero")]
     #[case::missing_fee("protocol_fees/zero2one")]
+    #[case::missing_hooks("hooks")]
     async fn test_usv4_try_from_invalid(#[case] missing_attribute: String) {
         // remove missing attribute
         let mut component = usv4_component();
@@ -313,6 +447,12 @@ mod tests {
             component
                 .static_attributes
                 .remove("key_lp_fee");
+        }
+
+        if missing_attribute == "hooks" {
+            component
+                .static_attributes
+                .remove("hooks");
         }
 
         let snapshot = ComponentWithState {
