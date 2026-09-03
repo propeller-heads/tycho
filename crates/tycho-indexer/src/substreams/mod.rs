@@ -85,7 +85,10 @@ impl SubstreamsEndpoint {
                 Ok(r)
             },
         )
-        .accept_compressed(tonic::codec::CompressionEncoding::Gzip);
+        .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+        // A seeded package emits every component and attribute of the protocol in its first
+        // block, which does not fit tonic's 4 MiB default.
+        .max_decoding_message_size(usize::MAX);
 
         let response_stream = client.blocks(request).await?;
         let block_stream = response_stream.into_inner();
