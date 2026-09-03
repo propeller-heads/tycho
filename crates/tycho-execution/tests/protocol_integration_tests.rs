@@ -75,6 +75,7 @@ fn test_single_encoding_strategy_ekubo() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -136,6 +137,7 @@ fn test_single_encoding_strategy_ekubo_erc20() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -199,6 +201,7 @@ fn test_single_encoding_strategy_ekubo_mev_resist() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -249,6 +252,7 @@ fn test_single_encoding_strategy_maverick() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -311,6 +315,7 @@ fn test_evm_single_encoding_strategy_usv4_eth_in() {
         Some(get_signer()),
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -379,6 +384,7 @@ fn test_evm_single_encoding_strategy_usv4_eth_out() {
         Some(get_signer()),
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -466,12 +472,13 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
 
     let expected_input = [
-        "ca931073", // selector (singleSwapPermit2)
+        "efdd6f26", // selector (singleSwapPermit2)
         "000000000000000000000000000000000000000000000000000000003b9aca00", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "0000000000000000000000006982508145454ce325ddbe47a25d4ec3d2311933", // token out
@@ -515,7 +522,7 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
     let hex_calldata = encode(&calldata);
 
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1672..], expected_swaps);
     write_calldata_to_file(
         "test_single_encoding_strategy_usv4_grouped_swap",
         hex_calldata.as_str(),
@@ -599,6 +606,7 @@ fn test_evm_single_encoding_strategy_usv4_and_hooks_grouped_swap() {
         Some(get_signer()),
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -688,6 +696,7 @@ fn test_single_encoding_strategy_ekubo_grouped_swap() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -755,6 +764,7 @@ fn test_single_encoding_strategy_curve() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -821,6 +831,7 @@ fn test_single_encoding_strategy_curve_st_eth() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -899,6 +910,7 @@ fn test_single_encoding_strategy_curve_protocol_will_debit_from_vault() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -953,6 +965,7 @@ fn test_single_encoding_strategy_balancer_v3() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1040,6 +1053,7 @@ fn test_single_encoding_strategy_bebop() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1126,6 +1140,7 @@ fn test_single_encoding_strategy_bebop_aggregate() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1207,6 +1222,7 @@ fn test_single_encoding_strategy_bebop_partial_fill() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1320,6 +1336,7 @@ fn test_single_encoding_strategy_hashflow() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1371,6 +1388,7 @@ fn test_single_encoding_strategy_fluid() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1435,6 +1453,7 @@ fn test_sequential_encoding_strategy_fluid() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1487,6 +1506,7 @@ fn test_single_encoding_strategy_rocketpool_deposit() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1545,6 +1565,7 @@ fn test_single_encoding_strategy_rocketpool_burn() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1596,6 +1617,7 @@ fn test_single_encoding_strategy_bopamm_weth_usdc() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1668,6 +1690,7 @@ fn test_single_encoding_strategy_ring_swap_v2() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1724,6 +1747,7 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1776,6 +1800,7 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1840,6 +1865,7 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1899,6 +1925,7 @@ fn test_single_encoding_strategy_slipstreams() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -1971,6 +1998,7 @@ fn test_sequential_encoding_strategy_slipstreams() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2021,6 +2049,7 @@ fn test_single_encoding_strategy_aerodrome_v1() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -2085,6 +2114,7 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2135,6 +2165,7 @@ fn test_single_encoding_strategy_erc4626() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -2199,6 +2230,7 @@ fn test_sequential_encoding_strategy_erc4626() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2261,6 +2293,7 @@ fn test_single_swap_with_univ4_angstrom() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2312,6 +2345,7 @@ fn test_single_encoding_strategy_weth_wrap() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2358,6 +2392,7 @@ fn test_single_encoding_strategy_weth_unwrap() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -2420,6 +2455,7 @@ fn test_single_encoding_strategy_ekubo_v3() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -2501,6 +2537,7 @@ fn test_single_ekubo_v3_grouped_swap() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2563,6 +2600,7 @@ fn test_sequential_encoding_strategy_etherfi_unwrap_weeth() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2624,6 +2662,7 @@ fn test_sequential_encoding_strategy_etherfi_wrap_eeth() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -2698,6 +2737,7 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token() {
         Some(get_signer()),
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .expect("calldata generation failed for TWIF fee token")
@@ -2776,6 +2816,7 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token_output() {
         Some(get_signer()),
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .expect("calldata generation failed for TWIF output fee token")
@@ -2906,6 +2947,7 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2973,6 +3015,7 @@ fn test_single_encoding_strategy_metric() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -3064,6 +3107,7 @@ fn test_evm_two_hop_usv4_twif_intermediary() {
         Some(get_signer()),
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .expect("calldata generation failed for grouped TWIF intermediary swap")
@@ -3209,6 +3253,7 @@ fn test_single_encoding_strategy_liquorice_settle() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3264,6 +3309,7 @@ fn test_single_encoding_strategy_uniswap_v3_arbitrum() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -3323,6 +3369,7 @@ fn test_single_encoding_strategy_uniswap_v3_polygon() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3380,6 +3427,7 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -3440,6 +3488,7 @@ fn test_single_encoding_strategy_sky() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3498,6 +3547,7 @@ fn test_sequential_encoding_strategy_sky() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()

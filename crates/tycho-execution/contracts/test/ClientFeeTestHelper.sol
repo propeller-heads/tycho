@@ -41,8 +41,8 @@ contract NonERC1271Wallet {}
 contract ClientFeeTestHelper is Test, Constants {
     bytes32 private constant _CLIENT_FEE_TYPEHASH = keccak256(
         "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
-        "uint256 maxClientContribution,uint256 deadline,"
-        "uint256 amountIn,address tokenIn,address tokenOut,"
+        "uint256 maxClientContribution,uint256 contributionNonce,"
+        "uint256 deadline,uint256 amountIn,address tokenIn,address tokenOut,"
         "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
 
@@ -101,7 +101,7 @@ contract ClientFeeTestHelper is Test, Constants {
                     "uint256 chainId,address verifyingContract)"
                 ),
                 keccak256("TychoRouter"),
-                keccak256("1"),
+                keccak256("2"),
                 chainId,
                 routerAddress
             )
@@ -112,6 +112,7 @@ contract ClientFeeTestHelper is Test, Constants {
                 params.clientFeeBps,
                 params.clientFeeReceiver,
                 params.maxClientContribution,
+                params.contributionNonce,
                 params.deadline,
                 amountIn,
                 tokenIn,
@@ -141,6 +142,7 @@ contract ClientFeeTestHelper is Test, Constants {
             clientFeeBps: 0,
             clientFeeReceiver: address(0),
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: 0,
             clientSignature: new bytes(0)
         });
@@ -149,10 +151,12 @@ contract ClientFeeTestHelper is Test, Constants {
     /**
      * @dev Builds and signs a ClientFeeParams struct using the given private key.
      *      The signer address is derived from the private key and used as clientFeeReceiver.
+     *      `contributionNonce` must be zero when `maxClientContribution` is zero.
      */
     function makeClientFeeParams(
         uint32 clientFeeBps,
         uint256 maxClientContribution,
+        uint256 contributionNonce,
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
@@ -168,6 +172,7 @@ contract ClientFeeTestHelper is Test, Constants {
             clientFeeBps: clientFeeBps,
             clientFeeReceiver: feeReceiver,
             maxClientContribution: maxClientContribution,
+            contributionNonce: contributionNonce,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });

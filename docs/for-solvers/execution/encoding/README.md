@@ -236,6 +236,7 @@ The `ClientFeeParams` struct is defined as:
 <tr><td><code>clientFeeBps</code></td><td>Client fee as a <code>uint32</code> in fee units, where <code>100_000_000</code> = 100% (see <a href="#fee-units">Fee units</a>). Set to <code>0</code> to take no fee</td></tr>
 <tr><td><code>clientFeeReceiver</code></td><td>Address that receives the client fee (credited to their vault balance)</td></tr>
 <tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr>
+<tr><td><code>contributionNonce</code></td><td>Single-use identifier for this authorization. The router commits at most one successful swap per <code>(clientFeeReceiver, contributionNonce)</code> pair and rejects a nonce it already consumed. Must be <code>0</code> when <code>maxClientContribution</code> is <code>0</code></td></tr>
 <tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr>
 <tr><td><code>clientSignature</code></td><td>EIP-712 signature over the fee fields <strong>and</strong> the full swap intent, signed by <code>clientFeeReceiver</code>: a 65-byte ECDSA signature when that address is an EOA, or an ERC-1271 signature of any length when it is a contract</td></tr>
 </tbody>
@@ -266,7 +267,7 @@ let params = ClientFeeParams::default().into_abi_params();
 
 // With a 1 BPS fee (10_000 fee units)
 let params = ClientFeeParams::new(receiver, signature, deadline, 10_000u32)
-    .with_max_client_contribution(max_contribution)
+    .with_max_client_contribution(max_contribution, contribution_nonce)
     .into_abi_params();
 ```
 
@@ -332,7 +333,7 @@ The EIP-712 domain is:
 EIP712Domain(string name, string version, uint256 chainId, address verifyingContract)
 ```
 
-with `name = "TychoRouter"`, `version = "1"`, and `verifyingContract` set to the TychoRouterV3 contract address.
+with `name = "TychoRouter"`, `version = "2"`, and `verifyingContract` set to the TychoRouterV3 contract address.
 
 The `clientFeeReceiver` can be an EOA or a contract. The router first recovers the signature with ECDSA and accepts it
 when it recovers to `clientFeeReceiver`. Otherwise it staticcalls
@@ -348,11 +349,48 @@ the contract's validation state changes, for example after an owner rotation.
 {% endhint %}
 
 {% hint style="warning" %}
-**Replay attack risk.** The signature contains no nonce. Once a signed `ClientFeeParams` appears on-chain, anyone who sees it can reuse it for a swap with identical input parameters — same `amountIn`, tokens, `expectedAmountOut`, `minAmountOut`, `receiver`, and encoded route — until `deadline` expires. If `maxClientContribution > 0`, the swap's `receiver` can repeatedly replay the transaction — each replay debits the client's vault balance by up to `maxClientContribution` — until the balance is exhausted or the deadline passes.
+**Fee-only signatures stay replayable.** When `maxClientContribution` is `0`, the router consumes no nonce. Anyone who
+sees the signed `ClientFeeParams` on-chain can reuse it for a swap with identical input parameters — same `amountIn`,
+tokens, `expectedAmountOut`, `minAmountOut`, `receiver`, and encoded route — until `deadline` expires. A replay charges
+the same client fee again and moves no client funds.
 
 To minimise exposure:
 * Set `deadline` as close to the current block timestamp as practical (e.g., a few minutes ahead).
 * Set `maxClientContribution` as low as the intended use case allows.
+{% endhint %}
+
+#### Contribution replay protection <a href="#contribution-replay-protection" id="contribution-replay-protection"></a>
+
+When `maxClientContribution > 0`, the router consumes `contributionNonce` on the first swap that succeeds with the
+authorization, whether or not that swap needed the contribution. A second swap carrying the same
+`(clientFeeReceiver, contributionNonce)` pair reverts with
+`TychoRouter__InvalidClientContributionNonce`. Failed, expired and invalidly signed swaps consume nothing.
+
+The router stores consumed nonces as a bitmap, 256 nonces per storage word:
+
+```solidity
+mapping(address client => mapping(uint248 wordPos => uint256 bitmap))
+    public clientContributionNonceBitmap;
+```
+
+A nonce maps to `wordPos = contributionNonce >> 8` and bit `uint8(contributionNonce)`. Nonces execute in any order, so
+concurrent quotes never block each other. Read the bitmap to find which of your nonces are already spent, and reuse the
+gaps left by expired quotes — filling a word costs about 5.4k gas per authorization, while opening a new word costs
+about 22.1k.
+
+To retire an unused authorization, the client calls:
+
+```solidity
+function invalidateClientContributionNonces(uint248 wordPos, uint256 mask) external
+```
+
+It sets every bit in `mask` for `msg.sender`, works while the router is paused, and can never clear a bit. An EOA calls
+it directly; a contract wallet calls it through its normal transaction mechanism.
+
+{% hint style="info" %}
+A nonce limits an authorization to one execution. It does not stop the taker from picking the moment to execute a quote
+that is still within its `deadline`, and it does not cap total exposure across many separately signed quotes. Keep short
+deadlines, per-quote caps and issuance limits.
 {% endhint %}
 
 <details>
@@ -385,6 +423,7 @@ fn sign_client_fee(
     client_fee_bps: u32,
     client_fee_receiver: Address,
     max_client_contribution: U256,
+    contribution_nonce: U256,
     deadline: U256,
     intent: &SwapIntent,
     signer: &PrivateKeySigner,
@@ -392,7 +431,7 @@ fn sign_client_fee(
     // Must match CLIENT_FEE_TYPEHASH in TychoRouterV3.sol
     let type_hash: B256 = keccak256(
         b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
-          uint256 maxClientContribution,uint256 deadline,\
+          uint256 maxClientContribution,uint256 contributionNonce,uint256 deadline,\
           uint256 amountIn,address tokenIn,address tokenOut,\
           uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
     );
@@ -406,7 +445,7 @@ fn sign_client_fee(
         (
             domain_type_hash,
             keccak256(b"TychoRouter"),
-            keccak256(b"1"),
+            keccak256(b"2"),
             U256::from(chain_id),
             router_address,
         )
@@ -420,6 +459,7 @@ fn sign_client_fee(
             U256::from(client_fee_bps),
             client_fee_receiver,
             max_client_contribution,
+            contribution_nonce,
             deadline,
             intent.amount_in,
             intent.token_in,

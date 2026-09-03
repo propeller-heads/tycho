@@ -238,6 +238,7 @@ struct ClientFeeParams {
     uint16 clientFeeBps;
     address clientFeeReceiver;
     uint256 maxClientContribution;
+    uint256 contributionNonce;
     uint256 deadline;
     bytes clientSignature;
 }

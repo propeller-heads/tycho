@@ -89,6 +89,8 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// - `max_client_contribution`: Maximum amount the client is willing to contribute from their vault
 ///   to top up the output if it falls below the solution's `min_amount_out`. If the shortfall
 ///   exceeds this value, the tx reverts.
+/// - `contribution_nonce`: Single-use identifier for the contribution authorization. The router
+///   rejects a nonce it already consumed. Must be zero when `max_client_contribution` is zero.
 ///
 /// # Returns
 /// A `Result<Transaction, EncodingError>` that either contains the full transaction data (to,
@@ -107,6 +109,7 @@ pub fn encode_tycho_router_call(
     client_fee_bps: u32,
     client_fee_receiver: Bytes,
     max_client_contribution: BigUint,
+    contribution_nonce: BigUint,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -120,8 +123,11 @@ pub fn encode_tycho_router_call(
     let receiver = bytes_to_address(solution.receiver())?;
     let n_tokens = U256::from(encoded_solution.n_tokens());
     let max_client_contribution = biguint_to_u256(&max_client_contribution);
-    let deadline = U256::MAX;
-    let (client_fee_receiver, client_signature) = if client_fee_receiver == Bytes::zero(20) {
+    let contribution_nonce = biguint_to_u256(&contribution_nonce);
+    // A zero client requires the canonical zero form: no deadline and no signature.
+    let is_zero_client = client_fee_receiver == Bytes::zero(20);
+    let deadline = if is_zero_client { U256::ZERO } else { U256::MAX };
+    let (client_fee_receiver, client_signature) = if is_zero_client {
         (Address::ZERO, vec![])
     } else {
         let router_address = bytes_to_address(encoded_solution.interacting_with())?;
@@ -132,6 +138,7 @@ pub fn encode_tycho_router_call(
             client_fee_bps,
             client_fee_receiver,
             max_client_contribution,
+            contribution_nonce,
             deadline,
             given_amount,
             given_token,
@@ -144,9 +151,15 @@ pub fn encode_tycho_router_call(
         (client_fee_receiver, sig)
     };
 
-    // ABI tuple matching ClientFeeParams: (uint32, address, uint256, uint256, bytes)
-    let client_fee_params =
-        (client_fee_bps, client_fee_receiver, max_client_contribution, deadline, client_signature);
+    // ABI tuple matching ClientFeeParams: (uint32, address, uint256, uint256, uint256, bytes)
+    let client_fee_params = (
+        client_fee_bps,
+        client_fee_receiver,
+        max_client_contribution,
+        contribution_nonce,
+        deadline,
+        client_signature,
+    );
     let (permit, signature) = if *solution.user_transfer_type() ==
         UserTransferType::TransferFromPermit2
     {
@@ -268,6 +281,7 @@ fn sign_client_fee(
     client_fee_bps: u32,
     client_fee_receiver: Address,
     max_client_contribution: U256,
+    contribution_nonce: U256,
     deadline: U256,
     amount_in: U256,
     token_in: Address,
@@ -284,12 +298,12 @@ fn sign_client_fee(
     // Must match CLIENT_FEE_TYPEHASH in TychoRouterV3.sol.
     let type_hash: B256 = keccak256(
         b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
-uint256 maxClientContribution,uint256 deadline,\
+uint256 maxClientContribution,uint256 contributionNonce,uint256 deadline,\
 uint256 amountIn,address tokenIn,address tokenOut,\
 uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
     );
 
-    // EIP-712 domain separator for TychoRouterV3 ("TychoRouter", "1")
+    // EIP-712 domain separator for TychoRouterV3 ("TychoRouter", "2")
     let domain_type_hash: B256 = keccak256(
         b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );
@@ -297,7 +311,7 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
         (
             domain_type_hash,
             keccak256(b"TychoRouter"),
-            keccak256(b"1"),
+            keccak256(b"2"),
             U256::from(chain_id),
             router_address,
         )
@@ -311,6 +325,7 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
             U256::from(client_fee_bps),
             client_fee_receiver,
             max_client_contribution,
+            contribution_nonce,
             deadline,
             amount_in,
             token_in,
