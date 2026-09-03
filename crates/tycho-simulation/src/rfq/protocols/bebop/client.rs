@@ -10,7 +10,7 @@ use futures::{stream::BoxStream, StreamExt};
 use http::Request;
 use num_bigint::BigUint;
 use prost::Message as ProstMessage;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::{
@@ -559,10 +559,47 @@ impl RFQClient for BebopClient {
                 }
             };
 
-            let quote_response = match response
-                .json::<BebopQuoteResponse>()
-                .await
-            {
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(e) => {
+                    warn!(
+                        "Reading Bebop quote response body failed (attempt {}/{}): {}",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e
+                    );
+                    last_error = Some(RFQError::ConnectionError(format!(
+                        "Failed to read Bebop quote response body: {e}"
+                    )));
+                    if attempt < MAX_RETRIES - 1 {
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap());
+                    }
+                }
+            };
+
+            // The quote engine reports its own failures with HTTP 200 and an `error` body. A
+            // non-2xx status comes from the gateway in front of it - auth, rate limiting, an
+            // outage - and carries a shape unrelated to a quote.
+            if !status.is_success() {
+                let detail = format!("Bebop quote request failed with HTTP {status}: {body}");
+                if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                    warn!("{detail} (attempt {}/{})", attempt + 1, MAX_RETRIES);
+                    last_error = Some(RFQError::ConnectionError(detail));
+                    if attempt < MAX_RETRIES - 1 {
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap());
+                    }
+                }
+                return Err(RFQError::FatalError(detail));
+            }
+
+            let quote_response = match serde_json::from_str::<BebopQuoteResponse>(&body) {
                 Ok(resp) => resp,
                 Err(e) => {
                     warn!(
@@ -572,7 +609,7 @@ impl RFQClient for BebopClient {
                         e
                     );
                     last_error = Some(RFQError::ParsingError(format!(
-                        "Failed to parse Bebop quote response: {e}"
+                        "Failed to parse Bebop quote response: {e}: {body}"
                     )));
                     if attempt < MAX_RETRIES - 1 {
                         sleep(Duration::from_millis(100)).await;
@@ -1273,6 +1310,68 @@ mod tests {
 
     /// Helper function to create a mock server that fails twice, then succeeds with
     /// aggregate_order.json
+    /// Serves the same status line and body to every request, counting them.
+    async fn create_static_server(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
+        use tokio::io::AsyncWriteExt;
+
+        let request_count = Arc::new(Mutex::new(0u32));
+        let request_count_clone = request_count.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let count_clone = request_count_clone.clone();
+                tokio::spawn(async move {
+                    *count_clone.lock().unwrap() += 1;
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream
+                        .write_all(response.as_bytes())
+                        .await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        (addr, request_count)
+    }
+
+    /// Body as returned by the gateway for a revoked key.
+    #[tokio::test]
+    async fn test_gateway_error_is_not_retried_and_names_the_status() {
+        let (addr, request_count) =
+            create_static_server("401 Unauthorized", r#"{"detail":"Unknown or revoked token"}"#)
+                .await;
+
+        let client = create_test_bebop_client(
+            format!("http://127.0.0.1:{}/quote", addr.port()),
+            Duration::from_secs(5),
+        );
+        let err = client
+            .request_binding_quote(&create_test_quote_params())
+            .await
+            .unwrap_err();
+
+        match err {
+            RFQError::FatalError(msg) => {
+                assert!(msg.contains("HTTP 401"), "{msg}");
+                assert!(msg.contains("Unknown or revoked token"), "{msg}");
+            }
+            other => panic!("expected FatalError, got {other:?}"),
+        }
+        assert_eq!(*request_count.lock().unwrap(), 1, "auth failures must not be retried");
+    }
+
     async fn create_retry_server() -> (std::net::SocketAddr, Arc<Mutex<u32>>) {
         use std::sync::{Arc, Mutex};
 
