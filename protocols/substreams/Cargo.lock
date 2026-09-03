@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-no-hooks"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ethabi 18.0.0",
  "ethereum-uniswap-v4-shared",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-shared"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
