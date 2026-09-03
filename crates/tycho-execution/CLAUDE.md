@@ -83,18 +83,29 @@ in vault-funded split swaps where split percentages don't sum to 100%.
 Three fee layers, deducted from swap output:
 
 1. **Client fee** (EIP-712 signed): Passed per-swap via `ClientFeeParams` struct
-   containing `clientFeeBps`, `clientFeeReceiver`, `maxClientContribution`, `deadline`, and `clientSignature`. The
+   containing `clientFeeBps`, `clientFeeReceiver`, `maxClientContribution`, `contributionNonce`, `deadline`, and
+   `clientSignature`. The
    client signs a `ClientFee` typehash that covers both the fee params **and** the full swap
    intent (`amountIn`, `tokenIn`, `tokenOut`, `expectedAmountOut`, `minAmountOut`, `receiver`, `swap`); the router verifies the EIP-712
    signature on-chain before applying any fee. Binding the signature to swap data (including the encoded swap bytes)
-   prevents cross-swap replay attacks. `_isValidClientSignature` accepts two signature kinds: a 65-byte ECDSA signature
+   prevents cross-swap replay attacks. `_verifyAndConsumeClientAuthorization` accepts two signature kinds: a 65-byte ECDSA signature
    recovering to `clientFeeReceiver`, or — when that fails — an ERC-1271 signature of any length that the
    `clientFeeReceiver` contract validates itself (`isValidSignature`, staticcalled via OpenZeppelin's
    `SignatureChecker`). ECDSA runs first so an EOA carrying delegated code (EIP-7702) keeps signing with its own key.
    Contract signatures are revocable — one that verifies in a given block may stop verifying later.
    The `clientFeeReceiver` address doubles as the client
    identifier. `maxClientContribution` caps how much the client contributes from their vault balance to cover a
-   shortfall below `minAmountOut`. Passing zero `ClientFeeParams` is allowed (no fee, no client tracking).
+   shortfall below `minAmountOut`. Passing zero `ClientFeeParams` is allowed (no fee, no client tracking), and the
+   zero-client form requires every other field to be zero or empty.
+
+   **Contribution replay protection**: when `maxClientContribution > 0`, `_verifyAndConsumeClientAuthorization` consumes
+   `contributionNonce` from `clientContributionNonceBitmap[clientFeeReceiver][contributionNonce >> 8]`, a Permit2-style
+   unordered bitmap holding 256 nonces per storage word. A successful swap commits the bit whether or not it debited
+   the vault; any revert rolls the write back. A reused nonce reverts
+   `TychoRouter__InvalidClientContributionNonce`. A fee-only authorization (`maxClientContribution == 0`) touches no
+   storage and must carry `contributionNonce == 0`, so it stays replayable. Clients retire unused nonces with
+   `invalidateClientContributionNonces(wordPos, mask)`, which only sets bits, only in the caller's namespace, and works
+   while the router is paused. The EIP-712 domain version is `"2"`.
 2. **Router fee on output** (stored): `_routerFeeOnOutputBps` -- Tycho's cut of the swap output amount.
 3. **Router fee on client fee** (stored): `_routerFeeOnClientFeeBps` -- Tycho's cut of the client fee (deducted from the
    client's portion, not from the user).

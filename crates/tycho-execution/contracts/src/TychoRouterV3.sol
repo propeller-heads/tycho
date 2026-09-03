@@ -88,11 +88,18 @@ error TychoRouter__ExpiredClientSignature(
     uint256 deadline, uint256 blockTimestamp
 );
 error TychoRouter__ZeroInput();
+error TychoRouter__InvalidClientContributionNonce(
+    address client, uint256 contributionNonce
+);
+error TychoRouter__NonZeroContributionNonce(uint256 contributionNonce);
 
 struct ClientFeeParams {
     uint32 clientFeeBps;
     address clientFeeReceiver;
     uint256 maxClientContribution;
+    // Single-use identifier for an authorization that permits a contribution.
+    // Must be zero when maxClientContribution is zero.
+    uint256 contributionNonce;
     uint256 deadline;
     // EIP-712 signature by clientFeeReceiver: a 65-byte ECDSA signature when
     // the receiver is an EOA, or an ERC-1271 signature of any length when it
@@ -110,6 +117,12 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     address private _feeCalculator; // Fee calculator contract
     address private _pendingFeeCalculator;
     uint48 private _feeCalculatorActivationTimestamp;
+
+    // Consumed contribution nonces, packed 256 per word. Keyed by the
+    // clientFeeReceiver address, so an ERC-1271 wallet keeps its consumed
+    // nonces across owner rotations.
+    mapping(address client => mapping(uint248 wordPos => uint256 bitmap)) public
+        clientContributionNonceBitmap;
 
     using SafeERC20 for IERC20;
     using LibPrefixLengthEncodedByteArray for bytes;
@@ -129,8 +142,8 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
     bytes32 public constant CLIENT_FEE_TYPEHASH = keccak256(
         "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
-        "uint256 maxClientContribution,uint256 deadline,"
-        "uint256 amountIn,address tokenIn,address tokenOut,"
+        "uint256 maxClientContribution,uint256 contributionNonce,"
+        "uint256 deadline,uint256 amountIn,address tokenIn,address tokenOut,"
         "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
     );
 
@@ -144,6 +157,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address indexed oldCalculator, address indexed newCalculator
     );
     event FeesTaken(address indexed token, FeeRecipient[] fees);
+    event ClientContributionNoncesInvalidated(
+        address indexed client, uint248 indexed wordPos, uint256 mask
+    );
 
     constructor(
         address permit2_,
@@ -152,7 +168,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         address unpauserAdmin,
         address executorSetterAdmin,
         address routerFeeSetterAdmin
-    ) Dispatcher(permit2_) EIP712("TychoRouter", "1") {
+    ) Dispatcher(permit2_) EIP712("TychoRouter", "2") {
         if (feeCalculator.code.length == 0) {
             revert TychoRouter__NotAContract(feeCalculator);
         }
@@ -201,7 +217,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
      * @return The total amount of the output token received by the receiver.
@@ -217,7 +233,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
     ) public payable whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -259,7 +275,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
      * @return The total amount of the output token received by the receiver.
@@ -275,7 +291,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
     ) public whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -316,7 +332,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param nTokens The total number of tokens involved in the swap graph (used to initialize arrays for internal calculations).
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -336,7 +352,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         bytes calldata signature,
         bytes calldata swaps
     ) external whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -380,7 +396,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
      * @return The total amount of the output token received by the receiver.
@@ -395,7 +411,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
     ) public payable whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -435,7 +451,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param swaps Encoded swap graph data containing details of each swap.
      *
      * @return The total amount of the output token received by the receiver.
@@ -450,7 +466,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swaps
     ) public whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -488,7 +504,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
      * @param swaps Encoded swap graph data containing details of each swap.
@@ -507,7 +523,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         bytes calldata signature,
         bytes calldata swaps
     ) external whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -550,7 +566,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param swapData Encoded swap details.
      *
      * @return The total amount of the output token received by the receiver.
@@ -565,7 +581,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
     ) public payable whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -604,7 +620,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param swapData Encoded swap details.
      *
      * @return The total amount of the output token received by the receiver.
@@ -619,7 +635,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         ClientFeeParams calldata clientFeeParams,
         bytes calldata swapData
     ) public whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -657,7 +673,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param expectedAmountOut The quoted output amount; used to detect positive slippage.
      * @param minAmountOut The minimum acceptable output amount (revert guardrail). Must be non-zero and not exceed `expectedAmountOut`.
      * @param receiver The address to receive the output tokens.
-     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, deadline and signature.
+     * @param clientFeeParams Client fee parameters including fee bps, receiver, max contribution, contribution nonce, deadline and signature.
      * @param permitSingle A Permit2 structure containing token approval details for the input token.
      * @param signature A valid signature authorizing the Permit2 approval.
      * @param swapData Encoded swap details.
@@ -676,7 +692,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         bytes calldata signature,
         bytes calldata swapData
     ) external whenNotPaused nonReentrant returns (uint256) {
-        _verifyClientSignature(
+        _verifyAndConsumeClientAuthorization(
             clientFeeParams,
             amountIn,
             tokenIn,
@@ -1364,9 +1380,53 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
     }
 
     /**
+     * @notice Marks a range of the caller's contribution nonces as used, so no
+     *         authorization carrying one of them can execute.
+     * @dev Callable while the router is paused. Bits can only be set, never
+     *      cleared, and each caller writes only its own namespace. Calling it
+     *      twice with the same arguments is idempotent.
+     * @param wordPos The bitmap word, equal to `contributionNonce >> 8`.
+     * @param mask The bits to set within that word.
+     */
+    function invalidateClientContributionNonces(uint248 wordPos, uint256 mask)
+        external
+    {
+        clientContributionNonceBitmap[msg.sender][wordPos] |= mask;
+        emit ClientContributionNoncesInvalidated(msg.sender, wordPos, mask);
+    }
+
+    /**
+     * @dev Consumes a contribution nonce for a client, reverting when that
+     *      nonce is already used. Mirrors the Permit2 unordered nonce bitmap:
+     *      the flip happens before the check because any revert on the
+     *      enclosing call rolls the write back.
+     * @param client The clientFeeReceiver whose namespace the nonce belongs to.
+     * @param contributionNonce The nonce to consume.
+     */
+    function _useClientContributionNonce(
+        address client,
+        uint256 contributionNonce
+    ) internal {
+        uint248 wordPos = uint248(contributionNonce >> 8);
+        uint256 bit = 1 << uint8(contributionNonce);
+        uint256 flipped = clientContributionNonceBitmap[client][wordPos] ^= bit;
+
+        if (flipped & bit == 0) {
+            revert TychoRouter__InvalidClientContributionNonce(
+                client, contributionNonce
+            );
+        }
+    }
+
+    /**
      * @dev Verifies the client's EIP-712 signature over the fee parameters,
-     *      the core swap parameters, and the encoded swap routing bytes.
-     *      When clientFeeReceiver is address(0), no signature is required.
+     *      the core swap parameters, and the encoded swap routing bytes, and
+     *      consumes the contribution nonce when the authorization permits a
+     *      contribution. A nonce commits at most one successful swap, so a
+     *      successful call consumes it even when the swap needed no
+     *      contribution. Any later revert rolls the consumption back.
+     *      When clientFeeReceiver is address(0), no signature is required and
+     *      every other field must be zero or empty.
      *      An EOA receiver signs with ECDSA; a contract receiver validates the
      *      signature itself through ERC-1271. Contract signatures are
      *      revocable, so a signature that verifies in one block may stop
@@ -1380,7 +1440,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
      * @param receiver The address to receive the output tokens.
      * @param swapData The encoded swap routing data.
      */
-    function _verifyClientSignature(
+    function _verifyAndConsumeClientAuthorization(
         ClientFeeParams calldata p,
         uint256 amountIn,
         address tokenIn,
@@ -1389,9 +1449,13 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         uint256 minAmountOut,
         address receiver,
         bytes calldata swapData
-    ) internal view {
+    ) internal {
         if (p.clientFeeReceiver == address(0)) {
-            if (p.maxClientContribution > 0 || p.clientFeeBps > 0) {
+            if (
+                p.maxClientContribution > 0 || p.clientFeeBps > 0
+                    || p.contributionNonce > 0 || p.deadline > 0
+                    || p.clientSignature.length > 0
+            ) {
                 revert TychoRouter__AddressZero();
             }
             return;
@@ -1402,6 +1466,15 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                 p.deadline, block.timestamp
             );
         }
+        if (p.maxClientContribution > 0) {
+            _useClientContributionNonce(
+                p.clientFeeReceiver, p.contributionNonce
+            );
+        } else if (p.contributionNonce > 0) {
+            // A fee-only authorization stays replayable and pays no storage
+            // cost, so it must not carry a nonce that looks like protection.
+            revert TychoRouter__NonZeroContributionNonce(p.contributionNonce);
+        }
         bytes32 digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(
@@ -1409,6 +1482,7 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
                     p.clientFeeBps,
                     p.clientFeeReceiver,
                     p.maxClientContribution,
+                    p.contributionNonce,
                     p.deadline,
                     amountIn,
                     tokenIn,

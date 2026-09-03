@@ -378,6 +378,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
             clientFeeBps: 0,
             clientFeeReceiver: ALICE,
             maxClientContribution: maxContribution,
+            contributionNonce: 0,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });
@@ -490,6 +491,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0,
             20 * 1e18,
+            0, // contributionNonce
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
@@ -543,6 +545,7 @@ contract TychoRouterSingleSwapTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0,
             maxContribution,
+            0, // contributionNonce
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
@@ -780,6 +783,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             1, // 1 bps (0.01%)
             0,
+            0, // contributionNonce
             amountIn,
             USDC_ADDR,
             TWIF,
@@ -858,6 +862,7 @@ contract TychoRouterSingleSwapFeeTokenTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0, // no client fee
             500000000000000000000000000, // max client contribution
+            0, // contributionNonce
             amountIn,
             USDC_ADDR,
             TWIF,

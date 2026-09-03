@@ -53,6 +53,7 @@ contract VaultSwapBatcher {
             clientFeeBps: 0,
             clientFeeReceiver: address(0),
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: 0,
             clientSignature: new bytes(0)
         });
@@ -432,6 +433,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0,
             amountIn / 10,
+            0, // contributionNonce
             amountIn,
             USDC_ADDR,
             USDC_ADDR,
@@ -495,6 +497,7 @@ contract TychoRouterUsingVaultTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0,
             inputAmount,
+            0, // contributionNonce
             inputAmount,
             WETH_ADDR,
             WETH_ADDR,

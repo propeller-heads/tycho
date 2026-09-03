@@ -78,6 +78,7 @@ fn test_evm_sequential_swap_strategy_encoder() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -143,6 +144,7 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -150,7 +152,7 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
     let hex_calldata = encode(&calldata);
 
     let expected = String::from(concat!(
-        "3c226834", // selector (sequentialSwap)
+        "638b8944", // selector (sequentialSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
@@ -159,17 +161,20 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         // clientFeeParams offset = 256
         "0000000000000000000000000000000000000000000000000000000000000100",
-        // swapData offset = 448
-        "00000000000000000000000000000000000000000000000000000000000001c0",
-        // clientFeeParams tail (6 words):
+        // swapData offset = 480
+        "00000000000000000000000000000000000000000000000000000000000001e0",
+        // clientFeeParams tail (7 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
         // clientFeeReceiver = 0
         "0000000000000000000000000000000000000000000000000000000000000000",
         // maxClientContribution = 0
         "0000000000000000000000000000000000000000000000000000000000000000",
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // deadline = U256::MAX
-        // clientSignature offset in struct = 160
-        "00000000000000000000000000000000000000000000000000000000000000a0",
+        // contributionNonce = 0
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        // deadline = 0 (canonical zero form for a zero client)
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        // clientSignature offset in struct = 192
+        "00000000000000000000000000000000000000000000000000000000000000c0",
         // clientSignature length = 0
         "0000000000000000000000000000000000000000000000000000000000000000",
         // swapData length = 164 bytes
@@ -272,12 +277,13 @@ fn test_evm_sequential_strategy_cyclic_swap() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "631eecea", // selector (sequentialSwapPermit2)
+        "ec280f9f", // selector (sequentialSwapPermit2)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
@@ -312,7 +318,7 @@ fn test_evm_sequential_strategy_cyclic_swap() {
     .join("");
 
     assert_eq!(hex_calldata[..392], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swaps);
+    assert_eq!(hex_calldata[1672..], expected_swaps);
     write_calldata_to_file("test_sequential_strategy_cyclic_swap", hex_calldata.as_str());
 }
 
@@ -393,12 +399,13 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
     let hex_calldata = alloy::hex::encode(&calldata);
     let expected_input = [
-        "ae890e77", // selector (sequentialSwapUsingVault)
+        "bdef71f6", // selector (sequentialSwapUsingVault)
         "0000000000000000000000000000000000000000000000000000000005f5e100", // amount in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
@@ -406,13 +413,14 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
         "0000000000000000000000000000000000000000000000000000000005ce3aa4", // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         "0000000000000000000000000000000000000000000000000000000000000100", // clientFeeParams offset = 256
-        "00000000000000000000000000000000000000000000000000000000000001c0", // swapData offset = 448
-        // clientFeeParams tail (6 words):
+        "00000000000000000000000000000000000000000000000000000000000001e0", // swapData offset = 480
+        // clientFeeParams tail (7 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeReceiver = 0
         "0000000000000000000000000000000000000000000000000000000000000000", // maxClientContribution = 0
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // deadline = U256::MAX
-        "00000000000000000000000000000000000000000000000000000000000000a0", // clientSignature offset in struct = 160
+        "0000000000000000000000000000000000000000000000000000000000000000", // contributionNonce = 0
+        "0000000000000000000000000000000000000000000000000000000000000000", // deadline = 0 (canonical zero form)
+        "00000000000000000000000000000000000000000000000000000000000000c0", // clientSignature offset in struct = 192
         "0000000000000000000000000000000000000000000000000000000000000000", // clientSignature length = 0
         // swapData:
         "00000000000000000000000000000000000000000000000000000000000000ac", // length = 172 bytes
@@ -496,6 +504,7 @@ fn test_evm_sequential_swap_strategy_encoder_with_fees() {
         Some(get_signer()),
         1_000_000,
         client_fee_receiver(),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()

@@ -50,6 +50,11 @@ pub struct ClientFeeParams {
     /// router's `minAmountOut` argument.
     #[serde(with = "biguint_string")]
     max_client_contribution: BigUint,
+    /// Single-use identifier for an authorization that permits a contribution. The router commits
+    /// at most one successful swap per `(client_fee_receiver, contribution_nonce)` pair. Must be
+    /// zero when `max_client_contribution` is zero.
+    #[serde(with = "biguint_string")]
+    contribution_nonce: BigUint,
     /// Deadline for the fee signature as a unix timestamp.
     #[serde(with = "biguint_string")]
     deadline: BigUint,
@@ -69,6 +74,7 @@ impl ClientFeeParams {
             client_fee_bps,
             client_fee_receiver,
             max_client_contribution: BigUint::ZERO,
+            contribution_nonce: BigUint::ZERO,
             deadline,
             client_signature,
         }
@@ -84,13 +90,25 @@ impl ClientFeeParams {
             client_fee_bps: 0,
             client_fee_receiver,
             max_client_contribution: BigUint::ZERO,
+            contribution_nonce: BigUint::ZERO,
             deadline,
             client_signature,
         }
     }
 
-    pub fn with_max_client_contribution(mut self, max_client_contribution: BigUint) -> Self {
+    /// Authorizes a contribution of up to `max_client_contribution`, identified by
+    /// `contribution_nonce`.
+    ///
+    /// The router consumes `contribution_nonce` on the first swap that succeeds with these params,
+    /// whether or not that swap needed the contribution. The caller owns nonce allocation: reusing
+    /// a nonce reverts the swap.
+    pub fn with_max_client_contribution(
+        mut self,
+        max_client_contribution: BigUint,
+        contribution_nonce: BigUint,
+    ) -> Self {
         self.max_client_contribution = max_client_contribution;
+        self.contribution_nonce = contribution_nonce;
         self
     }
 }
@@ -98,7 +116,7 @@ impl ClientFeeParams {
 #[cfg(feature = "evm")]
 impl ClientFeeParams {
     /// Converts into the ABI-encodable tuple matching the Solidity `ClientFeeParams` struct.
-    pub fn into_abi_params(self) -> (u32, Address, U256, U256, Vec<u8>) {
+    pub fn into_abi_params(self) -> (u32, Address, U256, U256, U256, Vec<u8>) {
         let receiver = if self.client_fee_receiver.is_empty() {
             Address::ZERO
         } else {
@@ -112,6 +130,7 @@ impl ClientFeeParams {
                     .max_client_contribution
                     .to_bytes_be(),
             ),
+            U256::from_be_slice(&self.contribution_nonce.to_bytes_be()),
             U256::from_be_slice(&self.deadline.to_bytes_be()),
             self.client_signature.to_vec(),
         )
@@ -400,7 +419,8 @@ impl EncodedSolution {
             _ => 0,
         };
         // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple
-        4 + head_params * 32 + 192
+        // (6 static words, then the signature length word)
+        4 + head_params * 32 + 224
     }
 }
 

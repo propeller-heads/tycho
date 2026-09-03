@@ -66,6 +66,7 @@ fn test_evm_single_swap_strategy_encoder() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -73,7 +74,7 @@ fn test_evm_single_swap_strategy_encoder() {
         encode(U256::abi_encode(&biguint_to_u256(&expected_amount_out)));
     let min_amount_out_encoded = encode(U256::abi_encode(&biguint_to_u256(&min_amount_out)));
     let expected_input = [
-        "ca931073", // selector (singleSwapPermit2)
+        "efdd6f26", // selector (singleSwapPermit2)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out
@@ -101,7 +102,7 @@ fn test_evm_single_swap_strategy_encoder() {
     let hex_calldata = encode(&calldata);
 
     assert_eq!(hex_calldata[..456], expected_input);
-    assert_eq!(hex_calldata[1608..], expected_swap);
+    assert_eq!(hex_calldata[1672..], expected_swap);
     write_calldata_to_file("test_single_swap_strategy_encoder", &hex_calldata.to_string());
 }
 
@@ -152,6 +153,7 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -159,7 +161,7 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         encode(U256::abi_encode(&biguint_to_u256(&expected_amount_out)));
     let min_amount_out_encoded = encode(U256::abi_encode(&biguint_to_u256(&min_amount_out)));
     let expected_input = [
-        "0c1a0ee7", // Function selector (singleSwap)
+        "0ff27446", // Function selector (singleSwap)
         "0000000000000000000000000000000000000000000000000de0b6b3a7640000", // amount in
         "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "0000000000000000000000006b175474e89094c44da98b954eedeac495271d0f", // token out
@@ -167,13 +169,14 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         &min_amount_out_encoded,      // minAmountOut (2% below expected)
         "000000000000000000000000cd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2", // receiver
         "0000000000000000000000000000000000000000000000000000000000000100", // clientFeeParams offset = 256
-        "00000000000000000000000000000000000000000000000000000000000001c0", // swapData offset = 448
-        // clientFeeParams tail (6 words):
+        "00000000000000000000000000000000000000000000000000000000000001e0", // swapData offset = 480
+        // clientFeeParams tail (7 words):
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeBps = 0
         "0000000000000000000000000000000000000000000000000000000000000000", // clientFeeReceiver = 0
         "0000000000000000000000000000000000000000000000000000000000000000", // maxClientContribution = 0
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // deadline = U256::MAX
-        "00000000000000000000000000000000000000000000000000000000000000a0", // clientSignature offset in struct = 160
+        "0000000000000000000000000000000000000000000000000000000000000000", // contributionNonce = 0
+        "0000000000000000000000000000000000000000000000000000000000000000", // deadline = 0 (canonical zero form)
+        "00000000000000000000000000000000000000000000000000000000000000c0", // clientSignature offset in struct = 192
         "0000000000000000000000000000000000000000000000000000000000000000", // clientSignature length = 0
         // swapData:
         "0000000000000000000000000000000000000000000000000000000000000050", // len swap = 80 bytes
@@ -243,6 +246,7 @@ fn test_single_swap_with_client_fees() {
         1_000_000,
         client_fee_receiver(),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -301,6 +305,7 @@ fn test_single_swap_with_fees_and_client_contribution() {
         1_000_000,
         client_fee_receiver(),
         BigUint::from_str("22_000000000000000000").unwrap(),
+        BigUint::ZERO,
     )
     .unwrap()
     .data;

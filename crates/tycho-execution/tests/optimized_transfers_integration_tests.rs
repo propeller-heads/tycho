@@ -88,6 +88,7 @@ fn test_uniswap_v3_uniswap_v2() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -173,6 +174,7 @@ fn test_uniswap_v3_uniswap_v3() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -269,6 +271,7 @@ fn test_uniswap_v3_curve() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -338,6 +341,7 @@ fn test_balancer_v2_uniswap_v2() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()
@@ -492,6 +496,7 @@ fn test_evm_multi_protocol() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -565,6 +570,7 @@ fn test_uniswap_v3_balancer_v3() {
         None,
         0,
         Bytes::zero(20),
+        BigUint::ZERO,
         BigUint::ZERO,
     )
     .unwrap()

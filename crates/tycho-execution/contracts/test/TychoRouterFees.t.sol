@@ -117,6 +117,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             2_000_000,
             0,
+            0, // contributionNonce
             amountIn,
             WETH_ADDR,
             DAI_ADDR,
@@ -323,6 +324,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             clientFeeBps: 100,
             clientFeeReceiver: vm.addr(CLIENT_FEE_RECEIVER_PK),
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: block.timestamp - 1,
             clientSignature: new bytes(0)
         });
@@ -367,6 +369,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             clientFeeBps: 100,
             clientFeeReceiver: vm.addr(CLIENT_FEE_RECEIVER_PK),
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });
@@ -407,6 +410,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             clientFeeBps: 100,
             clientFeeReceiver: vm.addr(CLIENT_FEE_RECEIVER_PK),
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });
@@ -447,6 +451,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             clientFeeBps: 100,
             clientFeeReceiver: vm.addr(CLIENT_FEE_RECEIVER_PK),
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });
@@ -493,6 +498,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
             clientFeeBps: 1_000_000, // 1%
             clientFeeReceiver: feeReceiver,
             maxClientContribution: 0,
+            contributionNonce: 0,
             deadline: block.timestamp + 1 hours,
             clientSignature: new bytes(0)
         });
@@ -675,6 +681,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             10_000,
             20,
+            0, // contributionNonce
             amountIn,
             WETH_ADDR,
             STA_ADDR,
@@ -791,6 +798,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         ClientFeeParams memory feeParams = makeClientFeeParams(
             0,
             0,
+            0, // contributionNonce
             amountIn,
             WETH_ADDR,
             DAI_ADDR,

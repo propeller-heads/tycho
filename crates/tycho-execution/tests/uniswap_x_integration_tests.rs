@@ -97,6 +97,7 @@ fn test_evm_sequential_swap_usx() {
         0,
         Bytes::zero(20),
         BigUint::ZERO,
+        BigUint::ZERO,
     )
     .unwrap()
     .data;
