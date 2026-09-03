@@ -19,6 +19,12 @@ pub struct Config {
     /// The Tempest router (`TempestEth` proxy) — emits `PairRegistered` and settles swaps.
     #[serde(with = "hex::serde")]
     pub router_address: Vec<u8>,
+    /// The `TempestVault` holding all pair inventory, as of the package's `initialBlock`.
+    ///
+    /// Only a starting point: the live address is event-sourced from `VaultUpdated`, and this is
+    /// the fallback for runs that start after that event. See `modules::vault_address`.
+    #[serde(with = "hex::serde")]
+    pub vault_address: Vec<u8>,
     /// The shared `PrioUpdateRegistry` the router reads quote lanes from.
     #[serde(with = "hex::serde")]
     pub registry_address: Vec<u8>,
@@ -205,11 +211,13 @@ mod tests {
     fn test_config_parses_substreams_params() {
         let config: Config = serde_qs::from_str(
             "router_address=00000003f1ec2379e79f58e12ec6c4f51ee92149\
+             &vault_address=c9d748e601d9984a43da0b80e5b91dc28d31d9fb\
              &registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f",
         )
         .unwrap();
 
         assert_eq!(config.router_address, addr("00000003f1ec2379e79f58e12ec6c4f51ee92149"));
+        assert_eq!(config.vault_address, addr("c9d748e601d9984a43da0b80e5b91dc28d31d9fb"));
         assert_eq!(config.registry_address, addr("da7afeed01fe625cf15d187a19f94b45f00b8c5f"));
     }
 }

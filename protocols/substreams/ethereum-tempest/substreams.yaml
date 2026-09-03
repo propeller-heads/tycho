@@ -27,6 +27,7 @@ params:
   map_protocol_components: &tempest_params "router_address=00000003f1ec2379e79f58e12ec6c4f51ee92149&vault_address=c9d748e601d9984a43da0b80e5b91dc28d31d9fb&registry_address=DA7AFeEd01fe625cF15D187A19F94B45F00b8C5f"
   store_pair_registered: *tempest_params
   store_router_state: *tempest_params
+  map_vault_balance_deltas: *tempest_params
   map_protocol_changes: *tempest_params
 
 modules:
@@ -75,6 +76,7 @@ modules:
     kind: map
     initialBlock: *initial_block
     inputs:
+      - params: string
       - source: sf.ethereum.type.v2.Block
       - store: store_component_index
         mode: deltas

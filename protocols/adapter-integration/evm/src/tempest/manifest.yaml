@@ -9,10 +9,12 @@ constants:
   protocol_gas: 130000
   # Minimum capabilities we can expect, individual pools may extend these
   # No ConstantPrice: the lane is a VWAP spread ladder, so larger sizes cross into wider bands.
+  # No PriceFunction: for the same reason the adapter cannot report a marginal price, so `price`
+  # reverts `NotImplemented` and simulation derives it numerically. Keep in step with
+  # `TempestAdapter.getCapabilities`.
   capabilities:
     - SellSide
     - BuySide
-    - PriceFunction
 
 # The file containing the adapter contract
 contract: TempestAdapter.sol

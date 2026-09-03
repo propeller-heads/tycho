@@ -53,9 +53,7 @@ fn map_protocol_components(
 ) -> Result<BlockEntityChanges> {
     let config: Config = serde_qs::from_str(params.as_str())?;
     let mut changes: Vec<TransactionEntityChanges> = vec![];
-    let Some(vault) = vault_address(&router_state_store) else {
-        return Ok(BlockEntityChanges { block: Some((&block).into()), changes });
-    };
+    let vault = vault_address(&router_state_store, &config);
     get_new_pairs(
         &config,
         &vault,
@@ -123,10 +121,18 @@ fn get_new_pairs(
     mut pending_creation: HashSet<String>,
     changes: &mut Vec<TransactionEntityChanges>,
 ) {
-    // The router's implementation is deliberately absent: it is an upgradeable ERC1967 proxy, and a
-    // component's contract set is frozen at creation, so a hardcoded implementation goes stale on
-    // the next `upgradeToAndCall` and leaves the proxy delegatecalling a codeless account. DCI
+    // The router's implementation is deliberately absent: it is an upgradeable ERC1967 proxy, and
+    // a component's contract set is frozen at creation, so a hardcoded implementation goes stale
+    // on the next `upgradeToAndCall` and leaves the proxy delegatecalling a codeless account. DCI
     // discovers it instead — see `add_entrypoints`.
+    //
+    // The vault is listed despite being movable, because DCI cannot stand in for it here. Nothing
+    // ever calls the vault — `quote` reads the vault's balance and allowance out of the *token*
+    // contracts, so the vault is absent from the traced access list and DCI would never discover
+    // it. It is listed for a different reason: `contract_addresses` is what filters which
+    // accounts' balances reach the pool (`vm/decoder.rs`), and DCI does not extend that set. A
+    // vault rotation therefore needs a re-index; `balance_owner` is repointed in
+    // `map_protocol_changes` so the attribute half at least stays correct.
     let contracts = [config.router_address.as_slice(), vault, config.registry_address.as_slice()];
 
     let mut on_pair_registered = |event: PairRegistered, tx: &TransactionTrace, _log: &Log| {
@@ -210,13 +216,18 @@ fn store_router_state(params: String, block: Block, store: StoreSetString) {
     }
 }
 
-/// The `TempestVault` address recorded by [`store_router_state`], if the package has seen it.
-fn vault_address(router_state_store: &StoreGetString) -> Option<Vec<u8>> {
-    let Some(raw) = router_state_store.get_last(VAULT_KEY) else {
-        substreams::log::info!("no VaultUpdated seen yet; vault-dependent output is skipped");
-        return None;
-    };
-    hex::decode(raw).ok()
+/// The live `TempestVault` address.
+///
+/// Prefers the value [`store_router_state`] recorded from `VaultUpdated`, so a rotation is picked
+/// up, and falls back to the configured address. The fallback matters because the only
+/// `VaultUpdated` on chain is the initialisation in the package's `initialBlock`: any run that
+/// starts after it — a partial re-index, a shortened test range — would otherwise see no vault at
+/// all and silently emit neither components nor balances.
+fn vault_address(router_state_store: &StoreGetString, config: &Config) -> Vec<u8> {
+    router_state_store
+        .get_last(VAULT_KEY)
+        .and_then(|raw| hex::decode(raw).ok())
+        .unwrap_or_else(|| config.vault_address.clone())
 }
 
 /// Whether the router is currently paused, per [`store_router_state`].
@@ -282,15 +293,15 @@ fn token_key(token: &[u8]) -> String {
 /// events touching the vault.
 #[substreams::handlers::map]
 fn map_vault_balance_deltas(
+    params: String,
     block: Block,
     token_component_deltas: StoreDeltas,
     token_components_store: StoreGetString,
     router_state_store: StoreGetString,
 ) -> Result<BlockBalanceDeltas> {
+    let config: Config = serde_qs::from_str(params.as_str())?;
     let mut balance_deltas = Vec::new();
-    let Some(vault) = vault_address(&router_state_store) else {
-        return Ok(BlockBalanceDeltas { balance_deltas });
-    };
+    let vault = vault_address(&router_state_store, &config);
 
     // Only `token:` keys carry a token to snapshot; the catch-all component index shares this
     // store and must be skipped.
@@ -485,7 +496,7 @@ fn map_protocol_changes(
     let config: Config = serde_qs::from_str(params.as_str())?;
     let mut pending_creation = first_registrations(pair_registered_deltas);
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
-    let vault = vault_address(&router_state_store);
+    let vault = vault_address(&router_state_store, &config);
     let paused = router_paused(&router_state_store);
 
     for tx_changes in components.changes {
@@ -508,14 +519,17 @@ fn map_protocol_changes(
     for trx in block.transactions() {
         // Most transactions in a block touch neither the router nor the registry. Skipping them
         // here avoids allocating a builder per transaction just to drop it again at `build()`.
-        let touches_router = trx
-            .logs_with_calls()
-            .any(|(log, _)| log.address == config.router_address);
-        let touches_registry = trx
-            .calls
-            .iter()
-            .any(|call| !call.state_reverted && call.address == config.registry_address);
-        if !touches_router && !touches_registry {
+        // Scanning `calls` rather than `logs_with_calls` keeps the gate itself allocation-free:
+        // the latter collects and sorts every log in the transaction before yielding one. The
+        // router is a proxy, so a `PairRegistered` log is emitted from the delegatecall frame
+        // whose `address` is the implementation — but the entry frame that called the proxy
+        // still carries `address == router`, and this is an `any` over every frame.
+        let touches_tempest = trx.calls.iter().any(|call| {
+            !call.state_reverted &&
+                (call.address == config.router_address ||
+                    call.address == config.registry_address)
+        });
+        if !touches_tempest {
             continue;
         }
 
@@ -553,6 +567,22 @@ fn map_protocol_changes(
                 let transition = if paused { Some(true) } else { transition };
                 if let Some(state) = transition {
                     builder.change_component_pause_state(&id, state);
+                }
+            } else if let Some(ev) = VaultUpdated::match_and_decode(log) {
+                // A component's `contract_addresses` is frozen at creation and cannot follow a
+                // rotation, but attributes are mutable. Repointing `balance_owner` keeps the
+                // balance overwrites addressed at the live vault; without it every existing
+                // component's inventory is written to the old address and the venue silently
+                // stops quoting.
+                for id in known_component_ids(&component_index_store) {
+                    builder.add_entity_change(&EntityChanges {
+                        component_id: id,
+                        attributes: vec![Attribute {
+                            name: BALANCE_OWNER_ATTRIBUTE.to_string(),
+                            value: ev.new_vault.clone(),
+                            change: ChangeType::Update.into(),
+                        }],
+                    });
                 }
             } else if Paused::match_and_decode(log).is_some() {
                 // The router is `Pausable` and every settlement and quote entrypoint is
@@ -619,10 +649,7 @@ fn map_protocol_changes(
             let builder = transaction_changes
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(&tx));
-            let Some(vault) = vault.as_ref() else {
-                return;
-            };
-            let mut contract_change = InterimContractChange::new(vault, false);
+            let mut contract_change = InterimContractChange::new(&vault, false);
             for token_balance_map in balances.values() {
                 for balance_change in token_balance_map.values() {
                     contract_change
@@ -635,13 +662,7 @@ fn map_protocol_changes(
 
     extract_contract_changes_builder(
         &block,
-        |addr| {
-            addr == config.router_address ||
-                vault
-                    .as_ref()
-                    .is_some_and(|vault| addr == *vault) ||
-                addr == config.registry_address
-        },
+        |addr| addr == config.router_address || addr == vault || addr == config.registry_address,
         &mut transaction_changes,
     );
 
