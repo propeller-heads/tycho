@@ -189,13 +189,14 @@ struct Cli {
 
     /// Run the protocol-stream test pipeline only on blocks whose number is a multiple of this
     /// value. 1 tests every block (current behavior). Use a higher value on fast chains (e.g.
-    /// Robinhood) where the harness cannot keep up with the head. State from every block is
-    /// still ingested. Incompatible with --partial-blocks.
+    /// Robinhood) where the harness cannot keep up with the head, or with --partial-blocks to
+    /// cap RPC usage (e.g. Base flashblocks). With --partial-blocks, every partial update of a
+    /// sampled block is tested (bursty by design) and blocks are still fetched via the
+    /// pending/latest polling path. State from every block is ingested either way.
     #[arg(
         long,
         default_value_t = 1,
-        value_parser = clap::value_parser!(u64).range(1..),
-        conflicts_with = "partial_blocks"
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     test_every_n_blocks: u64,
 
@@ -2242,8 +2243,8 @@ mod tests {
     }
 
     #[test]
-    fn test_every_n_blocks_conflicts_with_partial_blocks() {
-        let result = Cli::try_parse_from([
+    fn test_every_n_blocks_works_with_partial_blocks() {
+        let cli = Cli::try_parse_from([
             "tycho-integration-test",
             "--tycho-url",
             "localhost:4242",
@@ -2252,7 +2253,9 @@ mod tests {
             "--partial-blocks",
             "--test-every-n-blocks",
             "10",
-        ]);
-        assert!(result.is_err());
+        ])
+        .expect("--test-every-n-blocks must be accepted alongside --partial-blocks");
+        assert!(cli.partial_blocks);
+        assert_eq!(cli.test_every_n_blocks, 10);
     }
 }
