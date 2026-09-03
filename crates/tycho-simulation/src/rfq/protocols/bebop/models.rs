@@ -231,6 +231,10 @@ pub struct BebopErrorDetail {
     pub error_code: u32,
     pub message: String,
     pub request_id: String,
+    /// The largest sell amount the venue can currently fill, in human-readable units of the sell
+    /// token. Present on `InsufficientLiquidity` errors.
+    #[serde(default)]
+    pub can_sell_amount: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -56,6 +56,10 @@ fn chain_to_bebop_url(chain: Chain) -> Result<String, RFQError> {
     Ok(url)
 }
 
+/// The venue has no maker depth for the requested pair at the requested size. The same pair
+/// quotes successfully at a smaller size, and at this size again once makers requote.
+const INSUFFICIENT_LIQUIDITY_ERROR_CODE: u32 = 102;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BebopClient {
     chain: Chain,
@@ -259,10 +263,25 @@ impl BebopClient {
 
                 Ok(signed_quote)
             }
-            BebopQuoteResponse::Error(err) => Err(RFQError::FatalError(format!(
-                "Bebop API error: code {} - {} (requestId: {})",
-                err.error.error_code, err.error.message, err.error.request_id
-            ))),
+            BebopQuoteResponse::Error(err) => {
+                let detail = format!(
+                    "Bebop API error: code {} - {} (requestId: {})",
+                    err.error.error_code, err.error.message, err.error.request_id
+                );
+                if err.error.error_code == INSUFFICIENT_LIQUIDITY_ERROR_CODE {
+                    let can_sell = err
+                        .error
+                        .can_sell_amount
+                        .map(|amount| format!(", venue can sell at most {amount}"))
+                        .unwrap_or_default();
+                    Err(RFQError::QuoteNotFound(format!(
+                        "{detail}: requested {} {} -> {}{can_sell}",
+                        params.amount_in, params.token_in, params.token_out
+                    )))
+                } else {
+                    Err(RFQError::FatalError(detail))
+                }
+            }
         }
     }
 }
@@ -594,6 +613,43 @@ mod tests {
     const SWAP_AGGREGATE_SELECTOR: [u8; 4] = [0xa2, 0xf7, 0x48, 0x93];
     /// BebopRouter.swap
     const ROUTER_SWAP_SELECTOR: [u8; 4] = [0x95, 0x86, 0xd0, 0xe8];
+
+    fn error_params() -> GetAmountOutParams {
+        GetAmountOutParams {
+            amount_in: BigUint::from(500_000000000000000000u128),
+            token_in: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            token_out: Bytes::from_str("0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984").unwrap(),
+            sender: Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
+            receiver: Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
+        }
+    }
+
+    /// Body as returned by the API for a 500 WETH -> UNI request that exceeds maker depth.
+    #[test]
+    fn test_insufficient_liquidity_is_not_fatal() {
+        let body = r#"{"error":{"errorCode":102,"message":"InsufficientLiquidity: Insufficient liquidity for pairs ['No liquidity available for *UNI* / *WETH*']","requestId":"7bb4e241-ecb0-4b8b-bdf2-4574c24e4ce7","canSellAmount":219.73962916881246,"canSellAmountUsd":528265.0555032836}}"#;
+        let response: BebopQuoteResponse = serde_json::from_str(body).unwrap();
+
+        let err = BebopClient::process_quote_response(response, &error_params()).unwrap_err();
+
+        match err {
+            RFQError::QuoteNotFound(msg) => {
+                assert!(msg.contains("code 102"), "{msg}");
+                assert!(msg.contains("venue can sell at most 219.73"), "{msg}");
+            }
+            other => panic!("expected QuoteNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_other_error_codes_stay_fatal() {
+        let body = r#"{"error":{"errorCode":400,"message":"Unauthorized","requestId":"abc"}}"#;
+        let response: BebopQuoteResponse = serde_json::from_str(body).unwrap();
+
+        let err = BebopClient::process_quote_response(response, &error_params()).unwrap_err();
+
+        assert!(matches!(err, RFQError::FatalError(_)), "expected FatalError, got {err:?}");
+    }
 
     #[tokio::test]
     #[ignore] // Requires network access and setting proper env vars
