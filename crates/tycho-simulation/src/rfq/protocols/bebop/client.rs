@@ -38,6 +38,60 @@ use crate::{
     tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
+/// Keeps one component per token pair.
+///
+/// The pricing feed publishes some pairs in both orientations - one entry's bids are the other's
+/// asks over the same maker inventory, and a firm quote for a given direction is bounded by that
+/// one inventory. Two components would offer it twice, so a route could be split across both and
+/// ask for depth the venue does not have.
+///
+/// The surviving orientation is the one quoting in an approved quote token, since its TVL needs no
+/// normalisation; failing that, the one whose base address sorts first, for a stable choice across
+/// snapshots. An orientation that produced no component - too thin, or no path to an approved
+/// quote token - leaves the other uncontested.
+fn keep_one_orientation_per_pair(
+    components: &mut HashMap<String, ComponentWithState>,
+    quote_tokens: &HashSet<Bytes>,
+) {
+    /// Ranks an orientation by its `[base, quote]` tokens; the higher rank survives.
+    fn rank(tokens: &[Bytes], quote_tokens: &HashSet<Bytes>) -> (bool, bool) {
+        let [base, quote] = tokens else { return (false, false) };
+        (quote_tokens.contains(quote), base < quote)
+    }
+
+    let mut best_per_pair: HashMap<(Bytes, Bytes), String> = HashMap::new();
+    let mut superseded: Vec<String> = Vec::new();
+
+    for (id, component) in components.iter() {
+        let tokens = &component.component.tokens;
+        let [first, second] = &tokens[..] else { continue };
+        let pair = if first <= second {
+            (first.clone(), second.clone())
+        } else {
+            (second.clone(), first.clone())
+        };
+
+        match best_per_pair.get(&pair) {
+            None => {
+                best_per_pair.insert(pair, id.clone());
+            }
+            Some(incumbent_id) => {
+                let incumbent = &components[incumbent_id];
+                if rank(tokens, quote_tokens) > rank(&incumbent.component.tokens, quote_tokens) {
+                    superseded.push(incumbent_id.clone());
+                    best_per_pair.insert(pair, id.clone());
+                } else {
+                    superseded.push(id.clone());
+                }
+            }
+        }
+    }
+
+    for id in superseded {
+        components.remove(&id);
+    }
+}
+
 fn bytes_to_address(address: &Bytes) -> Result<Address, RFQError> {
     if address.len() == 20 {
         Ok(Address::from_slice(address))
@@ -56,6 +110,12 @@ fn chain_to_bebop_url(chain: Chain) -> Result<String, RFQError> {
     let url = format!("api.bebop.xyz/pmm/{chain_path}/v3");
     Ok(url)
 }
+
+/// How long the pricing feed may stay silent before it counts as dead. Updates arrive every one
+/// to two seconds, and every pair in a snapshot is under six seconds old, so this is far outside
+/// normal operation. It covers the case where no close frame arrives at all - a half-open socket
+/// left by a partition or a dropped NAT mapping reads as open forever.
+const FEED_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The `/quote` error codes Bebop documents, plus the two general ones any endpoint can return.
 ///
@@ -380,7 +440,23 @@ impl RFQClient for BebopClient {
                 let (_, mut ws_receiver) = ws_stream.split();
 
                 // Message processing loop
-                while let Some(msg) = ws_receiver.next().await {
+                loop {
+                    let msg = match timeout(FEED_IDLE_TIMEOUT, ws_receiver.next()).await {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => {
+                            warn!("Bebop pricing stream ended");
+                            break;
+                        }
+                        Err(_) => {
+                            // A socket that carries no pricing data can still read as open, and
+                            // then silence is the only signal that the feed is gone.
+                            warn!(
+                                "No Bebop pricing update for {} seconds; treating the feed as dead",
+                                FEED_IDLE_TIMEOUT.as_secs()
+                            );
+                            break;
+                        }
+                    };
                     match msg {
                         Ok(Message::Binary(data)) => {
                             match BebopPricingUpdate::decode(&data[..]) {
@@ -442,6 +518,8 @@ impl RFQClient for BebopClient {
                                         }
                                     }
 
+                                    keep_one_orientation_per_pair(&mut new_components, &client.quote_tokens);
+
                                     // Find components that were removed (existed before but not in this update)
                                     // This includes components with no bids or asks, since they are filtered
                                     // out by the tvl threshold.
@@ -493,6 +571,26 @@ impl RFQClient for BebopClient {
                         }
                         _ => {} // Ignore other message types
                     }
+                }
+
+                // The last book received says nothing about the venue once its feed is gone, so
+                // withdraw the components rather than leaving them quotable across the reconnect.
+                if !current_components.is_empty() {
+                    let removed_components = current_components
+                        .iter()
+                        .map(|(id, component)| (id.clone(), component.component.clone()))
+                        .collect();
+                    current_components.clear();
+                    let timestamp = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into()))?
+                        .as_secs();
+                    yield Ok(("bebop".to_string(), StateSyncMessage::<TimestampHeader> {
+                        header: TimestampHeader { timestamp },
+                        snapshots: Snapshot::default(),
+                        deltas: None,
+                        removed_components,
+                    }));
                 }
 
                 // If we're here, the message loop exited - always attempt to reconnect.
@@ -703,6 +801,81 @@ mod tests {
         }
     }
 
+    fn component_with_tokens(id: &str, base: &str, quote: &str) -> ComponentWithState {
+        let tokens = vec![Bytes::from_str(base).unwrap(), Bytes::from_str(quote).unwrap()];
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent {
+                id: id.to_string(),
+                protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
+                protocol_type_name: "bebop_pool".to_string(),
+                chain: Chain::Ethereum,
+                tokens,
+                contract_addresses: vec![],
+                static_attributes: Default::default(),
+                change: Default::default(),
+                creation_tx: Default::default(),
+                created_at: Default::default(),
+            },
+            component_tvl: Some(1.0),
+            entrypoints: vec![],
+        }
+    }
+
+    /// The pair that motivated this: the feed publishes UNI/WETH and WETH/UNI over one book.
+    #[test]
+    fn test_mirrored_orientations_collapse_to_one_component() {
+        let uni = "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984";
+        let weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let mut components = HashMap::from([
+            ("uni/weth".to_string(), component_with_tokens("uni/weth", uni, weth)),
+            ("weth/uni".to_string(), component_with_tokens("weth/uni", weth, uni)),
+        ]);
+
+        keep_one_orientation_per_pair(&mut components, &HashSet::new());
+
+        assert_eq!(components.len(), 1, "one book must not be advertised as two pools");
+        // Neither token is an approved quote token, so the stable tie-break decides.
+        assert!(components.contains_key("uni/weth"), "expected the lower base address to survive");
+    }
+
+    #[test]
+    fn test_orientation_quoting_in_an_approved_token_survives() {
+        let weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let mut components = HashMap::from([
+            ("weth/usdc".to_string(), component_with_tokens("weth/usdc", weth, usdc)),
+            ("usdc/weth".to_string(), component_with_tokens("usdc/weth", usdc, weth)),
+        ]);
+
+        keep_one_orientation_per_pair(
+            &mut components,
+            &HashSet::from([Bytes::from_str(usdc).unwrap()]),
+        );
+
+        assert_eq!(components.len(), 1);
+        assert!(
+            components.contains_key("weth/usdc"),
+            "the orientation quoting in USDC needs no TVL normalisation and must win, even though \
+             the USDC address sorts first"
+        );
+    }
+
+    #[test]
+    fn test_unmirrored_pairs_are_untouched() {
+        let uni = "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984";
+        let weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let mut components = HashMap::from([
+            ("uni/weth".to_string(), component_with_tokens("uni/weth", uni, weth)),
+            ("weth/usdc".to_string(), component_with_tokens("weth/usdc", weth, usdc)),
+        ]);
+
+        keep_one_orientation_per_pair(&mut components, &HashSet::new());
+
+        assert_eq!(components.len(), 2);
+    }
+
     /// Body as returned by the API for a 500 WETH -> UNI request that exceeds maker depth.
     #[test]
     fn test_insufficient_liquidity_is_not_fatal() {
@@ -747,6 +920,86 @@ mod tests {
         let err = BebopClient::process_quote_response(response, &error_params()).unwrap_err();
 
         assert!(matches!(err, RFQError::QuoteNotFound(_)), "expected QuoteNotFound, got {err:?}");
+    }
+
+    /// A book only describes the venue while its feed keeps arriving.
+    #[tokio::test]
+    async fn test_book_is_withdrawn_when_the_feed_drops() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws_stream = accept_async(stream).await.unwrap();
+            let (mut ws_sender, _) = ws_stream.split();
+            let update = BebopPricingUpdate {
+                pairs: vec![BebopPriceData {
+                    base: hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+                    quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
+                    last_update_ts: 1752617378,
+                    bids: vec![3070.05f32, 0.325717f32],
+                    asks: vec![3070.527f32, 0.325717f32],
+                }],
+            };
+            let _ = ws_sender
+                .send(Message::Binary(update.encode_to_vec().into()))
+                .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = ws_sender.close().await;
+            // Hold the task open so the client's reconnect attempt does not race the assertions.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let client = BebopClient {
+            chain: Chain::Ethereum,
+            price_ws: format!("ws://127.0.0.1:{}", addr.port()),
+            tokens: HashSet::from([weth, usdc.clone()]),
+            tvl: 1.0,
+            ws_key: "test_key".to_string(),
+            quote_tokens: HashSet::from([usdc]),
+            quote_endpoint: String::new(),
+            quote_timeout: Duration::from_secs(5),
+            origin_address: None,
+            origin_target: None,
+            origin_source: None,
+        };
+
+        let mut stream = client.stream();
+
+        let (_, snapshot) = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("no snapshot before the timeout")
+            .expect("stream ended")
+            .expect("stream errored");
+        let component_id = snapshot
+            .snapshots
+            .states
+            .keys()
+            .next()
+            .expect("the snapshot must carry the pair")
+            .clone();
+
+        let (_, withdrawal) = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("no withdrawal before the timeout")
+            .expect("stream ended")
+            .expect("stream errored");
+        assert!(
+            withdrawal.snapshots.states.is_empty(),
+            "a lost feed carries no new state, got {:?}",
+            withdrawal.snapshots.states.keys()
+        );
+        assert!(
+            withdrawal
+                .removed_components
+                .contains_key(&component_id),
+            "the pair must stop being quotable, removed: {:?}",
+            withdrawal.removed_components.keys()
+        );
     }
 
     #[tokio::test]
