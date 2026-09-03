@@ -121,19 +121,18 @@ fn get_new_pairs(
     mut pending_creation: HashSet<String>,
     changes: &mut Vec<TransactionEntityChanges>,
 ) {
-    // The router's implementation is deliberately absent: it is an upgradeable ERC1967 proxy, and
-    // a component's contract set is frozen at creation, so a hardcoded implementation goes stale
-    // on the next `upgradeToAndCall` and leaves the proxy delegatecalling a codeless account. DCI
-    // discovers it instead — see `add_entrypoints`.
+    // Neither the router's implementation nor the vault is listed. A component's contract set is
+    // frozen at creation, so anything that can move behind the router goes stale in it: the
+    // implementation on the next `upgradeToAndCall`, and the vault on the next `VaultUpdated`.
+    // Listing either would split components into cohorts that diverge permanently, since the set
+    // becomes `involved_contracts` in simulation.
     //
-    // The vault is listed despite being movable, because DCI cannot stand in for it here. Nothing
-    // ever calls the vault — `quote` reads the vault's balance and allowance out of the *token*
-    // contracts, so the vault is absent from the traced access list and DCI would never discover
-    // it. It is listed for a different reason: `contract_addresses` is what filters which
-    // accounts' balances reach the pool (`vm/decoder.rs`), and DCI does not extend that set. A
-    // vault rotation therefore needs a re-index; `balance_owner` is repointed in
-    // `map_protocol_changes` so the attribute half at least stays correct.
-    let contracts = [config.router_address.as_slice(), vault, config.registry_address.as_slice()];
+    // The implementation is discovered by DCI instead -- see `add_entrypoints`. The vault needs no
+    // discovery at all: nothing ever calls it, because `quote` reads its balance and allowance out
+    // of the *token* contracts, and simulation reaches its inventory through the mutable
+    // `balance_owner` attribute rather than through this set. `map_protocol_changes` repoints that
+    // attribute on `VaultUpdated`, so a rotation is followed without anything being frozen here.
+    let contracts = [config.router_address.as_slice(), config.registry_address.as_slice()];
 
     let mut on_pair_registered = |event: PairRegistered, tx: &TransactionTrace, _log: &Log| {
         if !event.registered {
