@@ -3,7 +3,7 @@
 ## v0.3.0
 
 - Embed `seed.bin`, a snapshot of every pool at one block written by the package's seed writer
-  (`seed/`), and replace that block's events with one synthetic transaction of `PoolSnapshot`
+  (`../seed`), and replace that block's events with one synthetic transaction of `PoolSnapshot`
   events so all stores start from the snapshot instead of from protocol genesis. Together with a manifest whose `initialBlock`
   is the seed block this lets an indexer skip the protocol's history. The committed seed is empty
   and pinned to the block before the first pool, so the stock manifest's output is unchanged.

@@ -48,6 +48,12 @@ runs:
                 continue
               fi
 
+              # A crate that names another workspace (`workspace = "..."`), such as a package's
+              # native seed writer, is built and tested by that workspace's CI, not here.
+              if grep -q '^workspace = ' "$dir/Cargo.toml" 2>/dev/null; then
+                break
+              fi
+
               # Extract package name, handle case where grep finds nothing
               PACKAGE_NAME=$(grep -m1 '^name = ' "$dir/Cargo.toml" 2>/dev/null | cut -d'"' -f2)
               if [ -n "$PACKAGE_NAME" ]; then

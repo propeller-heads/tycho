@@ -19,7 +19,7 @@ members = [
     "ethereum-uniswap-v4/no-hooks",
     "ethereum-uniswap-v4/with-hooks",
     "ethereum-ekubo-v2",
-    "ethereum-ekubo-v3",
+    "ethereum-ekubo-v3/package",
     "ethereum-maverick-v2",
     "ethereum-lido",
     "ethereum-balancer-v3",

@@ -61,6 +61,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | `protocols/substreams/` | Substreams modules (WASM) producing the protobuf messages consumed by `tycho-indexer`; **separate WASM workspace** with its own toolchain — not in `[workspace.members]` |
 | `protocols/testing/` (`protocol-testing`) | Simulation accuracy test harness: runs protocol state through `tycho-simulation` and compares against on-chain results |
 | `protocols/adapter-integration/` | EVM adapter integration tests |
+| [`tycho-seed`](../crates/tycho-seed/README.md) | Shared library of the seed writers, the per-protocol native crates at `protocols/substreams/<protocol>/seed/` that reconstruct a protocol's state at one block into a seed file its package (`<protocol>/package/`) embeds to start from that block instead of the protocol's first (Ekubo v3 so far); the header lives in `protocols/substreams/crates/tycho-seed-format`, the package-side reader in `tycho_substreams::seed` |
 
 ### Testing Infrastructure
 

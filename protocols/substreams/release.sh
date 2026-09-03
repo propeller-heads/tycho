@@ -16,7 +16,7 @@ if [ -n "$current_tag" ]; then
         # Semantic version
         version="v${BASH_REMATCH[2]}"
 
-        cargo_version=$(cargo pkgid -p "$package" | cut -d# -f2 | cut -d: -f2)
+        cargo_version=$(cargo pkgid -p "$package" | sed -e 's/.*[#@:]//')
         if [[ "v$cargo_version" != "$version" ]]; then
           echo "Error: Cargo version: v${cargo_version} does not match tag version: ${version}!"
           exit 1
@@ -45,24 +45,33 @@ fi
 
 chain_name=$(echo "$package" | cut -d'-' -f1)
 
+# The package directory: the argument itself when it names one (nested packages such as
+# ethereum-uniswap-v4/no-hooks), otherwise the directory of the Cargo package with that name
+# (packages that live below their protocol directory, such as ethereum-ekubo-v3/package).
+if [ -d "$package" ]; then
+    package_dir="$package"
+else
+    package_dir=$(realpath --relative-to=. "$(cargo pkgid -p "$package" | sed -e 's|^path+file://||' -e 's|#.*$||')")
+fi
+
 # Find all YAML files in the specified package directory if no YAML file input is provided
 yaml_files=()
 if [ -z "$2" ]; then
     # Check for YAML files in the package directory, filtering by chain name or called substreams.yaml
-    yaml_files=($(ls "$package"/*.yaml 2>/dev/null | grep -E "^$package/($chain_name|substreams.yaml)"))
+    yaml_files=($(ls "$package_dir"/*.yaml 2>/dev/null | grep -E "^$package_dir/($chain_name|substreams.yaml)"))
     if [ ${#yaml_files[@]} -eq 0 ]; then
         echo "Error: No YAML files found in the package directory that match the chain name: $chain_name or substreams.yaml."
         exit 1
     fi
 else
-    yaml_files=("$package/$2.yaml")
+    yaml_files=("$package_dir/$2.yaml")
 fi
 
 set -e  # Exit the script if any command fails
 # Build from inside the package directory so rustup picks up the package's own
 # rust-toolchain.toml; --locked enforces the committed Cargo.lock. Both are
 # required for reproducible wasm builds.
-(cd "$package" && cargo build --locked --target wasm32-unknown-unknown --release)
+(cd "$package_dir" && cargo build --locked --target wasm32-unknown-unknown --release)
 mkdir -p ./target/spkg/
 
 # Loop through each YAML file and build the substreams package

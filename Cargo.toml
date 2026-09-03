@@ -13,6 +13,8 @@ members = [
     "crates/tycho-integration-test",
     "crates/tycho-execution",
     "crates/tycho-execution/model",
+    "crates/tycho-seed",
+    "protocols/substreams/ethereum-ekubo-v3/seed",
     "protocols/testing",
 ]
 # protocols/substreams/ and crates/tycho-execution/substreams/ are intentionally excluded —

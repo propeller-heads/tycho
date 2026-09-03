@@ -10,7 +10,7 @@ protobuf:
     - tycho/evm/v1/utils.proto
     - ekubo.proto
   importPaths:
-    - ../../../proto
+    - ../../../../proto
     - ./proto
   excludePaths:
     - google
@@ -20,7 +20,7 @@ protobuf:
 binaries:
   default:
     type: wasm/rust-v1
-    file: ../target/wasm32-unknown-unknown/release/ethereum_ekubo_v3.wasm
+    file: ../../target/wasm32-unknown-unknown/release/ethereum_ekubo_v3.wasm
 
 network: mainnet
 networks:

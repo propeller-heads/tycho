@@ -1,10 +1,11 @@
 //! Seeded start of the package.
 //!
 //! Every build embeds `seed.bin`, a snapshot of every pool at one block written by the package's
-//! seed writer (`../seed`). At that block `map_events` replaces the real events with one synthetic
-//! transaction carrying a `PoolSnapshot` per pool, so every store module rebuilds its state from
-//! the snapshot. The seed describes the state *after* the block, which is why the real events of
-//! the seed block are dropped rather than applied on top.
+//! seed writer (`../seed`, a sibling of this package directory). At that block `map_events`
+//! replaces the real events with one synthetic transaction carrying a `PoolSnapshot` per pool, so
+//! every store module rebuilds its state from the snapshot. The seed describes the state *after*
+//! the block, which is why the real events of the seed block are dropped rather than applied on
+//! top.
 //!
 //! The committed `seed.bin` is an empty seed pinned to the block before the protocol's first pool,
 //! a block the stock manifest never streams, so the package behaves as if it had no seed. A seeded

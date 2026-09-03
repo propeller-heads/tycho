@@ -1,0 +1,20 @@
+[package]
+name = "ethereum-ekubo-v3-seed"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Writes the seed the ethereum-ekubo-v3 Substreams package embeds to start from a snapshot"
+# Native binary in the directory of a wasm32 package: the nearest workspace is the Substreams one,
+# which must not build it, so the root workspace is named explicitly.
+workspace = "../../../.."
+
+[dependencies]
+alloy = { workspace = true, features = ["rpc-types", "sol-types"] }
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+ekubo_sdk = { version = "3", features = ["evm"] }
+num-bigint.workspace = true
+prost = "0.11"
+tokio.workspace = true
+tracing.workspace = true
+tycho-seed = { path = "../../../../crates/tycho-seed" }
