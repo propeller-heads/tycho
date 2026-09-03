@@ -1019,10 +1019,12 @@ async fn process_update(
 
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
-            let block = if cli.test_every_n_blocks > 1 {
-                // Sampled mode: on fast chains the head is expected to be past the update, so the
-                // target block is fetched by number instead of racing the head. clap rejects
-                // --partial-blocks in this mode, so the block is always full.
+            let block = if fetch_sampled_block_by_number(cli.test_every_n_blocks, cli.partial_blocks)
+            {
+                // Sampled full-block mode: on fast chains the head is expected to be past the
+                // update, so the target block is fetched by number instead of racing the head.
+                // Sampled runs with --partial-blocks never take this path — a flashblock's
+                // pending state cannot be fetched by number — and use the polling path below.
                 match await_target_block(
                     &rpc_tools,
                     update_block_number,
@@ -2030,6 +2032,14 @@ fn is_sampled_block(block_number: u64, interval: u64) -> bool {
     block_number.is_multiple_of(interval)
 }
 
+/// True when a sampled update's target block should be fetched by number (sampled full-block
+/// mode, e.g. Robinhood where the head races past the update). With --partial-blocks, sampling
+/// only gates WHICH updates are tested; block fetching stays on the pending/latest polling path
+/// because a flashblock's pending state cannot be fetched by number after the fact.
+fn fetch_sampled_block_by_number(test_every_n_blocks: u64, partial_blocks: bool) -> bool {
+    test_every_n_blocks > 1 && !partial_blocks
+}
+
 /// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
 /// registry-priced pAMMs (FermiSwap, Kipseli, Bebop, TaurusFi).
 const STALE_UPDATE_SELECTOR: &str = "666a2814";
@@ -2158,7 +2168,9 @@ mod tests {
     use clap::Parser;
     use rstest::rstest;
 
-    use super::{is_oracle_stale_revert, is_sampled_block, pamm_venue, Cli};
+    use super::{
+        fetch_sampled_block_by_number, is_oracle_stale_revert, is_sampled_block, pamm_venue, Cli,
+    };
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
@@ -2214,6 +2226,19 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(is_sampled_block(block, interval), expected);
+    }
+
+    #[rstest]
+    #[case::sampled_full_block_mode(10, false, true)]
+    #[case::sampled_with_partial_blocks_polls(10, true, false)]
+    #[case::unsampled_polls(1, false, false)]
+    #[case::unsampled_with_partial_blocks_polls(1, true, false)]
+    fn sampled_fetch_by_number_only_without_partial_blocks(
+        #[case] test_every_n_blocks: u64,
+        #[case] partial_blocks: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(fetch_sampled_block_by_number(test_every_n_blocks, partial_blocks), expected);
     }
 
     #[test]
