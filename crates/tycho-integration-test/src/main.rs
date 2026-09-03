@@ -1020,8 +1020,10 @@ async fn process_update(
 
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
-            let block = if fetch_sampled_block_by_number(cli.test_every_n_blocks, cli.partial_blocks)
-            {
+            let by_number =
+                fetch_sampled_block_by_number(cli.test_every_n_blocks, cli.partial_blocks);
+
+            let block = if by_number {
                 // Sampled full-block mode: on fast chains the head is expected to be past the
                 // update, so the target block is fetched by number instead of racing the head.
                 // Sampled runs with --partial-blocks never take this path — a flashblock's

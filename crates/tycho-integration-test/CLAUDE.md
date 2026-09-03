@@ -41,9 +41,9 @@ shows up as a failure.
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
-  dispatches blocks to stream processors, calls `poll_rpc_for_block` (every-block mode) or
-  `await_target_block` (`--test-every-n-blocks` > 1, fetches the sampled block by number) for
-  on-chain comparison
+  dispatches blocks to stream processors, calls `poll_rpc_for_block` (every-block mode, and
+  sampled mode under `--partial-blocks`) or `await_target_block` (`--test-every-n-blocks` > 1
+  without `--partial-blocks`, fetches the sampled block by number) for on-chain comparison
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
