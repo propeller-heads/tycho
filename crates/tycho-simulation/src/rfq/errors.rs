@@ -13,6 +13,8 @@ pub enum RFQError {
     InvalidInput(String),
     #[error("RFQ quote not found error: {0}")]
     QuoteNotFound(String),
+    #[error("RFQ recoverable error: {0}")]
+    RecoverableError(String),
 }
 
 impl From<reqwest::Error> for RFQError {
@@ -28,9 +30,9 @@ impl From<RFQError> for SimulationError {
             // A venue that has no quote for these tokens at this size, or that could not be
             // reached, says nothing about the pool being broken - the same request may succeed on
             // the next block or at a smaller size.
-            RFQError::QuoteNotFound(_) | RFQError::ConnectionError(_) => {
-                SimulationError::RecoverableError(msg)
-            }
+            RFQError::QuoteNotFound(_) |
+            RFQError::ConnectionError(_) |
+            RFQError::RecoverableError(_) => SimulationError::RecoverableError(msg),
             RFQError::InvalidInput(_) => SimulationError::InvalidInput(msg, None),
             RFQError::ParsingError(_) | RFQError::FatalError(_) => SimulationError::FatalError(msg),
         }
@@ -49,6 +51,10 @@ mod tests {
         ));
         assert!(matches!(
             SimulationError::from(RFQError::ConnectionError("timed out".into())),
+            SimulationError::RecoverableError(_)
+        ));
+        assert!(matches!(
+            SimulationError::from(RFQError::RecoverableError("rate limited".into())),
             SimulationError::RecoverableError(_)
         ));
         assert!(matches!(

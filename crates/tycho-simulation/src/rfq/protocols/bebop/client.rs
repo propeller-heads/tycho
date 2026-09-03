@@ -30,7 +30,8 @@ use crate::{
         errors::RFQError,
         models::TimestampHeader,
         protocols::bebop::models::{
-            BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
+            BebopErrorDetail, BebopOrderToSign, BebopPriceData, BebopPricingUpdate,
+            BebopQuoteResponse,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -56,9 +57,23 @@ fn chain_to_bebop_url(chain: Chain) -> Result<String, RFQError> {
     Ok(url)
 }
 
-/// The venue has no maker depth for the requested pair at the requested size. The same pair
-/// quotes successfully at a smaller size, and at this size again once makers requote.
-const INSUFFICIENT_LIQUIDITY_ERROR_CODE: u32 = 102;
+/// The `/quote` error codes Bebop documents, plus the two general ones any endpoint can return.
+///
+/// The list is not in Bebop's live documentation - the page was dropped in a restructure, and
+/// `docs.bebop.xyz/specs/rfq-api.json` types `errorCode` as a bare integer. The published list is
+/// preserved at <https://web.archive.org/web/20260119212852/https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-error-codes>
+mod error_code {
+    pub const INVALID_API_REQUEST: u32 = 101;
+    pub const INSUFFICIENT_LIQUIDITY: u32 = 102;
+    pub const GAS_CALCULATION: u32 = 103;
+    pub const MIN_SIZE: u32 = 104;
+    pub const TOKEN_NOT_SUPPORTED: u32 = 105;
+    pub const GAS_EXCEEDS_SIZE: u32 = 106;
+    pub const UNEXPECTED_PERMITS: u32 = 107;
+    pub const RATE_LIMITED: u32 = 111;
+    pub const UNKNOWN: u32 = 500;
+    pub const TIMED_OUT: u32 = 522;
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BebopClient {
@@ -172,6 +187,49 @@ impl BebopClient {
         }
     }
 
+    /// Maps a `/quote` error body onto the severity it represents.
+    ///
+    /// The venue answering "not at this size, not right now" is an ordinary market condition: the
+    /// same request succeeds at another size or once makers requote. Only a rejection of the
+    /// request itself - a malformed query, an unsupported token - means retrying is pointless.
+    fn classify_api_error(err: &BebopErrorDetail, params: &GetAmountOutParams) -> RFQError {
+        let detail = format!(
+            "Bebop API error: code {} - {} (requestId: {})",
+            err.error_code,
+            err.message
+                .as_deref()
+                .unwrap_or("no message"),
+            err.request_id
+                .as_deref()
+                .unwrap_or("none")
+        );
+        let request =
+            format!("requested {} {} -> {}", params.amount_in, params.token_in, params.token_out);
+
+        match err.error_code {
+            error_code::INSUFFICIENT_LIQUIDITY => {
+                let can_sell = err
+                    .can_sell_amount
+                    .map(|amount| format!(", venue can sell at most {amount}"))
+                    .unwrap_or_default();
+                RFQError::QuoteNotFound(format!("{detail}: {request}{can_sell}"))
+            }
+            error_code::MIN_SIZE | error_code::GAS_EXCEEDS_SIZE => {
+                RFQError::QuoteNotFound(format!("{detail}: {request}"))
+            }
+            error_code::GAS_CALCULATION |
+            error_code::RATE_LIMITED |
+            error_code::UNKNOWN |
+            error_code::TIMED_OUT => RFQError::RecoverableError(detail),
+            error_code::INVALID_API_REQUEST |
+            error_code::TOKEN_NOT_SUPPORTED |
+            error_code::UNEXPECTED_PERMITS => RFQError::FatalError(detail),
+            // An undocumented code could mean anything, so treat it as the more serious case
+            // until it is classified.
+            _ => RFQError::FatalError(detail),
+        }
+    }
+
     fn process_quote_response(
         quote_response: BebopQuoteResponse,
         params: &GetAmountOutParams,
@@ -263,25 +321,7 @@ impl BebopClient {
 
                 Ok(signed_quote)
             }
-            BebopQuoteResponse::Error(err) => {
-                let detail = format!(
-                    "Bebop API error: code {} - {} (requestId: {})",
-                    err.error.error_code, err.error.message, err.error.request_id
-                );
-                if err.error.error_code == INSUFFICIENT_LIQUIDITY_ERROR_CODE {
-                    let can_sell = err
-                        .error
-                        .can_sell_amount
-                        .map(|amount| format!(", venue can sell at most {amount}"))
-                        .unwrap_or_default();
-                    Err(RFQError::QuoteNotFound(format!(
-                        "{detail}: requested {} {} -> {}{can_sell}",
-                        params.amount_in, params.token_in, params.token_out
-                    )))
-                } else {
-                    Err(RFQError::FatalError(detail))
-                }
-            }
+            BebopQuoteResponse::Error(err) => Err(Self::classify_api_error(&err.error, params)),
         }
     }
 }
@@ -651,6 +691,8 @@ mod tests {
     /// BebopRouter.swap
     const ROUTER_SWAP_SELECTOR: [u8; 4] = [0x95, 0x86, 0xd0, 0xe8];
 
+    use tycho_common::simulation::errors::SimulationError;
+
     fn error_params() -> GetAmountOutParams {
         GetAmountOutParams {
             amount_in: BigUint::from(500_000000000000000000u128),
@@ -678,14 +720,33 @@ mod tests {
         }
     }
 
+    /// A code's severity has to survive the hop into `SimulationError`, which is the type the
+    /// caller acts on.
     #[test]
-    fn test_other_error_codes_stay_fatal() {
-        let body = r#"{"error":{"errorCode":400,"message":"Unauthorized","requestId":"abc"}}"#;
+    fn test_severity_reaches_simulation_error() {
+        for (code, expected_recoverable) in
+            [(error_code::RATE_LIMITED, true), (error_code::TOKEN_NOT_SUPPORTED, false)]
+        {
+            let body =
+                format!(r#"{{"error":{{"errorCode":{code},"message":"m","requestId":"abc"}}}}"#);
+            let response: BebopQuoteResponse = serde_json::from_str(&body).unwrap();
+            let err = BebopClient::process_quote_response(response, &error_params()).unwrap_err();
+
+            let recoverable =
+                matches!(SimulationError::from(err), SimulationError::RecoverableError(_));
+            assert_eq!(recoverable, expected_recoverable, "code {code}");
+        }
+    }
+
+    /// `message` and `requestId` are nullable in the API schema.
+    #[test]
+    fn test_error_body_without_message_or_request_id() {
+        let body = r#"{"error":{"errorCode":102,"message":null,"requestId":null}}"#;
         let response: BebopQuoteResponse = serde_json::from_str(body).unwrap();
 
         let err = BebopClient::process_quote_response(response, &error_params()).unwrap_err();
 
-        assert!(matches!(err, RFQError::FatalError(_)), "expected FatalError, got {err:?}");
+        assert!(matches!(err, RFQError::QuoteNotFound(_)), "expected QuoteNotFound, got {err:?}");
     }
 
     #[tokio::test]

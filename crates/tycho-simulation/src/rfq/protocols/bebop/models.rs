@@ -229,8 +229,9 @@ pub struct BebopApiError {
 #[serde(rename_all = "camelCase")]
 pub struct BebopErrorDetail {
     pub error_code: u32,
-    pub message: String,
-    pub request_id: String,
+    /// Both of these are nullable in the API schema.
+    pub message: Option<String>,
+    pub request_id: Option<String>,
     /// The largest sell amount the venue can currently fill, in human-readable units of the sell
     /// token. Present on `InsufficientLiquidity` errors.
     #[serde(default)]
