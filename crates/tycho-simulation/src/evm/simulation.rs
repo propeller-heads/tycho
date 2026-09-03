@@ -97,13 +97,21 @@ where
         // db, the db is simply a reference wrapper. To avoid lifetimes leaking we don't let the evm
         // struct outlive this scope.
 
-        // We protect the state from being consumed.
-        let overrides = params
-            .overrides
-            .clone()
-            .unwrap_or_default();
-
-        let db_ref = OverriddenSimulationDB { inner_db: &self.state, overrides: &overrides };
+        // Borrowed, not cloned: an override map can hold every storage slot a pending block
+        // touched, and this runs once per pool.
+        let no_storage_overrides = HashMap::new();
+        let no_balance_overrides = HashMap::new();
+        let db_ref = OverriddenSimulationDB {
+            inner_db: &self.state,
+            overrides: params
+                .overrides
+                .as_ref()
+                .unwrap_or(&no_storage_overrides),
+            native_balance_overrides: params
+                .native_balance_overrides
+                .as_ref()
+                .unwrap_or(&no_balance_overrides),
+        };
 
         let tx_env = TxEnv {
             caller: params.caller,
@@ -378,7 +386,7 @@ fn interpret_evm_success(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 /// Data needed to invoke a transaction simulation
 pub struct SimulationParameters {
     /// Address of the sending account
@@ -399,6 +407,8 @@ pub struct SimulationParameters {
     pub transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     /// Per-call block context overrides.
     pub block_overrides: Option<BlockEnvOverrides>,
+    /// Native balance overrides. Same per-call scoping as `overrides`.
+    pub native_balance_overrides: Option<HashMap<Address, U256>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -429,6 +439,7 @@ mod tests {
     use crate::evm::engine_db::{
         engine_db_interface::EngineDatabaseInterface,
         simulation_db::{EVMProvider, SimulationDB},
+        tycho_db::PreCachedDB,
         utils::{get_client, get_runtime},
     };
 
@@ -606,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_simulate_applies_block_env_overrides() -> Result<(), Box<dyn Error>> {
-        let mut state = new_state();
+        let state = PreCachedDB::new()?;
         let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
         // Minimal runtime bytecode equivalent to the following Solidity contract:
         //
@@ -629,17 +640,18 @@ mod tests {
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
         state.init_account(contract, account, None, true)?;
         state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
-        state.set_block(Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }));
+        state.update(
+            Vec::new(),
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )?;
 
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
             to: contract,
             data: Vec::new(),
             value: U256::ZERO,
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
             block_overrides: Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+            ..Default::default()
         };
 
         let engine = SimulationEngine::new(state, false);
@@ -648,6 +660,41 @@ mod tests {
             .expect("simulation should apply block env overrides");
 
         assert_eq!(U256::from_be_slice(result.result.as_ref()), U256::from(123));
+        Ok(())
+    }
+
+    #[test]
+    fn test_simulate_applies_native_balance_overrides() -> Result<(), Box<dyn Error>> {
+        let state = PreCachedDB::new()?;
+        let contract = Address::from_str("0x0000000000000000000000000000000000001234")?;
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x47, // SELFBALANCE
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]));
+        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
+        state.init_account(contract, account, None, true)?;
+        state.init_account(Address::ZERO, AccountInfo::default(), None, true)?;
+        state.update(
+            Vec::new(),
+            Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }),
+        )?;
+        let expected_balance = U256::from(4_200_000_000_000_000_000u64);
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            native_balance_overrides: Some(HashMap::from([(contract, expected_balance)])),
+            ..Default::default()
+        };
+
+        let result = SimulationEngine::new(state, false)
+            .simulate(&sim_params)
+            .expect("simulation should apply the native balance override");
+
+        assert_eq!(U256::from_be_slice(result.result.as_ref()), expected_balance);
         Ok(())
     }
 
@@ -688,16 +735,8 @@ mod tests {
         };
 
         // Simulation parameters
-        let sim_params = SimulationParameters {
-            caller,
-            to: router_addr,
-            data: encoded,
-            value: U256::from(0u64),
-            overrides: None,
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
-        };
+        let sim_params =
+            SimulationParameters { caller, to: router_addr, data: encoded, ..Default::default() };
         let mut eng = SimulationEngine::new(state, true);
 
         let block = BlockHeader {
@@ -834,11 +873,8 @@ mod tests {
             to: usdt_address,
             // to: Address::from(deployed_contract_address),
             data: calldata,
-            value: U256::from(0u64),
             overrides: Some(overrides),
-            gas_limit: None,
-            transient_storage: None,
-            block_overrides: None,
+            ..Default::default()
         };
 
         let mut eng = SimulationEngine::new(state, false);

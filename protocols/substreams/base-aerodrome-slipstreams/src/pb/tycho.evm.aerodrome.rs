@@ -11,7 +11,7 @@ pub struct Pool {
     #[prost(bytes="vec", tag="4")]
     pub created_tx_hash: ::prost::alloc::vec::Vec<u8>,
 }
-/// A tick spacing and fee.
+/// A tick spacing and the fee the emitting factory charges for it.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TickSpacingFee {
@@ -19,6 +19,8 @@ pub struct TickSpacingFee {
     pub tick_spacing: i32,
     #[prost(uint64, tag="2")]
     pub fee: u64,
+    #[prost(bytes="vec", tag="3")]
+    pub factory: ::prost::alloc::vec::Vec<u8>,
 }
 /// A group of TickSpacingFee
 #[allow(clippy::derive_partial_eq_without_eq)]

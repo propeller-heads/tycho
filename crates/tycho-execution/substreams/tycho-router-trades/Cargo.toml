@@ -1,0 +1,22 @@
+[package]
+name = "tycho-router-trades"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tycho_router_trades"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+substreams = "0.7.6"
+substreams-ethereum = "0.11.1"
+substreams-database-change = "4.0.0"
+prost = "0.13"
+ethabi = "18.0.0"
+hex = "0.4.3"
+num-bigint = "0.4.6"
+anyhow = "1.0.75"
+
+[build-dependencies]
+anyhow = "1.0.75"
+substreams-ethereum = "0.11.1"

@@ -15,7 +15,7 @@ The following diagram summarizes the code architecture:
 
 The `TychoRouterEncoder` validates solutions and produces a list of transactions to execute against the `TychoRouterV3`.
 
-The `TychoRouterEncoder` uses a `StrategyEncoder` that it chooses automatically based on the solution (see more about strategies [here](../../../concepts.md#strategy)).
+The `TychoRouterEncoder` chooses a strategy encoder automatically based on the solution (see more about strategies [here](../../../concepts.md#strategy)).
 
 Internally, all encoders choose the appropriate `SwapEncoder`(s) to encode the individual swaps, which depend on the protocols used in the solution.
 

@@ -44,9 +44,9 @@ The router takes two output guardrails, and the solution supplies both:
 </table>
 
 Both are absolute amounts, so refreshing a quote means updating both — apply your slippage
-tolerance to the new quote and set `min_amount_out` to the result. The router bounds
-`minAmountOut` against `expectedAmountOut` on both sides (see [Slippage bounds](#slippage-bounds)),
-so it rejects a floor that no longer matches the quote.
+tolerance to the new quote and set `min_amount_out` to the result. The router caps `minAmountOut`
+at `expectedAmountOut` (see [Slippage bounds](#slippage-bounds)), so it rejects a floor above the
+quote.
 {% endtab %}
 
 {% tab title="UserTransferType" %}
@@ -92,14 +92,17 @@ any earlier split's calculation.
 
 <summary>Example Solution</summary>
 
-The following diagram shows a swap from ETH to DAI through USDC. ETH arrives in the router and is wrapped to WETH. The
-solution then splits between three (WETH, USDC) pools and finally swaps from USDC to DAI on one pool.
+The following diagram shows a swap from ETH to DAI through USDC. The first swap wraps ETH to WETH on the
+`native_wrapper` component. The solution then splits between three (WETH, USDC) pools and finally swaps from USDC to DAI
+on one pool.
 
 <figure><img src="../../../.gitbook/assets/split (1).svg" alt=""><figcaption><p>Diagram of an example solution</p></figcaption></figure>
 
 The `Solution` object for the given scenario would look as follows:
 
-<pre class="language-rust"><code class="lang-rust">swap_a = Swap::new(pool_a, weth_token.clone(), usdc_token.clone(), gas_a)
+<pre class="language-rust"><code class="lang-rust">swap_wrap = Swap::new(native_wrapper, eth_token, weth_token.clone(), gas_wrap);
+    // split defaults to 0 — wraps the full ETH amount
+swap_a = Swap::new(pool_a, weth_token.clone(), usdc_token.clone(), gas_a)
     .with_split(0.3); // 30% of WETH amount
 swap_b = Swap::new(pool_b, weth_token.clone(), usdc_token.clone(), gas_b)
     .with_split(0.3); // 30% of WETH amount
@@ -111,12 +114,12 @@ swap_d = Swap::new(pool_d, usdc_token, dai_token, gas_d);
 <strong>let solution = Solution::new(
 </strong>    user_address.clone(),
     user_address,
-    eth_address,       // token_in (ETH — encoder auto-wraps to WETH)
+    eth_address,       // token_in
     dai_address,       // token_out
     sell_amount,       // amount_in
     amount_out,        // quoted output, becomes expectedAmountOut
     min_amount_out,    // 0.25% below the quote, becomes minAmountOut
-    vec![swap_a, swap_b, swap_c, swap_d],
+    vec![swap_wrap, swap_a, swap_b, swap_c, swap_d],
 );
 </code></pre>
 
@@ -219,7 +222,7 @@ creation and signing yourself using the public `Permit2` utility (see [Token tra
 The full method call includes the following parameters, which act as **execution guardrails:**
 
 * `amountIn` and `tokenIn` — the amount and token you transfer into the TychoRouterV3. For native ETH, use `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`. The router reverts if the token is `address(0)` or the amount is zero.
-* `expectedAmountOut` — your quoted output amount, taken from `solution.expected_amount_out()`. This is the baseline the router measures slippage against, and the value it bounds `minAmountOut` against (see [Slippage bounds](#slippage-bounds)). It must be greater than zero.
+* `expectedAmountOut` — your quoted output amount, taken from `solution.expected_amount_out()`. The router measures positive slippage against it and caps `minAmountOut` at it (see [Slippage bounds](#slippage-bounds)). It must be greater than zero.
 * `minAmountOut` and `tokenOut` — the smallest output you are willing to accept once fees are deducted, taken from `solution.min_amount_out()`. The same native ETH address rule applies. For maximum security, derive the underlying quote from a **third-party source**.
 * `receiver` — who receives the final output. Set this to the TychoRouterV3 address to credit output tokens to the vault.
 * `nTokens` — _(split swaps only)_ the number of distinct tokens in the split routing graph.
@@ -275,18 +278,16 @@ example to your use case. See the `TychoRouterV3` contract functions for referen
 
 #### Slippage bounds <a href="#slippage-bounds" id="slippage-bounds"></a>
 
-`minAmountOut` must sit inside a window anchored on `expectedAmountOut`:
+`minAmountOut` must be non-zero and no greater than `expectedAmountOut`:
 
 ```
-expectedAmountOut * (10_000 - MAX_SLIPPAGE_TOLERANCE_BPS) / 10_000  <=  minAmountOut  <=  expectedAmountOut
+0  <  minAmountOut  <=  expectedAmountOut
 ```
 
-`MAX_SLIPPAGE_TOLERANCE_BPS` is `2_000`, which puts the floor 20% below your quote. A quote of 1000 USDC
-therefore accepts any `minAmountOut` between `800 * 10**6` and `1000 * 10**6`. The router reverts with
-`TychoRouter__InvalidMinAmountOut` for anything outside that window, zero included.
-
-`expectedAmountOut` sets both ends of the window, so raising it also raises the floor. Pass the amount
-your simulation returned.
+The router reverts with `TychoRouter__InvalidMinAmountOut` for a zero `minAmountOut` or one above
+`expectedAmountOut`. There is no lower cap on how far below the quote you may set it, so compute a
+real floor from your slippage tolerance — a `minAmountOut` set too low exposes the swap to MEV
+attacks. Pass the amount your simulation returned as `expectedAmountOut`.
 
 {% hint style="info" %}
 The router may capture output above `expectedAmountOut` as positive slippage, so it does not guarantee
@@ -296,7 +297,12 @@ that surplus beyond your quote reaches the receiver. Amounts between `minAmountO
 
 #### Native Tokens <a href="#native-tokens" id="native-tokens"></a>
 
-The encoder automatically bridges ETH↔WETH gaps anywhere in the swap path — at the start, end, or between swaps — using a dedicated WETH executor. Set `token_in` and `token_out` to the tokens the user actually holds and expects to receive, and the encoder inserts wrap/unwrap steps as needed. This works with protocols like Uniswap V4 that accept native ETH directly, with no extra configuration required.
+ETH and WETH are separate tokens in a solution, and the encoder does not convert between them for you.
+Wherever your route goes from one to the other, add a swap on the `native_wrapper` protocol. The Tycho
+stream injects a `native_wrapper` component on every chain, so you route through it like through any
+other pool, and a dedicated WETH executor runs the swap.
+
+Your swaps must connect `token_in` to `token_out`, so a missing wrap swap is rejected at validation.
 
 #### Client Fee Signature <a href="#client-fee-signature" id="client-fee-signature"></a>
 

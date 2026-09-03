@@ -1,0 +1,69 @@
+specVersion: v0.1.0
+package:
+  name: tycho_router_trades
+  version: v0.1.0
+  url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
+
+imports:
+  database_change: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
+
+protobuf:
+  files:
+    - tycho/router/v1/trades.proto
+  importPaths:
+    - ../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../../target/wasm32-unknown-unknown/release/tycho_router_trades.wasm
+
+modules:
+  - name: map_fee_config_events
+    kind: map
+    initialBlock: 86935804
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.FeeConfigEvents
+
+  - name: store_fee_config
+    kind: store
+    initialBlock: 86935804
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_fee_config_events
+
+  - name: map_trades
+    kind: map
+    initialBlock: 86935804
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_fee_config
+    output:
+      type: proto:tycho.router.v1.Trades
+
+  - name: db_out
+    kind: map
+    initialBlock: 86935804
+    inputs:
+      - map: map_trades
+      - map: map_fee_config_events
+    output:
+      type: proto:sf.substreams.sink.database.v1.DatabaseChanges
+
+network: polygon
+
+params:
+  map_fee_config_events: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc
+  map_trades: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc
+
+sink:
+  module: db_out
+  type: sf.substreams.sink.sql.v1.Service
+  config:
+    schema: "../../schema.sql"
+    engine: postgres

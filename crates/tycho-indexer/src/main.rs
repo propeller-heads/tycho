@@ -57,12 +57,10 @@ use tycho_indexer::{
         SubstreamsArgs,
     },
     extractor::{
-        chain_state::ChainState,
+        factory::ExtractorFactory,
         protocol_cache::ProtocolMemoryCache,
-        runner::{
-            DCIType, ExtractorBuilder, ExtractorConfig, ExtractorHandle, ExtractorRunner,
-            ProtocolTypeConfig,
-        },
+        runner::ExtractorHandle,
+        supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
@@ -71,6 +69,11 @@ use tycho_indexer::{
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
 mod ot;
+
+/// Buffer size of the per-extractor channel feeding `PendingDeltas`. Sized above the
+/// subscriber channels created by `ExtractorHandle::subscribe` since a single consumer
+/// drains the channels of all extractors.
+const PENDING_DELTAS_CHANNEL_SIZE: usize = 256;
 
 #[derive(Debug, Deserialize)]
 struct ExtractorConfigs {
@@ -299,12 +302,37 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
 
     let extractor_ctrl_tx = control_tx.clone();
     extraction_runtime.spawn(async move {
-        let (res, _, _) = select_all(extraction_tasks).await;
+        // Wait for the supervisors, shutting the whole process down as soon as one of them
+        // fails. A supervisor handles ordinary extractor failures itself and only returns an
+        // error in exceptional situations it cannot recover from (see
+        // `ExtractorSupervisor::run`). Keeping the process up past such an error would leave
+        // the extractor permanently dead while its stale pending deltas keep being served
+        // over RPC; a process restart rebuilds everything from a clean slate instead. A
+        // future improvement could accept a supervisor error and handle it in place.
+        let mut supervisors = extraction_tasks;
+        let mut res: Result<(), ExtractionError> = Ok(());
+        while !supervisors.is_empty() {
+            let (result, _, remaining) = select_all(supervisors).await;
+            supervisors = remaining;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    error!(error = %err, "Supervisor exited with error, shutting down");
+                    res = Err(err);
+                    break;
+                }
+                Err(join_err) => {
+                    error!(error = %join_err, "Supervisor task panicked, shutting down");
+                    res = Err(ExtractionError::Unknown(format!(
+                        "Supervisor task panicked: {join_err}"
+                    )));
+                    break;
+                }
+            }
+        }
 
         if extractor_ctrl_tx.send(res).is_err() {
-            error!(
-                "Fatal execution task exited and failed trying to communicate with main thread. Exiting the process..."
-            );
+            error!("Fatal: failed to communicate with main thread. Exiting the process...");
             process::exit(1);
         }
     });
@@ -313,7 +341,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
     main_runtime.spawn(async move {
         let (res, _, _) = select_all(other_tasks).await;
 
-        if services_ctrl_tx.send(res).is_err() {
+        if services_ctrl_tx.send(res.unwrap_or_else(|join_err| Err(ExtractionError::Unknown(format!("Task panicked: {join_err}"))))).is_err() {
             error!("Fatal service task exited and failed trying to communicate with main thread. Exiting the process...");
             process::exit(1);
         }
@@ -323,7 +351,13 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
         .recv()
         .expect("Control channel unexpectedly closed");
 
-    res.expect("A thread panicked. Shutting down Tycho.")
+    match res {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            error!(error = %err, "Fatal error, shutting down");
+            Err(err)
+        }
+    }
 }
 
 #[tokio::main]
@@ -367,10 +401,11 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
             run_args.initialization_block,
             None,
             dci_plugin,
+            None,
         ),
     )]));
 
-    let (extraction_tasks, mut other_tasks) = create_indexing_tasks(
+    let (supervisor_tasks, mut other_tasks) = create_indexing_tasks(
         &global_args,
         &run_args.substreams_args,
         &[chain],
@@ -381,11 +416,12 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     )
     .await?;
 
-    let mut all_tasks = extraction_tasks;
+    let mut all_tasks: Vec<JoinHandle<Result<(), ExtractionError>>> = supervisor_tasks;
     all_tasks.append(&mut other_tasks);
 
     let (res, _, _) = select_all(all_tasks).await;
-    res.expect("Extractor- nor ServiceTasks should panic!")
+    res.expect("Tasks should not panic")?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -438,13 +474,6 @@ async fn create_indexing_tasks(
 ) -> Result<(ExtractionTasks, ServerTasks), ExtractionError> {
     let rpc_client = global_args.rpc.build_client()?;
 
-    let block_number = rpc_client
-        .get_block_number()
-        .await
-        .expect("Error getting block number");
-
-    let chain_state = ChainState::new(chrono::Local::now().naive_utc(), block_number, 12); //TODO: remove hardcoded blocktime
-
     let protocol_systems: Vec<String> = extractors_config
         .extractors
         .keys()
@@ -473,13 +502,21 @@ async fn create_indexing_tasks(
         settlement_contract,
     );
 
-    let (runners, extractor_handles): (Vec<_>, Vec<_>) =
-        // TODO: accept substreams configuration from cli.
-        build_all_extractors(&extractors_config, chain_state, chains, &global_args.endpoint_url, global_args.s3_bucket.as_deref(), &substreams_args.substreams_api_token, &cached_gw, global_args.database_insert_batch_size, &token_processor, &rpc_client, extraction_runtime, substreams_args.enable_partial_blocks)
-            .await
-            .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?
-            .into_iter()
-            .unzip();
+    let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
+        &extractors_config,
+        chains,
+        &global_args.endpoint_url,
+        global_args.s3_bucket.as_deref(),
+        &substreams_args.substreams_api_token,
+        &cached_gw,
+        global_args.database_insert_batch_size,
+        &token_processor,
+        &rpc_client,
+        extraction_runtime,
+        substreams_args.enable_partial_blocks,
+    )
+    .await
+    .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
 
     let server_url = format!("http://{}:{}", global_args.server_ip, global_args.server_port);
     let api_key = env::var("AUTH_API_KEY").map_err(|_| {
@@ -496,24 +533,28 @@ async fn create_indexing_tasks(
             .dci_protocols(dci_protocols)
             .protocol_systems(protocol_systems)
             .register_extractors(extractor_handles.clone())
+            .pending_deltas(pending_deltas_rxs)
             .run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =
         tokio::spawn(shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)));
 
-    let extractor_tasks = runners
+    let runtime = extraction_runtime
+        .cloned()
+        .unwrap_or_else(|| tokio::runtime::Handle::current());
+
+    let supervisor_tasks = supervisors
         .into_iter()
-        .map(|runner| runner.run())
+        .map(|supervisor| runtime.spawn(supervisor.run()))
         .collect::<Vec<_>>();
 
-    Ok((extractor_tasks, vec![server_task, shutdown_task]))
+    Ok((supervisor_tasks, vec![server_task, shutdown_task]))
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn build_all_extractors(
     config: &ExtractorConfigs,
-    chain_state: ChainState,
     chains: &[Chain],
     endpoint_url: &str,
     s3_bucket: Option<&str>,
@@ -524,13 +565,25 @@ async fn build_all_extractors(
     rpc_client: &EthereumRpcClient,
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
-) -> Result<Vec<(ExtractorRunner, ExtractorHandle)>, ExtractionError> {
+) -> Result<
+    (
+        Vec<ExtractorSupervisor>,
+        Vec<ExtractorHandle>,
+        Vec<tokio::sync::mpsc::Receiver<tycho_indexer::extractor::DeltaCommand>>,
+    ),
+    ExtractionError,
+> {
+    let mut supervisors = Vec::new();
     let mut extractor_handles = Vec::new();
+    let mut pending_deltas_rxs = Vec::new();
 
     let chain = *chains
         .first()
         .expect("No chain provided");
 
+    // One cache for all extractors: it holds the whole chain's token and component universe
+    // (several GB on large chains), so populating one per extractor multiplies both memory
+    // and the bulk database read by the number of extractors.
     info!("Building protocol cache");
     let protocol_cache = ProtocolMemoryCache::new(
         chain,
@@ -551,24 +604,39 @@ async fn build_all_extractors(
         )
         .await;
 
-        let runtime = runtime
+        let runtime_handle = runtime
             .cloned()
             .unwrap_or_else(|| tokio::runtime::Handle::current());
 
-        let (runner, handle) =
-            ExtractorBuilder::new(extractor_config, endpoint_url, s3_bucket, substreams_api_token)
-                .database_insert_batch_size(database_insert_batch_size)
-                .partial_blocks(partial_blocks)
-                .build(chain_state, cached_gw, token_pre_processor, &protocol_cache, rpc_client)
-                .await?
-                .set_runtime(runtime)
-                .into_runner()
-                .await?;
+        let factory = ExtractorFactory::create(
+            extractor_config.clone(),
+            endpoint_url.to_owned(),
+            s3_bucket.map(ToString::to_string),
+            substreams_api_token.to_owned(),
+            chain,
+            cached_gw.clone(),
+            token_pre_processor.clone(),
+            rpc_client.clone(),
+            database_insert_batch_size,
+            partial_blocks,
+            Some(runtime_handle),
+            protocol_cache.clone(),
+        )
+        .await?;
 
-        extractor_handles.push((runner, handle));
+        // Create dedicated PendingDeltas channel for this extractor
+        let (pd_tx, pd_rx) = tokio::sync::mpsc::channel(PENDING_DELTAS_CHANNEL_SIZE);
+
+        let mut supervisor = ExtractorSupervisor::new(factory);
+        supervisor.add_subscriber(pd_tx).await;
+        let handle = supervisor.handle();
+
+        supervisors.push(supervisor);
+        extractor_handles.push(handle);
+        pending_deltas_rxs.push(pd_rx);
     }
 
-    Ok(extractor_handles)
+    Ok((supervisors, extractor_handles, pending_deltas_rxs))
 }
 
 async fn with_transaction<F, Fut, R>(gw: &CachedGateway, block: &Block, f: F) -> R
@@ -702,7 +770,9 @@ async fn shutdown_handler(
     }
 
     for e in extractors.iter() {
-        e.stop().await.unwrap();
+        if let Err(err) = e.stop().await {
+            warn!(error = %err, "Failed to stop extractor during shutdown");
+        }
     }
     server_handle.stop(true).await;
     if let Some(handle) = db_write_executor_handle {
