@@ -19,6 +19,8 @@ import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
 import {
     PropAMMFallbackExecutor
 } from "../src/executors/PropAMMFallbackExecutor.sol";
+import {FallbackExecutor} from "../src/executors/FallbackExecutor.sol";
+import {TychoFallbackRouter} from "../src/fallback/TychoFallbackRouter.sol";
 import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
 import {
     UniswapV3Executor,
@@ -137,6 +139,8 @@ contract TychoRouterTestSetup is
     PropAMMExecutor public propAMMExecutor;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
     SkyExecutor public skyExecutor;
+    TychoFallbackRouter public fallbackRouter;
+    FallbackExecutor public fallbackExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -272,7 +276,14 @@ contract TychoRouterTestSetup is
             );
         }
 
-        address[] memory executors = new address[](skyDeployable ? 28 : 27);
+        // Deployed after Sky for the same reason Sky is deployed last: adding a contract earlier
+        // shifts every later deterministic address and invalidates the pre-generated Permit2
+        // signatures.
+        fallbackRouter =
+            new TychoFallbackRouter(ADMIN, poolManager, FLUIDV1_LIQUIDITY);
+        fallbackExecutor = new FallbackExecutor(address(fallbackRouter));
+
+        address[] memory executors = new address[](skyDeployable ? 29 : 28);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -300,8 +311,9 @@ contract TychoRouterTestSetup is
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
         executors[26] = address(propAMMFallbackExecutor);
+        executors[27] = address(fallbackExecutor);
         if (skyDeployable) {
-            executors[27] = address(skyExecutor);
+            executors[28] = address(skyExecutor);
         }
         return executors;
     }

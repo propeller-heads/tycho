@@ -45,6 +45,7 @@ Entry (e.g. splitSwap)
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
+| `fallback/TychoFallbackRouter.sol` | Standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, runs a pAMM, and on failure runs the caller's chosen fallback venue. See "Venue fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
@@ -138,7 +139,64 @@ Dispatcher/TransferManager.
 Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
 AerodromeV1, LiquidityParty, Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, WETH,
 PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
-address travels in the swap data).
+address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Venue fallback").
+
+### Venue fallback (`fallback/TychoFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
+
+An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
+`swap()`, and `getTransferData()` fixes the transfer type per executor. A pAMM leg therefore has its tokens sitting at
+the pAMM by the time the pAMM reverts, and a Uniswap V3 retry -- which pays inside `uniswapV3SwapCallback` -- can no
+longer be funded.
+
+`TychoFallbackRouter` owns the tokens for the leg instead:
+
+```
+TychoRouterV3 --TransferType.Transfer--> TychoFallbackRouter --> primary  (reverts, rolled back)
+                                                             --> fallback (fills, pays receiver)
+```
+
+`FallbackExecutor` declares `TransferType.Transfer` with the fallback router as receiver and `outputToRouter = false`,
+then calls `TychoFallbackRouter.swap()`.
+
+**A pAMM primary and one caller-chosen fallback.** The pAMM runs inside `executePropAMM`, an external self-call
+wrapped in try/catch, so its transfer reverts with it and the fallback starts from the same balance. The fallback then
+runs in the outer frame: it gets no try/catch, so its revert is the swap's revert and there is no third attempt. The
+contract never picks a venue itself -- the encoder decides which fallback to use and supplies its pool address.
+
+A venue that reports success but delivers nothing reverts `TychoFallbackRouter__NoOutput`, which counts as a failure
+for both slots.
+
+**The fallback can never be a pAMM.** A pAMM is the thing the primary slot exists to retry, so retrying it with another
+one defeats the purpose. This needs no runtime check: the primary is a bare `address` argument and pAMM is not one of
+the fallback venue kinds.
+
+Swap encoding -- `FallbackExecutor` swap data is `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`. The pAMM is a
+bare address, so no length prefix is needed to find where the fallback starts. The fallback is
+`[venue: uint8][venue data]`:
+
+| Venue byte | Protocol | Venue data |
+|---|---|---|
+| 0 | Uniswap V2 | `[pair: 20][feeBps: 1]` |
+| 1 | Uniswap V3 | `[pool: 20]` |
+| 2 | Uniswap V4 | `[fee: 3][tickSpacing: 3][hook: 20][hookData: rest]` |
+| 3 | Curve | `[pool: 20][poolType: 1][i: 1][j: 1]` |
+| 4 | Fluid V1 | `[dex: 20][zero2one: 1]` |
+
+Uniswap V4 is the only variable-length entry, and it is last, so nothing needs to delimit it.
+
+Swap direction for Uniswap V2/V3/V4 comes from the sort order of `tokenIn` and `tokenOut`, so it is not encoded. Fluid's
+`zero2one` is the dex's own token order, which is not the address sort order, so it is.
+
+Constraints:
+
+- **Native ETH is not supported.** Routes use the wrapped token; `TychoRouterEncoder` already inserts the WETH wrap and
+  unwrap legs around a swap that needs them.
+- **Every venue gets `minAmountOut = 0`.** A binding per-venue value would revert the routes the fallback exists to
+  rescue. The TychoRouter's route-level `minAmountOut` is the price check, so the caller must set it low enough for the
+  last route in the list to clear.
+- **Uniswap V4 routes are single-pool.** A route names one pool, never a path.
+- The contract holds no funds and grants no allowances between transactions. `rescue` (DEFAULT_ADMIN_ROLE) sends a
+  stranded balance out; a Curve exchange can round a wei in.
 
 ### Executor Flow, Callbacks & Output Verification
 
