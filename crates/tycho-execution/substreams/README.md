@@ -52,9 +52,11 @@ column was not merely mislabelled there but wrong.
 `pricing/price_trades.sql` values a trade from one side only, preferring a side that holds a
 pinned token (lowest `priority` first: stablecoins, then the native token and its wrapper, then
 BTC wrappers) and otherwise any side Tycho happens to price. The unit price of the token on the
-other side is then implied from the trade itself. That is what gives the long tail a price at all:
-Tycho prices 7852 tokens on ethereum but only 29 on unichain and 126 on arbitrum, while nearly
-every trade has a stablecoin, WETH or the native token on one side.
+other side is always implied from the trade itself, even when Tycho prices that token too. That is
+what gives the long tail a price at all — Tycho prices 7852 tokens on ethereum but only 29 on
+unichain and 126 on arbitrum — and it keeps a row consistent, so `price x amount` equals
+`volume_usd` on both sides. A Tycho price there would be a price of today on a trade that may be
+a year old.
 
 Pinning is by address, never by symbol. Tycho holds many tokens with a copied symbol — base has
 about 40 `cbBTC` rows and ethereum a second 18-decimal `USDC` — and their prices are nonsense.
@@ -67,6 +69,14 @@ A stablecoin is worth 1 USD whenever the trade happened, so a stable-anchored tr
 any age and a backfill can be priced correctly. Every other basis would stamp today's price on an
 old trade, so those are limited to trades younger than `MAX_AGE`. `price_source` records the basis
 as `<in|out>_<stable|preferred|tycho>`; filter on it before summing `volume_usd`.
+
+The pricer polls: it runs a pass over every chain each `INTERVAL` seconds (60 in dev), so a new
+trade is valued about a minute after the sink writes it. Nothing prices a row on insert. A trade
+stays eligible while `priced_at IS NULL`, so a pass that is skipped costs nothing — with one
+exception: a trade that needs a non-stable basis is only eligible for `MAX_AGE` after its block
+time, so a pricer that is down longer than that leaves those rows unpriced for good. Re-running
+the values later is possible with `pricing/reprice.sql`, which offers priced rows to the logic
+again.
 
 The trades live in their own database (all chains in one table). Each chain has its own Tycho
 database, reached through `postgres_fdw`: one server and one `tycho_<chain>` schema per chain,
