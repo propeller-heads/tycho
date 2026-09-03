@@ -4,7 +4,10 @@ use crate::pb::uniswap::v4::{
 };
 use itertools::Itertools;
 use std::{collections::HashMap, str::FromStr, vec};
-use substreams::{pb::substreams::StoreDeltas, scalar::BigInt};
+use substreams::{
+    pb::substreams::{StoreDelta, StoreDeltas},
+    scalar::BigInt,
+};
 use substreams_helper::hex::Hexable;
 use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
 
@@ -72,12 +75,33 @@ pub fn collect_transaction_changes(
                 });
         });
 
-    // Insert ticks net-liquidity changes
-    ticks_store_deltas
+    // Insert ticks net-liquidity changes. Both ticks of a ModifyLiquidity event share one log
+    // ordinal and the store module's unstable sort may reorder them, so positional zip pairing
+    // is unsound; join store deltas to tick deltas by (store key, ordinal) instead.
+    let mut ticks_store_deltas_by_key: HashMap<(String, u64), StoreDelta> = ticks_store_deltas
         .deltas
         .into_iter()
-        .zip(ticks_map_deltas.deltas)
-        .for_each(|(store_delta, tick_delta)| {
+        .map(|delta| ((delta.key.clone(), delta.ordinal), delta))
+        .collect();
+
+    ticks_map_deltas
+        .deltas
+        .into_iter()
+        .for_each(|tick_delta| {
+            let store_key = format!(
+                "pool:{0}:tick:{1}",
+                tick_delta.pool_address.to_hex(),
+                tick_delta.tick_index
+            );
+            let store_delta = ticks_store_deltas_by_key
+                .remove(&(store_key.clone(), tick_delta.ordinal))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no tick store delta for key {store_key} at ordinal {}",
+                        tick_delta.ordinal
+                    )
+                });
+
             let new_value_bigint =
                 BigInt::from_str(&String::from_utf8(store_delta.new_value).unwrap()).unwrap();
 
@@ -221,5 +245,122 @@ fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddres
             ]
         }
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use substreams::pb::substreams::StoreDelta;
+
+    use super::*;
+    use crate::pb::uniswap::v4::{TickDelta, TickDeltas, Transaction as V4Transaction};
+
+    fn tick_delta(pool: &[u8], tick: i32, ordinal: u64, tx_index: u64) -> TickDelta {
+        TickDelta {
+            pool_address: pool.to_vec(),
+            tick_index: tick,
+            liquidity_net_delta: vec![],
+            ordinal,
+            transaction: Some(V4Transaction {
+                hash: vec![0x11; 32],
+                from: vec![0x22; 20],
+                to: vec![0x33; 20],
+                index: tx_index,
+            }),
+        }
+    }
+
+    fn store_delta(pool: &[u8], tick: i32, ordinal: u64, old: &str, new: &str) -> StoreDelta {
+        StoreDelta {
+            operation: 0,
+            ordinal,
+            key: format!("pool:{}:tick:{}", pool.to_hex(), tick),
+            old_value: old.as_bytes().to_vec(),
+            new_value: new.as_bytes().to_vec(),
+        }
+    }
+
+    fn collect_ticks_only(
+        map_deltas: TickDeltas,
+        store_deltas: StoreDeltas,
+    ) -> Vec<TransactionChanges> {
+        collect_transaction_changes(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            map_deltas,
+            store_deltas,
+            Default::default(),
+            Default::default(),
+        )
+    }
+
+    fn attributes_by_name(changes: &[TransactionChanges]) -> HashMap<String, (Vec<u8>, i32)> {
+        changes
+            .iter()
+            .flat_map(|tx| tx.entity_changes.iter())
+            .flat_map(|ec| ec.attributes.iter())
+            .map(|a| (a.name.clone(), (a.value.clone(), a.change)))
+            .collect()
+    }
+
+    #[test]
+    fn tick_store_deltas_join_by_key_not_position() {
+        let pool = [0xaa_u8; 32];
+        // One ModifyLiquidity: both ticks share ordinal 5. Store order is swapped
+        // relative to map order, as the store module's unstable sort can produce.
+        let map_deltas =
+            TickDeltas { deltas: vec![tick_delta(&pool, 100, 5, 1), tick_delta(&pool, 200, 5, 1)] };
+        let store_deltas = StoreDeltas {
+            deltas: vec![
+                store_delta(&pool, 200, 5, "", "75"),
+                store_delta(&pool, 100, 5, "100", "150"),
+            ],
+        };
+
+        let changes = collect_ticks_only(map_deltas, store_deltas);
+        let attrs = attributes_by_name(&changes);
+
+        let (value, change) = &attrs["ticks/100/net-liquidity"];
+        assert_eq!(*value, BigInt::from(150).to_signed_bytes_be());
+        assert_eq!(*change, i32::from(ChangeType::Update));
+
+        let (value, change) = &attrs["ticks/200/net-liquidity"];
+        assert_eq!(*value, BigInt::from(75).to_signed_bytes_be());
+        assert_eq!(*change, i32::from(ChangeType::Creation));
+    }
+
+    #[test]
+    fn same_tick_written_in_two_transactions() {
+        let pool = [0xaa_u8; 32];
+        // Two events touch the same tick in one block: creation in tx 1, then the
+        // liquidity returns to zero in tx 2, which must classify as a deletion.
+        let map_deltas =
+            TickDeltas { deltas: vec![tick_delta(&pool, 100, 5, 1), tick_delta(&pool, 100, 9, 2)] };
+        let store_deltas = StoreDeltas {
+            deltas: vec![
+                store_delta(&pool, 100, 5, "", "40"),
+                store_delta(&pool, 100, 9, "40", "0"),
+            ],
+        };
+
+        let changes = collect_ticks_only(map_deltas, store_deltas);
+        let by_tx: HashMap<u64, (Vec<u8>, i32)> = changes
+            .iter()
+            .map(|tx_changes| {
+                let attr = tx_changes.entity_changes[0].attributes[0].clone();
+                (tx_changes.tx.as_ref().unwrap().index, (attr.value, attr.change))
+            })
+            .collect();
+
+        assert_eq!(
+            by_tx[&1],
+            (BigInt::from(40).to_signed_bytes_be(), i32::from(ChangeType::Creation))
+        );
+        assert_eq!(
+            by_tx[&2],
+            (BigInt::from(0).to_signed_bytes_be(), i32::from(ChangeType::Deletion))
+        );
     }
 }
