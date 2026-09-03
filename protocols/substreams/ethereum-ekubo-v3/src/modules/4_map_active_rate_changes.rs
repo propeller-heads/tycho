@@ -57,6 +57,15 @@ fn maybe_rate_change(log: &PoolLog, timestamp: u64) -> Option<PartialActiveRateC
                 }
             })
         }
+        // Only timed pools carry rates; other pools never get `rate_token0/1` attributes.
+        Event::PoolSnapshot(ps) => ps
+            .timed
+            .as_ref()
+            .map(|timed| PartialActiveRateChange {
+                change_type: ChangeType::Absolute,
+                token0_value: timed.rate0.clone(),
+                token1_value: timed.rate1.clone(),
+            }),
         _ => None,
     }
 }

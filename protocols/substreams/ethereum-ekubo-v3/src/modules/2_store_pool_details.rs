@@ -34,18 +34,23 @@ fn store_pool_details(
 }
 
 fn maybe_pool_details(event: Event) -> Option<PoolDetails> {
-    let Event::PoolInitialized(pi) = event else {
-        return None;
+    let (token0, token1, config) = match event {
+        Event::PoolInitialized(pi) => (pi.token0, pi.token1, pi.config),
+        Event::PoolSnapshot(ps) => (ps.token0, ps.token1, ps.config),
+        Event::Swapped(_) |
+        Event::PositionUpdated(_) |
+        Event::VirtualExecution(_) |
+        Event::RateUpdated(_) => return None,
     };
 
     let config = EvmPoolConfig::try_from(
-        B256::try_from(pi.config.as_slice()).expect("pool config to be 32 bytes long"),
+        B256::try_from(config.as_slice()).expect("pool config to be 32 bytes long"),
     )
     .expect("pool config to be valid");
 
     Some(PoolDetails {
-        token0: pi.token0,
-        token1: pi.token1,
+        token0,
+        token1,
         is_stableswap: matches!(
             config.pool_type_config,
             EvmPoolTypeConfig::FullRange(_) | EvmPoolTypeConfig::Stableswap(_)

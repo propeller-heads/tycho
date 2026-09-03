@@ -56,6 +56,8 @@ fn maybe_balance_deltas(ev: Event) -> Option<(Vec<u8>, Vec<u8>)> {
     match ev {
         Event::Swapped(ev) => Some((ev.delta0, ev.delta1)),
         Event::PositionUpdated(ev) => Some((ev.delta0, ev.delta1)),
+        // The balance store is empty at the seed block, so the reserves are added as-is.
+        Event::PoolSnapshot(ev) => Some((ev.balance0, ev.balance1)),
         _ => None,
     }
 }

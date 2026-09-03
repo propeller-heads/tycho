@@ -148,7 +148,7 @@ pub mod block_transaction_events {
             /// bytes32
             #[prost(bytes="vec", tag="2")]
             pub pool_id: ::prost::alloc::vec::Vec<u8>,
-            #[prost(oneof="pool_log::Event", tags="3, 4, 5, 6, 7")]
+            #[prost(oneof="pool_log::Event", tags="3, 4, 5, 6, 7, 8")]
             pub event: ::core::option::Option<pool_log::Event>,
         }
         /// Nested message and enum types in `PoolLog`.
@@ -238,6 +238,82 @@ pub mod block_transaction_events {
                 #[prost(bytes="vec", tag="4")]
                 pub token1_rate_delta: ::prost::alloc::vec::Vec<u8>,
             }
+            /// The complete state of one pool at the seed block, reconstructed by the package's seed
+            /// writer (`seed/`). Emitted once per pool in the synthetic seed transaction; every store
+            /// module rebuilds its entry for the pool from this single event.
+            #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct PoolSnapshot {
+                /// address
+                #[prost(bytes="vec", tag="1")]
+                pub token0: ::prost::alloc::vec::Vec<u8>,
+                /// address
+                #[prost(bytes="vec", tag="2")]
+                pub token1: ::prost::alloc::vec::Vec<u8>,
+                /// bytes32
+                #[prost(bytes="vec", tag="3")]
+                pub config: ::prost::alloc::vec::Vec<u8>,
+                /// int32
+                #[prost(sint32, tag="4")]
+                pub tick: i32,
+                /// uint192
+                #[prost(bytes="vec", tag="5")]
+                pub sqrt_ratio: ::prost::alloc::vec::Vec<u8>,
+                /// uint128, signed big-endian like the store values it seeds
+                #[prost(bytes="vec", tag="6")]
+                pub liquidity: ::prost::alloc::vec::Vec<u8>,
+                /// Initialized ticks with a nonzero net liquidity delta, sorted by index.
+                #[prost(message, repeated, tag="7")]
+                pub ticks: ::prost::alloc::vec::Vec<TickSnapshot>,
+                /// int128, token0 reserves implied by the liquidity distribution
+                #[prost(bytes="vec", tag="8")]
+                pub balance0: ::prost::alloc::vec::Vec<u8>,
+                /// int128, token1 reserves implied by the liquidity distribution
+                #[prost(bytes="vec", tag="9")]
+                pub balance1: ::prost::alloc::vec::Vec<u8>,
+                /// Set only for pools whose extension carries time rate deltas (TWAMM, BoostedFees).
+                #[prost(message, optional, tag="10")]
+                pub timed: ::core::option::Option<TimedSnapshot>,
+            }
+            #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct TickSnapshot {
+                /// int32
+                #[prost(sint32, tag="1")]
+                pub index: i32,
+                /// int128
+                #[prost(bytes="vec", tag="2")]
+                pub liquidity_delta: ::prost::alloc::vec::Vec<u8>,
+            }
+            #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct TimedSnapshot {
+                /// last virtual order execution / fee donation timestamp
+                #[prost(uint64, tag="1")]
+                pub last_time: u64,
+                /// uint112, signed big-endian like the store values it seeds
+                #[prost(bytes="vec", tag="2")]
+                pub rate0: ::prost::alloc::vec::Vec<u8>,
+                /// uint112, signed big-endian like the store values it seeds
+                #[prost(bytes="vec", tag="3")]
+                pub rate1: ::prost::alloc::vec::Vec<u8>,
+                #[prost(message, repeated, tag="4")]
+                pub rate_deltas: ::prost::alloc::vec::Vec<RateDeltaSnapshot>,
+            }
+            /// Rate deltas becoming active at `time`. An empty delta means "no delta for this token",
+            /// mirroring `RateUpdated`.
+            #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+            pub struct RateDeltaSnapshot {
+                #[prost(uint64, tag="1")]
+                pub time: u64,
+                /// int112
+                #[prost(bytes="vec", tag="2")]
+                pub delta0: ::prost::alloc::vec::Vec<u8>,
+                /// int112
+                #[prost(bytes="vec", tag="3")]
+                pub delta1: ::prost::alloc::vec::Vec<u8>,
+            }
             #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Oneof)]
             pub enum Event {
@@ -251,9 +327,32 @@ pub mod block_transaction_events {
                 VirtualExecution(VirtualExecution),
                 #[prost(message, tag="7")]
                 RateUpdated(RateUpdated),
+                #[prost(message, tag="8")]
+                PoolSnapshot(PoolSnapshot),
             }
         }
     }
+}
+/// Body of the package's seed file: the state of every Ekubo v3 pool after the seed block. The
+/// block itself is named by the seed file's header, so an empty body is a valid seed of no pools.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Seed {
+    #[prost(message, repeated, tag="1")]
+    pub pools: ::prost::alloc::vec::Vec<PoolSeed>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PoolSeed {
+    /// bytes32
+    #[prost(bytes="vec", tag="1")]
+    pub pool_id: ::prost::alloc::vec::Vec<u8>,
+    /// uint96, the packed float as stored by the core contract
+    #[prost(bytes="vec", tag="2")]
+    pub sqrt_ratio_float: ::prost::alloc::vec::Vec<u8>,
+    /// `snapshot.sqrt_ratio` is left empty; the package fills it from `sqrt_ratio_float`.
+    #[prost(message, optional, tag="3")]
+    pub snapshot: ::core::option::Option<block_transaction_events::transaction_events::pool_log::PoolSnapshot>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

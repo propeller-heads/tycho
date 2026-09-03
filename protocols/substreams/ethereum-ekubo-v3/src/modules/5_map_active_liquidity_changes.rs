@@ -58,6 +58,10 @@ fn maybe_active_liquidity_change(
             value: swapped.liquidity_after.clone(),
             change_type: ChangeType::Absolute,
         }),
+        Event::PoolSnapshot(pool_snapshot) => Some(PartialLiquidityChange {
+            value: pool_snapshot.liquidity.clone(),
+            change_type: ChangeType::Absolute,
+        }),
         Event::PositionUpdated(position_updated) => {
             let pool_id = log.pool_id.to_hex();
 

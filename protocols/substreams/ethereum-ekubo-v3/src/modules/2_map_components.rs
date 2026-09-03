@@ -47,29 +47,74 @@ fn map_components(block_tx_events: BlockTransactionEvents) -> BlockChanges {
     }
 }
 
+/// The values a component starts with: zeroes for a pool that was just initialized, the recorded
+/// state for a pool restored from a seed.
+struct PoolStart {
+    token0: Vec<u8>,
+    token1: Vec<u8>,
+    config: Vec<u8>,
+    tick: i32,
+    sqrt_ratio: Vec<u8>,
+    liquidity: Vec<u8>,
+    timed: Option<TimedStart>,
+}
+
+struct TimedStart {
+    rate0: Vec<u8>,
+    rate1: Vec<u8>,
+    last_time: u64,
+}
+
 fn maybe_create_component(
     log: PoolLog,
     timestamp: u64,
 ) -> Option<(ProtocolComponent, EntityChanges, Vec<BalanceChange>)> {
-    let Event::PoolInitialized(pi) = log.event.unwrap() else {
-        return None;
+    let start = match log.event.unwrap() {
+        Event::PoolInitialized(pi) => PoolStart {
+            token0: pi.token0,
+            token1: pi.token1,
+            config: pi.config,
+            tick: pi.tick,
+            sqrt_ratio: pi.sqrt_ratio,
+            liquidity: 0_u128.to_be_bytes().to_vec(),
+            timed: pi
+                .has_time_rate_deltas
+                .then(|| TimedStart { rate0: vec![], rate1: vec![], last_time: timestamp }),
+        },
+        Event::PoolSnapshot(ps) => PoolStart {
+            token0: ps.token0,
+            token1: ps.token1,
+            config: ps.config,
+            tick: ps.tick,
+            sqrt_ratio: ps.sqrt_ratio,
+            liquidity: ps.liquidity,
+            timed: ps.timed.map(|timed| TimedStart {
+                rate0: timed.rate0,
+                rate1: timed.rate1,
+                last_time: timed.last_time,
+            }),
+        },
+        Event::Swapped(_) |
+        Event::PositionUpdated(_) |
+        Event::VirtualExecution(_) |
+        Event::RateUpdated(_) => return None,
     };
 
     let mut entity_attributes = vec![
         Attribute {
             change: ChangeType::Creation.into(),
             name: "liquidity".to_string(),
-            value: 0_u128.to_be_bytes().to_vec(),
+            value: start.liquidity,
         },
         Attribute {
             change: ChangeType::Creation.into(),
             name: "tick".to_string(),
-            value: pi.tick.to_be_bytes().to_vec(),
+            value: start.tick.to_be_bytes().to_vec(),
         },
         Attribute {
             change: ChangeType::Creation.into(),
             name: "sqrt_ratio".to_string(),
-            value: pi.sqrt_ratio,
+            value: start.sqrt_ratio,
         },
         Attribute {
             change: ChangeType::Creation.into(),
@@ -79,28 +124,28 @@ fn maybe_create_component(
         },
     ];
 
-    if pi.has_time_rate_deltas {
+    if let Some(timed) = start.timed {
         entity_attributes.extend([
             Attribute {
                 change: ChangeType::Creation.into(),
                 name: "rate_token0".to_string(),
-                value: vec![],
+                value: timed.rate0,
             },
             Attribute {
                 change: ChangeType::Creation.into(),
                 name: "rate_token1".to_string(),
-                value: vec![],
+                value: timed.rate1,
             },
             Attribute {
                 change: ChangeType::Creation.into(),
                 name: "last_time".to_string(),
-                value: timestamp.to_be_bytes().to_vec(),
+                value: timed.last_time.to_be_bytes().to_vec(),
             },
         ]);
     }
 
     let pool_config = EvmPoolConfig::try_from(
-        B256::try_from(pi.config.as_slice()).expect("pool config to be 32 bytes long"),
+        B256::try_from(start.config.as_slice()).expect("pool config to be 32 bytes long"),
     )
     .expect("pool config to be valid");
 
@@ -110,12 +155,12 @@ fn maybe_create_component(
         Attribute {
             change: ChangeType::Creation.into(),
             name: "token0".to_string(),
-            value: pi.token0.clone(),
+            value: start.token0.clone(),
         },
         Attribute {
             change: ChangeType::Creation.into(),
             name: "token1".to_string(),
-            value: pi.token1.clone(),
+            value: start.token1.clone(),
         },
         Attribute {
             change: ChangeType::Creation.into(),
@@ -145,7 +190,7 @@ fn maybe_create_component(
     Some((
         ProtocolComponent {
             id: component_id.clone(),
-            tokens: vec![pi.token0.clone(), pi.token1.clone()],
+            tokens: vec![start.token0.clone(), start.token1.clone()],
             contracts: vec![],
             change: ChangeType::Creation.into(),
             protocol_type: Some(ProtocolType {
@@ -160,12 +205,12 @@ fn maybe_create_component(
         vec![
             BalanceChange {
                 component_id: component_id.clone().into_bytes(),
-                token: pi.token0,
+                token: start.token0,
                 balance: BigInt::zero().to_signed_bytes_be(),
             },
             BalanceChange {
                 component_id: component_id.into_bytes(),
-                token: pi.token1,
+                token: start.token1,
                 balance: BigInt::zero().to_signed_bytes_be(),
             },
         ],

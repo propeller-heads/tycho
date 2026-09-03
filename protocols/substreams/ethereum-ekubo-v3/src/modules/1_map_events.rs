@@ -32,6 +32,10 @@ use crate::{
 
 #[substreams::handlers::map]
 fn map_events(block: eth::v2::Block) -> BlockTransactionEvents {
+    if block.number == crate::genesis::seed_block_number() {
+        return crate::genesis::genesis_events(&block);
+    }
+
     BlockTransactionEvents {
         block_transaction_events: block
             .transactions()

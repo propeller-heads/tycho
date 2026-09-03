@@ -22,6 +22,7 @@ pub fn store_active_ticks(block_tx_events: BlockTransactionEvents, tick_store: S
 fn maybe_tick(ev: Event) -> Option<i32> {
     match ev {
         Event::PoolInitialized(pool_initialized) => Some(pool_initialized.tick),
+        Event::PoolSnapshot(pool_snapshot) => Some(pool_snapshot.tick),
         Event::Swapped(swapped) => Some(swapped.tick_after),
         _ => None,
     }

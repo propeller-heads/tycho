@@ -26,6 +26,7 @@ fn map_filtered_events(
                             .expect("pool log should have an event")
                         {
                             Event::PoolInitialized(_) |
+                            Event::PoolSnapshot(_) |
                             Event::VirtualExecution(_) |
                             Event::RateUpdated(_) => true,
                             Event::Swapped(_) | Event::PositionUpdated(_) => {

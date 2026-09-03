@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_ekubo_v3"
-  version: v0.2.2
+  version: v0.3.0
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
 protobuf:

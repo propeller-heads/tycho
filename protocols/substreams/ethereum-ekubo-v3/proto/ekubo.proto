@@ -82,6 +82,7 @@ message BlockTransactionEvents {
         PoolInitialized pool_initialized = 5;
         VirtualExecution virtual_execution = 6;
         RateUpdated rate_updated = 7;
+        PoolSnapshot pool_snapshot = 8;
       }
 
       message Swapped {
@@ -120,6 +121,57 @@ message BlockTransactionEvents {
         bytes token0_rate_delta = 3; // int112
         bytes token1_rate_delta = 4; // int112
       }
+
+      // The complete state of one pool at the seed block, reconstructed by the package's seed
+      // writer (`seed/`). Emitted once per pool in the synthetic seed transaction; every store
+      // module rebuilds its entry for the pool from this single event.
+      message PoolSnapshot {
+        bytes token0 = 1;    // address
+        bytes token1 = 2;    // address
+        bytes config = 3;    // bytes32
+        sint32 tick = 4;     // int32
+        bytes sqrt_ratio = 5; // uint192
+        bytes liquidity = 6; // uint128, signed big-endian like the store values it seeds
+        // Initialized ticks with a nonzero net liquidity delta, sorted by index.
+        repeated TickSnapshot ticks = 7;
+        bytes balance0 = 8; // int128, token0 reserves implied by the liquidity distribution
+        bytes balance1 = 9; // int128, token1 reserves implied by the liquidity distribution
+        // Set only for pools whose extension carries time rate deltas (TWAMM, BoostedFees).
+        TimedSnapshot timed = 10;
+      }
+
+      message TickSnapshot {
+        sint32 index = 1;          // int32
+        bytes liquidity_delta = 2; // int128
+      }
+
+      message TimedSnapshot {
+        uint64 last_time = 1; // last virtual order execution / fee donation timestamp
+        bytes rate0 = 2;      // uint112, signed big-endian like the store values it seeds
+        bytes rate1 = 3;      // uint112, signed big-endian like the store values it seeds
+        repeated RateDeltaSnapshot rate_deltas = 4;
+      }
+
+      // Rate deltas becoming active at `time`. An empty delta means "no delta for this token",
+      // mirroring `RateUpdated`.
+      message RateDeltaSnapshot {
+        uint64 time = 1;
+        bytes delta0 = 2; // int112
+        bytes delta1 = 3; // int112
+      }
     }
   }
+}
+
+// Body of the package's seed file: the state of every Ekubo v3 pool after the seed block. The
+// block itself is named by the seed file's header, so an empty body is a valid seed of no pools.
+message Seed {
+  repeated PoolSeed pools = 1;
+}
+
+message PoolSeed {
+  bytes pool_id = 1;          // bytes32
+  bytes sqrt_ratio_float = 2; // uint96, the packed float as stored by the core contract
+  // `snapshot.sqrt_ratio` is left empty; the package fills it from `sqrt_ratio_float`.
+  BlockTransactionEvents.TransactionEvents.PoolLog.PoolSnapshot snapshot = 3;
 }

@@ -83,6 +83,31 @@ fn rate_deltas(ev: Event) -> Vec<PartialRateDelta> {
 
             deltas
         }
+        Event::PoolSnapshot(ps) => {
+            let Some(timed) = ps.timed else {
+                return vec![];
+            };
+
+            let mut deltas = Vec::with_capacity(timed.rate_deltas.len() * 2);
+            for rate_delta in timed.rate_deltas {
+                if !rate_delta.delta0.is_empty() {
+                    deltas.push(PartialRateDelta {
+                        time: rate_delta.time,
+                        rate_delta: rate_delta.delta0,
+                        is_token1: false,
+                    });
+                }
+                if !rate_delta.delta1.is_empty() {
+                    deltas.push(PartialRateDelta {
+                        time: rate_delta.time,
+                        rate_delta: rate_delta.delta1,
+                        is_token1: true,
+                    });
+                }
+            }
+
+            deltas
+        }
         _ => vec![],
     }
 }

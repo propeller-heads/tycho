@@ -41,20 +41,32 @@ struct PartialTickDelta {
 }
 
 fn tick_deltas(event: Event) -> Vec<PartialTickDelta> {
-    let Event::PositionUpdated(position_updated) = event else {
-        return vec![];
-    };
-
-    vec![
-        PartialTickDelta {
-            tick_index: position_updated.lower,
-            liquidity_net_delta: position_updated.liquidity_delta.clone(),
-        },
-        PartialTickDelta {
-            tick_index: position_updated.upper,
-            liquidity_net_delta: BigInt::from_signed_bytes_be(&position_updated.liquidity_delta)
+    match event {
+        Event::PositionUpdated(position_updated) => vec![
+            PartialTickDelta {
+                tick_index: position_updated.lower,
+                liquidity_net_delta: position_updated.liquidity_delta.clone(),
+            },
+            PartialTickDelta {
+                tick_index: position_updated.upper,
+                liquidity_net_delta: BigInt::from_signed_bytes_be(
+                    &position_updated.liquidity_delta,
+                )
                 .neg()
                 .to_signed_bytes_be(),
-        },
-    ]
+            },
+        ],
+        Event::PoolSnapshot(ps) => ps
+            .ticks
+            .into_iter()
+            .map(|tick| PartialTickDelta {
+                tick_index: tick.index,
+                liquidity_net_delta: tick.liquidity_delta,
+            })
+            .collect(),
+        Event::Swapped(_) |
+        Event::PoolInitialized(_) |
+        Event::VirtualExecution(_) |
+        Event::RateUpdated(_) => vec![],
+    }
 }

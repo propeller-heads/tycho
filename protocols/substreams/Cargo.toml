@@ -5,6 +5,7 @@ members = [
     "ethereum-curve",
     "crates/tycho-substreams",
     "crates/substreams-helper",
+    "crates/tycho-seed-format",
     "ethereum-ambient",
     "ethereum-uniswap-v2",
     "ethereum-uniswap-v3",

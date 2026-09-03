@@ -260,6 +260,8 @@ fn maybe_attribute_updates(ev: Event, timestamp: u64) -> Option<Vec<Attribute>> 
             value: timestamp.to_be_bytes().to_vec(),
             change: ChangeType::Update.into(),
         }]),
+        // The component creation already carries the snapshot's tick, sqrt_ratio and last_time.
+        Event::PoolSnapshot(_) => None,
         _ => None,
     }
 }
