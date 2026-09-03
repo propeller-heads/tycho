@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, watch};
 use tycho_client::feed::{synchronizer::Snapshot, BlockHeader, FeedMessage};
 use tycho_common::{
     models::{
-        blockchain::{Block, BlockAggregatedChanges, TxInput},
+        blockchain::{Block, BlockAggregatedChanges, PendingBlock},
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
         Chain,
     },
@@ -33,8 +33,7 @@ pub struct PendingUpdate {
 
 #[derive(Debug, Error)]
 pub enum PendingError {
-    /// Returned when `generate_pending_update` is called before the parent block of
-    /// `target_block` has been confirmed. Use
+    /// Returned when the parent of `pending.block()` has not been confirmed. Use
     /// [`subscribe_confirmed_block`](PendingBlockProcessor::subscribe_confirmed_block) to wait
     /// for the right block before calling.
     #[error("parent block {needed} not yet confirmed (current: {current})")]
@@ -57,17 +56,16 @@ pub enum PendingError {
 ///
 /// ```no_run
 /// # async fn example(
-/// #     mut pending: tycho_simulation::evm::pending::PendingBlockProcessor,
-/// #     txs: &[tycho_common::models::blockchain::TxInput],
-/// #     target_header: tycho_client::feed::BlockHeader,
+/// #     mut processor: tycho_simulation::evm::pending::PendingBlockProcessor,
+/// #     pending_block: &tycho_common::models::blockchain::PendingBlock,
 /// # ) {
-/// pending
+/// processor
 ///     .subscribe_confirmed_block()
-///     .wait_for(|&n| n >= target_header.number - 1)
+///     .wait_for(|&n| n >= pending_block.block().number - 1)
 ///     .await
 ///     .expect("stream closed");
-/// let update = pending
-///     .generate_pending_update(txs, target_header, "bundle-1".to_string())
+/// let update = processor
+///     .generate_pending_update(pending_block, "bundle-1".to_string())
 ///     .await
 ///     .expect("pending update failed");
 /// # }
@@ -126,11 +124,10 @@ impl PendingBlockProcessor {
         self.advance_inner(msg)
     }
 
-    /// Simulates `txs` against the confirmed parent state of `target_block` and returns an
-    /// ephemeral [`Update`].
+    /// Simulates `pending` against the confirmed parent of `pending.block()`.
     ///
     /// Drains any confirmed blocks that have arrived since the last call, then immediately
-    /// checks whether the parent block (`target_block - 1`) is available. If not, returns
+    /// checks whether `pending.block().number - 1` is available. If not, returns
     /// [`PendingError::ParentNotYetConfirmed`] — **no blocking**. Use
     /// [`subscribe_confirmed_block`](Self::subscribe_confirmed_block) to wait for the right
     /// block before calling.
@@ -139,16 +136,14 @@ impl PendingBlockProcessor {
     /// mutated. Calling this twice with the same arguments returns identical results.
     ///
     /// # Parameters
-    /// * `txs` — candidate bundle in execution order; failed transactions are skipped.
-    /// * `target_header` — header of the block being built. Its `number` is used for the
-    ///   parent-block guard; the full header is forwarded to `apply_deltas_ephemeral` so that block
-    ///   number and timestamp are injected into each state delta.
+    /// * `pending` — the in-flight block: the block being built, the candidate bundle in execution
+    ///   order (failed transactions are skipped), and post-execution account state for the accounts
+    ///   it touched. The returned deltas use this block's number and timestamp.
     /// * `label` — opaque caller-supplied tag stamped onto the returned [`PendingUpdate`]. Use it
     ///   to associate the result with a specific bundle or evaluation context.
     pub async fn generate_pending_update(
         &mut self,
-        txs: &[TxInput],
-        target_header: BlockHeader,
+        pending: &PendingBlock,
         label: String,
     ) -> Result<PendingUpdate, PendingError> {
         // Drain any confirmed blocks that have arrived since our last call.
@@ -156,17 +151,19 @@ impl PendingBlockProcessor {
             self.advance_inner(&msg)?;
         }
 
-        let parent = target_header.number.saturating_sub(1);
+        let target_block = pending.block();
+        let parent = target_block.number.saturating_sub(1);
         if self.current_confirmed_block < parent {
             return Err(PendingError::ParentNotYetConfirmed {
                 needed: parent,
                 current: self.current_confirmed_block,
             });
         }
+        let target_header = BlockHeader::from(target_block);
 
         let mut pending_deltas: HashMap<String, BlockAggregatedChanges> = HashMap::new();
-        for (extractor, indexer) in &mut self.indexers {
-            let changes = indexer.generate_deltas(txs);
+        for (extractor, indexer) in &self.indexers {
+            let changes = indexer.generate_deltas(pending);
             pending_deltas.insert(extractor.clone(), changes);
         }
 
@@ -289,5 +286,145 @@ fn snapshot_to_block_changes(
         state_deltas,
         component_balances,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use tycho_common::models::blockchain::{Block, PendingBlock};
+
+    use super::*;
+
+    /// Records the block it was handed, so a test can assert what the processor passed down.
+    struct RecordingIndexer {
+        seen: Arc<Mutex<Vec<Block>>>,
+    }
+
+    impl TxDeltaIndexer for RecordingIndexer {
+        fn apply_block(&mut self, _block: &BlockAggregatedChanges) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn generate_deltas(&self, pending: &PendingBlock) -> BlockAggregatedChanges {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(pending.block().clone());
+            BlockAggregatedChanges::default()
+        }
+    }
+
+    fn target_block(number: u64, timestamp: i64) -> Block {
+        Block {
+            number,
+            chain: Chain::Ethereum,
+            hash: Bytes::from([1u8; 32]),
+            parent_hash: Bytes::from([2u8; 32]),
+            ts: chrono::DateTime::from_timestamp(timestamp, 0)
+                .unwrap()
+                .naive_utc(),
+        }
+    }
+
+    fn processor(seen: Arc<Mutex<Vec<Block>>>) -> PendingBlockProcessor {
+        let indexers: HashMap<String, Box<dyn TxDeltaIndexer>> =
+            HashMap::from([("fluid".to_string(), Box::new(RecordingIndexer { seen }) as _)]);
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        PendingBlockProcessor::new(
+            indexers,
+            Arc::new(TychoStreamDecoder::<BlockHeader>::new()),
+            Chain::Ethereum,
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_indexer_receives_the_callers_target_block() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut pending_processor = processor(seen.clone());
+        // Parent is block 0, which the processor considers confirmed from the start.
+        let block = target_block(1, 1_759_842_947);
+
+        pending_processor
+            .generate_pending_update(
+                &PendingBlock::new(block.clone(), vec![], HashMap::new()),
+                "bundle-1".to_string(),
+            )
+            .await
+            .expect("pending update failed");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            [block],
+            "The indexer must be handed the caller's block, not one derived from the parent."
+        );
+    }
+
+    /// A confirmed block carrying no snapshots or deltas: it only advances the tip.
+    fn confirmed_at(number: u64) -> FeedMessage<BlockHeader> {
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "fluid".to_string(),
+                tycho_client::feed::synchronizer::StateSyncMessage {
+                    header: BlockHeader { number, ..Default::default() },
+                    ..Default::default()
+                },
+            )]),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    /// The header stamped onto every delta must come from the pending block too, not from the
+    /// confirmed tip. Priced against a tip of 5, a target of 3 tells the two apart.
+    #[tokio::test]
+    async fn test_stamped_header_comes_from_the_pending_block() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut pending_processor = processor(seen);
+        pending_processor
+            .advance(&confirmed_at(5))
+            .expect("advance failed");
+
+        let update = pending_processor
+            .generate_pending_update(
+                &PendingBlock::new(target_block(3, 1_759_842_947), vec![], HashMap::new()),
+                "bundle-1".to_string(),
+            )
+            .await
+            .expect("pending update failed");
+
+        assert_eq!(
+            update.update.block_number_or_timestamp, 3,
+            "The update must be stamped with the pending block, not the confirmed tip."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parent_guard_reads_the_pending_blocks_number() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut pending_processor = processor(seen.clone());
+        let block = target_block(23_526_115, 1_759_842_947);
+
+        let result = pending_processor
+            .generate_pending_update(
+                &PendingBlock::new(block, vec![], HashMap::new()),
+                "bundle-1".to_string(),
+            )
+            .await;
+
+        match result {
+            Err(PendingError::ParentNotYetConfirmed { needed, current }) => {
+                assert_eq!(needed, 23_526_114);
+                assert_eq!(current, 0);
+            }
+            Err(other) => panic!("expected ParentNotYetConfirmed, got {other:?}"),
+            Ok(_) => panic!("expected ParentNotYetConfirmed, got a successful update"),
+        }
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "No indexer should run when the parent is not confirmed."
+        );
     }
 }

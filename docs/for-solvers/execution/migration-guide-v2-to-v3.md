@@ -21,7 +21,7 @@ Router V3.
 
 **Removed fields:**
 
-<table><thead><tr><th width="280">Field</th><th width="420">Replacement</th></tr></thead><tbody><tr><td><code>native_action: Option&#x3C;NativeAction></code></td><td>The encoder now inserts WETH wrap/unwrap swaps automatically (see <a href="encoding/#native-tokens">Native Tokens</a>).</td></tr><tr><td><code>exact_out: bool</code></td><td>Only exact-in was ever supported. Removed for simplicity.</td></tr></tbody></table>
+<table><thead><tr><th width="280">Field</th><th width="420">Replacement</th></tr></thead><tbody><tr><td><code>native_action: Option&#x3C;NativeAction></code></td><td>Add a swap on the <code>native_wrapper</code> protocol instead (see <a href="encoding/#native-tokens">Native Tokens</a>).</td></tr><tr><td><code>exact_out: bool</code></td><td>Only exact-in was ever supported. Removed for simplicity.</td></tr></tbody></table>
 
 **New fields:**
 
@@ -157,8 +157,9 @@ gas for this solution.
 V2 used a `NativeAction` enum on the `Solution` with `Wrap` and `Unwrap` variants. The router had dedicated wrap/unwrap
 flags.
 
-**V3 removes this entirely.** Instead, a WETH executor handles wrapping and unwrapping as regular swap steps. The
-encoder automatically inserts these swaps when it detects ETH↔WETH gaps in the swap path.
+**V3 removes this entirely.** Instead, a WETH executor handles wrapping and unwrapping as regular swap steps. Include a
+swap on the `native_wrapper` protocol wherever the route crosses between ETH and WETH — the Tycho stream injects a
+`native_wrapper` component you can route through like any other pool.
 
 ```rust
 // V2
@@ -170,7 +171,7 @@ swaps: vec![weth_to_dai_swap],
 ..
 };
 
-// V3 — just set token_in to ETH; the encoder adds a WETH wrap swap automatically
+// V3 — the wrap is a regular swap step
 let solution = Solution::new(
 sender,
 receiver,
@@ -178,12 +179,12 @@ eth_address,   // token_in is ETH
 dai_address,   // token_out is DAI
 amount,
 min_amount_out,
-vec![weth_to_dai_swap],  // first swap expects WETH — encoder bridges the gap
+vec![eth_to_weth_wrap_swap, weth_to_dai_swap],
 );
 ```
 
-This also works for mid-path bridging (e.g., if one swap outputs ETH and the next expects WETH) and at the end of a
-path. See more in [Native Tokens](encoding/#native-tokens).
+The same applies mid-path (e.g., if one swap outputs ETH and the next expects WETH) and at the end of a path. See more
+in [Native Tokens](encoding/#native-tokens).
 
 #### Encoder Builder
 
@@ -377,20 +378,6 @@ singleSwap(amountIn, tokenIn, tokenOut, expectedAmountOut, minAmountOut, receive
 `sequentialSwap`, `splitSwap`, and their `Permit2` and `UsingVault` variants take it in the same
 position. `splitSwap` keeps `nTokens` between `minAmountOut` and `receiver`.
 
-#### Slippage Bounds
-
-V3.0 accepted any non-zero `minAmountOut`, including `1`. V3.1 requires it to sit inside a window
-anchored on `expectedAmountOut`:
-
-```
-expectedAmountOut * (10_000 - MAX_SLIPPAGE_TOLERANCE_BPS) / 10_000  <=  minAmountOut  <=  expectedAmountOut
-```
-
-`MAX_SLIPPAGE_TOLERANCE_BPS` is `2_000`, which puts the floor 20% below the quote. Two things follow
-from this. Calldata that used to pass `minAmountOut = 1` now reverts, so compute a real floor from your
-slippage tolerance. And because `expectedAmountOut` sets both ends of the window, inflating it raises
-your floor rather than relaxing it — pass the amount your simulation actually returned.
-
 #### Client Fee Signature
 
 The `ClientFee` typehash gains `expectedAmountOut` and widens `clientFeeBps`, so every V3.0 signature
@@ -456,7 +443,7 @@ struct FeeInput {
 
 | Error                                                                | Cause                                                     |
 |----------------------------------------------------------------------|-----------------------------------------------------------|
-| `TychoRouter__InvalidMinAmountOut(minAmountOut, expectedAmountOut)`   | `minAmountOut` outside the slippage window, or zero       |
+| `TychoRouter__InvalidMinAmountOut(minAmountOut, expectedAmountOut)`   | `minAmountOut` zero, or above `expectedAmountOut` — see [Slippage bounds](encoding/#slippage-bounds) |
 | `TychoRouter__AmountOutZero()`                                       | `expectedAmountOut` is zero                               |
 | `TychoRouter__FeesExceedOutput(totalFees, actualAmountOut)`          | Calculated fees exceed the swap output                    |
 

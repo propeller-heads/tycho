@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -13,9 +13,11 @@ use tycho_simulation::{
     evm::{
         decoder::StreamDecodeError,
         engine_db::tycho_db::PreCachedDB,
+        override_stream::StateOverrideProvider,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
+            balancer_v3::BalancerV3State,
             cowamm::state::CowAMMState,
             curve::CurveState,
             ekubo::state::EkuboState,
@@ -31,6 +33,7 @@ use tycho_simulation::{
             ramses_v3::state::RamsesV3State,
             ring_swap_v2::state::RingSwapV2State,
             rocketpool::state::RocketpoolState,
+            sky::state::SkyState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -53,6 +56,9 @@ pub struct ProtocolStreamProcessor {
     protocols: Option<Vec<String>>,
     partial_blocks: bool,
     no_tls: bool,
+    /// State override providers registered on the stream, keyed by protocol system. Empty leaves
+    /// the builder to install its own defaults.
+    override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
 }
 
 impl ProtocolStreamProcessor {
@@ -76,7 +82,19 @@ impl ProtocolStreamProcessor {
             protocols,
             partial_blocks,
             no_tls,
+            override_providers: HashMap::new(),
         })
+    }
+
+    /// Registers `providers` as the pools' state override sources, taking precedence over the
+    /// builder's own defaults so the process opens one Titan connection rather than one per
+    /// consumer.
+    pub fn with_override_providers(
+        mut self,
+        providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
+    ) -> Self {
+        self.override_providers = providers;
+        self
     }
 
     pub async fn run_stream(
@@ -160,6 +178,10 @@ impl ProtocolStreamProcessor {
             protocol_stream =
                 self.add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
         }
+        for (protocol_system, provider) in &self.override_providers {
+            protocol_stream =
+                protocol_stream.with_override_provider(protocol_system, provider.clone());
+        }
         if self.partial_blocks {
             protocol_stream = protocol_stream.enable_partial_blocks();
         }
@@ -201,6 +223,7 @@ impl ProtocolStreamProcessor {
                 "cowamm".to_string(),
                 "ekubo_v3".to_string(),
                 "rocketpool".to_string(),
+                "sky".to_string(),
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
                 "vm:bopamm".to_string(),
@@ -209,6 +232,7 @@ impl ProtocolStreamProcessor {
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
+                "sushiswap_v2".to_string(),
                 "uniswap_v3".to_string(),
                 "uniswap_v4".to_string(),
                 "pancakeswap_v3".to_string(),
@@ -355,6 +379,9 @@ impl ProtocolStreamProcessor {
             "rocketpool" => {
                 stream = stream.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None);
             }
+            "sky" => {
+                stream = stream.exchange::<SkyState>("sky", tvl_filter.clone(), None);
+            }
             "cowamm" => {
                 stream = stream.exchange::<CowAMMState>("cowamm", tvl_filter.clone(), None);
             }
@@ -395,11 +422,8 @@ impl ProtocolStreamProcessor {
                     stream.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None);
             }
             "vm:balancer_v3" => {
-                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:balancer_v3",
-                    tvl_filter.clone(),
-                    None,
-                );
+                stream =
+                    stream.exchange::<BalancerV3State>("vm:balancer_v3", tvl_filter.clone(), None);
             }
             _ => {
                 return Err(miette::miette!("Unknown protocol: {}", protocol));

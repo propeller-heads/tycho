@@ -4,7 +4,10 @@ use std::{
 };
 
 use alloy::{
-    primitives::{map::AddressHashMap, Address, U256},
+    primitives::{
+        map::{AddressHashMap, B256HashMap},
+        Address, B256, U256,
+    },
     rpc::types::{state::AccountOverride, Block},
     sol_types::SolValue,
 };
@@ -35,11 +38,14 @@ pub mod models;
 pub mod tenderly;
 mod traces;
 
-/// Simulates every encoded swap in `execution_info` against `block` and returns one result per
-/// simulation id.
+/// Simulates every encoded swap in `execution_info` against `block` via `debug_traceCall` and
+/// returns one result per simulation id.
 ///
 /// `router_overwrites_data` decides which contracts are simulated as deployed and which are
 /// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
+///
+/// `oracle_overwrites` are storage slots applied to every simulation, merged per account after
+/// the balance, allowance and protocol overwrites.
 ///
 /// # Errors
 /// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`. An `Err`
@@ -50,6 +56,7 @@ pub async fn simulate_swap_transaction(
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
+    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
 ) -> Result<
     HashMap<String, TychoExecutionResult>,
     (miette::Error, Option<AddressHashMap<AccountOverride>>, Option<tenderly::OverwriteMetadata>),
@@ -143,6 +150,9 @@ pub async fn simulate_swap_transaction(
         }
         if let Some(ref bopamm_overwrites) = bopamm_overwrites {
             state_overwrites.extend(bopamm_overwrites.clone());
+        }
+        if let Some(ref oracle_overwrites) = oracle_overwrites {
+            merge_storage_overwrites(&mut state_overwrites, oracle_overwrites);
         }
 
         // Add protocol-specific overwrites for Angstrom hooks
@@ -262,6 +272,25 @@ pub async fn simulate_swap_transaction(
     Ok(tycho_execution_results)
 }
 
+/// Adds `storage` to one simulation's overwrites, slot by slot.
+fn merge_storage_overwrites(
+    overwrites: &mut AddressHashMap<AccountOverride>,
+    storage: &AddressHashMap<B256HashMap<B256>>,
+) {
+    for (address, slots) in storage {
+        overwrites
+            .entry(*address)
+            .or_default()
+            .state_diff
+            .get_or_insert_with(Default::default)
+            .extend(
+                slots
+                    .iter()
+                    .map(|(slot, value)| (*slot, *value)),
+            );
+    }
+}
+
 fn collect_fermiswap_pairs(
     execution_info: &HashMap<String, TychoExecutionInput>,
 ) -> miette::Result<Vec<(Address, Address)>> {
@@ -319,4 +348,52 @@ fn collect_bopamm_asset_ids(
     }
 
     Ok(asset_ids.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{address, b256};
+
+    use super::*;
+
+    const REGISTRY: Address = address!("da7afeed01fe625cf15d187a19f94b45f00b8c5f");
+    const LANE: B256 = b256!("0000000000000000000000000000000000000000000000000000000000000001");
+    const OTHER_LANE: B256 =
+        b256!("0000000000000000000000000000000000000000000000000000000000000002");
+    const VALUE: B256 = b256!("00000000000000000000000000000000000000000000000000000000000000ff");
+
+    #[test]
+    fn an_account_with_another_slot_overwritten() {
+        let mut overwrites = AddressHashMap::default();
+        overwrites
+            .insert(REGISTRY, AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]));
+        let storage =
+            AddressHashMap::from_iter([(REGISTRY, B256HashMap::from_iter([(OTHER_LANE, VALUE)]))]);
+
+        merge_storage_overwrites(&mut overwrites, &storage);
+
+        let state_diff = overwrites[&REGISTRY]
+            .state_diff
+            .as_ref()
+            .expect("state diff is set");
+        assert_eq!(state_diff.get(&LANE), Some(&VALUE));
+        assert_eq!(state_diff.get(&OTHER_LANE), Some(&VALUE));
+    }
+
+    #[test]
+    fn an_account_with_no_overwrites() {
+        let mut overwrites = AddressHashMap::default();
+        let storage =
+            AddressHashMap::from_iter([(REGISTRY, B256HashMap::from_iter([(LANE, VALUE)]))]);
+
+        merge_storage_overwrites(&mut overwrites, &storage);
+
+        assert_eq!(
+            overwrites[&REGISTRY]
+                .state_diff
+                .as_ref()
+                .and_then(|slots| slots.get(&LANE)),
+            Some(&VALUE)
+        );
+    }
 }

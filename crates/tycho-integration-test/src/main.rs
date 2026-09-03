@@ -1,5 +1,6 @@
 mod fee_fetcher;
 mod metrics;
+mod oracle_overrides;
 mod statistics;
 mod stream_processor;
 
@@ -31,7 +32,7 @@ use tycho_client::feed::SynchronizerState;
 use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-    utils::bytes_to_address,
+    utils::bytes_to_address, PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX,
 };
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
@@ -56,8 +57,10 @@ use tycho_test::{
 
 use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
+    oracle_overrides::{override_protocol, titan_providers, BlockOverrides, OracleOverrides},
     statistics::TestStatistics,
     stream_processor::{
+        price_level_stream_processor::PriceLevelStreamProcessor,
         protocol_stream_processor::ProtocolStreamProcessor,
         rfq_stream_processor::RFQStreamProcessor, StreamUpdate, UpdateType,
     },
@@ -105,6 +108,10 @@ struct Cli {
     #[arg(long, default_value_t = true)]
     run_pamm_protocols: bool,
 
+    /// Disable the Titan pAMM price level stream (only active on Ethereum)
+    #[arg(long, default_value_t = false)]
+    disable_price_level_stream: bool,
+
     /// Port for the Prometheus metrics server
     #[arg(long, default_value_t = 9898)]
     metrics_port: u16,
@@ -130,6 +137,10 @@ struct Cli {
     /// The RFQ stream will skip messages for this duration (in seconds) after processing a message
     #[arg(long, default_value_t = 600)]
     skip_messages_duration: u64,
+
+    /// The price level stream emits one sampled update per this many blocks
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+    price_level_stream_block_interval: u64,
 
     /// Maximum number of attempts to poll the RPC when the update block is ahead of the RPC.
     /// Each attempt is separated by --rpc-poll-interval-ms. Adjust for faster chains (e.g. Base,
@@ -176,9 +187,27 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     partial_blocks: bool,
 
+    /// Run the protocol-stream test pipeline only on blocks whose number is a multiple of this
+    /// value. 1 tests every block (current behavior). Use a higher value on fast chains (e.g.
+    /// Robinhood) where the harness cannot keep up with the head. State from every block is
+    /// still ingested. Incompatible with --partial-blocks.
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..),
+        conflicts_with = "partial_blocks"
+    )]
+    test_every_n_blocks: u64,
+
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
+    /// 0 disables the watchdog.
     #[arg(long, default_value_t = 30)]
     stale_threshold_secs: u64,
+
+    /// Seconds without a Titan price level message before marking the served pAMMs as stale in
+    /// metrics. 0 disables the watchdog.
+    #[arg(long, default_value_t = 10)]
+    price_level_stream_stale_threshold_secs: u64,
 
     /// Disable on-chain swap execution validation (RPC simulation only, no swap encoding or
     /// execution). Useful for diagnosing stream latency without execution overhead.
@@ -358,13 +387,24 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let token_prices: SharedTokenPrices = Arc::new(RwLock::new(Arc::new(initial_prices)));
     tokio::spawn(refresh_token_prices(chain, token_prices.clone(), TOKEN_PRICE_REFRESH_INTERVAL));
 
-    // Run streams in background tasks with separate channels so RFQ processing
-    // cannot block protocol update consumption
+    // Run streams in background tasks with separate channels so RFQ and price level stream
+    // processing cannot block protocol update consumption
     let (protocol_tx, mut protocol_rx) =
         tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let (rfq_tx, mut rfq_rx) = tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
+    let (price_level_tx, mut price_level_rx) =
+        tokio::sync::mpsc::channel::<miette::Result<StreamUpdate>>(64);
     let mut protocol_handle = None;
     let mut rfq_handle = None;
+    let mut price_level_handle = None;
+
+    // One Titan connection serves both the indexed pAMM pools and the execution overrides. The
+    // price level stream only runs on Ethereum, so off it the providers are only worth opening
+    // for the pools.
+    let overrides_wanted =
+        chain == Chain::Ethereum && !cli.disable_price_level_stream && !cli.disable_execution;
+    let override_providers =
+        if !cli.disable_onchain || overrides_wanted { titan_providers() } else { HashMap::new() };
 
     if !cli.disable_onchain {
         if let Ok(protocol_stream_processor) = ProtocolStreamProcessor::new(
@@ -379,6 +419,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
         ) {
             protocol_handle = Some(
                 protocol_stream_processor
+                    .with_override_providers(override_providers.clone())
                     .run_stream(&all_tokens, protocol_tx)
                     .await?,
             );
@@ -399,6 +440,29 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 .await?,
         );
     }
+    if !cli.disable_price_level_stream {
+        if let Some(price_level_stream_processor) = PriceLevelStreamProcessor::new(
+            chain,
+            cli.max_simulations as usize,
+            cli.price_level_stream_block_interval,
+            Duration::from_secs(cli.price_level_stream_stale_threshold_secs),
+        ) {
+            price_level_handle = Some(
+                price_level_stream_processor
+                    .run_stream(&all_tokens, price_level_tx)
+                    .await?,
+            );
+        } else {
+            debug!(?chain, "The Titan pAMM price level stream only serves Ethereum; not starting");
+        }
+    }
+
+    // Without the overrides the venue reverts `StaleUpdate()`.
+    let oracle_overrides = if price_level_handle.is_some() && !cli.disable_execution {
+        OracleOverrides::spawn(&override_providers).map(Arc::new)
+    } else {
+        None
+    };
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
     // Only collect statistics when max_blocks is set; avoids unbounded growth for indefinite runs
@@ -417,8 +481,10 @@ async fn run(cli: Cli) -> miette::Result<()> {
     info!("Waiting for first protocol update...");
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
+    let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
     let mut rfq_stream_open = !cli.disable_rfq;
+    let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
     // known protocols as Stale in metrics. This catches stream disconnections where the
@@ -430,15 +496,17 @@ async fn run(cli: Cli) -> miette::Result<()> {
     tokio::pin!(stale_sleep);
 
     loop {
-        if !protocol_stream_open && !rfq_stream_open {
+        if !protocol_stream_open && !rfq_stream_open && !price_level_stream_open {
             info!("All streams closed, exiting");
             break;
         }
 
         tokio::select! {
-            // Monitor protocol stream termination
+            // Monitor protocol stream termination. The handles are awaited by reference: the
+            // select futures are recreated (and the losers dropped) every iteration, so taking
+            // the handle out would detach the task and disable this arm after one poll.
             result = async {
-                if let Some(handle) = protocol_handle.take() {
+                if let Some(handle) = protocol_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
@@ -458,20 +526,38 @@ async fn run(cli: Cli) -> miette::Result<()> {
 
             // Monitor RFQ stream termination
             result = async {
-                if let Some(handle) = rfq_handle.take() {
+                if let Some(handle) = rfq_handle.as_mut() {
                     handle.await
                 } else {
                     std::future::pending().await
                 }
             }, if rfq_handle.is_some() => {
+                rfq_handle = None;
                 match result {
                     Ok(()) => {
                         warn!("RFQ stream terminated");
-                        // rfq_handle is already None due to take()
                     }
                     Err(e) => {
                         warn!("RFQ stream panicked: {:?}", e);
-                        // rfq_handle is already None due to take()
+                    }
+                }
+            }
+
+            // Monitor price level stream termination
+            result = async {
+                if let Some(handle) = price_level_handle.as_mut() {
+                    handle.await
+                } else {
+                    std::future::pending().await
+                }
+            }, if price_level_handle.is_some() => {
+                price_level_handle = None;
+                match result {
+                    Ok(()) => {
+                        warn!("Price level stream terminated");
+                    }
+                    Err(e) => {
+                        warn!("Price level stream panicked: {:?}", e);
                     }
                 }
             }
@@ -506,28 +592,9 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .as_mut()
                             .reset(tokio::time::Instant::now() + stale_threshold);
 
-                        if cli.max_blocks > 0 {
-                            if let Some(stats) = statistics.as_ref() {
-                                let stats = stats
-                                    .read()
-                                    .expect("Failed to get read lock for statistics (max-block check)");
-                                if stats.blocks_processed >= cli.max_blocks {
-                                    drop(stats);
-                                    info!("Reached max blocks ({}), stopping...", cli.max_blocks);
-                                    break;
-                                }
-                                let block_num = update.update.block_number_or_timestamp;
-                                if !stats.blocks_seen.contains(&block_num)
-                                    && stats.blocks_processed >= cli.max_blocks
-                                {
-                                    drop(stats);
-                                    info!(
-                                        "Next block would exceed max blocks ({}), stopping...",
-                                        cli.max_blocks
-                                    );
-                                    break;
-                                }
-                            }
+                        if reached_max_blocks(cli.max_blocks, statistics.as_ref()) {
+                            info!("Reached max blocks ({}), stopping...", cli.max_blocks);
+                            break;
                         }
 
                         let cli = cli.clone();
@@ -535,6 +602,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
+                        let oracle_overrides = oracle_overrides.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let permit = protocol_semaphore
                             .clone()
@@ -543,7 +611,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire protocol permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, oracle_overrides, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -573,6 +641,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let tycho_state = tycho_state.clone();
                         let statistics = statistics.clone();
                         let token_prices = token_prices.clone();
+                        let oracle_overrides = oracle_overrides.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let permit = rfq_semaphore
                             .clone()
@@ -581,7 +650,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             .into_diagnostic()
                             .wrap_err("Failed to acquire RFQ permit")?;
                         tokio::spawn(async move {
-                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, &update, router_overwrites_data).await {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, oracle_overrides, &update, router_overwrites_data).await {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
@@ -590,6 +659,50 @@ async fn run(cli: Cli) -> miette::Result<()> {
                     None => {
                         info!("RFQ stream closed");
                         rfq_stream_open = false;
+                    }
+                }
+            }
+
+            // Process price level stream updates independently
+            update = price_level_rx.recv(), if price_level_stream_open => {
+                match update {
+                    Some(update) => {
+                        let update = match update {
+                            Ok(u) => Arc::new(u),
+                            Err(e) => {
+                                warn!("{}", format_error_chain(&e));
+                                continue;
+                            }
+                        };
+
+                        if reached_max_blocks(cli.max_blocks, statistics.as_ref()) {
+                            info!("Reached max blocks ({}), stopping...", cli.max_blocks);
+                            break;
+                        }
+
+                        let cli = cli.clone();
+                        let rpc_tools = rpc_tools.clone();
+                        let tycho_state = tycho_state.clone();
+                        let statistics = statistics.clone();
+                        let token_prices = token_prices.clone();
+                        let oracle_overrides = oracle_overrides.clone();
+                        let router_overwrites_data = router_overwrites_data.clone();
+                        let permit = price_level_semaphore
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .into_diagnostic()
+                            .wrap_err("Failed to acquire price level stream permit")?;
+                        tokio::spawn(async move {
+                            if let Err(e) = process_update(cli, chain, rpc_tools, tycho_state, statistics, token_prices, router_fee, oracle_overrides, &update, router_overwrites_data).await {
+                                warn!("{}", format_error_chain(&e));
+                            }
+                            drop(permit);
+                        });
+                    }
+                    None => {
+                        info!("Price level stream closed");
+                        price_level_stream_open = false;
                     }
                 }
             }
@@ -643,6 +756,78 @@ async fn refresh_token_prices(chain: Chain, prices: SharedTokenPrices, interval:
                 );
             }
         }
+    }
+}
+
+/// Waits until the RPC has reached `target_block` and returns exactly that block. `Ok(None)`
+/// means the chain did not reach the target within `max_attempts`; `Err` means the polling ended
+/// on an RPC failure instead, carrying the failed operation, target block, and attempt.
+///
+/// Unlike [`poll_rpc_for_block`], an RPC that has already moved past the target is not treated
+/// as stale: the target block is fetched by number, since the caller wants to simulate at that
+/// exact (recent) block. Transient RPC failures are retried like a lagging chain — an `Err` is
+/// only returned once the attempts are exhausted, and a healthy poll clears earlier failures.
+async fn await_target_block(
+    rpc_tools: &tycho_test::RPCTools,
+    target_block: u64,
+    max_attempts: u32,
+    poll_interval: Duration,
+) -> miette::Result<Option<Block>> {
+    let mut last_failure: Option<miette::Report> = None;
+    for attempt in 1..=max_attempts {
+        match rpc_tools
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await
+        {
+            Ok(Some(latest)) if latest.header.number == target_block => {
+                return Ok(Some(latest));
+            }
+            Ok(Some(latest)) if latest.header.number > target_block => {
+                // The chain has moved past the target; fetch it by number. A failure here must
+                // not drop the update — keep polling with the remaining attempts instead.
+                match rpc_tools
+                    .provider
+                    .get_block_by_number(BlockNumberOrTag::Number(target_block))
+                    .await
+                {
+                    Ok(Some(target)) => return Ok(Some(target)),
+                    Ok(None) => {
+                        last_failure = Some(miette!(
+                            "RPC reports latest block {} but served no block {target_block} \
+                             (attempt {attempt}/{max_attempts})",
+                            latest.header.number
+                        ));
+                    }
+                    Err(e) => {
+                        last_failure = Some(miette!(e).wrap_err(format!(
+                            "Failed to fetch target block {target_block} by number (attempt \
+                             {attempt}/{max_attempts})"
+                        )));
+                    }
+                }
+            }
+            // The chain has not reached the target yet and the RPC is healthy: any earlier
+            // failure is stale, the block is simply not there.
+            Ok(Some(_)) => last_failure = None,
+            Ok(None) => {
+                last_failure = Some(miette!(
+                    "RPC served no latest block while awaiting target block {target_block} \
+                     (attempt {attempt}/{max_attempts})"
+                ));
+            }
+            Err(e) => {
+                last_failure = Some(miette!(e).wrap_err(format!(
+                    "Failed to fetch the latest block while awaiting target block \
+                     {target_block} (attempt {attempt}/{max_attempts})"
+                )));
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    match last_failure {
+        Some(failure) => Err(failure),
+        None => Ok(None),
     }
 }
 
@@ -771,6 +956,7 @@ async fn process_update(
     statistics: Option<Arc<RwLock<TestStatistics>>>,
     token_prices: SharedTokenPrices,
     router_fee: RouterFeeOnOutput,
+    oracle_overrides: Option<Arc<OracleOverrides>>,
     update: &StreamUpdate,
     router_overwrites_data: RouterOverwritesData,
 ) -> miette::Result<()> {
@@ -786,118 +972,195 @@ async fn process_update(
         .map_err(|e| miette!("Failed to acquire read lock on token prices: {e}"))?
         .clone();
 
-    let block = if let UpdateType::Protocol = update.update_type {
-        // Update state cache before block alignment check
-        {
-            let mut current_state = tycho_state
-                .write()
-                .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
-            for (id, comp) in update.update.new_pairs.iter() {
-                current_state
-                    .components
-                    .insert(id.clone(), comp.clone());
-                current_state
-                    .component_ids_by_protocol
-                    .entry(comp.protocol_system.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert(id.clone());
-            }
-            for (id, state) in update.update.states.iter() {
-                current_state
-                    .states
-                    .insert(id.clone(), state.clone());
-            }
-            for (removed_id, removed_component) in update.update.removed_pairs.iter() {
-                current_state
-                    .components
-                    .remove(removed_id);
-                current_state.states.remove(removed_id);
-                current_state
-                    .component_ids_by_protocol
-                    .get_mut(&removed_component.protocol_system)
-                    .map(|id_set| id_set.remove(removed_id));
-            }
-
-            for (protocol, component_ids) in &current_state.component_ids_by_protocol {
-                metrics::record_protocol_pool_count(protocol, component_ids.len());
-            }
-        }
-
-        let update_block_number = update.update.block_number_or_timestamp;
-
-        // Flashblocks-capable endpoints expose sequencer pre-confirmed state under `pending`;
-        // standard endpoints use `latest` (confirmed blocks only).
-        let block_tag = if cli.partial_blocks && update.update.is_partial {
-            BlockNumberOrTag::Pending
-        } else {
-            BlockNumberOrTag::Latest
-        };
-        let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
-
-        let poll_result = poll_rpc_for_block(
-            &rpc_tools,
-            update_block_number,
-            block_tag,
-            cli.rpc_poll_attempts,
-            poll_interval,
-        )
-        .await?;
-
-        let block_type = if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
-        let block = match poll_result {
-            BlockPollResult::Ready(b) => {
-                let latency_seconds = update.received_at.as_secs_f64() - b.header.timestamp as f64;
-                metrics::record_block_processing_duration(latency_seconds, block_type);
-                Arc::new(*b)
-            }
-            BlockPollResult::Stale { target_block_timestamp } => {
-                if let Some(ts) = target_block_timestamp {
-                    let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
-                    metrics::record_block_processing_duration(latency_seconds, block_type);
+    let block = match update.update_type {
+        UpdateType::Protocol => {
+            // Update state cache before block alignment check
+            {
+                let mut current_state = tycho_state
+                    .write()
+                    .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
+                for (id, comp) in update.update.new_pairs.iter() {
+                    current_state
+                        .components
+                        .insert(id.clone(), comp.clone());
+                    current_state
+                        .component_ids_by_protocol
+                        .entry(comp.protocol_system.clone())
+                        .or_insert_with(HashSet::new)
+                        .insert(id.clone());
                 }
-                metrics::record_protocol_update_skipped();
-                for protocol in update.update.sync_states.keys() {
-                    metrics::record_protocol_sync_state_skipped(protocol);
+                for (id, state) in update.update.states.iter() {
+                    current_state
+                        .states
+                        .insert(id.clone(), state.clone());
                 }
+                for (removed_id, removed_component) in update.update.removed_pairs.iter() {
+                    current_state
+                        .components
+                        .remove(removed_id);
+                    current_state.states.remove(removed_id);
+                    current_state
+                        .component_ids_by_protocol
+                        .get_mut(&removed_component.protocol_system)
+                        .map(|id_set| id_set.remove(removed_id));
+                }
+
+                for (protocol, component_ids) in &current_state.component_ids_by_protocol {
+                    metrics::record_protocol_pool_count(protocol, component_ids.len());
+                }
+            }
+
+            let update_block_number = update.update.block_number_or_timestamp;
+
+            if !is_sampled_block(update_block_number, cli.test_every_n_blocks) {
+                metrics::record_protocol_update_sampled_out();
                 return Ok(());
             }
-            BlockPollResult::Timeout => {
-                warn!(
-                    "RPC ({block_tag}) did not reach update block {update_block_number}, skipping."
-                );
-                metrics::record_protocol_update_skipped();
+
+            let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
+
+            let block = if cli.test_every_n_blocks > 1 {
+                // Sampled mode: on fast chains the head is expected to be past the update, so the
+                // target block is fetched by number instead of racing the head. clap rejects
+                // --partial-blocks in this mode, so the block is always full.
+                match await_target_block(
+                    &rpc_tools,
+                    update_block_number,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await
+                {
+                    Ok(Some(b)) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
+                        metrics::record_block_processing_duration(latency_seconds, "full");
+                        Arc::new(b)
+                    }
+                    Ok(None) => {
+                        warn!("RPC did not serve sampled block {update_block_number}, skipping.");
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else {
+                // Flashblocks-capable endpoints expose sequencer pre-confirmed state under
+                // `pending`; standard endpoints use `latest` (confirmed blocks only).
+                let block_tag = if cli.partial_blocks && update.update.is_partial {
+                    BlockNumberOrTag::Pending
+                } else {
+                    BlockNumberOrTag::Latest
+                };
+
+                let poll_result = poll_rpc_for_block(
+                    &rpc_tools,
+                    update_block_number,
+                    block_tag,
+                    cli.rpc_poll_attempts,
+                    poll_interval,
+                )
+                .await?;
+
+                let block_type =
+                    if block_tag == BlockNumberOrTag::Pending { "partial" } else { "full" };
+                match poll_result {
+                    BlockPollResult::Ready(b) => {
+                        let latency_seconds =
+                            update.received_at.as_secs_f64() - b.header.timestamp as f64;
+                        metrics::record_block_processing_duration(latency_seconds, block_type);
+                        Arc::new(*b)
+                    }
+                    BlockPollResult::Stale { target_block_timestamp } => {
+                        if let Some(ts) = target_block_timestamp {
+                            let latency_seconds = update.received_at.as_secs_f64() - ts as f64;
+                            metrics::record_block_processing_duration(latency_seconds, block_type);
+                        }
+                        metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
+                        return Ok(());
+                    }
+                    BlockPollResult::Timeout => {
+                        warn!(
+                            "RPC ({block_tag}) did not reach update block \
+                             {update_block_number}, skipping."
+                        );
+                        metrics::record_protocol_update_skipped();
+                        return Ok(());
+                    }
+                }
+            };
+            if update.is_first_update {
+                info!("Skipping simulation on first protocol update...");
                 return Ok(());
             }
-        };
-        if update.is_first_update {
-            info!("Skipping simulation on first protocol update...");
-            return Ok(());
-        }
 
-        // Record block number for statistics
-        if let Some(stats) = statistics.as_ref() {
-            let mut stats = stats
-                .write()
-                .expect("Failed to get write lock for statistics (record block)");
-            stats.record_block_processed();
-        }
+            // Record block number for statistics
+            if let Some(stats) = statistics.as_ref() {
+                let mut stats = stats
+                    .write()
+                    .expect("Failed to get write lock for statistics (record block)");
+                stats.record_block_processed(update.update.block_number_or_timestamp);
+            }
 
-        block
-    } else {
-        // RFQ updates: fetch latest block without alignment checks
-        match rpc_tools
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await
-            .into_diagnostic()
-            .wrap_err("Failed to fetch latest block")
-            .ok()
-            .flatten()
-        {
-            Some(b) => Arc::new(b),
-            None => {
-                warn!("Failed to retrieve latest block, continuing to next message...");
-                return Ok(());
+            block
+        }
+        UpdateType::Rfq => {
+            // RFQ updates: fetch latest block without alignment checks
+            match rpc_tools
+                .provider
+                .get_block_by_number(BlockNumberOrTag::Latest)
+                .await
+                .into_diagnostic()
+                .wrap_err("Failed to fetch latest block")
+                .ok()
+                .flatten()
+            {
+                Some(b) => Arc::new(b),
+                None => {
+                    warn!("Failed to retrieve latest block, continuing to next message...");
+                    return Ok(());
+                }
+            }
+        }
+        UpdateType::PriceLevelStream => {
+            // The quotes target the block Titan was building, so execution is simulated at
+            // exactly that block: the overrides carry its timestamp.
+            let target_block = update.update.block_number_or_timestamp;
+            let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
+            // RPC failures propagate instead of counting as a miss: the miss metric means "the
+            // chain did not reach the quoted block", not "the RPC was down".
+            match await_target_block(&rpc_tools, target_block, cli.rpc_poll_attempts, poll_interval)
+                .await?
+            {
+                Some(b) => {
+                    if let Some(stats) = statistics.as_ref() {
+                        let mut stats = stats
+                            .write()
+                            .expect("Failed to get write lock for statistics (record block)");
+                        stats.record_block_processed(target_block);
+                    }
+                    Arc::new(b)
+                }
+                None => {
+                    metrics::record_price_level_target_block_miss();
+                    debug!(
+                        target_block,
+                        "RPC did not serve the price level update's target block, skipping."
+                    );
+                    return Ok(());
+                }
             }
         }
     };
@@ -1053,11 +1316,28 @@ async fn process_update(
         return Ok(());
     }
 
+    // Titan publishes overrides per block, so only price level stream updates take them.
+    let oracle_overwrites = match update.update_type {
+        UpdateType::PriceLevelStream => {
+            let overrides = oracle_overrides
+                .as_ref()
+                .and_then(|overrides| overrides.for_block(block.header.number));
+            record_oracle_override_misses(
+                &block_execution_info,
+                overrides.as_ref(),
+                block.number(),
+            );
+            overrides.map(BlockOverrides::into_storage)
+        }
+        UpdateType::Protocol | UpdateType::Rfq => None,
+    };
+
     let results = match simulate_swap_transaction(
         &rpc_tools,
         block_execution_info.clone(),
         &block,
         router_overwrites_data,
+        oracle_overwrites,
     )
     .await
     {
@@ -1077,6 +1357,23 @@ async fn process_update(
             }
         }
         .clone();
+
+        // A `StaleUpdate()` revert is an expected outcome, not an integration failure, so it
+        // is recorded separately from the revert metrics.
+        if let Some(pamm) = pamm_venue(&execution_info.protocol_system) {
+            if let TychoExecutionResult::Revert { reason, .. } = result {
+                if is_oracle_stale_revert(pamm, reason) {
+                    debug!(
+                        block = block.number(),
+                        protocol = %execution_info.protocol_system,
+                        "pAMM price feed not fresh for the quoted block (block not built by \
+                         Titan or update missing); skipping execution comparison"
+                    );
+                    metrics::record_execution_stale_quote(&execution_info.protocol_system);
+                    continue;
+                }
+            }
+        }
 
         let state_str = {
             let current_state = tycho_state
@@ -1165,14 +1462,16 @@ fn select_components_to_process(
                     }
                 }
             }
-            UpdateType::Rfq => match update.update.new_pairs.get(id) {
-                Some(comp) => comp.clone(),
-                None => {
-                    warn!(id=%id, "Component not found in update's new pairs. Potential cause: \
-                    the `states` and `new_pairs` lists don't contain the same items. Skipping...");
-                    continue;
+            UpdateType::Rfq | UpdateType::PriceLevelStream => {
+                match update.update.new_pairs.get(id) {
+                    Some(comp) => comp.clone(),
+                    None => {
+                        warn!(id=%id, "Component not found in update's new pairs. Potential cause: \
+                        the `states` and `new_pairs` lists don't contain the same items. Skipping...");
+                        continue;
+                    }
                 }
-            },
+            }
         };
         components_to_process.push((id.clone(), component, state.clone_box()));
     }
@@ -1711,6 +2010,96 @@ fn process_execution_result(
     }
 }
 
+/// Whether the run has processed `--max-blocks` blocks. Always false when no cap is set or
+/// statistics are disabled.
+fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatistics>>>) -> bool {
+    if max_blocks == 0 {
+        return false;
+    }
+    let Some(stats) = statistics else {
+        return false;
+    };
+    let stats = stats
+        .read()
+        .expect("Failed to get read lock for statistics (max-block check)");
+    stats.blocks_processed >= max_blocks
+}
+
+/// True when `block_number` is selected by the `--test-every-n-blocks` sampling interval.
+fn is_sampled_block(block_number: u64, interval: u64) -> bool {
+    block_number.is_multiple_of(interval)
+}
+
+/// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
+/// registry-priced pAMMs (FermiSwap, Kipseli, Bebop, TaurusFi).
+const STALE_UPDATE_SELECTOR: &str = "666a2814";
+
+/// Selector of `FeedStalled()`, the equivalent freshness guard of the Metric pAMM's own price
+/// feed.
+const FEED_STALLED_SELECTOR: &str = "9a0423af";
+
+/// The bare venue name of a pAMM component, or `None` for any other protocol system.
+fn pamm_venue(protocol_system: &str) -> Option<&str> {
+    protocol_system
+        .strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
+        .or_else(|| protocol_system.strip_prefix(PROPAMM_FALLBACK_PREFIX))
+}
+
+/// Counts, per protocol system, the pAMM swaps about to be simulated without the overrides their
+/// own venue needs.
+///
+/// Split in two so a gap Titan could close is not confused with a venue it never serves: a venue
+/// whose protocol published nothing for this block counts as a miss, one Titan's override stream
+/// carries no channel for counts as unserved. Both fill on the router's Uniswap V3 pool instead of
+/// the venue, so neither swap compares a venue's quote against its own fill.
+fn record_oracle_override_misses(
+    execution_info: &HashMap<String, TychoExecutionInput>,
+    overrides: Option<&BlockOverrides>,
+    block: u64,
+) {
+    let mut missing: HashSet<&str> = HashSet::new();
+    let mut unserved: HashSet<&str> = HashSet::new();
+    for info in execution_info.values() {
+        let Some(venue) = pamm_venue(&info.protocol_system) else {
+            continue;
+        };
+        match override_protocol(venue) {
+            Some(protocol) => {
+                if !overrides.is_some_and(|overrides| overrides.covers(protocol)) {
+                    missing.insert(&info.protocol_system);
+                }
+            }
+            None => {
+                unserved.insert(&info.protocol_system);
+            }
+        }
+    }
+
+    for protocol in missing {
+        debug!(
+            block,
+            protocol, "Titan published no state overrides for the venue at the quoted block"
+        );
+        metrics::record_price_level_oracle_override_miss(protocol);
+    }
+    for protocol in unserved {
+        debug!(block, protocol, "Titan's state override stream serves no channel for the venue");
+        metrics::record_price_level_oracle_override_unserved(protocol);
+    }
+}
+
+/// Returns whether a revert reason is the freshness guard of `pamm`: `StaleUpdate()` for every
+/// pAMM, plus `FeedStalled()` for Metric.
+///
+/// Selectors are matched without a `0x` prefix, because a wrapped error carries the inner
+/// selector as ABI-encoded bytes.
+fn is_oracle_stale_revert(pamm: &str, reason: &str) -> bool {
+    if reason.contains("StaleUpdate") || reason.contains(STALE_UPDATE_SELECTOR) {
+        return true;
+    }
+    pamm == "metric" && (reason.contains("FeedStalled") || reason.contains(FEED_STALLED_SELECTOR))
+}
+
 /// Extract the error name from a revert reason string
 /// Examples:
 /// - "TychoRouter__NegativeSlippage(1000, 990)" -> "TychoRouter__NegativeSlippage"
@@ -1762,4 +2151,83 @@ fn format_error_chain(e: &miette::Error) -> String {
         chain.push(format!("{cause}"));
     }
     chain.join(" -> ")
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use rstest::rstest;
+
+    use super::{is_oracle_stale_revert, is_sampled_block, pamm_venue, Cli};
+
+    #[rstest]
+    #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
+    #[case::through_the_router("propammfallback:fermiswap", Some("fermiswap"))]
+    #[case::auto_detected(
+        "pricelevelstream:0x5979458912f80b96d30d4220af8e2e4925a33320",
+        Some("0x5979458912f80b96d30d4220af8e2e4925a33320")
+    )]
+    #[case::indexed_pamm("vm:fermiswap", None)]
+    #[case::other_protocol("uniswap_v3", None)]
+    fn the_venue_is_read_from_either_pamm_family(
+        #[case] protocol_system: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(pamm_venue(protocol_system), expected);
+    }
+
+    #[rstest]
+    #[case::stale_update_name("fermiswap", "execution reverted: StaleUpdate()")]
+    #[case::stale_update_bare_selector("kipseli", "execution reverted: 0x666a2814")]
+    // Metric's FeedStalled() reaches the router wrapped in an outer error whose decoded reason
+    // carries the inner selector only as ABI-encoded bytes, without a `0x` prefix (realistic
+    // shape captured from a live run log).
+    #[case::feed_stalled_inside_wrapped_error(
+        "metric",
+        "WrappedError(0xc0b06c4adfabb5be10ddb1dcd1c80caa6742f7bc, \
+         0xc1701b6700000000000000000000000000000000000000000000000000000000, \
+         0x9a0423af00000000000000000000000000000000000000000000000000000000, 0x)"
+    )]
+    #[case::feed_stalled_name("metric", "execution reverted: FeedStalled()")]
+    fn stale_guard_reverts_are_expected(#[case] pamm: &str, #[case] reason: &str) {
+        assert!(is_oracle_stale_revert(pamm, reason));
+    }
+
+    #[rstest]
+    #[case::negative_slippage("metric", "TychoRouter__NegativeSlippage(1000, 990)")]
+    #[case::plain_revert("fermiswap", "execution reverted")]
+    #[case::arithmetic("fermiswap", "arithmetic underflow or overflow")]
+    #[case::feed_stalled_on_non_metric_pamm("fermiswap", "execution reverted: FeedStalled()")]
+    fn other_reverts_stay_real_failures(#[case] pamm: &str, #[case] reason: &str) {
+        assert!(!is_oracle_stale_revert(pamm, reason));
+    }
+
+    #[rstest]
+    #[case::interval_one_selects_every_block(1, 41513952, true)]
+    #[case::interval_one_selects_multiples_too(1, 41513950, true)]
+    #[case::multiple_of_interval(10, 41513950, true)]
+    #[case::not_a_multiple(10, 41513952, false)]
+    #[case::block_zero(10, 0, true)]
+    fn sampling_selects_multiples_of_interval(
+        #[case] interval: u64,
+        #[case] block: u64,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_sampled_block(block, interval), expected);
+    }
+
+    #[test]
+    fn test_every_n_blocks_conflicts_with_partial_blocks() {
+        let result = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--partial-blocks",
+            "--test-every-n-blocks",
+            "10",
+        ]);
+        assert!(result.is_err());
+    }
 }

@@ -976,6 +976,7 @@ fn test_single_encoding_strategy_bebop() {
     let partial_fill_offset = 12u64;
     let bebop_calldata = Bytes::from_str("0x4dcebcba00000000000000000000000000000000000000000000000000000000697215240000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c6600000000000000000000000051c72848c68a965f66fa7a88855f9f7784502a7f00000000000000000000000000000000000000000000000027d0330b6f18fece000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000faba6f8e4a5e8ab82f62fe7c39859fa577269be3000000000000000000000000000000000000000000000000000000000bebc20000000000000000000000000000000000000000000000001f9350ccd9bd54d8ae0000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c66000000000000000000000000000000000000000000000000000000000000000020dd178be2d265ea34d555878d0a826c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000041df80ac607bd068150dd110509b97a01177035f4d9d27c00cbcbc184d2bfad9e6410fe402152a7a7298fac95b8c3338055e23905034a09b91cff87ef4b88249101c00000000000000000000000000000000000000000000000000000000000000").unwrap();
     let bebop_state = MockRFQState {
+        quote_amount_in: None,
         quote_amount_out: amount_out.clone(),
         quote_data: HashMap::from([
             ("calldata".to_string(), bebop_calldata),
@@ -992,6 +993,7 @@ fn test_single_encoding_strategy_bebop() {
                 Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
+        ..Default::default()
     };
 
     let bebop_component = ProtocolComponent {
@@ -1060,6 +1062,7 @@ fn test_single_encoding_strategy_bebop_aggregate() {
 
     let bebop_calldata = Bytes::from_str("0xa2f7489300000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000640000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000697215cf0000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c66000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000001c00000000000000000000000000000000000000000000000000000000000000220000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003e000000000000000000000000000000000000000000000000000000000000004c00000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c6600000000000000000000000000000000000000000000000000000000000005a08dd0c54e8e2d4918ad2ae17adcad316c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000067336cec42645f55059eff241cb02ea5cc52ff8600000000000000000000000051c72848c68a965f66fa7a88855f9f7784502a7f000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000027d0330b6f19040400000000000000000000000000000000000000000000000027d0330b6f1904050000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000001000000000000000000000000faba6f8e4a5e8ab82f62fe7c39859fa577269be30000000000000000000000000000000000000000000000000000000000000001000000000000000000000000faba6f8e4a5e8ab82f62fe7c39859fa577269be300000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000224cce24e000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000002834ae5b200000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000005af1d63497a5be7d1b500000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000006a97976ceb39a18c1ed00000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041c41d5149290fc301bf2d936e80adc1a857ae230351b28d4c6d905d5cd4fcce5a333bff59c2130df099e8886b1101ed761adcc3510531aab3b40b40e17fd917991b000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000418df1f9cbfea2aea60a7e34a361e2521b2fd607373197784d8131f857a5888b48380a33803e87e32a7cb1f1ac3845d4a3229d61f74663c2547341e04f08759ce31b00000000000000000000000000000000000000000000000000000000000000").unwrap();
     let bebop_state = MockRFQState {
+        quote_amount_in: None,
         quote_amount_out: amount_out.clone(),
         quote_data: HashMap::from([
             ("calldata".to_string(), bebop_calldata),
@@ -1076,6 +1079,7 @@ fn test_single_encoding_strategy_bebop_aggregate() {
                 Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
             ),
         ]),
+        ..Default::default()
     };
 
     let bebop_component = ProtocolComponent {
@@ -1131,6 +1135,90 @@ fn test_single_encoding_strategy_bebop_aggregate() {
 }
 
 #[test]
+fn test_single_encoding_strategy_bebop_partial_fill() {
+    let user = Bytes::from_str("0xd2068e04cf586f76eece7ba5beb779d7bb1474a1").unwrap();
+    let token_in = weth();
+    let token_out = usdc();
+    let runtime_amount_in = BigUint::from_str("10000000000000000000").unwrap();
+    let estimated_amount_in = BigUint::from_str("19000000000000000000").unwrap();
+    let signed_amount_in = BigUint::from_str("20000000000000000000").unwrap();
+    // WETH uses 18 decimals and USDC uses 6, so amount_out cannot double as an input cap.
+    let signed_amount_out = BigUint::from(20_000_000u64);
+    let runtime_amount_out = BigUint::from(10_000_000u64);
+    let partial_fill_offset = 2u64;
+
+    let mut bebop_calldata = hex::decode("a2f74893").unwrap();
+    bebop_calldata.extend_from_slice(&[0u8; 64]);
+    bebop_calldata.extend_from_slice(&biguint_to_u256(&signed_amount_in).to_be_bytes::<32>());
+
+    let bebop_state = MockRFQState {
+        quote_amount_in: Some(signed_amount_in),
+        quote_amount_out: signed_amount_out,
+        quote_data: HashMap::from([
+            ("calldata".to_string(), Bytes::from(bebop_calldata)),
+            (
+                "partial_fill_offset".to_string(),
+                Bytes::from(
+                    partial_fill_offset
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            ),
+            (
+                "tx_to".to_string(),
+                Bytes::from_str("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F").unwrap(),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let bebop_component = ProtocolComponent {
+        id: String::from("bebop-rfq"),
+        protocol_system: String::from("rfq:bebop"),
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        bebop_component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(estimated_amount_in)
+    .with_protocol_state(Arc::new(bebop_state));
+    let solution = Solution::new(
+        user.clone(),
+        user,
+        token_in,
+        token_out,
+        runtime_amount_in,
+        runtime_amount_out.clone(),
+        &runtime_amount_out * BigUint::from(9800u64) / BigUint::from(10_000u64),
+        vec![swap],
+    );
+
+    let encoded_solution = get_tycho_router_encoder(Chain::Ethereum)
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file(
+        "test_single_encoding_strategy_bebop_partial_fill",
+        hex::encode(calldata).as_str(),
+    );
+}
+
+#[test]
 fn test_single_encoding_strategy_hashflow() {
     // Note: This test does not assert anything. It is only used to obtain
     // integration test data for our router solidity test.
@@ -1146,6 +1234,7 @@ fn test_single_encoding_strategy_hashflow() {
     let quote_amount_out = BigUint::from_str("3714751").unwrap();
 
     let hashflow_state = MockRFQState {
+        quote_amount_in: None,
         quote_amount_out,
         quote_data: HashMap::from([
             (
@@ -1187,6 +1276,7 @@ fn test_single_encoding_strategy_hashflow() {
             ),
             ("signature".to_string(), Bytes::from_str("0xdedc8a21a00afdac18e0a62b3f0d641d21de75e1fa0bb8f402ccf047923274fe40df9e249f693d88be4a005f4217d21ed920eac7373fd23d8329d3c6b0c873f71c").unwrap()),
         ]),
+        ..Default::default()
     };
 
     let hashflow_component = ProtocolComponent {
@@ -1693,6 +1783,69 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file(
         "test_single_encoding_strategy_fermiswap_weth_usdc",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_propamm_weth_usdc() {
+    // WETH -> (generic IPropAMM pAMM fed by the price level stream) -> USDC
+    let token_in = weth();
+    let token_out = usdc();
+
+    // The mock pAMM address used by the PropAMMRouterTest Foundry test.
+    let pamm = "1111111111111111111111111111111111111111";
+    let swap = Swap::new(
+        ProtocolComponent {
+            // The id the price level stream produces: pamm ++ token0 ++ token1.
+            id: format!(
+                "0x{pamm}a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            ),
+            protocol_system: String::from("pricelevelstream:kipseli"),
+            static_attributes: HashMap::from([(
+                "pamm_address".to_string(),
+                Bytes::from_str(pamm).unwrap(),
+            )]),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        // The mock pAMM pays a fixed 2000 USDC per WETH.
+        BigUint::from(1_000_000_000_u64),
+        BigUint::from(1_000_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_propamm_weth_usdc",
         hex_calldata.as_str(),
     );
 }
@@ -2214,56 +2367,6 @@ fn test_single_encoding_strategy_weth_unwrap() {
 }
 
 #[test]
-fn test_sequential_encoding_strategy_wrap_added() {
-    // The solution is initially a single swap. The wrapping step is inserted automatically.
-    // Final execution flow:
-    // ETH → (wrap to WETH) → WETH → (Uniswap V2 swap) → DAI
-
-    let swap_weth_dai = Swap::new(
-        ProtocolComponent {
-            id: "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11".to_string(),
-            protocol_system: "uniswap_v2".to_string(),
-            ..Default::default()
-        },
-        default_token(weth().clone()),
-        default_token(dai().clone()),
-        BigUint::ZERO,
-    );
-    let encoder = get_tycho_router_encoder(Chain::Ethereum);
-
-    let solution = Solution::new(
-        Bytes::from_str("0x9964bff29baa37b47604f3f3f51f3b3c5149d6de").unwrap(),
-        Bytes::from_str("0x9964bff29baa37b47604f3f3f51f3b3c5149d6de").unwrap(),
-        eth(),
-        dai(),
-        BigUint::from(1_000_000_000_000_000_000_u128),
-        BigUint::from(1_000_000_000_000_000_000_u128),
-        BigUint::from(980000000000000000u128),
-        vec![swap_weth_dai],
-    );
-
-    let encoded_solution = encoder
-        .encode_solutions(vec![solution.clone()])
-        .unwrap()[0]
-        .clone();
-
-    let calldata = encode_tycho_router_call(
-        eth_chain().id(),
-        encoded_solution,
-        &solution,
-        &eth(),
-        None,
-        0,
-        Bytes::zero(20),
-        BigUint::ZERO,
-    )
-    .unwrap()
-    .data;
-    let hex_calldata = encode(&calldata);
-    write_calldata_to_file("test_sequential_encoding_strategy_wrap_added", hex_calldata.as_str());
-}
-
-#[test]
 fn test_single_encoding_strategy_ekubo_v3() {
     //   ETH ──(EKUBO V3)──> USDC
 
@@ -2736,6 +2839,7 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
     );
 
     let liquorice_state = MockRFQState {
+        quote_amount_in: None,
         quote_amount_out,
         quote_data: HashMap::from([
             ("calldata".to_string(), liquorice_calldata),
@@ -2757,6 +2861,7 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
                 ),
             ),
         ]),
+        ..Default::default()
     };
 
     let liquorice_component = ProtocolComponent {
@@ -3037,6 +3142,7 @@ fn test_single_encoding_strategy_liquorice_settle() {
     );
 
     let liquorice_state = MockRFQState {
+        quote_amount_in: None,
         quote_amount_out,
         quote_data: HashMap::from([
             ("calldata".to_string(), liquorice_calldata),
@@ -3058,6 +3164,7 @@ fn test_single_encoding_strategy_liquorice_settle() {
                 ),
             ),
         ]),
+        ..Default::default()
     };
 
     let liquorice_component = ProtocolComponent {
@@ -3279,4 +3386,122 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_uniswap_v3_bsc", hex_calldata.as_str());
+}
+
+fn sky_component(id: &str, component_type: &str, gem: &str) -> ProtocolComponent {
+    ProtocolComponent {
+        id: String::from(id),
+        protocol_system: String::from("sky"),
+        static_attributes: HashMap::from([
+            (String::from("component_type"), Bytes::from(component_type.as_bytes().to_vec())),
+            (String::from("gem"), Bytes::from(gem)),
+        ]),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_single_encoding_strategy_sky() {
+    // USDC -> (LitePSM) -> DAI
+    let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+    let dai = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+    let psm = sky_component(
+        "0xf6e72db5454dd049d0788e411b06cfaf16853042",
+        "psm",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    );
+    let swap =
+        Swap::new(psm, default_token(usdc.clone()), default_token(dai.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        usdc,
+        dai,
+        BigUint::from_str("1000000000").unwrap(), // 1000 USDC
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_sky", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_sky() {
+    // DAI -> (DaiUsds converter) -> USDS -> (UsdsPsmWrapper) -> USDC
+    let dai = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+    let usds = Bytes::from("0xdc035d45d973e3ec169d2276ddab16f1e407384f");
+    let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+    let converter = sky_component(
+        "0x3225737a9bbb6473cb4a45b7244aca2befdb276a",
+        "converter",
+        "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+    );
+    let wrapper = sky_component(
+        "0xa188eec8f81263234da3622a406892f3d630f98c",
+        "psm_wrapper",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    );
+    let swap1 = Swap::new(
+        converter,
+        default_token(dai.clone()),
+        default_token(usds.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 =
+        Swap::new(wrapper, default_token(usds.clone()), default_token(usdc.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        dai,
+        usdc,
+        BigUint::from_str("1000000000000000000000").unwrap(), // 1000 DAI
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }

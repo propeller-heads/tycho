@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package tycho.router.v1;
+
+// All router trades found in one block.
+message Trades {
+  repeated Trade trades = 1;
+  repeated RouterCallError errors = 2;
+}
+
+// A selector-matched router call that could not be decoded safely.
+message RouterCallError {
+  string chain = 1;
+  uint64 block_number = 2;
+  uint64 block_timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 tx_index = 5;
+  uint32 call_index = 6;
+  bytes router = 7;
+  string router_version = 8;
+  // Decode stage: "calldata", "amount_out" or "hops".
+  string stage = 9;
+  string error = 10;
+  bool tx_success = 11;
+  bool call_success = 12;
+}
+
+// One call into a TychoRouter swap entry point (successful or reverted).
+message Trade {
+  string chain = 1;
+  uint64 block_number = 2;
+  uint64 block_timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 tx_index = 5;
+  // Index of the router call inside the transaction trace; unique per tx.
+  uint32 call_index = 6;
+  // True when the enclosing transaction succeeded.
+  bool tx_success = 7;
+  // True when the router call itself did not revert or fail.
+  bool call_success = 8;
+
+  bytes router = 9;
+  // Router ABI generation: "v2", "v3_0" or "v3_1".
+  string router_version = 10;
+  // "single", "sequential" or "split".
+  string strategy = 11;
+  // How user funds enter the router: "transfer_from", "permit2", "vault" or "none".
+  string funding = 12;
+
+  bytes eoa = 13;
+  bytes msg_sender = 14;
+  bytes receiver = 15;
+  bytes token_in = 16;
+  bytes token_out = 17;
+  // Decimal strings; empty when not present for this router version / outcome.
+  string amount_in = 18;
+  string expected_amount_out = 19;
+  string min_amount_out = 20;
+  // Settled output amount after fees, decoded from the call return value.
+  string amount_out = 21;
+  string native_value = 22;
+  uint64 gas_used = 23;
+
+  // Revert data: 4-byte selector (hex) and the resolved error name / reason string.
+  string revert_selector = 24;
+  string revert_reason = 25;
+
+  ClientFee client_fee = 26;
+  RouterFeeConfig router_fee_config = 27;
+  repeated FeeTaken fees_taken = 28;
+
+  uint32 n_tokens = 29;
+  repeated Hop hops = 30;
+  // Trailing calldata appended after the ABI-encoded arguments.
+  bytes watermark = 31;
+  // V2 only.
+  bool wrap_eth = 32;
+  bool unwrap_eth = 33;
+}
+
+// One executor invocation inside a trade.
+message Hop {
+  uint32 index = 1;
+  bytes executor = 2;
+  // Protocol systems resolved from the executor address; empty when unknown.
+  repeated string protocol_systems = 3;
+  // Split swaps only: indices into the trade's token array and the raw uint24 split
+  // (0 means "remainder").
+  uint32 token_in_index = 4;
+  uint32 token_out_index = 5;
+  uint32 split = 6;
+  bytes protocol_data = 7;
+}
+
+// ClientFeeParams passed to V3 routers.
+message ClientFee {
+  uint64 fee_bps = 1;
+  bytes receiver = 2;
+  string max_client_contribution = 3;
+  // uint256 decimal string; the encoder uses uint256 max for "no deadline".
+  string deadline = 4;
+  bool has_signature = 5;
+}
+
+// Router fee configuration in effect for this trade, resolved from the fee store.
+message RouterFeeConfig {
+  bytes fee_calculator = 1;
+  uint64 fee_on_output_bps = 2;
+  uint64 fee_on_client_fee_bps = 3;
+  bool custom_fee_on_output = 4;
+  bool custom_fee_on_client_fee = 5;
+  bool positive_slippage_enabled = 6;
+  // Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
+  uint64 bps_scale = 7;
+}
+
+// One recipient of the FeesTaken event.
+message FeeTaken {
+  bytes recipient = 1;
+  string amount = 2;
+  // Contract array position: "router" first, then "client".
+  string role = 3;
+}
+
+// Fee configuration changes found in one block.
+message FeeConfigEvents {
+  repeated FeeConfigEvent events = 1;
+}
+
+// One admin event on a FeeCalculator or a fee-calculator rotation on a router.
+message FeeConfigEvent {
+  string chain = 1;
+  uint64 block_number = 2;
+  uint64 block_timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 log_index = 5;
+  uint64 ordinal = 6;
+  bytes emitter = 7;
+  // Event name, e.g. "RouterFeeOnOutputUpdated", "FeeCalculatorActivated".
+  string event = 8;
+  // Client address for Custom* events; empty otherwise.
+  bytes client = 9;
+  // Decimal / hex string representation of the old and new values.
+  string old_value = 10;
+  string new_value = 11;
+}

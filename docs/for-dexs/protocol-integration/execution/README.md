@@ -32,7 +32,7 @@ Once your `SwapEncoder` is implemented:
 
 <summary>Protocols Supporting Consecutive Swap Optimizations</summary>
 
-Some protocols — like Uniswap V4 — use flash accounting to batch consecutive swaps without intermediate token transfers. As described in the [Swap Group](../../../for-solvers/execution/encoding/#swap-group) section, each `SwapEncoder` still encodes only a **single swap**; the `StrategyEncoder` concatenates them into a single executor call.
+Some protocols — like Uniswap V4 — use flash accounting to batch consecutive swaps without intermediate token transfers. As described in the [Swap Group](../../../for-solvers/execution/encoding/#swap-group) section, each `SwapEncoder` still encodes only a **single swap**; the strategy encoder concatenates them into a single executor call.
 
 The first swap in a group may carry extra data that subsequent swaps omit (see the diagram below).
 

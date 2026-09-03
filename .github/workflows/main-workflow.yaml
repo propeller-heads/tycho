@@ -74,6 +74,40 @@ jobs:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
 
+  # ── tycho-router-trades: build image and promote to dev ───────────────────
+  build-and-push-tycho-router-trades:
+    needs: release
+    uses: propeller-heads/ci-cd-templates/.github/workflows/build-and-push-docker-image.yaml@main
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      image_tag: ${{ needs.release.outputs.next_release_version }}
+      image_name: tycho-router-trades
+      dockerfile: crates/tycho-execution/substreams/Dockerfile
+    secrets:
+      app_id: ${{ secrets.APP_ID }}
+      app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+      role_to_assume: ${{ secrets.ROLE_TO_ASSUME }}
+      aws_region: ${{ secrets.AWS_REGION }}
+      repository_url: ${{ secrets.REPOSITORY_URL }}
+      domain_owner: ${{ secrets.DOMAIN_OWNER }}
+
+  promote-tycho-router-trades-to-dev:
+    needs:
+      - release
+      - build-and-push-tycho-router-trades
+    uses: propeller-heads/ci-cd-templates/.github/workflows/promote-to-dev.yaml@main
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      image_tag: ${{ needs.release.outputs.next_release_version }}
+      image_name: tycho-router-trades
+    secrets:
+      app_id: ${{ secrets.APP_ID }}
+      app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
   # ── tycho-integration-test: build image and promote to dev ────────────────
   build-and-push-tycho-integration-test:
     needs: release

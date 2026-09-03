@@ -77,6 +77,13 @@ contract Constants is
     address PAUSER = makeAddr("pauser");
     address UNPAUSER = makeAddr("unpauser");
 
+    // Sky
+    address SKY_LITE_PSM = address(0xf6e72Db5454dd049d0788e411b06CfAF16853042);
+    address SKY_USDS_PSM_WRAPPER =
+        address(0xA188EEC8F81263234dA3622A406892F3D630f98c);
+    address SKY_DAI_USDS_CONVERTER =
+        address(0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A);
+
     // Assets
     address ETH_ADDR = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     address WETH_ADDR = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
@@ -87,6 +94,7 @@ contract Constants is
     address INCH_ADDR = address(0x111111111117dC0aa78b770fA6A738034120C302);
     address USDE_ADDR = address(0x4c9EDD5852cd905f086C759E8383e09bff1E68B3);
     address USDT_ADDR = address(0xdAC17F958D2ee523a2206206994597C13D831ec7);
+    address USDS_ADDR = address(0xdC035D45d973E3EC169d2276DDab16f1e407384F);
     address PEPE_ADDR = address(0x6982508145454Ce325dDbE47a25d4ec3d2311933);
     address STETH_ADDR = address(0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84);
     address RETH_ADDR = address(0xae78736Cd615f374D3085123A210448E74Fc6393);
@@ -210,6 +218,14 @@ contract Constants is
 
     // FermiSwap
     address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
+
+    // PropAMMRouter (github.com/lambdaclass/propamm-router-contracts) and its Uniswap V3 fallback
+    address PROPAMM_ROUTER = 0x4DdF368080CD7946db5b459aD591c350158175e1;
+    address PROPAMM_FALLBACK_SWAP_ROUTER =
+        0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
+    // Whitelisted pAMM venues on the PropAMMRouter
+    address FERMI_PROPAMM_VENUE = 0x5979458912F80B96d30D4220af8E2e4925A33320;
+    address KIPSELI_PROPAMM_VENUE = 0x71e790dd841c8A9061487cb3E78C288E75cE0B3d;
 
     // Metric oracle (Base)
     address METRIC_ORACLE = 0x681E908B8ab57c49C74D770F369754CCC3E1ae09;
