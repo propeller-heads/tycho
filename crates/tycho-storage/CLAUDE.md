@@ -58,3 +58,13 @@ out-of-process writers. See the module docs for design.
 Every mutable entity carries `valid_from` / `valid_to` timestamps enabling time-travel
 queries. `versioning::apply_versioning()` sets `valid_to` on the previous row when a new
 version is inserted. Historical rows are never mutated.
+
+## Migrations
+
+An index on a table the extractor writes on the hot path (`token`, the
+`component_balance` partitions, `protocol_state`) must be created with
+`CREATE INDEX CONCURRENTLY`, in a migration whose `metadata.toml` sets
+`run_in_transaction = false` — a plain `CREATE INDEX` takes a SHARE lock and
+stalls indexing for the whole build. See
+`migrations/2026-08-19_component_balance_default_valid_from_index/` for the
+pattern.

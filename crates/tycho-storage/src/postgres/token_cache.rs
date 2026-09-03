@@ -85,7 +85,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ops::Bound,
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::Duration,
 };
 
@@ -103,6 +103,14 @@ use crate::postgres::{orm, schema, PostgresError};
 
 /// Number of rows fetched per query during the initial full load.
 const LOAD_BATCH_SIZE: i64 = 500_000;
+
+/// Number of rows fetched per query during a delta refresh. Smaller than the
+/// load batch so readers interleave with the apply loop during a bulk backfill.
+const REFRESH_BATCH_SIZE: i64 = 50_000;
+
+/// How many times the initial load tries a query before giving up. Applies both
+/// per batch and to the whole load, with exponential backoff between attempts.
+const LOAD_RETRY_ATTEMPTS: u32 = 3;
 
 /// Timestamp value for tokens that never appeared in a component balance.
 /// `i64::MIN` sorts below any real threshold, matching the SQL `EXISTS` filter
@@ -165,14 +173,19 @@ impl ChainTokenStore {
             }
             None => {
                 let idx = self.tokens.len() as u32;
-                self.idx_by_address
-                    .insert(token.address.clone(), idx);
-                self.quality_index
-                    .entry(token.quality as i32)
-                    .or_default()
-                    .insert(idx);
+                let address = token.address.clone();
+                let quality = token.quality as i32;
+                // Mutation order is a panic-tolerance invariant: positions are
+                // pushed first so no index can reference a missing position, and
+                // the address index goes last so a token only becomes reachable
+                // by address once complete. `write_recovered` relies on this.
                 self.tokens.push(Arc::new(token));
                 self.last_traded.push(NEVER_TRADED);
+                self.quality_index
+                    .entry(quality)
+                    .or_default()
+                    .insert(idx);
+                self.idx_by_address.insert(address, idx);
             }
         }
     }
@@ -212,7 +225,7 @@ impl ChainTokenStore {
 
         match (candidates, ts_threshold) {
             (Some(bitmap), None) => {
-                let total = bitmap.len() as i64;
+                let total = bitmap.len();
                 let entity = bitmap
                     .iter()
                     .skip(offset)
@@ -228,7 +241,7 @@ impl ChainTokenStore {
                 limit,
             ),
             (None, None) => {
-                let total = self.tokens.len() as i64;
+                let total = self.tokens.len() as u64;
                 let entity = self
                     .tokens
                     .iter()
@@ -309,7 +322,7 @@ impl ChainTokenStore {
             }
             total += 1;
         }
-        WithTotal { entity, total: Some(total as i64) }
+        WithTotal { entity, total: Some(total as u64) }
     }
 }
 
@@ -334,11 +347,24 @@ impl TokenCache {
         pool: Pool<AsyncPgConnection>,
         chains: &[Chain],
     ) -> Result<Self, StorageError> {
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|err| StorageError::Unexpected(err.to_string()))?;
-        Self::from_connection(&mut conn, chains).await
+        let mut attempt = 0u32;
+        loop {
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+            match Self::from_connection(&mut conn, chains).await {
+                Ok(cache) => return Ok(cache),
+                Err(err) if attempt < LOAD_RETRY_ATTEMPTS - 1 => {
+                    attempt += 1;
+                    // A fresh pooled connection covers the case the batch-level
+                    // retry cannot: the connection itself died mid-load.
+                    warn!(%err, attempt, "Token cache load failed; retrying with a new connection");
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Loads the tokens of the given chains. Chains present in the `chain` table
@@ -408,16 +434,29 @@ impl TokenCache {
 
         let mut last_db_id = i64::MIN;
         loop {
-            let batch: Vec<(orm::Token, Address)> = schema::token::table
-                .inner_join(schema::account::table)
-                .filter(schema::account::chain_id.eq(chain_id))
-                .filter(schema::token::id.gt(last_db_id))
-                .order(schema::token::id.asc())
-                .limit(LOAD_BATCH_SIZE)
-                .select((orm::Token::as_select(), schema::account::address))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
+            let mut attempt = 0u32;
+            let batch: Vec<(orm::Token, Address)> = loop {
+                let result = schema::token::table
+                    .inner_join(schema::account::table)
+                    .filter(schema::account::chain_id.eq(chain_id))
+                    .filter(schema::token::id.gt(last_db_id))
+                    .order(schema::token::id.asc())
+                    .limit(LOAD_BATCH_SIZE)
+                    .select((orm::Token::as_select(), schema::account::address))
+                    .load(conn)
+                    .await;
+                match result {
+                    Ok(batch) => break batch,
+                    Err(err) if attempt < LOAD_RETRY_ATTEMPTS - 1 => {
+                        attempt += 1;
+                        // The id cursor makes a retry resume exactly where the
+                        // failed query stopped; nothing loaded is redone.
+                        warn!(%err, attempt, "Token cache load batch failed; retrying");
+                        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                    }
+                    Err(err) => return Err(PostgresError::from(err).into()),
+                }
+            };
 
             let batch_len = batch.len();
             for (orm_token, address) in batch {
@@ -433,21 +472,32 @@ impl TokenCache {
 
         // Latest balance change per token, mirroring the SQL `EXISTS` filter on
         // `component_balance_default.valid_from`.
-        let last_traded: Vec<(i64, NaiveDateTime)> = schema::component_balance_default::table
-            .inner_join(schema::protocol_component::table)
-            .filter(schema::protocol_component::chain_id.eq(chain_id))
-            .select((
-                schema::component_balance_default::token_id,
-                schema::component_balance_default::valid_from,
-            ))
-            .order_by((
-                schema::component_balance_default::token_id.asc(),
-                schema::component_balance_default::valid_from.desc(),
-            ))
-            .distinct_on(schema::component_balance_default::token_id)
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
+        let mut attempt = 0u32;
+        let last_traded: Vec<(i64, NaiveDateTime)> = loop {
+            let result = schema::component_balance_default::table
+                .inner_join(schema::protocol_component::table)
+                .filter(schema::protocol_component::chain_id.eq(chain_id))
+                .select((
+                    schema::component_balance_default::token_id,
+                    schema::component_balance_default::valid_from,
+                ))
+                .order_by((
+                    schema::component_balance_default::token_id.asc(),
+                    schema::component_balance_default::valid_from.desc(),
+                ))
+                .distinct_on(schema::component_balance_default::token_id)
+                .load(conn)
+                .await;
+            match result {
+                Ok(last_traded) => break last_traded,
+                Err(err) if attempt < LOAD_RETRY_ATTEMPTS - 1 => {
+                    attempt += 1;
+                    warn!(%err, attempt, "Token cache last traded load failed; retrying");
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+                Err(err) => return Err(PostgresError::from(err).into()),
+            }
+        };
 
         let mut max_valid_from = NaiveDateTime::default();
         for (token_db_id, valid_from) in last_traded {
@@ -465,10 +515,7 @@ impl TokenCache {
         query: &TokenQuery,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
         let store = self.store(&query.chain)?;
-        let guard = store
-            .read()
-            .expect("token cache lock poisoned");
-        Ok(guard.query(query))
+        Ok(read_recovered(store).query(query))
     }
 
     /// Inserts tokens that are not yet cached; existing entries are left untouched,
@@ -495,9 +542,7 @@ impl TokenCache {
                 error!(chain = %chain, "Token upsert for chain missing from token cache");
                 continue;
             };
-            let mut guard = store
-                .write()
-                .expect("token cache lock poisoned");
+            let mut guard = write_recovered(store);
             for token in chain_tokens {
                 guard.upsert(token.clone(), overwrite);
             }
@@ -513,9 +558,7 @@ impl TokenCache {
             error!(chain = %chain, "Balance update for chain missing from token cache");
             return;
         };
-        let mut guard = store
-            .write()
-            .expect("token cache lock poisoned");
+        let mut guard = write_recovered(store);
         for (address, ts) in updates {
             guard.update_last_traded(address, ts);
         }
@@ -544,42 +587,66 @@ impl TokenCache {
     /// so a strict `> last_sync` filter would skip it forever. Re-reading recent
     /// history is safe because writing the same token twice is a no-op.
     async fn refresh_tokens(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
-        let last_sync = *self
-            .last_sync
-            .read()
-            .expect("token cache lock poisoned");
-        let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
-
-        let chain_db_ids: Vec<i64> = self.chain_ids.keys().copied().collect();
-        let rows: Vec<(orm::Token, Address, i64)> = schema::token::table
-            .inner_join(schema::account::table)
-            .filter(schema::token::modified_ts.gt(since))
-            .filter(schema::account::chain_id.eq_any(chain_db_ids))
-            .order(schema::token::id.asc())
-            .select((orm::Token::as_select(), schema::account::address, schema::account::chain_id))
-            .load(conn)
+        self.refresh_tokens_paged(conn, REFRESH_BATCH_SIZE)
             .await
-            .map_err(PostgresError::from)?;
+    }
 
-        let n_refreshed = rows.len();
+    /// See [`TokenCache::refresh_tokens`]. The window is read in `batch_size`
+    /// chunks along the `token.id` cursor and each chunk is applied before the
+    /// next is fetched, so a bulk quality backfill neither allocates the whole
+    /// window nor holds a write lock for its duration.
+    async fn refresh_tokens_paged(
+        &self,
+        conn: &mut AsyncPgConnection,
+        batch_size: i64,
+    ) -> Result<usize, StorageError> {
+        let last_sync = *read_recovered(&self.last_sync);
+        let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
+        let chain_db_ids: Vec<i64> = self.chain_ids.keys().copied().collect();
+
+        let mut n_rows = 0usize;
         // The marker never moves backwards: starting from `last_sync` (not `since`)
         // keeps an empty poll from sliding it into the past.
         let mut max_modified_ts = last_sync;
-        let mut refreshed = Vec::with_capacity(n_refreshed);
-        for (orm_token, address, chain_id) in rows {
-            let Some(chain) = self.chain_ids.get(&chain_id) else {
-                continue;
-            };
-            max_modified_ts = max_modified_ts.max(orm_token.modified_ts);
-            refreshed.push(to_model_token(&orm_token, &address, *chain));
-        }
-        self.upsert_tokens(&refreshed);
+        let mut last_id = i64::MIN;
+        loop {
+            let rows: Vec<(orm::Token, Address, i64)> = schema::token::table
+                .inner_join(schema::account::table)
+                .filter(schema::token::modified_ts.gt(since))
+                .filter(schema::account::chain_id.eq_any(chain_db_ids.clone()))
+                .filter(schema::token::id.gt(last_id))
+                .order(schema::token::id.asc())
+                .limit(batch_size)
+                .select((
+                    orm::Token::as_select(),
+                    schema::account::address,
+                    schema::account::chain_id,
+                ))
+                .load(conn)
+                .await
+                .map_err(PostgresError::from)?;
 
-        *self
-            .last_sync
-            .write()
-            .expect("token cache lock poisoned") = max_modified_ts;
-        Ok(n_refreshed)
+            let batch_len = rows.len();
+            n_rows += batch_len;
+            let mut refreshed = Vec::with_capacity(batch_len);
+            for (orm_token, address, chain_id) in rows {
+                last_id = orm_token.id;
+                let Some(chain) = self.chain_ids.get(&chain_id) else {
+                    continue;
+                };
+                max_modified_ts = max_modified_ts.max(orm_token.modified_ts);
+                refreshed.push(to_model_token(&orm_token, &address, *chain));
+            }
+            self.upsert_tokens(&refreshed);
+            if (batch_len as i64) < batch_size {
+                break;
+            }
+        }
+
+        // Advanced only once every batch loaded; a mid-loop failure re-reads the
+        // whole window next tick, which is safe because upserts are idempotent.
+        *write_recovered(&self.last_sync) = max_modified_ts;
+        Ok(n_rows)
     }
 
     /// Applies the newest `component_balance_default.valid_from` per token written
@@ -589,60 +656,81 @@ impl TokenCache {
     /// Re-reads a [`REFRESH_OVERLAP_SECS`] window for the same reason as the token
     /// poll; re-applying is a no-op because `update_last_traded` keeps the maximum.
     async fn refresh_balances(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
-        let last_sync = *self
-            .last_balance_sync
-            .read()
-            .expect("token cache lock poisoned");
-        let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
-
-        let chain_db_ids: Vec<i64> = self.chain_ids.keys().copied().collect();
-        let rows: Vec<(Address, i64, NaiveDateTime)> = schema::component_balance_default::table
-            .inner_join(schema::token::table.inner_join(schema::account::table))
-            .filter(schema::component_balance_default::valid_from.gt(since))
-            .filter(schema::account::chain_id.eq_any(chain_db_ids))
-            .order_by((
-                schema::component_balance_default::token_id.asc(),
-                schema::component_balance_default::valid_from.desc(),
-            ))
-            .distinct_on(schema::component_balance_default::token_id)
-            .select((
-                schema::account::address,
-                schema::account::chain_id,
-                schema::component_balance_default::valid_from,
-            ))
-            .load(conn)
+        self.refresh_balances_paged(conn, REFRESH_BATCH_SIZE)
             .await
-            .map_err(PostgresError::from)?;
+    }
 
-        let n_refreshed = rows.len();
+    /// See [`TokenCache::refresh_balances`]. Pages along the `token_id` cursor,
+    /// which is also the `DISTINCT ON` key, so `LIMIT` yields up to `batch_size`
+    /// distinct tokens per query and each batch is applied before the next fetch.
+    async fn refresh_balances_paged(
+        &self,
+        conn: &mut AsyncPgConnection,
+        batch_size: i64,
+    ) -> Result<usize, StorageError> {
+        let last_sync = *read_recovered(&self.last_balance_sync);
+        let since = last_sync - chrono::Duration::seconds(REFRESH_OVERLAP_SECS);
+        let chain_db_ids: Vec<i64> = self.chain_ids.keys().copied().collect();
+
+        let mut n_rows = 0usize;
         // The marker never moves backwards: starting from `last_sync` (not `since`)
         // keeps an empty poll from sliding it into the past.
         let mut max_valid_from = last_sync;
-        let mut by_chain: HashMap<Chain, Vec<(Address, NaiveDateTime)>> = HashMap::new();
-        for (address, chain_id, valid_from) in rows {
-            let Some(chain) = self.chain_ids.get(&chain_id) else {
-                continue;
-            };
-            max_valid_from = max_valid_from.max(valid_from);
-            by_chain
-                .entry(*chain)
-                .or_default()
-                .push((address, valid_from));
-        }
-        for (chain, updates) in &by_chain {
-            self.update_last_traded(
-                chain,
-                updates
-                    .iter()
-                    .map(|(address, ts)| (address, *ts)),
-            );
+        let mut last_token_id = i64::MIN;
+        loop {
+            let rows: Vec<(i64, Address, i64, NaiveDateTime)> =
+                schema::component_balance_default::table
+                    .inner_join(schema::token::table.inner_join(schema::account::table))
+                    .filter(schema::component_balance_default::valid_from.gt(since))
+                    .filter(schema::account::chain_id.eq_any(chain_db_ids.clone()))
+                    .filter(schema::component_balance_default::token_id.gt(last_token_id))
+                    .order_by((
+                        schema::component_balance_default::token_id.asc(),
+                        schema::component_balance_default::valid_from.desc(),
+                    ))
+                    .distinct_on(schema::component_balance_default::token_id)
+                    .limit(batch_size)
+                    .select((
+                        schema::component_balance_default::token_id,
+                        schema::account::address,
+                        schema::account::chain_id,
+                        schema::component_balance_default::valid_from,
+                    ))
+                    .load(conn)
+                    .await
+                    .map_err(PostgresError::from)?;
+
+            let batch_len = rows.len();
+            n_rows += batch_len;
+            let mut by_chain: HashMap<Chain, Vec<(Address, NaiveDateTime)>> = HashMap::new();
+            for (token_id, address, chain_id, valid_from) in rows {
+                last_token_id = token_id;
+                let Some(chain) = self.chain_ids.get(&chain_id) else {
+                    continue;
+                };
+                max_valid_from = max_valid_from.max(valid_from);
+                by_chain
+                    .entry(*chain)
+                    .or_default()
+                    .push((address, valid_from));
+            }
+            for (chain, updates) in &by_chain {
+                self.update_last_traded(
+                    chain,
+                    updates
+                        .iter()
+                        .map(|(address, ts)| (address, *ts)),
+                );
+            }
+            if (batch_len as i64) < batch_size {
+                break;
+            }
         }
 
-        *self
-            .last_balance_sync
-            .write()
-            .expect("token cache lock poisoned") = max_valid_from;
-        Ok(n_refreshed)
+        // Advanced only once every batch loaded; a mid-loop failure re-reads the
+        // whole window next tick, which is safe because re-applying keeps the max.
+        *write_recovered(&self.last_balance_sync) = max_valid_from;
+        Ok(n_rows)
     }
 
     /// Spawns a detached task calling `refresh` every `period`, so the cache picks
@@ -698,6 +786,25 @@ impl TokenCache {
             last_balance_sync: RwLock::new(NaiveDateTime::default()),
         }
     }
+}
+
+/// Recovers a poisoned lock instead of propagating the panic: a writer that
+/// panicked mid-mutation cannot break positional invariants (see the mutation
+/// order in `ChainTokenStore::upsert`), so the store stays servable and the
+/// interrupted write converges through the delta refresh.
+fn read_recovered<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        error!("Token cache lock poisoned; recovering");
+        poisoned.into_inner()
+    })
+}
+
+/// See [`read_recovered`].
+fn write_recovered<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        error!("Token cache lock poisoned; recovering");
+        poisoned.into_inner()
+    })
 }
 
 fn to_model_token(orm_token: &orm::Token, address: &Address, chain: Chain) -> Token {
@@ -939,6 +1046,31 @@ mod test {
     }
 
     #[test]
+    fn test_cache_survives_a_poisoned_store_lock() {
+        let cache = store_with_tokens(&[100]);
+
+        let store = cache
+            .chains
+            .get(&Chain::Ethereum)
+            .unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.write().unwrap();
+            panic!("poison the token cache store lock");
+        }));
+        assert!(store.is_poisoned());
+
+        let total = || {
+            cache
+                .query_tokens(&base_query())
+                .unwrap()
+                .total
+        };
+        assert_eq!(total(), Some(1), "reads must survive poisoning");
+        cache.upsert_tokens(&[make_token(1, 100)]);
+        assert_eq!(total(), Some(2), "writes must survive poisoning");
+    }
+
+    #[test]
     fn test_unknown_chain_is_an_error() {
         let cache = store_with_tokens(&[100]);
         let result = cache.query_tokens(&TokenQuery { chain: Chain::Base, ..base_query() });
@@ -1031,7 +1163,7 @@ mod benchmark {
             })
             .expect("query failed")
             .total
-            .unwrap();
+            .unwrap() as i64;
         println!("== token cache benchmark ==");
         println!("chain: {chain}");
         println!("tokens: {n_tokens}");
@@ -1189,7 +1321,7 @@ mod benchmark {
             })
             .unwrap()
             .total
-            .unwrap();
+            .unwrap() as i64;
         let n_pages = (total + page_size - 1) / page_size;
 
         let started = Instant::now();
@@ -1622,6 +1754,93 @@ mod serial_db_test {
 
             // A second refresh re-reads the overlap window and stays equivalent.
             cache.refresh(&mut conn).await.unwrap();
+            for query in query_matrix(&addresses) {
+                assert_equivalent(&sql_gateway, &cache, &mut conn, query).await;
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_token_poll_pages_through_the_window() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let addresses = setup(&mut conn).await;
+            let sql_gateway = PostgresGateway::from_connection(&mut conn).await;
+            let cache = TokenCache::from_connection(&mut conn, &[Chain::Ethereum])
+                .await
+                .unwrap();
+
+            // Five external quality updates force three batches at batch_size 2.
+            diesel::update(schema::token::table)
+                .filter(schema::token::symbol.eq_any(vec!["T0", "T2", "T4", "T6", "T7"]))
+                .set(schema::token::quality.eq(5))
+                .execute(&mut conn)
+                .await
+                .unwrap();
+
+            let n_rows = cache
+                .refresh_tokens_paged(&mut conn, 2)
+                .await
+                .unwrap();
+            assert!(n_rows >= 5, "all changed rows must be read across batches");
+
+            for query in query_matrix(&addresses) {
+                assert_equivalent(&sql_gateway, &cache, &mut conn, query).await;
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_balance_poll_pages_through_the_window() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let addresses = setup(&mut conn).await;
+            let sql_gateway = PostgresGateway::from_connection(&mut conn).await;
+            let cache = TokenCache::from_connection(&mut conn, &[Chain::Ethereum])
+                .await
+                .unwrap();
+
+            // First trades for three never-traded tokens, written externally.
+            let tx_id: i64 = schema::transaction::table
+                .filter(schema::transaction::hash.eq(Bytes::from_str(TX_HASH_1).unwrap()))
+                .select(schema::transaction::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            let component_id: i64 = schema::protocol_component::table
+                .select(schema::protocol_component::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            for position in [1usize, 2, 4] {
+                let token_id: i64 = schema::token::table
+                    .inner_join(schema::account::table)
+                    .filter(schema::account::address.eq(addresses[position].clone()))
+                    .select(schema::token::id)
+                    .first(&mut conn)
+                    .await
+                    .unwrap();
+                db_fixtures::insert_component_balance(
+                    &mut conn,
+                    Balance::from(500u64.to_be_bytes().to_vec()),
+                    Bytes::zero(32),
+                    500.0,
+                    token_id,
+                    tx_id,
+                    component_id,
+                    None,
+                )
+                .await;
+            }
+
+            let n_rows = cache
+                .refresh_balances_paged(&mut conn, 2)
+                .await
+                .unwrap();
+            assert!(n_rows >= 3, "all traded tokens must be read across batches");
+
             for query in query_matrix(&addresses) {
                 assert_equivalent(&sql_gateway, &cache, &mut conn, query).await;
             }

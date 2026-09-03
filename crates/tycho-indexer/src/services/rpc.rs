@@ -314,7 +314,7 @@ where
         let total = match addresses {
             Some(adrs) => {
                 // If contract addresses are specified, the total count is the number of addresses
-                adrs.len() as i64
+                adrs.len() as u64
             }
             None => account_data.total.unwrap_or_default(), /* TODO: handle case where contract
                                                              * addresses are not specified */
@@ -493,14 +493,14 @@ where
         // By precomputing the paginated IDs we also ensure that the fetched balances and
         // protocol state are paginated in the same way.
         // Also, by doing this in a single point prevents failures and increases performance.
-        let (paginated_ids, total): (Vec<String>, i64) = match ids {
+        let (paginated_ids, total): (Vec<String>, u64) = match ids {
             Some(ids) => (
                 ids.iter()
                     .skip(pagination_params.offset() as usize)
                     .take(pagination_params.page_size as usize)
                     .map(|s| s.to_string())
                     .collect(),
-                ids.len() as i64,
+                ids.len() as u64,
             ),
             None => {
                 let req = dto::ProtocolComponentsRequestBody {
@@ -514,7 +514,7 @@ where
                     .get_protocol_components_inner(req)
                     .await
                     .expect("Failed to get protocol component IDs");
-                let total_components = protocol_components.pagination.total;
+                let total_components = protocol_components.pagination.total as u64;
                 (
                     protocol_components
                         .protocol_components
@@ -591,7 +591,7 @@ where
                 .collect(),
             None => self.protocol_systems.iter().collect(),
         };
-        let total = filtered.len() as i64;
+        let total = filtered.len() as u64;
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
         let skip = (page * page_size) as usize;
@@ -802,7 +802,7 @@ where
                 .map(|comp| comp.id.as_str())
                 .collect();
 
-            let total = buffered_components.len() as i64;
+            let total = buffered_components.len() as u64;
 
             if requested_ids.len() == fetched_ids.len() {
                 let response_components: Vec<dto::ProtocolComponent> = buffered_components
@@ -839,11 +839,11 @@ where
         {
             Ok(component_data) => {
                 let db_total = component_data.total.unwrap_or_default();
-                let total = db_total + buffered_components.len() as i64;
+                let total = db_total + buffered_components.len() as u64;
                 let mut components = component_data.entity;
 
                 // Handle adding buffered components to the response
-                let buffer_offset = pagination_params.offset() - db_total;
+                let buffer_offset = pagination_params.offset() - db_total as i64;
                 if buffer_offset > 0 {
                     // Pagination page is greater than that provided by the db query - respond with
                     // buffered data only
@@ -2751,7 +2751,7 @@ mod tests {
                 move |_, _, _, _, _| {
                     let mock_response_clone = match &mock_response {
                         Ok((num, components)) => {
-                            Ok(WithTotal { entity: components.clone(), total: Some(*num) })
+                            Ok(WithTotal { entity: components.clone(), total: Some(*num as u64) })
                         }
                         Err(_) => Err(StorageError::Unexpected("Mock Error".to_string())),
                     };

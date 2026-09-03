@@ -305,7 +305,7 @@ impl PostgresGateway {
         }
 
         // Apply pagination and fetch total count
-        let count: Option<i64> = if let Some(pagination_params) = pagination_params {
+        let count: Option<u64> = if let Some(pagination_params) = pagination_params {
             component_query = component_query
                 .order_by(pc::id)
                 .limit(pagination_params.page_size)
@@ -317,7 +317,7 @@ impl PostgresGateway {
                     .count()
                     .get_result::<i64>(conn)
                     .await
-                    .unwrap_or(0),
+                    .unwrap_or(0) as u64,
             )
         } else {
             None
@@ -399,7 +399,7 @@ impl PostgresGateway {
         }
 
         // Apply pagination and fetch total count
-        let count: Option<i64> = if let Some(pagination_params) = pagination_params {
+        let count: Option<u64> = if let Some(pagination_params) = pagination_params {
             component_query = component_query
                 .order_by(pc::id)
                 .limit(pagination_params.page_size)
@@ -411,7 +411,7 @@ impl PostgresGateway {
                     .count()
                     .get_result::<i64>(conn)
                     .await
-                    .unwrap_or(0),
+                    .unwrap_or(0) as u64,
             )
         } else {
             None
