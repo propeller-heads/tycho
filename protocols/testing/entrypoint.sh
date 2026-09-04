@@ -37,6 +37,7 @@ infer_chain() {
         unichain-*) echo "unichain" ;;
         bsc-*)      echo "bsc" ;;
         polygon-*)  echo "polygon" ;;
+        robinhood-*) echo "robinhood" ;;
         *)          echo "ethereum" ;;
     esac
 }
@@ -51,6 +52,7 @@ get_rpc_url() {
         unichain-*) echo "${UNICHAIN_RPC_URL:-$RPC_URL}" ;;
         bsc-*)      echo "${BSC_RPC_URL:-$RPC_URL}" ;;
         polygon-*)  echo "${POLYGON_RPC_URL:-$RPC_URL}" ;;
+        robinhood-*) echo "${ROBINHOOD_RPC_URL:?ROBINHOOD_RPC_URL must be set to an archive RPC to test a robinhood-* package}" ;;
         *)          echo "$RPC_URL" ;;
     esac
 }
