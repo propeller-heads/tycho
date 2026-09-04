@@ -38,6 +38,20 @@ use tycho_common::{
 
 use crate::evm::override_stream::OverrideSnapshot;
 
+/// What a quote may assume about the swap's position within its execution block, for protocols
+/// whose pricing depends on that position.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockPositionAssumption {
+    /// No assumption: price the swap for the least favourable position it could take, so the
+    /// output is never over-quoted. Loses fills where a better position would in fact have held.
+    #[default]
+    WorstCase,
+    /// Bet the swap lands before any other on the same pool. Better quotes wherever the protocol
+    /// favours that position; a lost bet surfaces as reverts or negative slippage at execution
+    /// time. Enable only if the submission path can realistically win that race.
+    First,
+}
+
 /// Context struct containing attributes for decoders
 ///
 /// This struct can be extended to include additional attributes for other decoders in the future
@@ -45,6 +59,12 @@ use crate::evm::override_stream::OverrideSnapshot;
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
+    /// What quotes may assume about the swap's position within its execution block.
+    ///
+    /// Only consumed by protocols that price the first swap of a block differently (currently
+    /// `aerodrome_slipstreams`). Once the pool has been touched in the execution block, position
+    /// is a known fact and the assumption has no effect.
+    pub block_position: BlockPositionAssumption,
     /// Live per-block VM state override channel, wired into the pool at construction time.
     ///
     /// Set internally by the decoder from its registered override providers; not part of the
@@ -54,7 +74,17 @@ pub struct DecoderContext {
 
 impl DecoderContext {
     pub fn new() -> Self {
-        Self { adapter_path: None, vm_traces: None, live_override: None }
+        Self {
+            adapter_path: None,
+            vm_traces: None,
+            block_position: BlockPositionAssumption::default(),
+            live_override: None,
+        }
+    }
+
+    pub fn block_position_assumption(mut self, assumption: BlockPositionAssumption) -> Self {
+        self.block_position = assumption;
+        self
     }
 
     pub fn vm_adapter_path<S: Into<String>>(mut self, path: S) -> Self {

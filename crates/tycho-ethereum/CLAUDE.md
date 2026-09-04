@@ -1,6 +1,6 @@
 # tycho-ethereum
 
-Ethereum-specific implementations of traits defined in `tycho-common`. Consumed exclusively by `tycho-indexer`.
+Ethereum-specific implementations of traits defined in `tycho-common`. Consumed by `tycho-indexer`, `tycho-simulation`, and `tycho-test`.
 
 ## Module Map
 
@@ -27,11 +27,13 @@ services/
        ├─ slot_detector.rs            Detects ERC-20 storage slot layout via trace simulation
        ├─ balance_slot_detector.rs    Locates balance mapping slot
        └─ allowance_slot_detector.rs  Locates allowance mapping slot
+
+test_fixtures.rs        Shared RPC/account fixtures, also consumed by tycho-test
 ```
 
 ## Module Dependencies
 
-All services depend on `rpc/` for RPC calls and on `erc20.rs` for ABI encoding. The entrypoint tracer's slot detectors feed into `account_extractor` when slot layout is unknown.
+All services depend on `rpc/` for RPC calls and on `erc20.rs` for ABI encoding. The slot detectors are consumed by the indexer's `dynamic_contract_indexer/hooks/`, not by `account_extractor`.
 
 ```
 tycho-common traits
@@ -49,4 +51,6 @@ tycho-common traits
 | `token_pre_processor` | `TokenPreProcessor` |
 | `token_analyzer` | `TokenAnalyzer` |
 | `entrypoint_tracer` | `EntryPointTracer` |
+| `entrypoint_tracer/balance_slot_detector` | `BalanceSlotDetector` (`EVMBalanceSlotDetector`) |
+| `entrypoint_tracer/allowance_slot_detector` | `AllowanceSlotDetector` (`EVMAllowanceSlotDetector`) |
 | `rpc` | `FeePriceGetter` (returns `BlockGasPrice` from `gas.rs`) |

@@ -31,8 +31,18 @@ fmt:
 protogen:
 	cd tycho-router-trades && substreams protogen chains/ethereum.yaml --output-path src/pb --exclude-paths="sf/substreams,google,sf/ethereum"
 
+# Packs into target/spkg/, where docker-compose mounts it for the local sinks. release.sh does the
+# same for the published packages.
 pack: build
-	substreams pack $(MANIFEST) -o tycho-router-trades-$(CHAIN).spkg
+	mkdir -p target/spkg
+	substreams pack $(MANIFEST) -o target/spkg/$(CHAIN).spkg
+
+pack-all: build
+	mkdir -p target/spkg
+	for manifest in tycho-router-trades/chains/*.yaml; do \
+		chain=$$(basename "$$manifest" .yaml); \
+		substreams pack "$$manifest" -o "target/spkg/$$chain.spkg"; \
+	done
 
 # Stream decoded trades to the terminal for a block range, e.g.
 #   make run CHAIN=ethereum START=25654569 STOP=+100

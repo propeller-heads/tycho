@@ -90,16 +90,24 @@ stand-in tables in `tycho_ethereum` instead of the foreign tables.
 
 ## Container
 
-`Dockerfile` (build from the repository root) compiles the wasm, packs one `.spkg` per chain and
-ships them with `substreams-sink-sql` and `psql`. The image has two modes:
+`Dockerfile` (build from the repository root) ships `substreams-sink-sql` with `psql`, the AWS CLI
+and the SQL. It builds no wasm and carries no `.spkg`: `release.sh` publishes those separately and
+each container fetches the one it is pinned to, so rebuilding the image cannot change what a sink
+reads. The image has two modes:
 
 ```bash
 docker build -f crates/tycho-execution/substreams/Dockerfile -t tycho-router-trades .
 # one container per chain, all writing to the same database
-docker run -e CHAIN=ethereum -e DSN='psql://...' -e SUBSTREAMS_API_TOKEN=... tycho-router-trades sink
+docker run -e CHAIN=ethereum -e SPKG=substreams/tycho-router-trades/ethereum-v0.1.0.spkg \
+  -e DSN='psql://...' -e SUBSTREAMS_API_TOKEN=... tycho-router-trades sink
 # one container running the pricing loop
 docker run -e DSN='postgres://...' tycho-router-trades price
 ```
+
+`SPKG` is a local path when that file exists and otherwise a key in the release bucket
+(`TYCHO_S3_BUCKET`, default `repo.propellerheads-propellerheads`), cached under `SPKG_CACHE_DIR`.
+That is the same rule the indexer uses for its own packages, so a pinned release and a
+bind-mounted local build both work.
 
 Both modes wait until the database accepts connections. `sink` runs `substreams-sink-sql setup`
 (idempotent) and then `run` with `--batch-block-flush-interval 100`; optional
@@ -108,13 +116,16 @@ default `:9102`). `price` registers one `postgres_fdw` server per `TYCHO_<CHAIN>
 variable (`scripts/fdw_setup.sh`, re-run on every start). It runs `price_trades.sql` separately
 for each chain every `INTERVAL` seconds (default 60,
 `MAX_AGE` default `1 hour`). A failed chain is logged without blocking the others.
-`docker-compose.yaml` wires the database, the eight sinks and the pricer for a local run
-(`docker compose --profile sinks up`).
+`docker-compose.yaml` wires the database, the eight sinks and the pricer for a local run: run
+`make pack-all` first, which writes the packages to `target/spkg/` where the compose file mounts
+them (`docker compose --profile sinks up`).
 
 ### Kubernetes
 
 `main-workflow.yaml` builds the image as `tycho-router-trades:<release version>` on every
 monorepo release and promotes the tag to `helmwave/dev/versions.yml` in `helm-configuration`. The
+image only carries the sink and the SQL, so that promotion is routine: what each chain indexes is
+decided by the package pinned under `spkgs`, released separately. The
 release `router-trades-db` there (namespace `dev-tycho`) is a Postgres 16 StatefulSet; release
 `router-trades` is one pod with a `sink` container per chain and one `price` container, all
 writing to `router-trades-db:5432`. Grafana reaches the database through the same service with
@@ -128,16 +139,14 @@ Two properties of `substreams-sink-sql` decide what an update costs, and both bi
 including `initialBlock` and `params` — and the compiled wasm. The sinks run with the default
 `--on-module-hash-mismatch=error`, so when the hash changes the container exits at startup with a
 mismatch against the row in `cursors_<chain>`, and it keeps crashlooping until that row is
-deleted. What changed decides the blast radius:
+deleted.
 
-| change | new hash for |
-|---|---|
-| one chain's manifest (`initialBlock`, router `params`) | that chain only |
-| anything under `src/`, `Cargo.lock`, the wasm build | **every chain** |
-
-A local `cargo build` is not byte-identical to the Docker build, so production hashes cannot be
-precomputed on a laptop; CI builds of the same source are stable, so an image rebuild without a
-source change keeps every cursor valid.
+Nothing changes that hash by accident, because it belongs to a released `.spkg` rather than to the
+image. A chain's hash moves only when someone pins a different package for that chain under
+`spkgs` in `helmwave/<env>/values/tycho/router-trades/router-trades.yml`, and it moves for that
+chain alone. Rebuilding or promoting the image — from a change here or from an unrelated monorepo
+release — changes nothing. A wasm build is in any case not byte-identical across environments, so
+a hash is only ever known from the package that CI published.
 
 **The sink does not upsert.** `db_out` uses `create_row`, which is `OPERATION_CREATE`, and the
 postgres dialect turns that into a plain `INSERT` with no `ON CONFLICT`. Any block the sink reads
@@ -147,10 +156,11 @@ in practice, all of them.
 
 ### Procedure
 
-1. Merge the change and let the release build the image; `promote-to-dev` writes the tag into
-   `helmwave/dev/versions.yml` and the dev deployment rolls the pod.
-2. Chains whose hash changed exit on the mismatch; the others resume from their cursors. This is
-   expected, and it is contained: the sinks have no readiness probe and Postgres is a separate
+1. Merge the change, release the packages (see "Releasing a package") and pin the new keys for
+   the affected chains under `spkgs` in
+   `helmwave/<env>/values/tycho/router-trades/router-trades.yml`. The dev deployment rolls the pod.
+2. Chains whose package changed exit on the mismatch; the others resume from their cursors. This
+   is expected, and it is contained: the sinks have no readiness probe and Postgres is a separate
    release.
 3. Clear the state of each affected chain, now that its sink is down and not flushing:
 
@@ -173,6 +183,36 @@ cursor in the table, which is block 0 for a chain that has never produced data.
 
 `cursors_<chain>` holds one bookmark row and `substreams_history_<chain>` is the reorg-undo
 journal. Neither holds trade data, so clearing them loses no trade.
+
+## Releasing a package
+
+`release.sh` builds the wasm once and packs one `.spkg` per chain to
+`s3://repo.propellerheads-propellerheads/substreams/tycho-router-trades/<chain>-<version>.spkg`.
+It mirrors `protocols/substreams/release.sh`, including its rules:
+
+* the version comes from `tycho-router-trades/Cargo.toml`, so bump it in the PR that changes the
+  package;
+* a release needs a `tycho-router-trades-<semver>` tag on HEAD whose version matches, and a clean
+  tree. **Releases are immutable** — S3 rejects a key that already exists, so a changed package
+  takes a new version and never an overwrite;
+* without such a tag the run publishes `pre.<sha>`, which may be overwritten and is meant for
+  testing.
+
+Run it from CI with the **Release Router Trades Substreams** workflow (`workflow_dispatch`, with
+an optional space-separated `chains` input). It prints the `db_out` module hash of every package.
+That hash is the identity the cursors are keyed by, so compare it with the running
+`cursors_<chain>.id` before pinning, to know whether a chain will resume or restart.
+
+Then pin the published keys per chain in helm:
+
+```yaml
+spkgs:
+  ethereum: substreams/tycho-router-trades/ethereum-v0.2.0.spkg
+  bsc:      substreams/tycho-router-trades/bsc-v0.3.0.spkg
+```
+
+Chains are independent: each runs the version it is pinned to, and a rollback is a pin back to the
+previous key.
 
 ## Adding a chain
 
@@ -214,11 +254,11 @@ Six places, and the deployment fails quietly if any of the last three is missed.
    name.
 
 6. **Wire the deployment.** Add a `sink-<chain>` service to `docker-compose.yaml` for local runs.
-   In `helm-configuration`, add the chain to the `$chains` list of
-   `helmwave/dev/values/tycho/router-trades/router-trades.yml`, which gives it a sink container, a
-   metrics port and a scrape entry, and add a `TYCHO_<CHAIN>_DATABASE_URL` entry pointing at that
-   chain's Tycho database so the pricer can reach its prices. The image bakes the packed `.spkg`
-   files, so the chain only runs after a release rebuilds it.
+   Release the chain's package (see "Releasing a package"). In `helm-configuration`, add the chain
+   to the `$chains` list of `helmwave/dev/values/tycho/router-trades/router-trades.yml`, which
+   gives it a sink container, a metrics port and a scrape entry, pin its package under `spkgs`,
+   and add a `TYCHO_<CHAIN>_DATABASE_URL` entry pointing at that chain's Tycho database so the
+   pricer can reach its prices.
 
 Nothing has to be cleared in the database: a chain with no cursor row starts at its
 `initialBlock`.

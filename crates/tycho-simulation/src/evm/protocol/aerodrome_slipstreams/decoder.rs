@@ -27,7 +27,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
         block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         _all_tokens: &HashMap<Bytes, Token>,
-        _decoder_context: &DecoderContext,
+        decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
         let liq = snapshot
             .state
@@ -200,6 +200,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
 
         AerodromeSlipstreamsState::new(
             snapshot.component.id.clone(),
+            // Seed value only: the stream decoder points every block-sensitive state at the
+            // execution block before the snapshot reaches a consumer.
             block.timestamp,
             liquidity,
             sqrt_price,
@@ -212,6 +214,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             observations,
             dynamic_fee_config,
         )
+        .map(|state| state.with_position_assumption(decoder_context.block_position))
         .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
     }
 }

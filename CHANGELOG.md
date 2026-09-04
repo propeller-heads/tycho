@@ -1,3 +1,46 @@
+## [0.388.0](https://github.com/propeller-heads/tycho/compare/0.387.0...0.388.0) (2026-09-04)
+
+
+### Features
+
+* **router-trades:** release the spkg packages apart from the image ([18e7d07](https://github.com/propeller-heads/tycho/commit/18e7d07762992b4dcb92469546b8c815b0857cdb))
+* **router-trades:** release the spkg packages apart from the image ([#1401](https://github.com/propeller-heads/tycho/issues/1401)) ([4586a6a](https://github.com/propeller-heads/tycho/commit/4586a6a96dfb1b6ec22587f40b7c8e3068e249d8))
+
+## [0.387.0](https://github.com/propeller-heads/tycho/compare/0.386.1...0.387.0) (2026-09-04)
+
+
+### Features
+
+* add sky executor ([af20b85](https://github.com/propeller-heads/tycho/commit/af20b852919b532e4a4508a9c7e846e46da43d8c))
+* add sky executor ([#1393](https://github.com/propeller-heads/tycho/issues/1393)) ([856f3c1](https://github.com/propeller-heads/tycho/commit/856f3c1131921ccc6896c715856ada578ba3d8e1))
+
+## [0.386.1](https://github.com/propeller-heads/tycho/compare/0.386.0...0.386.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **testing:** make Robinhood Chain packages testable ([d93a698](https://github.com/propeller-heads/tycho/commit/d93a698d014b33c9ffd3ef8e1a91282ac4990f6b))
+* **testing:** make Robinhood Chain packages testable ([#1410](https://github.com/propeller-heads/tycho/issues/1410)) ([f39d07e](https://github.com/propeller-heads/tycho/commit/f39d07ee096a4182248c6f4179bc24880f1ce158))
+* **testing:** set ROBINHOOD_RPC_URL for the Foundry fork tests ([f2b689f](https://github.com/propeller-heads/tycho/commit/f2b689fb893c6c65bdb4e1d108fe5285d81813c4)), closes [#1337](https://github.com/propeller-heads/tycho/issues/1337)
+* **testing:** wire ROBINHOOD_RPC_URL through CI, and require it ([10d89ad](https://github.com/propeller-heads/tycho/commit/10d89adb27764913f76f8314fd2016ea7566dd54))
+
+## [0.386.0](https://github.com/propeller-heads/tycho/compare/0.385.0...0.386.0) (2026-09-04)
+
+
+### Features
+
+* **simulation:** gate the first-in-block fee bet behind an opt-in ([def6079](https://github.com/propeller-heads/tycho/commit/def60799ab03148ba775a1f85aa33e2534f8913d))
+* **simulation:** quote slipstream fees at the execution block ([901747a](https://github.com/propeller-heads/tycho/commit/901747ab2d236f493311c8c07a75a2aa701d453d))
+* **simulation:** quote slipstream fees at the execution block ([#1359](https://github.com/propeller-heads/tycho/issues/1359)) ([ae6f2f4](https://github.com/propeller-heads/tycho/commit/ae6f2f4357c8d88acb6b03737a2403c5bc1b55c5))
+
+
+### Bug Fixes
+
+* **simulation:** harden the execution-block sweep after review ([b00d797](https://github.com/propeller-heads/tycho/commit/b00d797cb885cd7a2ca089c48ea56d2d224e4cbd))
+* **simulation:** keep removed components out of the execution-block sweep ([b44a81c](https://github.com/propeller-heads/tycho/commit/b44a81c643d26f2c2c1eb9d16656830cd5cc8204))
+* **simulation:** pass the chain at the decoder sites merged from main ([7c21b1a](https://github.com/propeller-heads/tycho/commit/7c21b1a71e4e118f0d3885f7f4f7a9c22a0299e1))
+* **simulation:** set the chain in the fixture-replay decoder helper ([59c9bfc](https://github.com/propeller-heads/tycho/commit/59c9bfcbe8158e70f5696c388563f2b13e6df57a))
+
 ## [0.385.0](https://github.com/propeller-heads/tycho/compare/0.384.0...0.385.0) (2026-09-03)
 
 
