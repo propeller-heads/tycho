@@ -45,8 +45,11 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
 
 ### Deploy executors
 
-1. In `scripts/deploy-executors.js` define the executors to be deployed
-2. Deploy executors: `npx hardhat run scripts/deploy-executors.js --network NETWORK`
+1. Configure the executors for the network in `config/executor_deployments.json` (contract name and
+   constructor args per protocol). Every protocol configured there is deployed.
+2. Deploy executors: `npx hardhat run scripts/deploy-executors.js --network NETWORK`. To deploy only
+   some of them, list their protocol names in `EXECUTORS`, e.g.
+   `EXECUTORS=uniswap_v2,rfq:bebop npx hardhat run scripts/deploy-executors.js --network NETWORK`
 3. Fill in the executor addresses in `config/executor_addresses.json`
 
 ### Deploy Router
