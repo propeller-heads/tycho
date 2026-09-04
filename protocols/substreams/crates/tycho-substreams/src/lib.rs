@@ -6,6 +6,7 @@ pub mod contract;
 pub mod entrypoint;
 pub mod models;
 pub mod pb;
+pub mod seed;
 
 #[cfg(test)]
 pub mod testing;

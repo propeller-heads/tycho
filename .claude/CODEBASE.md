@@ -64,6 +64,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | `crates/tycho-execution/substreams/` | TychoRouter trade indexer: a **second, separate WASM workspace** (excluded from the root `Cargo.toml`) that decodes every router trade from call traces and sinks it to Postgres with `substreams-sink-sql`, priced in USD afterwards. Adding a chain, or changing a manifest or its Rust source, has deployment consequences — see `crates/tycho-execution/CLAUDE.md` and `crates/tycho-execution/substreams/README.md` |
 | `protocols/testing/` (`protocol-testing`) | Simulation accuracy test harness: runs protocol state through `tycho-simulation` and compares against on-chain results |
 | `protocols/adapter-integration/` | EVM adapter integration tests |
+| [`tycho-seed`](../crates/tycho-seed/README.md) | Shared library of the seed writers, the per-protocol native crates at `protocols/substreams/<protocol>/seed/` that reconstruct a protocol's state at one block into a seed file its package (`<protocol>/package/`) embeds to start from that block instead of the protocol's first (Ekubo v3 so far); the header lives in `protocols/substreams/crates/tycho-seed-format`, the package-side reader in `tycho_substreams::seed` |
 
 ### Testing Infrastructure
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- `seed` module: reads the seed file a package embeds to start from a snapshot (header check
+  against the package name and the streamed block, synthetic transaction for the seeded state).
+  The file layout lives in the new `tycho-seed-format` crate.
+
 ## 0.8.1
 
 ### Fixed

@@ -399,7 +399,7 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -910,7 +910,7 @@ dependencies = [
  "num-bigint",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -929,7 +929,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -946,7 +946,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -984,7 +984,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-ekubo-v3"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -1017,11 +1017,12 @@ dependencies = [
  "itertools 0.10.5",
  "num-bigint",
  "prost 0.11.9",
+ "prost-types 0.11.9",
  "substreams 0.5.22",
  "substreams-ethereum 0.10.6",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.4.0)",
- "tycho-substreams 0.2.2",
+ "tycho-substreams 0.9.0",
 ]
 
 [[package]]
@@ -1038,7 +1039,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.5.0)",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -1061,7 +1062,7 @@ dependencies = [
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2",
  "tiny-keccak",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -1079,7 +1080,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?rev=b8aeaa3)",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -1162,7 +1163,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?rev=b8aeaa3)",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -1178,7 +1179,7 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -1229,7 +1230,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.1",
 ]
 
 [[package]]
@@ -3422,6 +3423,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
+name = "tycho-seed-format"
+version = "0.1.0"
+dependencies = [
+ "tiny-keccak",
+]
+
+[[package]]
 name = "tycho-substreams"
 version = "0.2.0"
 source = "git+https://github.com/propeller-heads/tycho-protocol-sdk.git?rev=3c08359#3c08359cf112e15c137dd5256b8dc8e9cd6c1626"
@@ -3505,23 +3513,6 @@ dependencies = [
 [[package]]
 name = "tycho-substreams"
 version = "0.8.1"
-dependencies = [
- "base64 0.22.1",
- "ethabi 18.0.0",
- "hex",
- "itertools 0.12.1",
- "num-bigint",
- "prost 0.11.9",
- "rstest",
- "serde",
- "serde_json",
- "substreams 0.5.22",
- "substreams-ethereum 0.9.13",
-]
-
-[[package]]
-name = "tycho-substreams"
-version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e12c39162e44705f28402e2f114da2694e01a466a80dc6f7dca9af0b49f92c76"
 dependencies = [
@@ -3534,6 +3525,24 @@ dependencies = [
  "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
+]
+
+[[package]]
+name = "tycho-substreams"
+version = "0.9.0"
+dependencies = [
+ "base64 0.22.1",
+ "ethabi 18.0.0",
+ "hex",
+ "itertools 0.12.1",
+ "num-bigint",
+ "prost 0.11.9",
+ "rstest",
+ "serde",
+ "serde_json",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-seed-format",
 ]
 
 [[package]]

@@ -1,0 +1,26 @@
+[package]
+name = "tycho-seed"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Shared pieces of the seed writers that let a Substreams package start from a snapshot: seed files, archive-node access, manifest rewriting and the common CLI subcommands"
+
+[dependencies]
+alloy = { workspace = true, features = [
+    "providers",
+    "provider-http",
+    "rpc-types",
+    "reqwest-default-tls",
+] }
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+dotenv.workspace = true
+serde_yaml = "0.9.34"
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+tycho-common.workspace = true
+tycho-ethereum.workspace = true
+tycho-seed-format = { path = "../../protocols/substreams/crates/tycho-seed-format" }
+
+[dev-dependencies]
+tempfile = "3"

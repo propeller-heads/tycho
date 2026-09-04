@@ -68,6 +68,14 @@ pub mod stream_client {
             self.inner = self.inner.accept_compressed(encoding);
             self
         }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
         pub async fn blocks(
             &mut self,
             request: impl tonic::IntoRequest<super::Request>,

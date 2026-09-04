@@ -3960,6 +3960,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-ekubo-v3-seed"
+version = "0.384.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "clap",
+ "ekubo_sdk",
+ "num-bigint",
+ "prost 0.11.9",
+ "tokio",
+ "tracing",
+ "tycho-seed",
+]
+
+[[package]]
 name = "evm_ekubo_sdk"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9935,6 +9950,30 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_yaml",
+]
+
+[[package]]
+name = "tycho-seed"
+version = "0.384.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "clap",
+ "dotenv",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+ "tycho-common",
+ "tycho-ethereum",
+ "tycho-seed-format",
+]
+
+[[package]]
+name = "tycho-seed-format"
+version = "0.1.0"
+dependencies = [
+ "tiny-keccak",
 ]
 
 [[package]]

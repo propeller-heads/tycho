@@ -1,4 +1,4 @@
-substreams_yaml_path: ./substreams.yaml
+substreams_yaml_path: ./package/substreams.yaml
 protocol_system: "ekubo_v3"
 skip_balance_check: true # Ekubo follows a singleton design, pool balances are held in one contract
 protocol_type_names:

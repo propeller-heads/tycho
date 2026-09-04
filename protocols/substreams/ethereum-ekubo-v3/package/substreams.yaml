@@ -1,0 +1,170 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_ekubo_v3"
+  version: v0.3.0
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - ekubo.proto
+  importPaths:
+    - ../../../../proto
+    - ./proto
+  excludePaths:
+    - google
+    - tycho
+    - sf/substreams
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../../target/wasm32-unknown-unknown/release/ethereum_ekubo_v3.wasm
+
+network: mainnet
+networks:
+  mainnet:
+    initialBlock:
+      map_events: 24134506 # First pool creation
+
+modules:
+  # Stage 1
+  - name: map_events
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:ekubo.BlockTransactionEvents
+
+  # Stage 2
+  - name: map_components
+    kind: map
+    inputs:
+      - map: map_events
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pool_details
+    kind: store
+    valueType: proto:ekubo.PoolDetails
+    updatePolicy: set_if_not_exists
+    inputs:
+      - map: map_events
+
+  # Stage 3
+  - name: map_filtered_events
+    kind: map
+    inputs:
+      - map: map_events
+      - store: store_pool_details
+    output:
+      type: proto:ekubo.BlockTransactionEvents
+
+  # Stage 4
+  - name: map_active_rate_changes
+    kind: map
+    inputs:
+      - map: map_filtered_events
+    output:
+      type: proto:ekubo.ActiveRateChanges
+
+  - name: map_rate_deltas
+    kind: map
+    inputs:
+      - map: map_filtered_events
+    output:
+      type: proto:ekubo.RateDeltas
+
+  - name: map_tick_deltas
+    kind: map
+    inputs:
+      - map: map_filtered_events
+    output:
+      type: proto:ekubo.TickDeltas
+
+  - name: store_active_ticks
+    kind: store
+    valueType: int64
+    updatePolicy: set
+    inputs:
+      - map: map_filtered_events
+
+  # Stage 5
+  - name: map_active_liquidity_changes
+    kind: map
+    inputs:
+      - map: map_filtered_events
+      - store: store_pool_details
+      - store: store_active_ticks
+    output:
+      type: proto:ekubo.ActiveLiquidityChanges
+
+  - name: map_balance_changes
+    kind: map
+    inputs:
+      - map: map_filtered_events
+      - store: store_pool_details
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_active_rates
+    kind: store
+    valueType: bigint
+    updatePolicy: set_sum
+    inputs:
+      - map: map_active_rate_changes
+
+  - name: store_rate_deltas
+    kind: store
+    valueType: bigint
+    updatePolicy: add
+    inputs:
+      - map: map_rate_deltas
+
+  - name: store_tick_deltas
+    kind: store
+    valueType: bigint
+    updatePolicy: add
+    inputs:
+      - map: map_tick_deltas
+
+  # Stage 6
+  - name: store_active_liquidities
+    kind: store
+    valueType: bigint
+    updatePolicy: set_sum
+    inputs:
+      - map: map_active_liquidity_changes
+
+  - name: store_balance_changes
+    kind: store
+    valueType: bigint
+    updatePolicy: add
+    inputs:
+      - map: map_balance_changes
+
+  # Stage 7
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - map: map_filtered_events
+      - map: map_balance_changes
+      - store: store_balance_changes
+        mode: deltas
+      - map: map_tick_deltas
+      - store: store_tick_deltas
+        mode: deltas
+      - map: map_rate_deltas
+      - store: store_rate_deltas
+        mode: deltas
+      - map: map_active_liquidity_changes
+      - store: store_active_liquidities
+        mode: deltas
+      - map: map_active_rate_changes
+      - store: store_active_rates
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
