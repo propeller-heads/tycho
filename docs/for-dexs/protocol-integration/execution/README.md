@@ -266,7 +266,7 @@ These tests ensure your integration works end-to-end within Tycho’s architectu
 
 Once your implementation is approved:
 
-1. **Declare the executor's deployment** by adding its contract name and constructor arguments to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/executor_deployments.json" target="_blank" rel="noopener noreferrer">`config/executor_deployments.json`</a> (keyed by chain and protocol) and listing its protocol in the `deploy_protocols` map in `deploy-executors.js`. The deploy script and the SDK test-fixture generation both read the constructor arguments from this config.
+1. **Declare the executor's deployment** by adding its contract name and constructor arguments to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/executor_deployments.json" target="_blank" rel="noopener noreferrer">`config/executor_deployments.json`</a> (keyed by chain and protocol). `deploy-executors.js` deploys every protocol configured for the network, and the SDK test-fixture generation reads the constructor arguments from the same config.
 2. **Deploy the executor contract** on the appropriate network (more <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/contracts/scripts/README.md" target="_blank" rel="noopener noreferrer">here</a>).
 3. **Contact us** to whitelist the new executor address on our main router contract.
 4. **Update the configuration** by adding the new executor address to `executor_addresses.json` and register the `SwapEncoder` within the `SwapEncoderBuilder` .
