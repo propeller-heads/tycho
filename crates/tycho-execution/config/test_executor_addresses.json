@@ -25,7 +25,8 @@
     "vm:bopamm": "0x27cc01A4676C73fe8b6d0933Ac991BfF1D77C4da",
     "pricelevelstream": "0x92a6649Fdcc044DA968d94202465578a9371C7b1",
     "propammfallback": "0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d",
-    "vm:tempest": "0x886D6d1eB8D415b00052828CD6d5B321f072073d"
+    "sky": "0x886D6d1eB8D415b00052828CD6d5B321f072073d",
+    "vm:tempest": "0x3C4293F66941ECa00f4950C10d4255d5c271bAeF"
   },
   "base": {
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",

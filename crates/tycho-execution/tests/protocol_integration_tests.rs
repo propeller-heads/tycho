@@ -3442,3 +3442,121 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_uniswap_v3_bsc", hex_calldata.as_str());
 }
+
+fn sky_component(id: &str, component_type: &str, gem: &str) -> ProtocolComponent {
+    ProtocolComponent {
+        id: String::from(id),
+        protocol_system: String::from("sky"),
+        static_attributes: HashMap::from([
+            (String::from("component_type"), Bytes::from(component_type.as_bytes().to_vec())),
+            (String::from("gem"), Bytes::from(gem)),
+        ]),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_single_encoding_strategy_sky() {
+    // USDC -> (LitePSM) -> DAI
+    let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+    let dai = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+    let psm = sky_component(
+        "0xf6e72db5454dd049d0788e411b06cfaf16853042",
+        "psm",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    );
+    let swap =
+        Swap::new(psm, default_token(usdc.clone()), default_token(dai.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        usdc,
+        dai,
+        BigUint::from_str("1000000000").unwrap(), // 1000 USDC
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_sky", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_sky() {
+    // DAI -> (DaiUsds converter) -> USDS -> (UsdsPsmWrapper) -> USDC
+    let dai = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+    let usds = Bytes::from("0xdc035d45d973e3ec169d2276ddab16f1e407384f");
+    let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+    let converter = sky_component(
+        "0x3225737a9bbb6473cb4a45b7244aca2befdb276a",
+        "converter",
+        "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+    );
+    let wrapper = sky_component(
+        "0xa188eec8f81263234da3622a406892f3d630f98c",
+        "psm_wrapper",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    );
+    let swap1 = Swap::new(
+        converter,
+        default_token(dai.clone()),
+        default_token(usds.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 =
+        Swap::new(wrapper, default_token(usds.clone()), default_token(usdc.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        dai,
+        usdc,
+        BigUint::from_str("1000000000000000000000").unwrap(), // 1000 DAI
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
+}

@@ -34,6 +34,7 @@ members = [
     "ethereum-tempest",
     "ethereum-bopamm",
     "ethereum-ring-swap-v2",
+    "ethereum-sky",
     "polygon-ramses-v3",
 ]
 resolver = "2"

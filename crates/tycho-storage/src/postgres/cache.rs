@@ -712,6 +712,23 @@ impl CachedGateway {
         }
     }
 
+    /// Creates a fresh gateway instance sharing the same write channel and connection pool,
+    /// but with its own `open_tx`, `flushed_block_height` and `lru_cache`.
+    ///
+    /// Use this instead of `clone()` when the intent is to create an independent writer
+    /// (e.g. for a restarted extractor) rather than sharing cache state.
+    pub fn new_instance(&self) -> Self {
+        CachedGateway {
+            tx: self.tx.clone(),
+            open_tx: Arc::new(Mutex::new(None)),
+            // a fresh writer has not flushed anything yet
+            flushed_block_height: AtomicU64::new(0),
+            pool: self.pool.clone(),
+            state_gateway: self.state_gateway.clone(),
+            lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
+        }
+    }
+
     pub async fn get_delta(
         &self,
         chain: &Chain,

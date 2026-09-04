@@ -14,6 +14,8 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map
+  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 BlockChanges, BlockAggregatedChanges, TxWithChanges
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
@@ -151,15 +153,16 @@ written; it auto-drains those blocks so memory usage stays bounded.
 ## Connections
 
 ```
-ExtractorRunner (runner.rs)
-  ├─ SubstreamsStream (substreams/) → ProtocolExtractor (protocol_extractor.rs)
-  │    ├─ ReorgBuffer (reorg_buffer.rs) → CachedGateway → DB
-  │    ├─ ProtocolMemoryCache (protocol_cache.rs)
-  │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
-  └─ broadcast Arc<BlockAggregatedChanges>
-       ├─ WsService (services/ws.rs) → WebSocket clients
-       └─ PendingDeltasBuffer (services/deltas_buffer.rs)
-            └─ RpcHandlers (services/rpc.rs) → HTTP responses
+ExtractorSupervisor (supervisor.rs) — rebuilds the runner via ExtractorFactory (factory.rs) on failure
+  └─ ExtractorRunner (runner.rs)
+       ├─ SubstreamsStream (substreams/) → ProtocolExtractor (protocol_extractor.rs)
+       │    ├─ ReorgBuffer (reorg_buffer.rs) → CachedGateway → DB
+       │    ├─ ProtocolMemoryCache (protocol_cache.rs)
+       │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
+       └─ broadcast DeltaCommand (Block | ExtractorRestarted)
+            ├─ WsService (services/ws.rs) → WebSocket clients
+            └─ PendingDeltasBuffer (services/deltas_buffer.rs)
+                 └─ RpcHandlers (services/rpc.rs) → HTTP responses
 ```
 
 ## Client Sync

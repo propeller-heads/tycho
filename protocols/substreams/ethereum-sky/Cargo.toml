@@ -1,0 +1,23 @@
+[package]
+name = "ethereum-sky"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ethereum_sky"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+alloy-primitives = { version = "1.4.1", features = ["serde"] }
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+itertools = "0.10.5"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_qs = "0.13.0"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = "0.8.0"
+
+[build-dependencies]
+anyhow = "1"
+substreams-ethereum = "0.9.9"

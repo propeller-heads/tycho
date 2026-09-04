@@ -28,7 +28,10 @@ use tycho_simulation::{
 };
 
 use crate::{
-    execution::{models::Transaction, tenderly::OverwriteMetadata},
+    execution::{
+        models::{RouterOverwritesData, Transaction},
+        tenderly::OverwriteMetadata,
+    },
     rpc_tools::RPCTools,
 };
 
@@ -630,74 +633,63 @@ fn overwrite_bopamm_lane_timestamp(stored_value: B256, timestamp: u32) -> B256 {
     B256::from(value)
 }
 
-/// Sets up state overwrites for the Tycho router and its associated executor.
+/// Builds the state overwrites described by `data` for the router at `router_address`.
 ///
-/// This function prepares the router for execution simulation by applying bytecode overwrites
-/// to both the router and executor contracts. It ensures that the router recognizes the executor
-/// as an approved executor by setting the appropriate storage slot values.
+/// Every executor in `data.executors` gets its `executorsActivationTimestamp` slot set to `1` on
+/// the router, so `Dispatcher._validateExecutor` accepts it even when it is unapproved or still
+/// inside its 3-day activation timelock. Executors mapped to `Some(bytecode)` additionally get
+/// that bytecode planted at their address; the others keep their deployed code. Router and fee
+/// calculator bytecode are planted only when present, and the fee calculator additionally gets the
+/// router's `_feeCalculator` slot pointed at it.
 ///
-/// # Process
-/// 1. Override the router's bytecode with the provided router bytecode
-/// 2. Calculate and set the executor approval storage slot in the router
-/// 3. Override the executor's bytecode with the provided executor bytecode
+/// Returns an empty map for `RouterOverwritesData::default()`, i.e. the deployed contracts are
+/// simulated unchanged.
 ///
-/// # Arguments
-/// * `router_address` - The address where the Tycho router contract will be deployed/overridden
-/// * `router_bytecode` - The compiled runtime bytecode for the Tycho router contract
-/// * `executor_bytecode` - The compiled runtime bytecode for the protocol-specific executor
-///
-/// # Returns
-/// A HashMap containing account overwrites for both the router and executor addresses.
-/// The router override includes:
-///   - Router contract bytecode
-///   - Storage slot setting executor approval (executors mapping slot = 1)
-///
-/// The executor override includes:
-///   - Protocol-specific executor contract bytecode
-///
-/// # Errors
-/// Returns an error if:
-/// - Executor address parsing fails
-/// - Storage slot calculation fails
-pub async fn setup_router_overwrites(
+/// Intended for read-only simulation (`eth_call`/`debug_traceCall`) — a real transaction cannot
+/// carry state overwrites.
+pub fn setup_router_overwrites(
     router_address: Address,
-    router_bytecode: Vec<u8>,
-    executor_bytecode: Vec<u8>,
-    fee_calculator_bytecode: Vec<u8>,
+    data: RouterOverwritesData,
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let mut state_overwrites = AddressHashMap::default();
+    if data.is_empty() {
+        return Ok(state_overwrites);
+    }
 
-    let executor_address = Address::from_str(EXECUTOR_ADDRESS).into_diagnostic()?;
-    let fee_calculator_address = Address::from_str(FEE_CALCULATOR_ADDRESS).into_diagnostic()?;
+    let mut router_override = AccountOverride::default();
+    let mut router_state_diff: Vec<(FixedBytes<32>, FixedBytes<32>)> = Vec::new();
 
-    // Router override: bytecode + executor approval slot + _feeCalculator slot
-    let executor_storage_slot = calculate_executor_storage_slot(executor_address);
-    // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
-    let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
-    let fee_calculator_slot_value = {
-        let mut v = [0u8; 32];
-        v[12..].copy_from_slice(fee_calculator_address.as_slice());
-        FixedBytes::<32>::from(v)
-    };
+    if let Some(router_bytecode) = data.router_bytecode {
+        router_override = router_override.with_code(router_bytecode);
+    }
 
-    let tycho_router_override = AccountOverride::default()
-        .with_code(router_bytecode)
-        .with_state_diff(vec![
-            (executor_storage_slot, FixedBytes::<32>::from(U256::ONE)),
-            (fee_calculator_slot, fee_calculator_slot_value),
-        ]);
-    state_overwrites.insert(router_address, tycho_router_override);
+    for (executor_address, executor_bytecode) in data.executors {
+        router_state_diff.push((
+            calculate_executor_storage_slot(executor_address),
+            FixedBytes::<32>::from(U256::ONE),
+        ));
+        if let Some(executor_bytecode) = executor_bytecode {
+            state_overwrites
+                .insert(executor_address, AccountOverride::default().with_code(executor_bytecode));
+        }
+    }
 
-    // Executor bytecode override
-    state_overwrites
-        .insert(executor_address, AccountOverride::default().with_code(executor_bytecode));
+    // The FeeCalculator override returns zero fees for all clients, so it acts as a no-op.
+    if let Some(fee_calculator_bytecode) = data.fee_calculator_bytecode {
+        let fee_calculator_address = Address::from_str(FEE_CALCULATOR_ADDRESS).into_diagnostic()?;
+        // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
+        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
+        let mut fee_calculator_slot_value = [0u8; 32];
+        fee_calculator_slot_value[12..].copy_from_slice(fee_calculator_address.as_slice());
+        router_state_diff
+            .push((fee_calculator_slot, FixedBytes::<32>::from(fee_calculator_slot_value)));
+        state_overwrites.insert(
+            fee_calculator_address,
+            AccountOverride::default().with_code(fee_calculator_bytecode),
+        );
+    }
 
-    // FeeCalculator bytecode override (returns zero fees for all clients)
-    state_overwrites.insert(
-        fee_calculator_address,
-        AccountOverride::default().with_code(fee_calculator_bytecode),
-    );
-
+    state_overwrites.insert(router_address, router_override.with_state_diff(router_state_diff));
     Ok(state_overwrites)
 }
 
@@ -757,5 +749,99 @@ mod tests {
         let expected_storage_slot = keccak256((module, asset_id).abi_encode());
 
         assert_eq!(storage_slot, expected_storage_slot);
+    }
+
+    #[test]
+    fn test_router_overwrites_activate_executors_without_touching_bytecode() {
+        let router = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
+        let executors = [
+            Address::from_str("0x0017c8351b0e79ae4c0eeaa1c14dcdbc2b6f7e91").unwrap(),
+            Address::from_str("0x667cb0d1e2c48d4b1d2a1f6e9c8f0a3b5d7e9f11").unwrap(),
+        ];
+        let data = RouterOverwritesData {
+            executors: executors
+                .iter()
+                .map(|executor| (*executor, None))
+                .collect(),
+            ..Default::default()
+        };
+
+        let overwrites = setup_router_overwrites(router, data).unwrap();
+
+        assert_eq!(overwrites.len(), 1, "only the router account must be overwritten");
+        let router_override = overwrites
+            .get(&router)
+            .expect("router override");
+        assert!(router_override.code.is_none(), "the router must keep its deployed bytecode");
+        let state_diff = router_override
+            .state_diff
+            .as_ref()
+            .expect("activation slots");
+        assert_eq!(state_diff.len(), executors.len(), "one slot per executor");
+        for executor in executors {
+            assert_eq!(
+                state_diff.get(&calculate_executor_storage_slot(executor)),
+                Some(&FixedBytes::<32>::from(U256::ONE)),
+                "executor {executor} is not activated"
+            );
+        }
+    }
+
+    #[test]
+    fn test_router_overwrites_plant_bytecode_and_activate_the_executor() {
+        let router = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
+        let executor = Address::from_str(EXECUTOR_ADDRESS).unwrap();
+        let fee_calculator = Address::from_str(FEE_CALCULATOR_ADDRESS).unwrap();
+        let data = RouterOverwritesData {
+            router_bytecode: Some(vec![0x60, 0x01]),
+            executors: HashMap::from([(executor, Some(vec![0x60, 0x02]))]),
+            fee_calculator_bytecode: Some(vec![0x60, 0x03]),
+        };
+
+        let overwrites = setup_router_overwrites(router, data).unwrap();
+
+        assert_eq!(overwrites.len(), 3);
+        assert_eq!(
+            overwrites
+                .get(&executor)
+                .and_then(|o| o.code.as_ref()),
+            Some(&alloy::primitives::Bytes::from(vec![0x60, 0x02]))
+        );
+        assert_eq!(
+            overwrites
+                .get(&fee_calculator)
+                .and_then(|o| o.code.as_ref()),
+            Some(&alloy::primitives::Bytes::from(vec![0x60, 0x03]))
+        );
+
+        let router_override = overwrites
+            .get(&router)
+            .expect("router override");
+        assert_eq!(router_override.code, Some(alloy::primitives::Bytes::from(vec![0x60, 0x01])));
+        let state_diff = router_override
+            .state_diff
+            .as_ref()
+            .expect("state diff");
+        assert_eq!(
+            state_diff.get(&calculate_executor_storage_slot(executor)),
+            Some(&FixedBytes::<32>::from(U256::ONE)),
+            "the executor is not activated"
+        );
+        let mut fee_calculator_slot_value = [0u8; 32];
+        fee_calculator_slot_value[12..].copy_from_slice(fee_calculator.as_slice());
+        assert_eq!(
+            state_diff.get(&FixedBytes::<32>::from(U256::from(9))),
+            Some(&FixedBytes::<32>::from(fee_calculator_slot_value)),
+            "the router does not point at the overwritten fee calculator"
+        );
+    }
+
+    #[test]
+    fn test_default_router_overwrites_leave_every_contract_deployed() {
+        let router = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
+
+        let overwrites = setup_router_overwrites(router, RouterOverwritesData::default()).unwrap();
+
+        assert!(overwrites.is_empty());
     }
 }

@@ -288,6 +288,43 @@ swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, defaul
 estimate (zero if unknown). Encoders aggregate these into `EncodedSolution.estimated_gas`, exposing a single estimate
 for the whole solution.
 
+## Router Trades Substreams (`substreams/`)
+
+Standalone WASM workspace (excluded from the root workspace) indexing every trade routed through
+the deployed TychoRouter contracts. Trades are recovered from EVM call traces — the router emits
+no swap event — decoded per ABI generation (`v2`, `v3_0`, `v3_1`), enriched with hop/executor
+data, `FeesTaken` amounts and the router fee configuration replayed from FeeCalculator events,
+then emitted as `DatabaseChanges` for `substreams-sink-sql` (`schema.sql`). Per-chain manifests
+live in `substreams/tycho-router-trades/chains/`.
+
+Trades are valued in USD after ingestion, not in the substreams. Tycho prices tokens in each
+chain's native token, so pricing anchors through the stablecoins pinned in
+`substreams/pricing/preferred_tokens.sql` and values a trade from one trusted side, implying the
+other side's price from the trade. See `substreams/README.md`.
+
+**Adding a chain** touches six places, and the last three fail silently when missed — follow
+"Adding a chain" in `substreams/README.md`:
+
+1. `substreams/tycho-router-trades/chains/<chain>.yaml` — new manifest: `network`, the router and
+   fee-calculator `params`, and `initialBlock` on all four modules.
+2. `initialBlock` set from the deployment block of the earliest router on that chain (binary
+   search `eth_getCode`), never a round number: the whole module graph is built from there.
+3. The chain must serve Extended (Firehose) blocks; trades come from call traces, so a chain
+   without them yields nothing rather than an error.
+4. `substreams/pricing/preferred_tokens.sql` — the native sentinel row plus at least one pinned
+   stablecoin, or the chain has no USD anchor and every trade stays unpriced. Pin by address and
+   verify the implied price; symbols are duplicated by fake tokens.
+5. `substreams/scripts/gen_tables.py` re-run, so `src/executors_table.rs` names the new chain's
+   executors.
+6. `substreams/docker-compose.yaml` and, in `helm-configuration`, the `$chains` list plus a
+   `TYCHO_<CHAIN>_DATABASE_URL` entry in
+   `helmwave/dev/values/tycho/router-trades/router-trades.yml`.
+
+**Changing a manifest or the Rust source changes the module hash**, which the sink cursors are
+keyed by; the affected containers then exit until their `cursors_<chain>` row is cleared, and
+because the sink writes plain `INSERT`s, any chain that re-reads written blocks needs its rows
+deleted too. See "Updating a deployed sink" in `substreams/README.md`.
+
 ## Build & Test
 
 ### Solidity (Foundry)

@@ -4,10 +4,11 @@
 //! including loading router and executor bytecode for various protocols.
 //! The actual execution logic is from the tycho-test library.
 
-use std::{collections::HashMap, sync::LazyLock};
+use std::{collections::HashMap, str::FromStr, sync::LazyLock};
 
+use alloy::primitives::Address;
 use miette::{miette, IntoDiagnostic, WrapErr};
-use tycho_test::execution::models::RouterOverwritesData;
+use tycho_test::execution::{encoding::EXECUTOR_ADDRESS, models::RouterOverwritesData};
 pub const ROUTER_BYTECODE_JSON: &str = include_str!("../fixtures/TychoRouterV3.runtime.json");
 const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculator.runtime.json");
 
@@ -27,6 +28,7 @@ const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.run
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
 
 /// Mapping from protocol component patterns to executor bytecode JSON strings
@@ -52,6 +54,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("ekubo_v3", EKUBO_V3_BYTECODE_JSON);
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
+    map.insert("sky", SKY_BYTECODE_JSON);
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
     map
 });
@@ -105,12 +108,15 @@ pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> 
 ///
 /// # Returns
 /// A `RouterOverwritesData` struct containing the router, executor, and fee calculator bytecode.
+/// The executor bytecode is planted at `EXECUTOR_ADDRESS`, which is the address the swaps are
+/// encoded against.
 ///
 /// # Errors
 /// Returns an error if:
 /// - Router or fee calculator bytecode JSON parsing fails
 /// - Executor bytecode loading fails for the protocol system
 /// - Bytecode hex decoding fails
+/// - The executor address cannot be parsed
 pub fn create_router_overwrites_data(
     protocol_system: &str,
 ) -> miette::Result<RouterOverwritesData> {
@@ -118,6 +124,11 @@ pub fn create_router_overwrites_data(
     let executor_bytecode = load_executor_bytecode(protocol_system)?;
     let fee_calculator_bytecode =
         decode_runtime_bytecode(FEE_CALCULATOR_BYTECODE_JSON, "fee calculator")?;
+    let executor_address = Address::from_str(EXECUTOR_ADDRESS).into_diagnostic()?;
 
-    Ok(RouterOverwritesData { router_bytecode, executor_bytecode, fee_calculator_bytecode })
+    Ok(RouterOverwritesData {
+        router_bytecode: Some(router_bytecode),
+        executors: HashMap::from([(executor_address, Some(executor_bytecode))]),
+        fee_calculator_bytecode: Some(fee_calculator_bytecode),
+    })
 }
