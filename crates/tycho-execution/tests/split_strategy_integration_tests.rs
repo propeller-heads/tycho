@@ -240,7 +240,7 @@ fn test_evm_split_input_cyclic_swap() {
         "00",                                       // token in index
         "01",                                       // token out index
         "999999",                                   // split
-        "2e234dae75c793f67a35089c9d99245e1c58470b", // executor address
+        "9833c03d2597210f51048310d9720c49cd7ab7dd", // executor address
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token out
         "0001f4",                                   // pool fee
@@ -250,7 +250,7 @@ fn test_evm_split_input_cyclic_swap() {
         "00",                                       // token in index
         "01",                                       // token out index
         "000000",                                   // split
-        "2e234dae75c793f67a35089c9d99245e1c58470b", // executor address
+        "9833c03d2597210f51048310d9720c49cd7ab7dd", // executor address
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token out
         "000bb8",                                   // pool fee
@@ -260,7 +260,7 @@ fn test_evm_split_input_cyclic_swap() {
         "01",                                       // token in index
         "00",                                       // token out index
         "000000",                                   // split
-        "5615deb798bb3e4dfa0139dfa1b3d433cc23b72f", // executor address
+        "05f23696afe84e1d3229370f71651cf5b8588ee1", // executor address
         "b4e16d0168e52d35cacd2c6185b44281ec28c9dc", // component id (pool address)
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in (WETH)
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out (USDC)
@@ -394,7 +394,7 @@ fn test_evm_split_output_cyclic_swap() {
         "00",                                       // token in index
         "01",                                       // token out index
         "000000",                                   // split
-        "5615deb798bb3e4dfa0139dfa1b3d433cc23b72f", // executor address
+        "05f23696afe84e1d3229370f71651cf5b8588ee1", // executor address
         "b4e16d0168e52d35cacd2c6185b44281ec28c9dc", // component id (pool address)
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token in (USDC)
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token out (WETH)
@@ -402,7 +402,7 @@ fn test_evm_split_output_cyclic_swap() {
         "01",                                       // token in index
         "00",                                       // token out index
         "999999",                                   // split
-        "2e234dae75c793f67a35089c9d99245e1c58470b", // executor address
+        "9833c03d2597210f51048310d9720c49cd7ab7dd", // executor address
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "0001f4",                                   // pool fee
@@ -412,7 +412,7 @@ fn test_evm_split_output_cyclic_swap() {
         "01",                                       // token in index
         "00",                                       // token out index
         "000000",                                   // split
-        "2e234dae75c793f67a35089c9d99245e1c58470b", // executor address
+        "9833c03d2597210f51048310d9720c49cd7ab7dd", // executor address
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // token in
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token out
         "000bb8",                                   // pool fee

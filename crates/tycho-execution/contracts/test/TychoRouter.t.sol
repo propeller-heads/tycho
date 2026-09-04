@@ -16,8 +16,14 @@ import {
     Dispatcher__ExecutorIsTimelocked,
     Dispatcher__NonContractExecutor
 } from "@src/Dispatcher.sol";
+import {ExecutorDeployment} from "./ExecutorDeployment.sol";
+import {ALICE, DAI_ADDR, PERMIT2_ADDRESS, WETH_ADDR} from "./Constants.sol";
+import {
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment
+} from "./deployments/UniswapV2.sol";
 
-contract TychoRouterTest is TychoRouterTestSetup {
+contract TychoRouterTest is TychoRouterTestSetup, UniswapV2Deployment {
     bytes32 public constant EXECUTOR_SETTER_ROLE =
         0x6a1dd52dcad5bd732e45b6af4e7344fa284e2d7d4b23b5b09cb55d36b0685c87;
     bytes32 public constant PAUSER_ROLE =
@@ -380,7 +386,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
         uint256 amountIn = 1 ether;
         deal(WETH_ADDR, ALICE, amountIn);
         bytes memory swap = encodeSingleSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
         vm.startPrank(ALICE);
@@ -394,7 +400,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
 
     function testDeploymentExecutorsAndFeeCalculatorActive() public {
         address[] memory executors = new address[](1);
-        executors[0] = address(usv2Executor);
+        executors[0] = uniswapV2Executor;
         TychoRouterExposed router = _deployRouterWithExecutors(executors);
 
         // No warp: the executor and the fee calculator work at deployment
@@ -405,17 +411,17 @@ contract TychoRouterTest is TychoRouterTestSetup {
     function testExecutorAddedAfterDeploymentIsTimelocked() public {
         TychoRouterExposed router = _deployRouterWithExecutors(new address[](0));
         address[] memory executors = new address[](1);
-        executors[0] = address(usv2Executor);
+        executors[0] = uniswapV2Executor;
         vm.prank(EXECUTOR_SETTER);
         router.setExecutors(executors);
 
         bytes memory swap = encodeSingleSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
         vm.expectRevert(
             abi.encodeWithSelector(
-                Dispatcher__ExecutorIsTimelocked.selector, address(usv2Executor)
+                Dispatcher__ExecutorIsTimelocked.selector, uniswapV2Executor
             )
         );
         router.singleSwap(
@@ -435,12 +441,11 @@ contract TychoRouterTest is TychoRouterTestSetup {
 
     function testConstructorDuplicateExecutor() public {
         address[] memory executors = new address[](2);
-        executors[0] = address(usv2Executor);
-        executors[1] = address(usv2Executor);
+        executors[0] = uniswapV2Executor;
+        executors[1] = uniswapV2Executor;
         vm.expectRevert(
             abi.encodeWithSelector(
-                Dispatcher__ExecutorAlreadyExists.selector,
-                address(usv2Executor)
+                Dispatcher__ExecutorAlreadyExists.selector, uniswapV2Executor
             )
         );
         _deployRouterWithExecutors(executors);

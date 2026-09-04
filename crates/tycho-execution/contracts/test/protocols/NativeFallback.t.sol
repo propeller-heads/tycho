@@ -23,6 +23,17 @@ import {
     NativeFallbackRouter__InvalidSelector,
     NativeFallbackRouter__UnexpectedOverride
 } from "../../src/fallback/NativeFallbackRouter.sol";
+import {ALICE, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {
+    NATIVE_ROUTER_V6_ETHEREUM,
+    nativeRouterV6
+} from "../deployments/Native.sol";
+import {FLUIDV1_LIQUIDITY} from "../deployments/FluidV1.sol";
+import {
+    UNISWAP_V3_STATIC_QUOTER,
+    USDC_WETH_USV3
+} from "../deployments/UniswapV3.sol";
+import {POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 /// @dev Uses `NativeExecutorForkTest`'s recorded quote, whose recipient is `ALICE`.
 contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {

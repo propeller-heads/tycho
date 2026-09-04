@@ -3,12 +3,28 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/BebopExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {
+    Constants,
+    DAI_ADDR,
+    USDC_ADDR,
+    USDT_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    BEBOP_ROUTER,
+    BEBOP_SETTLEMENT,
+    BebopDeployment
+} from "../deployments/Bebop.sol";
+
+address constant ONDO_ADDR =
+    address(0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3);
 
 /// @dev BebopSettlement.swapSingle
 bytes4 constant SWAP_SINGLE_SELECTOR = 0x4dcebcba;
@@ -467,7 +483,7 @@ contract BebopExecutorTest is Constants, Permit2TestHelper, TestUtils {
     }
 }
 
-contract TychoRouterForBebopTest is TychoRouterTestSetup {
+contract TychoRouterForBebopTest is TychoRouterTestSetup, BebopDeployment {
     // Override the fork block for Bebop tests
     function getForkBlock() public pure override returns (uint256) {
         return 24290115;

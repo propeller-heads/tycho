@@ -12,6 +12,9 @@ import {
 } from "@src/executors/MetricExecutor.sol";
 import {TransferManager} from "@src/TransferManager.sol";
 import "../TychoRouterTestSetup.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, BASE_USDC, BASE_WETH} from "../Constants.sol";
+import {MetricDeployment} from "../deployments/Metric.sol";
 
 error MetricExecutorTest__UnexpectedTransferType();
 error MetricDispatcherHarness__NoExecutor();
@@ -292,7 +295,7 @@ contract MetricExecutorTest is Test {
     }
 }
 
-contract TychoRouterForMetricTest is TychoRouterTestSetup {
+contract TychoRouterForMetricTest is TychoRouterTestSetup, MetricDeployment {
     function getChain() public pure override returns (string memory) {
         return "base";
     }

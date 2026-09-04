@@ -4,8 +4,15 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../../src/executors/UniswapV4Executor.sol";
 import "../TestUtils.sol";
 import "./UniswapV4Utils.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    USDC_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
+import {ANGSTROM_HOOK, POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 contract UniswapV4ExecutorExposed is UniswapV4Executor {
     using SafeERC20 for IERC20;

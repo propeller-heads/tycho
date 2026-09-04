@@ -394,7 +394,7 @@ mod tests {
             .add_default_encoders(Some(executors))
             .unwrap();
         let executor_address =
-            Bytes::from_str("0x89CA9F4f77B267778EB2eA0Ba1bEAdEe8523af36").unwrap();
+            Bytes::from_str("0xFEd4f910b27fCcaBE9C83D89220adbF066E784E8").unwrap();
 
         for protocol in [
             FALLBACK_KEY,

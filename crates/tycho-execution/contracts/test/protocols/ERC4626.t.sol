@@ -3,7 +3,9 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/ERC4626Executor.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, WETH_ADDR} from "../Constants.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ERC4626Deployment} from "../deployments/ERC4626.sol";
 
 contract ERC4626ExecutorExposed is ERC4626Executor {
     constructor() ERC4626Executor() {}
@@ -138,7 +140,7 @@ contract ERC4626ExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForERC4626Test is TychoRouterTestSetup {
+contract TychoRouterForERC4626Test is TychoRouterTestSetup, ERC4626Deployment {
     function getForkBlock() public pure override returns (uint256) {
         return 23889103;
     }

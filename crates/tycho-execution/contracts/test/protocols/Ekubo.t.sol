@@ -4,10 +4,19 @@ import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/EkuboExecutor.sol";
 import {TransferManager} from "@src/TransferManager.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    USDC_ADDR,
+    USDE_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {ICore} from "@ekubo/interfaces/ICore.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/Test.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {EkuboDeployment} from "../deployments/Ekubo.sol";
 
 contract EkuboExecutorTest is Constants, TestUtils {
     address constant EXECUTOR_ADDRESS =
@@ -163,7 +172,7 @@ contract EkuboExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForEkuboTest is TychoRouterTestSetup {
+contract TychoRouterForEkuboTest is TychoRouterTestSetup, EkuboDeployment {
     function getForkBlock() public view virtual override returns (uint256) {
         return 23518049;
     }
@@ -232,7 +241,7 @@ contract TychoRouterForEkuboTest is TychoRouterTestSetup {
     }
 }
 
-contract TychoRouterForEkuboMevTest is TychoRouterTestSetup {
+contract TychoRouterForEkuboMevTest is TychoRouterTestSetup, EkuboDeployment {
     function getForkBlock() public view virtual override returns (uint256) {
         return 22722989;
     }

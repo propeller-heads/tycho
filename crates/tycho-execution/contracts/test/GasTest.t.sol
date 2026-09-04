@@ -2,7 +2,16 @@ pragma solidity ^0.8.24;
 
 import {IUniversalRouter} from "../interfaces/IUniversalRouter.sol";
 import {IPermit2} from "../lib/permit2/src/interfaces/IPermit2.sol";
-import {Constants} from "./Constants.sol";
+import {
+    ALICE,
+    ALICE_PK,
+    Constants,
+    DAI_ADDR,
+    PERMIT2_ADDRESS,
+    USDE_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "./Constants.sol";
 import {Actions} from "../lib/v4-periphery/src/libraries/Actions.sol";
 import {PoolKey} from "../lib/v4-core/src/types/PoolKey.sol";
 import {IV4Router} from "../lib/v4-periphery/src/interfaces/IV4Router.sol";
@@ -11,6 +20,9 @@ import {Currency} from "../lib/v4-core/src/types/Currency.sol";
 import {IHooks} from "../lib/v4-core/src/interfaces/IHooks.sol";
 import "forge-std/Test.sol";
 import "@permit2/src/interfaces/IAllowanceTransfer.sol";
+
+// Uniswap universal router
+address constant UNIVERSAL_ROUTER = 0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af;
 
 contract Commands {
     uint256 constant V2_SWAP_EXACT_IN = 0x08;

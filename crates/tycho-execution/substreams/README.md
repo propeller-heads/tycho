@@ -550,7 +550,7 @@ Endpoints are resolved from the manifest `network` field; override with
 ## Development
 
 ```bash
-make test    # unit tests (decoding fixtures from contracts/test/assets/calldata.txt)
+make test    # unit tests (decoding fixtures from contracts/test/assets/calldata/)
 make lint    # fmt + clippy
 make build   # wasm
 make test-pricing  # disposable two-chain PostgreSQL/FDW integration test

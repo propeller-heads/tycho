@@ -10,6 +10,11 @@ import {
     INFINITY_FORK_BLOCK,
     BASE_USDT
 } from "./PancakeswapInfinity.t.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, BASE_USDC} from "../Constants.sol";
+import {
+    PancakeswapInfinityDeployment
+} from "../deployments/PancakeswapInfinity.sol";
 
 interface IBinSlot0 {
     function getSlot0(bytes32 id)
@@ -24,7 +29,10 @@ interface IBinSlot0 {
 /// paid by `transferFrom`: the executor is a callback protocol, so the gas estimator adds
 /// nothing for the user's transfer and the quote has to carry it. The constants are the least
 /// squares fit to this test's output; run with `-vv` to see the measurements.
-contract PancakeswapInfinityBinGasTest is TychoRouterTestSetup {
+contract PancakeswapInfinityBinGasTest is
+    TychoRouterTestSetup,
+    PancakeswapInfinityDeployment
+{
     uint256 constant SWAP_BASE_GAS = 205_000;
     uint256 constant GAS_PER_BIN_CROSSED = 12_100;
     /// Residual the fit allows per swap. The USDC side costs about 6k more than the USDT side,
@@ -77,7 +85,7 @@ contract PancakeswapInfinityBinGasTest is TychoRouterTestSetup {
         uint256 snapshot = vm.snapshotState();
         uint24 before = activeId();
         bytes memory swap = encodeSingleSwap(
-            address(pancakeswapInfinityExecutor),
+            pancakeswapInfinityExecutor,
             binSwapData(tokenIn, tokenOut, zeroForOne, 7)
         );
 

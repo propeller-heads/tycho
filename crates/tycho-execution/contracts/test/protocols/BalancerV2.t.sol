@@ -2,7 +2,7 @@ pragma solidity ^0.8.26;
 
 import "../TestUtils.sol";
 import "@src/executors/BalancerV2Executor.sol";
-import {Constants} from "../Constants.sol";
+import {BAL_ADDR, Constants, WETH_ADDR} from "../Constants.sol";
 
 contract BalancerV2ExecutorExposed is BalancerV2Executor {
     constructor() BalancerV2Executor() {}

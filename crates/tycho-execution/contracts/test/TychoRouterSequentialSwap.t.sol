@@ -6,8 +6,37 @@ import {
     TychoRouter__NegativeSlippage
 } from "@src/TychoRouterV3.sol";
 import "./TychoRouterTestSetup.sol";
+import {ExecutorDeployment} from "./ExecutorDeployment.sol";
+import {
+    ALICE,
+    DAI_ADDR,
+    ETH_ADDR,
+    PERMIT2_ADDRESS,
+    STETH_ADDR,
+    USDC_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "./Constants.sol";
+import {BalancerV2Deployment} from "./deployments/BalancerV2.sol";
+import {CurveDeployment, STETH_POOL} from "./deployments/Curve.sol";
+import {
+    DAI_USDC_POOL,
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment
+} from "./deployments/UniswapV2.sol";
+import {
+    UniswapV3Deployment,
+    USDC_WETH_USV3,
+    USDC_WETH_USV3_2
+} from "./deployments/UniswapV3.sol";
 
-contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
+contract TychoRouterSequentialSwapTest is
+    TychoRouterTestSetup,
+    BalancerV2Deployment,
+    CurveDeployment,
+    UniswapV2Deployment,
+    UniswapV3Deployment
+{
     function _getSequentialSwaps() internal view returns (bytes[] memory) {
         // Trade 1 WETH for USDC through DAI with 2 swaps on Uniswap V2
         // 1 WETH   ->   DAI   ->   USDC
@@ -16,13 +45,13 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](2);
         // WETH -> DAI
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
 
         // DAI -> USDC
         swaps[1] = encodeSequentialSwap(
-            address(usv2Executor),
+            uniswapV2Executor,
             encodeUniswapV2Swap(DAI_USDC_POOL, DAI_ADDR, USDC_ADDR)
         );
         return swaps;
@@ -241,13 +270,11 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         bytes[] memory swaps = new bytes[](2);
         // USDC -> WETH
-        swaps[0] = encodeSequentialSwap(
-            address(usv3Executor), usdcWethV3Pool1ZeroOneData
-        );
+        swaps[0] =
+            encodeSequentialSwap(uniswapV3Executor, usdcWethV3Pool1ZeroOneData);
         // WETH -> USDC
-        swaps[1] = encodeSequentialSwap(
-            address(usv3Executor), usdcWethV3Pool2OneZeroData
-        );
+        swaps[1] =
+            encodeSequentialSwap(uniswapV3Executor, usdcWethV3Pool2OneZeroData);
 
         tychoRouter.exposedSequentialSwapWithTransferFrom(
             USDC_ADDR, amountIn, pleEncode(swaps), tychoRouterAddr
@@ -410,9 +437,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(stethWethV2Pool, STETH_ADDR, WETH_ADDR);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(curveExecutor), curveStEthData);
-        swaps[1] =
-            encodeSequentialSwap(address(usv2Executor), usv2StethWethData);
+        swaps[0] = encodeSequentialSwap(curveExecutor, curveStEthData);
+        swaps[1] = encodeSequentialSwap(uniswapV2Executor, usv2StethWethData);
 
         uint256 amountOut = tychoRouter.sequentialSwap{value: amountIn}(
             amountIn,

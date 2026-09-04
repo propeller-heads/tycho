@@ -3,7 +3,13 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/MaverickV2Executor.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {MaverickV2Deployment} from "../deployments/MaverickV2.sol";
+
+address constant GHO_ADDR = address(0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f);
+// Maverick v2
+address constant GHO_USDC_POOL = 0x14Cf6D2Fe3E1B326114b07d22A6F6bb59e346c67;
 
 contract MaverickV2ExecutorExposed is MaverickV2Executor {
     constructor() MaverickV2Executor() {}
@@ -119,7 +125,10 @@ contract MaverickV2ExecutorTest is TestUtils, Constants {
     }
 }
 
-contract TychoRouterForBalancerV3Test is TychoRouterTestSetup {
+contract TychoRouterForMaverickV2Test is
+    TychoRouterTestSetup,
+    MaverickV2Deployment
+{
     function testSingleMaverickIntegration() public {
         deal(GHO_ADDR, ALICE, 1 ether);
         uint256 balanceBefore = IERC20(USDC_ADDR).balanceOf(ALICE);

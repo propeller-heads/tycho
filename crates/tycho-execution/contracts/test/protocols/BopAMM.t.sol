@@ -8,6 +8,11 @@ import {
     BopAMMExecutor__ZeroSettlementAddress
 } from "../../src/executors/BopAMMExecutor.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {BOPAMM_SETTLEMENT, BopAMMDeployment} from "../deployments/BopAMM.sol";
+
+address constant BOPAMM_MAKER = 0x6F7a3714D7FC266e3E84067AC31E7b1a3bE18060;
 
 contract BopAMMExecutorExposed is BopAMMExecutor {
     constructor(address settlement_) BopAMMExecutor(settlement_) {}
@@ -135,7 +140,7 @@ contract BopAMMExecutorTest is TestUtils, Constants {
     }
 }
 
-contract BopAMMRouterTest is TychoRouterTestSetup {
+contract BopAMMRouterTest is TychoRouterTestSetup, BopAMMDeployment {
     function getForkBlock() public pure override returns (uint256) {
         // A block containing a quote commit for the WETH/USDC book (the
         // registry's exact-timestamp gate passes at this block).

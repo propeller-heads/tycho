@@ -8,7 +8,13 @@ import {
     IFlashAccountant,
     ILocker
 } from "@ekubo-v3/interfaces/IFlashAccountant.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    USDC_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
 import {LibCall} from "@solady/utils/LibCall.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -29,6 +35,11 @@ import {
 import {
     SignedExclusiveSwap
 } from "@ekubo-v3/extensions/SignedExclusiveSwap.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    EKUBO_V3_SIGNED_EXCLUSIVE_SWAP,
+    EkuboV3Deployment
+} from "../deployments/EkuboV3.sol";
 
 // Handles callbacks directly and receives the native token directly.
 // Abstract so that only the most derived contract passes the
@@ -535,7 +546,7 @@ contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
     }
 }
 
-contract TychoRouterForEkuboV3Test is TychoRouterTestSetup {
+contract TychoRouterForEkuboV3Test is TychoRouterTestSetup, EkuboV3Deployment {
     function getForkBlock() public pure override returns (uint256) {
         return 24218590;
     }

@@ -16,6 +16,31 @@ import {
 import {UniswapV4Executor} from "@src/executors/UniswapV4Executor.sol";
 import {UniswapV4Utils} from "./UniswapV4Utils.sol";
 import {SubsidyPayer} from "@src/SubsidyPayer.sol";
+import {UniswapV2Executor} from "@src/executors/UniswapV2Executor.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    ALICE,
+    CLIENT_FEE_RECEIVER_PK,
+    DAI_ADDR,
+    ETH_ADDR,
+    USDC_ADDR,
+    WBTC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
+import {NativeWrapDeployment} from "../deployments/NativeWrap.sol";
+import {
+    DAI_USDC_POOL,
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment,
+    USDC_WBTC_POOL,
+    WETH_WBTC_POOL
+} from "../deployments/UniswapV2.sol";
+import {
+    DAI_WETH_USV3,
+    UniswapV3Deployment,
+    USDC_WETH_USV3
+} from "../deployments/UniswapV3.sol";
+import {UniswapV4Deployment} from "../deployments/UniswapV4.sol";
 
 /// @dev Pays every subsidy it can afford and records the last call. Stands in
 ///      for SubsidyPayer, so it checks no signature, nonce or caller.
@@ -242,7 +267,13 @@ abstract contract TychoSubsidizingTestBase is TychoRouterTestSetup {
     }
 }
 
-contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
+contract TychoSubsidizingExecutorTest is
+    TychoSubsidizingTestBase,
+    NativeWrapDeployment,
+    UniswapV2Deployment,
+    UniswapV3Deployment,
+    UniswapV4Deployment
+{
     uint256 constant NONCE = 42;
     uint256 constant MIN_AMOUNT_IN = 1;
     uint24 constant SEVENTY_PERCENT = uint24(uint256(0xffffff) * 70 / 100);
@@ -291,7 +322,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             DAI_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv2Executor), innerData)
+            encodeSingleSwap(uniswapV2Executor, innerData)
         );
 
         uint256 amountOut = _singleSwap(
@@ -301,7 +332,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             BOB,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+                _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
             )
         );
 
@@ -321,7 +352,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             BOB,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+                _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
             )
         );
 
@@ -341,7 +372,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         assertEq(minAmountIn, MIN_AMOUNT_IN);
         assertEq(
             innerSwapHash,
-            keccak256(abi.encodePacked(address(usv2Executor), innerData))
+            keccak256(abi.encodePacked(uniswapV2Executor, innerData))
         );
         assertEq(nonce, NONCE);
         assertEq(deadline, block.timestamp + 1 hours);
@@ -361,7 +392,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             encodeSingleSwap(
                 address(wrapper),
                 _subsidized(
-                    address(usv2Executor),
+                    uniswapV2Executor,
                     _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR),
                     amount
                 )
@@ -383,7 +414,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             BOB,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(nativeWrapExecutor), wrapData, WETH_SUBSIDY)
+                _subsidized(nativeWrapExecutor, wrapData, WETH_SUBSIDY)
             )
         );
 
@@ -403,7 +434,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             USDC_ADDR,
             amountIn,
             ALICE,
-            encodeSingleSwap(address(usv3Executor), innerData)
+            encodeSingleSwap(uniswapV3Executor, innerData)
         );
 
         uint256 amountOut = _singleSwap(
@@ -413,7 +444,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             ALICE,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv3Executor), innerData, USDC_SUBSIDY)
+                _subsidized(uniswapV3Executor, innerData, USDC_SUBSIDY)
             )
         );
 
@@ -430,7 +461,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             ETH_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv4Executor), innerData)
+            encodeSingleSwap(uniswapV4Executor, innerData)
         );
 
         uint256 amountOut = _singleSwap(
@@ -440,7 +471,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             BOB,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv4Executor), innerData, ETH_SUBSIDY)
+                _subsidized(uniswapV4Executor, innerData, ETH_SUBSIDY)
             )
         );
 
@@ -455,7 +486,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         uint32 clientFeeBps = 1_000_000; // 1%
         bytes memory swapData = encodeSingleSwap(
             address(wrapper),
-            _subsidized(address(usv4Executor), _usv4UsdcToEth(), ETH_SUBSIDY)
+            _subsidized(uniswapV4Executor, _usv4UsdcToEth(), ETH_SUBSIDY)
         );
 
         uint256 total =
@@ -503,17 +534,16 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             encodeUniswapV3Swap(WETH_ADDR, DAI_ADDR, DAI_WETH_USV3, false);
 
         swaps = new bytes[](2);
-        swaps[0] = encodeSplitSwap(
-            0, 1, SEVENTY_PERCENT, address(usv2Executor), usv2Data
-        );
-        swaps[1] = encodeSplitSwap(0, 1, 0, address(usv3Executor), usv3Data);
+        swaps[0] =
+            encodeSplitSwap(0, 1, SEVENTY_PERCENT, uniswapV2Executor, usv2Data);
+        swaps[1] = encodeSplitSwap(0, 1, 0, uniswapV3Executor, usv3Data);
         if (subsidizeLargerLeg) {
             swaps[0] = encodeSplitSwap(
                 0,
                 1,
                 SEVENTY_PERCENT,
                 address(wrapper),
-                _subsidized(address(usv2Executor), usv2Data, DAI_SUBSIDY)
+                _subsidized(uniswapV2Executor, usv2Data, DAI_SUBSIDY)
             );
         }
     }
@@ -530,7 +560,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             0,
             address(wrapper),
             _subsidized(
-                address(usv3Executor),
+                uniswapV3Executor,
                 encodeUniswapV3Swap(WETH_ADDR, DAI_ADDR, DAI_WETH_USV3, false),
                 DAI_SUBSIDY
             )
@@ -588,21 +618,21 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             0,
             1,
             (0xffffff * 60) / 100,
-            address(usv2Executor),
+            uniswapV2Executor,
             _usv2(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
         swaps[1] = encodeSplitSwap(
             1,
             3,
             0,
-            address(usv2Executor),
+            uniswapV2Executor,
             _usv2(USDC_WBTC_POOL, WBTC_ADDR, USDC_ADDR)
         );
         swaps[2] = encodeSplitSwap(
             0,
             2,
             0,
-            address(usv2Executor),
+            uniswapV2Executor,
             _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
         swaps[3] = subsidizeDaiLeg
@@ -611,9 +641,9 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
                 3,
                 0,
                 address(wrapper),
-                _subsidized(address(usv2Executor), daiToUsdc, USDC_SUBSIDY)
+                _subsidized(uniswapV2Executor, daiToUsdc, USDC_SUBSIDY)
             )
-            : encodeSplitSwap(2, 3, 0, address(usv2Executor), daiToUsdc);
+            : encodeSplitSwap(2, 3, 0, uniswapV2Executor, daiToUsdc);
     }
 
     function testSplitSwapSubsidizedLegAfterIntermediate() public {
@@ -638,10 +668,9 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         bytes memory daiToUsdc = _usv2(DAI_USDC_POOL, DAI_ADDR, USDC_ADDR);
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
-            _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+            uniswapV2Executor, _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
-        swaps[1] = encodeSequentialSwap(address(usv2Executor), daiToUsdc);
+        swaps[1] = encodeSequentialSwap(uniswapV2Executor, daiToUsdc);
 
         uint256 snapshot = vm.snapshotState();
         uint256 baseline =
@@ -650,7 +679,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
         swaps[1] = encodeSequentialSwap(
             address(wrapper),
-            _subsidized(address(usv2Executor), daiToUsdc, USDC_SUBSIDY)
+            _subsidized(uniswapV2Executor, daiToUsdc, USDC_SUBSIDY)
         );
         uint256 amountOut =
             _sequentialSwap(WETH_ADDR, USDC_ADDR, amountIn, swaps);
@@ -666,10 +695,9 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             encodeUniswapV3Swap(WETH_ADDR, USDC_ADDR, USDC_WETH_USV3, false);
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
-            _usv2(DAI_WETH_UNIV2_POOL, DAI_ADDR, WETH_ADDR)
+            uniswapV2Executor, _usv2(DAI_WETH_UNIV2_POOL, DAI_ADDR, WETH_ADDR)
         );
-        swaps[1] = encodeSequentialSwap(address(usv3Executor), wethToUsdc);
+        swaps[1] = encodeSequentialSwap(uniswapV3Executor, wethToUsdc);
 
         uint256 snapshot = vm.snapshotState();
         uint256 baseline = _sequentialSwap(DAI_ADDR, USDC_ADDR, amountIn, swaps);
@@ -677,7 +705,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
         swaps[1] = encodeSequentialSwap(
             address(wrapper),
-            _subsidized(address(usv3Executor), wethToUsdc, USDC_SUBSIDY)
+            _subsidized(uniswapV3Executor, wethToUsdc, USDC_SUBSIDY)
         );
         uint256 amountOut =
             _sequentialSwap(DAI_ADDR, USDC_ADDR, amountIn, swaps);
@@ -688,7 +716,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
     function testViewsCalledByRouterForInnerReportingItsCaller() public {
         bytes memory data =
-            _subsidized(address(nativeWrapExecutor), hex"01", WETH_SUBSIDY);
+            _subsidized(nativeWrapExecutor, hex"01", WETH_SUBSIDY);
 
         vm.startPrank(tychoRouterAddr);
         address fundsExpected = wrapper.fundsExpectedAddress(data);
@@ -705,7 +733,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         bytes memory innerData = _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
         bytes memory swapData = encodeSingleSwap(
             address(wrapper),
-            _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+            _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
         );
 
         uint256 baseline = _baselineSingleSwap(
@@ -713,7 +741,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             DAI_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv2Executor), innerData)
+            encodeSingleSwap(uniswapV2Executor, innerData)
         );
 
         vm.prank(FEE_SETTER);
@@ -762,7 +790,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             DAI_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv2Executor), innerData)
+            encodeSingleSwap(uniswapV2Executor, innerData)
         );
 
         vm.prank(FEE_SETTER);
@@ -776,7 +804,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             1,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+                _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
             )
         );
 
@@ -794,8 +822,8 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         uint256 amountIn = 3000 ether;
         bytes memory daiToWeth = _usv2(DAI_WETH_UNIV2_POOL, DAI_ADDR, WETH_ADDR);
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(usv2Executor), daiToWeth);
-        swaps[1] = encodeSequentialSwap(address(nativeWrapExecutor), hex"00");
+        swaps[0] = encodeSequentialSwap(uniswapV2Executor, daiToWeth);
+        swaps[1] = encodeSequentialSwap(nativeWrapExecutor, hex"00");
 
         uint256 snapshot = vm.snapshotState();
         uint256 baseline = _sequentialSwap(DAI_ADDR, ETH_ADDR, amountIn, swaps);
@@ -803,7 +831,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
         swaps[0] = encodeSequentialSwap(
             address(wrapper),
-            _subsidized(address(usv2Executor), daiToWeth, WETH_SUBSIDY)
+            _subsidized(uniswapV2Executor, daiToWeth, WETH_SUBSIDY)
         );
         uint256 aliceEthBefore = ALICE.balance;
         uint256 amountOut = _sequentialSwap(DAI_ADDR, ETH_ADDR, amountIn, swaps);
@@ -818,8 +846,8 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         uint256 amountIn = 3000_000000;
         bytes memory usdcToEth = _usv4UsdcToEth();
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(usv4Executor), usdcToEth);
-        swaps[1] = encodeSequentialSwap(address(nativeWrapExecutor), hex"01");
+        swaps[0] = encodeSequentialSwap(uniswapV4Executor, usdcToEth);
+        swaps[1] = encodeSequentialSwap(nativeWrapExecutor, hex"01");
 
         uint256 snapshot = vm.snapshotState();
         uint256 baseline =
@@ -828,7 +856,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
 
         swaps[0] = encodeSequentialSwap(
             address(wrapper),
-            _subsidized(address(usv4Executor), usdcToEth, ETH_SUBSIDY)
+            _subsidized(uniswapV4Executor, usdcToEth, ETH_SUBSIDY)
         );
         uint256 amountOut =
             _sequentialSwap(USDC_ADDR, WETH_ADDR, amountIn, swaps);
@@ -855,20 +883,19 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
                 1,
                 SEVENTY_PERCENT,
                 address(wrapper),
-                _subsidized(address(usv2Executor), usv2Data, WETH_SUBSIDY)
+                _subsidized(uniswapV2Executor, usv2Data, WETH_SUBSIDY)
             )
             : encodeSplitSwap(
-                0, 1, SEVENTY_PERCENT, address(usv2Executor), usv2Data
+                0, 1, SEVENTY_PERCENT, uniswapV2Executor, usv2Data
             );
         swaps[1] = encodeSplitSwap(
             0,
             1,
             0,
-            address(usv3Executor),
+            uniswapV3Executor,
             encodeUniswapV3Swap(DAI_ADDR, WETH_ADDR, DAI_WETH_USV3, true)
         );
-        swaps[2] =
-            encodeSplitSwap(1, 2, 0, address(nativeWrapExecutor), hex"00");
+        swaps[2] = encodeSplitSwap(1, 2, 0, nativeWrapExecutor, hex"00");
     }
 
     function testSplitEndingInUnwrapCarriesSubsidy() public {
@@ -897,7 +924,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             DAI_ADDR,
             amountIn,
             tychoRouterAddr,
-            encodeSingleSwap(address(usv2Executor), innerData)
+            encodeSingleSwap(uniswapV2Executor, innerData)
         );
 
         _singleSwap(
@@ -907,7 +934,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             tychoRouterAddr,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+                _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
             )
         );
 
@@ -926,7 +953,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             DAI_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv2Executor), innerData)
+            encodeSingleSwap(uniswapV2Executor, innerData)
         );
 
         uint256 amountOut = _singleSwapExpecting(
@@ -938,7 +965,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             baseline + 1,
             encodeSingleSwap(
                 address(wrapper),
-                _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+                _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
             )
         );
 
@@ -957,12 +984,12 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             DAI_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv2Executor), innerData)
+            encodeSingleSwap(uniswapV2Executor, innerData)
         );
 
         bytes memory swapData = encodeSingleSwap(
             address(revertingWrapper),
-            _subsidized(address(usv2Executor), innerData, DAI_SUBSIDY)
+            _subsidized(uniswapV2Executor, innerData, DAI_SUBSIDY)
         );
         _fundAlice(WETH_ADDR, amountIn);
         vm.expectEmit(tychoRouterAddr);
@@ -991,7 +1018,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
             encodeSingleSwap(
                 address(probingWrapper),
                 _subsidized(
-                    address(usv2Executor),
+                    uniswapV2Executor,
                     _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR),
                     DAI_SUBSIDY
                 )
@@ -1066,7 +1093,7 @@ contract TychoSubsidizingExecutorTest is TychoSubsidizingTestBase {
         bytes memory swapData = encodeSingleSwap(
             address(wrapper),
             _subsidized(
-                address(usv2Executor),
+                uniswapV2Executor,
                 _usv2(DAI_WETH_UNIV2_POOL, WETH_ADDR, WETH_ADDR),
                 WETH_SUBSIDY
             )
@@ -1150,7 +1177,12 @@ contract EthRejectingReceiver {
     }
 }
 
-contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
+contract TychoSubsidizingWithPayerTest is
+    TychoSubsidizingTestBase,
+    UniswapV2Deployment,
+    UniswapV3Deployment,
+    UniswapV4Deployment
+{
     uint256 constant NONCE = 7;
     uint256 constant AMOUNT_IN = 1 ether;
     bytes32 constant DOMAIN_TYPEHASH = keccak256(
@@ -1271,9 +1303,9 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
         returns (bytes memory)
     {
         Subsidy memory s = _subsidy(
-            boundTo, DAI_ADDR, DAI_SUBSIDY, address(usv2Executor), usv2Data
+            boundTo, DAI_ADDR, DAI_SUBSIDY, uniswapV2Executor, usv2Data
         );
-        return _encode(s, _sign(s), address(usv2Executor), usv2Data);
+        return _encode(s, _sign(s), uniswapV2Executor, usv2Data);
     }
 
     function _fund(address account) internal {
@@ -1308,7 +1340,7 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
     }
 
     function _plainV2() internal view returns (bytes memory) {
-        return encodeSingleSwap(address(usv2Executor), usv2Data);
+        return encodeSingleSwap(uniswapV2Executor, usv2Data);
     }
 
     function _expectSkip(ISubsidyPayer.SkipReason reason) internal {
@@ -1319,13 +1351,12 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
     function testTamperedInnerData() public {
         bytes memory usv3Data =
             encodeUniswapV3Swap(WETH_ADDR, DAI_ADDR, DAI_WETH_USV3, false);
-        Subsidy memory s = _subsidy(
-            ALICE, DAI_ADDR, DAI_SUBSIDY, address(usv2Executor), usv2Data
-        );
+        Subsidy memory s =
+            _subsidy(ALICE, DAI_ADDR, DAI_SUBSIDY, uniswapV2Executor, usv2Data);
         bytes memory swapData =
-            _encode(s, _sign(s), address(usv3Executor), usv3Data);
+            _encode(s, _sign(s), uniswapV3Executor, usv3Data);
         uint256 baseline =
-            _baseline(encodeSingleSwap(address(usv3Executor), usv3Data));
+            _baseline(encodeSingleSwap(uniswapV3Executor, usv3Data));
 
         _fund(ALICE);
         _expectSkip(ISubsidyPayer.SkipReason.InvalidSignature);
@@ -1336,12 +1367,11 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
     }
 
     function testExpiredSubsidy() public {
-        Subsidy memory s = _subsidy(
-            ALICE, DAI_ADDR, DAI_SUBSIDY, address(usv2Executor), usv2Data
-        );
+        Subsidy memory s =
+            _subsidy(ALICE, DAI_ADDR, DAI_SUBSIDY, uniswapV2Executor, usv2Data);
         s.deadline = block.timestamp + 10;
         bytes memory swapData =
-            _encode(s, _sign(s), address(usv2Executor), usv2Data);
+            _encode(s, _sign(s), uniswapV2Executor, usv2Data);
         vm.warp(block.timestamp + 11);
         uint256 baseline = _baseline(_plainV2());
 
@@ -1354,11 +1384,10 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
     }
 
     function testUnsignedPlaceholder() public {
-        Subsidy memory s = _subsidy(
-            ALICE, DAI_ADDR, DAI_SUBSIDY, address(usv2Executor), usv2Data
-        );
+        Subsidy memory s =
+            _subsidy(ALICE, DAI_ADDR, DAI_SUBSIDY, uniswapV2Executor, usv2Data);
         bytes memory swapData =
-            _encode(s, new bytes(65), address(usv2Executor), usv2Data);
+            _encode(s, new bytes(65), uniswapV2Executor, usv2Data);
         uint256 baseline = _baseline(_plainV2());
 
         _fund(ALICE);
@@ -1483,10 +1512,9 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
     ///      ALICE, signed by the subsidy signer.
     function _signedUsdcToEthSwapData() internal view returns (bytes memory) {
         bytes memory usv4Data = _usv4UsdcToEth();
-        Subsidy memory s = _subsidy(
-            ALICE, ETH_ADDR, ETH_SUBSIDY, address(usv4Executor), usv4Data
-        );
-        return _encode(s, _sign(s), address(usv4Executor), usv4Data);
+        Subsidy memory s =
+            _subsidy(ALICE, ETH_ADDR, ETH_SUBSIDY, uniswapV4Executor, usv4Data);
+        return _encode(s, _sign(s), uniswapV4Executor, usv4Data);
     }
 
     function _usdcToEthBaseline(uint256 amountIn) internal returns (uint256) {
@@ -1495,7 +1523,7 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
             ETH_ADDR,
             amountIn,
             BOB,
-            encodeSingleSwap(address(usv4Executor), _usv4UsdcToEth())
+            encodeSingleSwap(uniswapV4Executor, _usv4UsdcToEth())
         );
     }
 
@@ -1584,15 +1612,13 @@ contract TychoSubsidizingWithPayerTest is TychoSubsidizingTestBase {
     function testEthRejectingReceiver() public {
         address receiver = address(new EthRejectingReceiver());
         bytes memory usv4Data = _usv4UsdcToEth();
-        Subsidy memory s = _subsidy(
-            ALICE, ETH_ADDR, ETH_SUBSIDY, address(usv4Executor), usv4Data
-        );
-        bytes memory wrapped =
-            _encode(s, _sign(s), address(usv4Executor), usv4Data);
+        Subsidy memory s =
+            _subsidy(ALICE, ETH_ADDR, ETH_SUBSIDY, uniswapV4Executor, usv4Data);
+        bytes memory wrapped = _encode(s, _sign(s), uniswapV4Executor, usv4Data);
 
         uint256 snapshot = vm.snapshotState();
         (bool plainSuccess, bytes memory plainResult) = _usdcToEthCall(
-            encodeSingleSwap(address(usv4Executor), usv4Data), receiver
+            encodeSingleSwap(uniswapV4Executor, usv4Data), receiver
         );
         vm.revertToState(snapshot);
         (bool wrappedSuccess, bytes memory wrappedResult) =

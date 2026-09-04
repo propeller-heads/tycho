@@ -1,7 +1,6 @@
 use std::{
-    env,
-    fs::OpenOptions,
-    io::{Read, Seek, SeekFrom, Write},
+    env, fs,
+    path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -420,50 +419,23 @@ pub(crate) fn find_ple_item_end(items: &[Vec<u8>], index: usize) -> usize {
     end
 }
 
+/// Calldata the Solidity tests replay, one `<test_identifier>.hex` file per test: the
+/// `tests/*.rs` binaries write concurrently.
+const CALLDATA_DIR: &str = "contracts/test/assets/calldata";
+
 // Function used in tests to write calldata to a file that then is used by the corresponding
 // solidity tests.
 pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
-    let file_path = "contracts/test/assets/calldata.txt";
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(file_path)
-        .expect("Failed to open calldata file");
-    // nextest runs each test in its own process, so only a file lock keeps two tests from
-    // rewriting the file at once. Dropping `file` releases it.
-    file.lock()
-        .expect("Failed to lock calldata file");
-
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .expect("Failed to read calldata file");
-
-    let entry = format!("{test_identifier}:{hex_calldata}");
-    let mut lines = Vec::new();
-    let mut found = false;
-    for line in contents.lines() {
-        let key = line.split(':').next().unwrap_or("");
-        if key == test_identifier {
-            lines.push(entry.as_str());
-            found = true;
-        } else {
-            lines.push(line);
-        }
-    }
-
-    // If the test identifier wasn't found, append a new line
-    if !found {
-        lines.push(entry.as_str());
-    }
-
-    let mut updated = lines.join("\n");
-    updated.push('\n');
-    file.set_len(0)
-        .expect("Failed to truncate calldata file");
-    file.seek(SeekFrom::Start(0))
-        .expect("Failed to rewind calldata file");
-    file.write_all(updated.as_bytes())
-        .expect("Failed to write calldata");
+    assert!(
+        test_identifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "Test identifier {test_identifier} is used as a file name, so it must consist of ASCII \
+         alphanumerics and underscores only"
+    );
+    let path = Path::new(CALLDATA_DIR).join(format!("{test_identifier}.hex"));
+    fs::write(&path, hex_calldata)
+        .unwrap_or_else(|e| panic!("Failed to write calldata to {}: {e}", path.display()));
 }
 
 #[cfg(test)]

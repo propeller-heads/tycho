@@ -2,6 +2,9 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import {SlipstreamsExecutorExposed} from "./Slipstreams.t.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, BASE_WETH, BASE_cbBTC} from "../Constants.sol";
+import {SlipstreamsDeployment} from "../deployments/Slipstreams.sol";
 
 /// Swaps directly on a CL pool and pays from its own balance in the callback: the reference for
 /// what an executor or the router must deliver.
@@ -122,7 +125,11 @@ contract AeroClExecutorTest is Constants, AeroClReference {
     }
 }
 
-contract TychoRouterForAeroClTest is TychoRouterTestSetup, AeroClReference {
+contract TychoRouterForAeroClTest is
+    TychoRouterTestSetup,
+    AeroClReference,
+    SlipstreamsDeployment
+{
     function getChain() public pure override returns (string memory) {
         return "base";
     }

@@ -180,7 +180,7 @@ mod tests {
     fn encode_swap(swap: &Swap) -> Result<Vec<u8>, EncodingError> {
         // Deterministic test address, config/test_executor_addresses.json ("base").
         let encoder = PancakeswapInfinitySwapEncoder::new(
-            Bytes::from("0xe54a55121A47451c5727ADBAF9b9FC1643477e25"),
+            Bytes::from("0xD28256Bac8B294AEA588B484B7e861Ad55E3B428"),
             Chain::Base,
             None,
         )?;

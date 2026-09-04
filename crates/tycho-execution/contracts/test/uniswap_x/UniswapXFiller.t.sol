@@ -11,8 +11,26 @@ import {
 } from "@src/uniswap_x/IStructs.sol";
 import {TychoRouterV3, ClientFeeParams} from "@src/TychoRouterV3.sol";
 import "../TychoRouterTestSetup.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    DAI_ADDR,
+    ETH_ADDR,
+    USDC_ADDR,
+    USDT_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
+import {
+    DAI_WETH_UNIV2_POOL,
+    UniswapV2Deployment
+} from "../deployments/UniswapV2.sol";
+import {DAI_USDT_USV3, UniswapV3Deployment} from "../deployments/UniswapV3.sol";
 
-contract UniswapXFillerTest is Test, TychoRouterTestSetup {
+contract UniswapXFillerTest is
+    Test,
+    TychoRouterTestSetup,
+    UniswapV2Deployment,
+    UniswapV3Deployment
+{
     address EXECUTOR = address(0xCe79b081c0c924cb67848723ed3057234d10FC6b);
     address REACTOR = address(0x00000011F84B9aa48e5f8aA8B9897600006289Be);
 
@@ -54,8 +72,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV2Executor, protocolData);
 
         uint256 expectedAmountOut = 2008817438608734439722;
         bytes memory tychoRouterData = abi.encodeWithSelector(
@@ -172,8 +189,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV3Swap(DAI_ADDR, USDT_ADDR, DAI_USDT_USV3, zeroForOne);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv3Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(uniswapV3Executor, protocolData);
 
         bytes memory tychoRouterData = abi.encodeWithSelector(
             tychoRouter.singleSwap.selector,

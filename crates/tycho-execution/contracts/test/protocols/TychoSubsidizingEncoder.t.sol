@@ -3,12 +3,30 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import {SubsidyPayer} from "@src/SubsidyPayer.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    ALICE,
+    DAI_ADDR,
+    PERMIT2_ADDRESS,
+    USDC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
+import {NativeWrapDeployment} from "../deployments/NativeWrap.sol";
+import {UniswapV2Deployment} from "../deployments/UniswapV2.sol";
+import {UniswapV3Deployment} from "../deployments/UniswapV3.sol";
+import {UniswapV4Deployment} from "../deployments/UniswapV4.sol";
 
 /// @dev Runs subsidized swaps encoded and signed by
 ///      tests/subsidy_integration_tests.rs. Each `<name>_unsigned` entry is
 ///      the same calldata with the encoder's zero signature, which fills
 ///      without the subsidy.
-contract TychoSubsidizingEncoderTest is TychoRouterTestSetup {
+contract TychoSubsidizingEncoderTest is
+    TychoRouterTestSetup,
+    NativeWrapDeployment,
+    UniswapV2Deployment,
+    UniswapV3Deployment,
+    UniswapV4Deployment
+{
     // Must match the constants in tests/subsidy_integration_tests.rs.
     address constant SUBSIDIZING_EXECUTOR =
         0xE06C68f4c151619a8F32d475e91349B3D820343a;

@@ -74,7 +74,7 @@ mod tests {
 
     fn encoder() -> BopAMMSwapEncoder {
         BopAMMSwapEncoder::new(
-            Bytes::from("0x3Cff5E7eBecb676c3Cb602D0ef2d46710b88854E"),
+            Bytes::from("0xbc95b804527A0A2bb8D90ddE2E6409Cc06505e0b"),
             Chain::Ethereum,
             None,
         )

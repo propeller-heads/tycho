@@ -332,7 +332,7 @@ mod tests {
             origin: None,
         };
         let encoder = CurveSwapEncoder::new(
-            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Bytes::from("0x05F23696AfE84E1D3229370F71651cF5B8588eE1"),
             Chain::Ethereum,
             curve_config(),
         )
@@ -394,7 +394,7 @@ mod tests {
             origin: None,
         };
         let encoder = CurveSwapEncoder::new(
-            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Bytes::from("0x05F23696AfE84E1D3229370F71651cF5B8588eE1"),
             Chain::Ethereum,
             curve_config(),
         )
@@ -457,7 +457,7 @@ mod tests {
             origin: None,
         };
         let encoder = CurveSwapEncoder::new(
-            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Bytes::from("0x05F23696AfE84E1D3229370F71651cF5B8588eE1"),
             Chain::Ethereum,
             None,
         )

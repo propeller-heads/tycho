@@ -3,6 +3,11 @@ pragma solidity ^0.8.26;
 
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE} from "../Constants.sol";
+import {
+    PancakeswapInfinityDeployment
+} from "../deployments/PancakeswapInfinity.sol";
 
 address constant BSC_USDT = 0x55d398326f99059fF775485246999027B3197955;
 
@@ -58,7 +63,10 @@ function usdtNesSwapData() pure returns (bytes memory) {
 
 // The Infinity executor needs nothing new for CLAlphaHook pools: the hook travels in the pool
 // key and only gates on its start time.
-abstract contract PancakeswapInfinityAlphaBase is TychoRouterTestSetup {
+abstract contract PancakeswapInfinityAlphaBase is
+    TychoRouterTestSetup,
+    PancakeswapInfinityDeployment
+{
     function getChain() public pure override returns (string memory) {
         return "bsc";
     }
@@ -78,7 +86,7 @@ abstract contract PancakeswapInfinityAlphaBase is TychoRouterTestSetup {
             1,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(pancakeswapInfinityExecutor), swapData)
+            encodeSingleSwap(pancakeswapInfinityExecutor, swapData)
         );
         vm.stopPrank();
         return out;
@@ -111,7 +119,7 @@ abstract contract PancakeswapInfinityAlphaBase is TychoRouterTestSetup {
             1,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(pancakeswapInfinityExecutor), swapData)
+            encodeSingleSwap(pancakeswapInfinityExecutor, swapData)
         ) {
             fail();
         } catch (bytes memory reason) {

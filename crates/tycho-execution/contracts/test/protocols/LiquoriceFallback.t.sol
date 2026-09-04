@@ -21,6 +21,17 @@ import {
     LiquoriceFallbackRouter__InvalidDataLength,
     LiquoriceFallbackRouter__InvalidSelector
 } from "../../src/fallback/LiquoriceFallbackRouter.sol";
+import {USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {
+    LIQUORICE_BALANCE_MANAGER,
+    LIQUORICE_SETTLEMENT
+} from "../deployments/Liquorice.sol";
+import {FLUIDV1_LIQUIDITY} from "../deployments/FluidV1.sol";
+import {
+    UNISWAP_V3_STATIC_QUOTER,
+    USDC_WETH_USV3
+} from "../deployments/UniswapV3.sol";
+import {POOL_MANAGER} from "../deployments/UniswapV4.sol";
 
 /// @dev Uses `LiquoriceExecutorTest.testSettleSingle`'s signed quote, whose trader and receiver
 /// is `TRADER`.

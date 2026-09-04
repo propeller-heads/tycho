@@ -3,6 +3,12 @@ pragma solidity ^0.8.26;
 import "./EkuboV3.t.sol";
 import {PoolId} from "@ekubo-v3/types/poolId.sol";
 import {toPoolId} from "@ekubo-v3/types/poolKey.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {ALICE, USDC_ADDR, USDT_ADDR} from "../Constants.sol";
+import {
+    EKUBO_V3_SIGNED_EXCLUSIVE_SWAP,
+    EkuboV3Deployment
+} from "../deployments/EkuboV3.sol";
 
 uint256 constant MEV_CAPTURE_V21_FORK_BLOCK = 26250000;
 address constant MEV_CAPTURE_V21_TOKEN0 =
@@ -152,7 +158,10 @@ contract EkuboV3MevCaptureV21Test is Constants, TestUtils {
 
 /// The route the Rust encoder builds for the first swap above, executed through
 /// TychoRouter with the quote as the minimum amount out.
-contract TychoRouterForEkuboV3MevCaptureV21Test is TychoRouterTestSetup {
+contract TychoRouterForEkuboV3MevCaptureV21Test is
+    TychoRouterTestSetup,
+    EkuboV3Deployment
+{
     LiquidityHelper liquidityHelper;
 
     function getForkBlock() public pure override returns (uint256) {

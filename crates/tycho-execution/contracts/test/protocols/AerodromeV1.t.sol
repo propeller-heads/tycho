@@ -7,9 +7,11 @@ import {
     AerodromeV1Executor__InvalidDataLength
 } from "@src/executors/AerodromeV1Executor.sol";
 import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants} from "../Constants.sol";
 import {TransferManager} from "@src/TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {AerodromeV1Deployment} from "../deployments/AerodromeV1.sol";
 
 abstract contract AerodromeV1TestBase {
     address internal constant AERODROME_V1_VOLATILE_POOL =
@@ -210,7 +212,8 @@ contract AerodromeV1ExecutorTest is Constants, TestUtils, AerodromeV1TestBase {
 
 contract TychoRouterForAerodromeV1Test is
     TychoRouterTestSetup,
-    AerodromeV1TestBase
+    AerodromeV1TestBase,
+    AerodromeV1Deployment
 {
     function getChain() public pure override returns (string memory) {
         return "base";

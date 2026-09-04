@@ -344,7 +344,7 @@ Constraints:
   the `rfq:hashflow` router; Native adds the `rfq:native` router; Liquorice adds the `rfq:liquorice` settlement
   and balance manager.
 - The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
-  to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
+  under the chain in `executor_deployments.json`, keyed by its protocol name (`fallback` for `PropAMMFallbackExecutor`,
   `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`,
   `fallback:rfq:hashflow` for `HashflowFallbackExecutor`, `fallback:rfq:native` for `NativeFallbackExecutor`,
   `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`). An entry holds the zero address until its router is
@@ -720,7 +720,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    pull-based)
 5. Add Rust encoder in `src/encoding/evm/swap_encoder/` and register in `swap_encoder_registry.rs`
 6. Add integration tests in both `contracts/test/protocols/` and `tests/`
-7. Add test setup in `contracts/test/TychoRouterTestSetup.sol`
+7. Add `contracts/test/deployments/<Name>.sol` with the protocol system, the executor's contract name, its test constructor arguments and
+   the protocol's addresses the tests use, and its address (`<name>Executor`) to `config/test_executor_addresses.json`
 8. If the executor gives the caller control over the called pool contract (e.g. the caller supplies the pool
    address), model it in the security model (`model/src/model/executors.rs`): add a variant to the `Executor` enum
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
@@ -772,10 +773,11 @@ Coding rules for Solidity and Rust (naming, errors, tests) are in `.claude/knowl
 
 ### Testing
 
-- Router tests inherit `TychoRouterTestSetup.sol`; tests that don't use the router have their own test contract
+- Router tests inherit `TychoRouterTestSetup.sol` and the `<Name>Deployment` contract (`test/deployments/<Name>.sol`)
+  of each executor they swap through; the setup deploys and registers only those. Tests that don't use the router have their own test contract
 - **Cross-language integration tests**: Rust encoding tests
-  call `write_calldata_to_file(test_identifier, hex_calldata)` (`src/encoding/evm/utils.rs`), which appends `name:hex`
-  lines to `contracts/test/assets/calldata.txt`. Solidity tests then read that file
+  call `write_calldata_to_file(test_identifier, hex_calldata)` (`src/encoding/evm/utils.rs`), which writes
+  `contracts/test/assets/calldata/<test_identifier>.hex`, one file per test. Solidity tests then read it back
   via `loadCallDataFromFile(testName)` (`contracts/test/TestUtils.sol`) and execute the calldata against a mainnet fork.
   This verifies that Rust-encoded calldata is valid and executes correctly end-to-end.
 

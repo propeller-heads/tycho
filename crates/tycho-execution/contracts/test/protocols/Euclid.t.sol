@@ -3,7 +3,8 @@ pragma solidity ^0.8.26;
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/EuclidExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {Constants, USDC_ADDR, WETH_ADDR} from "../Constants.sol";
+import {EuclidDeployment, ONEINCH_ROUTER_V5} from "../deployments/Euclid.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @dev The 1inch v5 router's own reverts, from OrderRFQMixin.
@@ -441,7 +442,7 @@ contract EuclidExecutorTest is Constants, TestUtils {
 ///      router this setup deploys, and signed for it. The fork is pinned to
 ///      the block the quote was recorded at, where the order is unexpired and
 ///      its nonce unused; the maker's inventory and allowance are set here.
-contract TychoRouterForEuclidTest is TychoRouterTestSetup {
+contract TychoRouterForEuclidTest is TychoRouterTestSetup, EuclidDeployment {
     function getForkBlock() public pure override returns (uint256) {
         return 26384407;
     }

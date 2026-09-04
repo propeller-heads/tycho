@@ -1,7 +1,7 @@
 pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
-import {Constants} from "../Constants.sol";
+import {ALICE, Constants, STETH_ADDR} from "../Constants.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
     LidoV4Executor,
@@ -13,6 +13,8 @@ import {
     LidoV4Direction
 } from "../../src/executors/LidoV4Executor.sol";
 import {TestUtils} from "../TestUtils.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {LidoV4Deployment, WSTETH_ADDR} from "../deployments/LidoV4.sol";
 
 /// Only the views the tests need; the executor itself reads neither.
 interface IStakeLimit {
@@ -423,7 +425,7 @@ contract LidoV4ExecutorTest is TestUtils, Constants {
     }
 }
 
-contract TychoRouterForLidoV4Test is TychoRouterTestSetup {
+contract TychoRouterForLidoV4Test is TychoRouterTestSetup, LidoV4Deployment {
     function getForkBlock() public pure override returns (uint256) {
         return 25603404;
     }

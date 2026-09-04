@@ -6,6 +6,8 @@ import {TychoRouterTestSetup} from "../TychoRouterTestSetup.sol";
 import {TychoRouter__NegativeSlippage} from "@src/TychoRouterV3.sol";
 import {BaibaiExecutor} from "@src/executors/BaibaiExecutor.sol";
 import {TransferManager} from "@src/TransferManager.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {BaibaiDeployment} from "../deployments/Baibai.sol";
 
 /// @dev `quoteFor` is from BaiBai's taker documentation
 ///      (docs.baibai.cx/takers/quoting-and-swapping). The others were identified on the live,
@@ -53,8 +55,8 @@ interface IBaibaiCurveBook {
 /// @dev The venue's revert for a curve past its expiry, from BaiBai's taker documentation.
 error CurveStale();
 
-contract BaibaiTest is TychoRouterTestSetup {
-    BaibaiExecutor public baibaiExecutor;
+contract BaibaiTest is TychoRouterTestSetup, BaibaiDeployment {
+    BaibaiExecutor public executor;
     address internal constant BAIBAI_ENTRYPOINT =
         0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa;
     address constant CURVE_BOOK = 0x604d9b9eB1e1571C78661a6C1088427EC9c8c6E5;
@@ -62,27 +64,10 @@ contract BaibaiTest is TychoRouterTestSetup {
     address constant BASE = 0x4200000000000000000000000000000000000006;
     address constant QUOTE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    /// @dev Where the executor is placed: derived from its name, so deployments the shared
-    ///      setup adds do not move it, and the Rust-encoded calldata
-    ///      (config/test_executor_addresses.json) keeps addressing it.
-    address constant BAIBAI_EXECUTOR =
-        address(uint160(uint256(keccak256("tycho.test.BaibaiExecutor"))));
 
     function setUp() public override {
         super.setUp();
-        deployCodeTo(
-            "BaibaiExecutor.sol:BaibaiExecutor",
-            abi.encode(BAIBAI_ENTRYPOINT),
-            BAIBAI_EXECUTOR
-        );
-        baibaiExecutor = BaibaiExecutor(BAIBAI_EXECUTOR);
-        address[] memory executors = new address[](1);
-        executors[0] = address(baibaiExecutor);
-        // Register before the pinned timestamp so activation does not expire the curve.
-        vm.warp(forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR);
-        vm.prank(EXECUTOR_SETTER);
-        tychoRouter.setExecutors(executors);
-        vm.warp(forkTimestamp);
+        executor = BaibaiExecutor(baibaiExecutor);
     }
 
     function getChain() public pure override returns (string memory) {
@@ -106,7 +91,7 @@ contract BaibaiTest is TychoRouterTestSetup {
                 address tokenIn,
                 address tokenOut,
                 bool outputToRouter
-            ) = baibaiExecutor.getTransferData(abi.encodePacked(BASE, sell));
+            ) = executor.getTransferData(abi.encodePacked(BASE, sell));
             assertEq(
                 uint8(kind),
                 uint8(TransferManager.TransferType.ProtocolWillDebit)
@@ -116,7 +101,7 @@ contract BaibaiTest is TychoRouterTestSetup {
             assertEq(tokenOut, sell == 1 ? QUOTE : BASE);
             assertFalse(outputToRouter);
         }
-        assertEq(baibaiExecutor.fundsExpectedAddress(""), address(this));
+        assertEq(executor.fundsExpectedAddress(""), address(this));
     }
 
     /// @dev An entrypoint that names no quote token cannot route a swap either way.
@@ -141,10 +126,10 @@ contract BaibaiTest is TychoRouterTestSetup {
         ];
         for (uint256 i; i < invalid.length; ++i) {
             vm.expectRevert(BaibaiExecutor.BaibaiExecutor__InvalidData.selector);
-            baibaiExecutor.getTransferData(invalid[i]);
+            executor.getTransferData(invalid[i]);
         }
         vm.expectRevert(BaibaiExecutor.BaibaiExecutor__InvalidData.selector);
-        baibaiExecutor.getTransferData(abi.encodePacked(address(0), uint8(1)));
+        executor.getTransferData(abi.encodePacked(address(0), uint8(1)));
     }
 
     function _setFee(address taker, uint16 bps) internal {
@@ -373,7 +358,7 @@ contract BaibaiTest is TychoRouterTestSetup {
         vm.startPrank(BOB);
         IERC20(base).approve(tychoRouterAddr, amount);
         bytes memory swap = encodeSingleSwap(
-            address(baibaiExecutor), abi.encodePacked(base, uint8(1))
+            address(executor), abi.encodePacked(base, uint8(1))
         );
         tychoRouter.singleSwap(
             amount, base, QUOTE, minOutput, minOutput, BOB, noClientFee(), swap
@@ -391,7 +376,7 @@ contract BaibaiTest is TychoRouterTestSetup {
         vm.startPrank(BOB);
         IERC20(base).approve(tychoRouterAddr, amount);
         bytes memory swap = encodeSingleSwap(
-            address(baibaiExecutor), abi.encodePacked(base, uint8(1))
+            address(executor), abi.encodePacked(base, uint8(1))
         );
         uint256 custodyBefore = IERC20(base).balanceOf(CUSTODIAN);
         vm.expectPartialRevert(reason);

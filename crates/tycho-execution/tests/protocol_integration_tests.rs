@@ -490,7 +490,7 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
         // length of ple encoded swaps without padding
         "00000000000000000000000000000000000000000000000000000000000000a0",
         // Swap data header
-        "f62849f9a0b5bf2913b396098f7c7019b51a820a", // executor address
+        "e79aba453c638458a49af2c18bee8a0ea684df10", // executor address
         // Protocol data
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // group token in
         "6982508145454ce325ddbe47a25d4ec3d2311933", // group token out
@@ -1859,8 +1859,8 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
 #[test]
 fn test_single_encoding_strategy_biconomy_weth_usdc() {
     // WETH -> (Biconomy PropAMM venue, push-payment IPropAMM) -> USDC
-    let token_in = weth();
-    let token_out = usdc();
+    let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+    let token_out = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
     // The mock venue address used by the BiconomyRouterTest Foundry test.
     let venue = "2222222222222222222222222222222222222222";
@@ -1879,7 +1879,7 @@ fn test_single_encoding_strategy_biconomy_weth_usdc() {
         BigUint::ZERO,
     );
 
-    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let encoder = get_tycho_router_encoder(Chain::Base);
     let solution = Solution::new(
         alice_address(),
         alice_address(),
@@ -1898,7 +1898,7 @@ fn test_single_encoding_strategy_biconomy_weth_usdc() {
         .clone();
 
     let calldata = encode_tycho_router_call(
-        eth_chain().id(),
+        Chain::Base.id(),
         &encoded_solution,
         &solution,
         &eth(),

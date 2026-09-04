@@ -3,8 +3,22 @@ pragma solidity ^0.8.26;
 import "./TychoRouterTestSetup.sol";
 import "./protocols/UniswapV4Utils.sol";
 import "@src/executors/BebopExecutor.sol";
+import {ExecutorDeployment} from "./ExecutorDeployment.sol";
+import {ALICE, DAI_ADDR, PERMIT2_ADDRESS} from "./Constants.sol";
+import {BalancerV2Deployment} from "./deployments/BalancerV2.sol";
+import {CurveDeployment} from "./deployments/Curve.sol";
+import {EkuboDeployment} from "./deployments/Ekubo.sol";
+import {UniswapV2Deployment} from "./deployments/UniswapV2.sol";
+import {UniswapV4Deployment} from "./deployments/UniswapV4.sol";
 
-contract TychoRouterTestProtocolIntegration is TychoRouterTestSetup {
+contract TychoRouterTestProtocolIntegration is
+    TychoRouterTestSetup,
+    BalancerV2Deployment,
+    CurveDeployment,
+    EkuboDeployment,
+    UniswapV2Deployment,
+    UniswapV4Deployment
+{
     function testMultiProtocolIntegration() public {
         // Test created with calldata from our router encoder.
         //

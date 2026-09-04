@@ -4,8 +4,20 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "@src/executors/NativeExecutor.sol";
 import {TransferManager} from "@src/TransferManager.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    Constants,
+    ETH_ADDR,
+    USDC_ADDR,
+    WETH_ADDR
+} from "../Constants.sol";
 import "forge-std/Test.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {
+    NATIVE_ROUTER_V6_ETHEREUM,
+    NativeDeployment,
+    nativeRouterV6
+} from "../deployments/Native.sol";
 
 // Mocks
 
@@ -474,7 +486,10 @@ contract NativeExecutorForkTest is Test, Constants {
     }
 }
 
-contract TychoRouterNativeIntegrationTest is TychoRouterTestSetup {
+contract TychoRouterNativeIntegrationTest is
+    TychoRouterTestSetup,
+    NativeDeployment
+{
     function setUp() public override {
         super.setUp();
         // Execute within the recorded V6 quotes' validity window.

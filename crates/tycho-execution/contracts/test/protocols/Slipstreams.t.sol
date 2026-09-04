@@ -3,9 +3,26 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import "@src/executors/SlipstreamsExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {
+    ALICE,
+    BASE_USDC,
+    BASE_WETH,
+    BASE_cbBTC,
+    Constants,
+    DAI_ADDR
+} from "../Constants.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
+import {ExecutorDeployment} from "../ExecutorDeployment.sol";
+import {SlipstreamsDeployment} from "../deployments/Slipstreams.sol";
+
+address constant BASE_BMI = 0x2F16386bB37709016023232523FF6d9DAF444BE3;
+// Aerodrome Slipstreams
+address constant SLIPSTREAMS_WETH_USDC_POOL =
+    0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59;
+// Pool that uses the new factory
+address constant SLIPSTREAMS_WETH_BMI_POOL =
+    0x1b7088833548A8C4Ab12a900a2f4bdFA49221081;
 
 contract SlipstreamsExecutorExposed is SlipstreamsExecutor {
     constructor() SlipstreamsExecutor() {}
@@ -197,7 +214,10 @@ contract SlipstreamsExecutorTest is Test, TestUtils, Constants {
     }
 }
 
-contract TychoRouterForSlipstreamsTest is TychoRouterTestSetup {
+contract TychoRouterForSlipstreamsTest is
+    TychoRouterTestSetup,
+    SlipstreamsDeployment
+{
     function getChain() public pure override returns (string memory) {
         return "base";
     }
