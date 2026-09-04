@@ -114,7 +114,7 @@ mod tests {
             group_token_out: token_out.clone(),
         };
         let encoder = WrapSwapEncoder::new(
-            Bytes::from("0x13aa49bAc059d709dd0a18D6bb63290076a702D7"),
+            Bytes::from("0x2826fc2226EEA3E08DBa1d5A93e57E1a1F224134"),
             Chain::Ethereum,
             None,
         )

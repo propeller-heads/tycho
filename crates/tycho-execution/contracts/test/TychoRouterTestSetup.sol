@@ -1,46 +1,13 @@
 pragma solidity ^0.8.26;
 
-// Executors
-import {BalancerV2Executor} from "../src/executors/BalancerV2Executor.sol";
-import {BalancerV3Executor} from "../src/executors/BalancerV3Executor.sol";
-import {BebopExecutor} from "../src/executors/BebopExecutor.sol";
-import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
-import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
-import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
-import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
-import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
-import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
-import {
-    LiquidityPartyExecutor
-} from "../src/executors/LiquidityPartyExecutor.sol";
-import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
-import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
-import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
-import {
-    PropAMMFallbackExecutor
-} from "../src/executors/PropAMMFallbackExecutor.sol";
-import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
-import {
-    UniswapV3Executor,
-    IUniswapV3Pool
-} from "../src/executors/UniswapV3Executor.sol";
-import {UniswapV4Executor} from "../src/executors/UniswapV4Executor.sol";
-import {FluidV1Executor} from "../src/executors/FluidV1Executor.sol";
-import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
-import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
-import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
-import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
-import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
-import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
-import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
-import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
-import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
+import {IUniswapV3Pool} from "../src/executors/UniswapV3Executor.sol";
+import {CREATE3} from "@solady/utils/CREATE3.sol";
+
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
 import {Permit2TestHelper} from "./Permit2TestHelper.sol";
 import {ClientFeeTestHelper} from "./ClientFeeTestHelper.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 // Core contracts
 import "@src/TychoRouterV3.sol";
@@ -107,36 +74,24 @@ contract TychoRouterTestSetup is
     ClientFeeTestHelper,
     TestUtils
 {
+    address[] private _deployedExecutors;
+
     TychoRouterExposed tychoRouter;
     address tychoRouterAddr;
-    UniswapV2Executor public usv2Executor;
-    UniswapV3Executor public usv3Executor;
-    UniswapV3Executor public pancakev3Executor;
-    UniswapV4Executor public usv4Executor;
-    BalancerV2Executor public balancerv2Executor;
-    EkuboExecutor public ekuboExecutor;
-    CurveExecutor public curveExecutor;
-    MaverickV2Executor public maverickv2Executor;
-    BalancerV3Executor public balancerV3Executor;
-    BebopExecutor public bebopExecutor;
-    HashflowExecutor public hashflowExecutor;
-    FluidV1Executor public fluidV1Executor;
-    SlipstreamsExecutor public slipstreamsExecutor;
-    RocketpoolExecutor public rocketpoolExecutor;
-    ERC4626Executor public erc4626Executor;
-    NativeWrapExecutor public nativeWrapExecutor;
-    EkuboV3Executor public ekuboV3Executor;
-    EtherfiExecutor public etherfiExecutor;
-    LiquidityPartyExecutor public liquidityPartyExecutor;
-    LiquoriceExecutor public liquoriceExecutor;
-    AerodromeV1Executor public aerodromeV1Executor;
-    FermiSwapExecutor public fermiSwapExecutor;
-    MetricExecutor public metricExecutor;
-    BopAMMExecutor public bopAMMExecutor;
-    RingSwapV2Executor public ringSwapV2Executor;
-    PropAMMExecutor public propAMMExecutor;
-    PropAMMFallbackExecutor public propAMMFallbackExecutor;
-    SkyExecutor public skyExecutor;
+
+    // Executors are deployed and registered by `deployExecutors`; one is exposed here
+    // only when a test outside this file uses it.
+    address public balancerv2Executor;
+    address public curveExecutor;
+    address public fluidV1Executor;
+    address public nativeWrapExecutor;
+    address public propAMMFallbackExecutor;
+    address public ringSwapV2Executor;
+    address public rocketpoolExecutor;
+    address public slipstreamsExecutor;
+    address public usv2Executor;
+    address public usv3Executor;
+    address public usv4Executor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -201,29 +156,53 @@ contract TychoRouterTestSetup is
         return tychoRouter;
     }
 
+    /// Deploys `<name>Executor` with CREATE3, at an address derived from the contract name and
+    /// this test contract alone: a CREATE2 proxy keyed by `keccak256("<name>Executor")` performs
+    /// the CREATE, so the address does not depend on the order in which the executors are
+    /// deployed, on the executor's own bytecode, or on where its source sits in the tree. The
+    /// addresses pinned in `config/test_executor_addresses.json` — and embedded in the calldata
+    /// fixtures the Rust tests generate from it — therefore only need to change when an executor
+    /// is renamed. Constructors run normally; `msg.sender` inside them is the proxy and
+    /// `address(this)` is the final executor address.
+    function _deployExecutor(string memory name, bytes memory constructorArgs)
+        internal
+        returns (address executor)
+    {
+        string memory contractName = string.concat(name, "Executor");
+        executor = CREATE3.deployDeterministic(
+            abi.encodePacked(vm.getCode(contractName), constructorArgs),
+            keccak256(bytes(contractName))
+        );
+        _deployedExecutors.push(executor);
+    }
+
+    /// Deploys `<name>Executor`, which takes no constructor arguments.
+    function _deployExecutor(string memory name)
+        internal
+        returns (address executor)
+    {
+        return _deployExecutor(name, "");
+    }
+
+    /// Deploys every executor and returns them in deployment order, for registration on the
+    /// router. Executors are listed by source path; a new one goes wherever its path sorts.
     function deployExecutors() public returns (address[] memory) {
-        address poolManagerAddress = 0x000000000004444c5dc75cB358380D2e3dE08A90;
         address ekuboCore = 0xe0e0e08A6A4b9Dc7bD67BCB7aadE5cF48157d444;
         address ekuboMevResist = 0x553a2EFc570c9e104942cEC6aC1c18118e54C091;
+        address poolManager = 0x000000000004444c5dc75cB358380D2e3dE08A90;
 
-        IPoolManager poolManager = IPoolManager(poolManagerAddress);
-        usv2Executor = new UniswapV2Executor(30);
-        usv3Executor = new UniswapV3Executor();
-        usv4Executor = new UniswapV4Executor(poolManager, ANGSTROM_HOOK);
-        pancakev3Executor = new UniswapV3Executor();
-        balancerv2Executor = new BalancerV2Executor();
-        ekuboExecutor = new EkuboExecutor(ekuboCore, ekuboMevResist);
-        curveExecutor = new CurveExecutor(ETH_ADDR, STETH_ADDR);
-        maverickv2Executor = new MaverickV2Executor();
-        balancerV3Executor = new BalancerV3Executor();
-        bebopExecutor = new BebopExecutor(BEBOP_SETTLEMENT, BEBOP_ROUTER);
-        hashflowExecutor = new HashflowExecutor(HASHFLOW_ROUTER);
-        fluidV1Executor = new FluidV1Executor(FLUIDV1_LIQUIDITY);
-        slipstreamsExecutor = new SlipstreamsExecutor();
-        rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
-        erc4626Executor = new ERC4626Executor();
-        nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor();
+        delete _deployedExecutors;
+        _deployExecutor("AerodromeV1");
+        balancerv2Executor = _deployExecutor("BalancerV2");
+        _deployExecutor("BalancerV3");
+        _deployExecutor("Bebop", abi.encode(BEBOP_SETTLEMENT, BEBOP_ROUTER));
+        _deployExecutor("BopAMM", abi.encode(BOPAMM_SETTLEMENT));
+        curveExecutor =
+            _deployExecutor("Curve", abi.encode(ETH_ADDR, STETH_ADDR));
+        _deployExecutor("Ekubo", abi.encode(ekuboCore, ekuboMevResist));
+        _deployExecutor("EkuboV3");
+        _deployExecutor("ERC4626");
+
         // Etch placeholder bytecode if Etherfi contracts are not yet deployed
         // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
         if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
@@ -234,13 +213,22 @@ contract TychoRouterTestSetup is
         if (REDEMPTION_MANAGER_ADDR.code.length == 0) {
             vm.etch(REDEMPTION_MANAGER_ADDR, bytes("1"));
         }
-        etherfiExecutor = new EtherfiExecutor(
-            ETH_ADDR,
-            EETH_ADDR,
-            LIQUIDITY_POOL_ADDR,
-            WEETH_ADDR,
-            REDEMPTION_MANAGER_ADDR
+        _deployExecutor(
+            "Etherfi",
+            abi.encode(
+                ETH_ADDR,
+                EETH_ADDR,
+                LIQUIDITY_POOL_ADDR,
+                WEETH_ADDR,
+                REDEMPTION_MANAGER_ADDR
+            )
         );
+        _deployExecutor("FermiSwap", abi.encode(FERMI_SWAPPER));
+        fluidV1Executor =
+            _deployExecutor("FluidV1", abi.encode(FLUIDV1_LIQUIDITY));
+        _deployExecutor("Hashflow", abi.encode(HASHFLOW_ROUTER));
+        _deployExecutor("LiquidityParty");
+
         // Etch placeholder bytecode if Liquorice contracts are not yet
         // deployed at this fork block.
         if (LIQUORICE_SETTLEMENT.code.length == 0) {
@@ -249,61 +237,41 @@ contract TychoRouterTestSetup is
         if (LIQUORICE_BALANCE_MANAGER.code.length == 0) {
             vm.etch(LIQUORICE_BALANCE_MANAGER, bytes("1"));
         }
-        liquoriceExecutor = new LiquoriceExecutor(
-            LIQUORICE_SETTLEMENT, LIQUORICE_BALANCE_MANAGER
+        _deployExecutor(
+            "Liquorice",
+            abi.encode(LIQUORICE_SETTLEMENT, LIQUORICE_BALANCE_MANAGER)
         );
-        liquidityPartyExecutor = new LiquidityPartyExecutor();
-        aerodromeV1Executor = new AerodromeV1Executor();
-        fermiSwapExecutor = new FermiSwapExecutor(FERMI_SWAPPER);
-        metricExecutor = new MetricExecutor(METRIC_ORACLE);
-        bopAMMExecutor = new BopAMMExecutor(BOPAMM_SETTLEMENT);
-        ringSwapV2Executor =
-            new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
-        propAMMExecutor = new PropAMMExecutor();
-        propAMMFallbackExecutor = new PropAMMFallbackExecutor();
+        _deployExecutor("MaverickV2");
+        _deployExecutor("Metric", abi.encode(METRIC_ORACLE));
+        nativeWrapExecutor =
+            _deployExecutor("NativeWrap", abi.encode(WETH_ADDR));
+        _deployExecutor("PropAMM");
+        propAMMFallbackExecutor = _deployExecutor("PropAMMFallback");
+        ringSwapV2Executor = _deployExecutor(
+            "RingSwapV2", abi.encode(RING_FEW_FACTORY, RING_SWAP_FACTORY)
+        );
+        rocketpoolExecutor =
+            _deployExecutor("Rocketpool", abi.encode(ROCKET_DEPOSIT_POOL));
+
         // The Sky venues exist only on mainnet, and the executor's constructor
         // reads their token wiring, so it cannot deploy on forks where the
-        // venues have no code. Deployed last, so skipping it does not shift
-        // the other executors' deterministic addresses.
-        bool skyDeployable = SKY_DAI_USDS_CONVERTER.code.length != 0;
-        if (skyDeployable) {
-            skyExecutor = new SkyExecutor(
-                SKY_LITE_PSM, SKY_USDS_PSM_WRAPPER, SKY_DAI_USDS_CONVERTER
+        // venues have no code.
+        if (SKY_DAI_USDS_CONVERTER.code.length != 0) {
+            _deployExecutor(
+                "Sky",
+                abi.encode(
+                    SKY_LITE_PSM, SKY_USDS_PSM_WRAPPER, SKY_DAI_USDS_CONVERTER
+                )
             );
         }
+        slipstreamsExecutor = _deployExecutor("Slipstreams");
+        usv2Executor = _deployExecutor("UniswapV2", abi.encode(uint256(30)));
+        usv3Executor = _deployExecutor("UniswapV3");
+        usv4Executor = _deployExecutor(
+            "UniswapV4", abi.encode(poolManager, ANGSTROM_HOOK)
+        );
 
-        address[] memory executors = new address[](skyDeployable ? 28 : 27);
-        executors[0] = address(usv2Executor);
-        executors[1] = address(usv3Executor);
-        executors[2] = address(pancakev3Executor);
-        executors[3] = address(usv4Executor);
-        executors[4] = address(balancerv2Executor);
-        executors[5] = address(ekuboExecutor);
-        executors[6] = address(curveExecutor);
-        executors[7] = address(maverickv2Executor);
-        executors[8] = address(balancerV3Executor);
-        executors[9] = address(bebopExecutor);
-        executors[10] = address(hashflowExecutor);
-        executors[11] = address(fluidV1Executor);
-        executors[12] = address(slipstreamsExecutor);
-        executors[13] = address(rocketpoolExecutor);
-        executors[14] = address(erc4626Executor);
-        executors[15] = address(nativeWrapExecutor);
-        executors[16] = address(ekuboV3Executor);
-        executors[17] = address(etherfiExecutor);
-        executors[18] = address(liquoriceExecutor);
-        executors[19] = address(liquidityPartyExecutor);
-        executors[20] = address(aerodromeV1Executor);
-        executors[21] = address(fermiSwapExecutor);
-        executors[22] = address(metricExecutor);
-        executors[23] = address(bopAMMExecutor);
-        executors[24] = address(ringSwapV2Executor);
-        executors[25] = address(propAMMExecutor);
-        executors[26] = address(propAMMFallbackExecutor);
-        if (skyDeployable) {
-            executors[27] = address(skyExecutor);
-        }
-        return executors;
+        return _deployedExecutors;
     }
 
     function deployFeeCalculator() public {

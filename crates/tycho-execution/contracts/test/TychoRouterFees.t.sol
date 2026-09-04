@@ -84,8 +84,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         // quotedAmountOut = expected gross output; fees are calculated on this amount
         uint256 quotedAmountOut = 2018817438608734439722;
@@ -316,8 +315,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         ClientFeeParams memory feeParams = ClientFeeParams({
             clientFeeBps: 100,
@@ -360,8 +358,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         ClientFeeParams memory feeParams = ClientFeeParams({
             clientFeeBps: 100,
@@ -399,8 +396,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         // Sign params with 100 bps
         ClientFeeParams memory feeParams = ClientFeeParams({
@@ -440,8 +436,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         ClientFeeParams memory feeParams = ClientFeeParams({
             clientFeeBps: 100,
@@ -486,7 +481,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         IERC20(WETH_ADDR).approve(tychoRouterAddr, _CLIENT_FEE_AMOUNT_IN);
 
         swap = encodeSingleSwap(
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
         feeParams = ClientFeeParams({
@@ -667,8 +662,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(STA_WETH_UNIV2_POOL, WETH_ADDR, STA_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         // router actually received 1271775641957229539568553 STA after pool fee
         uint256 quotedSTA = 1271775641957229539568553;
@@ -728,8 +722,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         // quotedAmountOut = expected gross output; 1% fee is calculated on this
         uint256 quotedAmountOut = 2018817438608734439722;
@@ -782,8 +775,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
 
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         uint256 expectedAmountOut = 1900 * 1e18;
 
@@ -844,8 +836,7 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         uint256 actualAmountOut = 2018817438608734439722;
         uint256 expectedAmountOut = 2000 * 1e18;

@@ -490,7 +490,7 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
         // length of ple encoded swaps without padding
         "00000000000000000000000000000000000000000000000000000000000000a0",
         // Swap data header
-        "f62849f9a0b5bf2913b396098f7c7019b51a820a", // executor address
+        "67f4c55217e19e99bdef7d635816b61a6ac36687", // executor address
         // Protocol data
         "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // group token in
         "6982508145454ce325ddbe47a25d4ec3d2311933", // group token out

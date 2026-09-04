@@ -92,7 +92,7 @@ fn test_evm_single_swap_strategy_encoder() {
         // length of encoded swap (80 bytes: 20 pool + 20 tokenIn + 20 tokenOut)
         "0000000000000000000000000000000000000000000000000000000000000050",
         // Swap data
-        "5615deb798bb3e4dfa0139dfa1b3d433cc23b72f", // executor address
+        "48f127dbe4b5e6013647a24fa16f41276bd95836", // executor address
         "a478c2975ab1ea89e8196811f51a7b7ade33eb11", // component id (pool address)
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // tokenIn
         "6b175474e89094c44da98b954eedeac495271d0f", // tokenOut
@@ -178,7 +178,7 @@ fn test_single_swap_strategy_encoder_transfer_from() {
         // swapData:
         "0000000000000000000000000000000000000000000000000000000000000050", // len swap = 80 bytes
         // Swap data
-        "5615deb798bb3e4dfa0139dfa1b3d433cc23b72f", // executor address
+        "48f127dbe4b5e6013647a24fa16f41276bd95836", // executor address
         "a478c2975ab1ea89e8196811f51a7b7ade33eb11", // component id (pool address)
         "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // tokenIn
         "6b175474e89094c44da98b954eedeac495271d0f", // tokenOut

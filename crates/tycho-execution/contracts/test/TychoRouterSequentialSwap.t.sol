@@ -16,13 +16,13 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](2);
         // WETH -> DAI
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
 
         // DAI -> USDC
         swaps[1] = encodeSequentialSwap(
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_USDC_POOL, DAI_ADDR, USDC_ADDR)
         );
         return swaps;
@@ -241,13 +241,11 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
 
         bytes[] memory swaps = new bytes[](2);
         // USDC -> WETH
-        swaps[0] = encodeSequentialSwap(
-            address(usv3Executor), usdcWethV3Pool1ZeroOneData
-        );
+        swaps[0] =
+            encodeSequentialSwap(usv3Executor, usdcWethV3Pool1ZeroOneData);
         // WETH -> USDC
-        swaps[1] = encodeSequentialSwap(
-            address(usv3Executor), usdcWethV3Pool2OneZeroData
-        );
+        swaps[1] =
+            encodeSequentialSwap(usv3Executor, usdcWethV3Pool2OneZeroData);
 
         // Set transient storage to allow transferFrom from ALICE
         tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
@@ -412,9 +410,8 @@ contract TychoRouterSequentialSwapTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(stethWethV2Pool, STETH_ADDR, WETH_ADDR);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(curveExecutor), curveStEthData);
-        swaps[1] =
-            encodeSequentialSwap(address(usv2Executor), usv2StethWethData);
+        swaps[0] = encodeSequentialSwap(curveExecutor, curveStEthData);
+        swaps[1] = encodeSequentialSwap(usv2Executor, usv2StethWethData);
 
         uint256 amountOut = tychoRouter.sequentialSwap{value: amountIn}(
             amountIn,

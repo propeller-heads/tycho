@@ -101,7 +101,7 @@ mod tests {
             group_token_out: token_out.clone(),
         };
         let encoder = FluidV1SwapEncoder::new(
-            Bytes::from("0x212224D2F2d262cd093eE13240ca4873fcCBbA3C"),
+            Bytes::from("0xa323FBE2fC618f746248C3F609F8441D70dA233a"),
             Chain::Ethereum,
             None,
         )

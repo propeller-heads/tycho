@@ -488,8 +488,7 @@ contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
         bytes memory protocolData = abi.encodePacked(
             maliciousPair, DAI_ADDR, WETH_ADDR, FW_DAI, FW_WETH
         );
-        bytes memory swap =
-            encodeSingleSwap(address(ringSwapV2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(ringSwapV2Executor, protocolData);
 
         deal(DAI_ADDR, ALICE, amountIn);
         vm.startPrank(ALICE);
@@ -519,8 +518,7 @@ contract TychoRouterForRingSwapV2Test is TychoRouterTestSetup {
         bytes memory protocolData = abi.encodePacked(
             RING_DAI_WETH_PAIR, DAI_ADDR, WETH_ADDR, fakeFewToken, FW_WETH
         );
-        bytes memory swap =
-            encodeSingleSwap(address(ringSwapV2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(ringSwapV2Executor, protocolData);
 
         deal(DAI_ADDR, ALICE, amountIn);
         vm.startPrank(ALICE);

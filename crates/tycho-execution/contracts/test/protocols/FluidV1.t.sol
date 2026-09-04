@@ -263,8 +263,7 @@ contract TychoRouterForFluidV1Test is TychoRouterTestSetup {
             address(ezETH), // tokenOut
             true // isNativeSell
         );
-        bytes memory swap =
-            encodeSingleSwap(address(fluidV1Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(fluidV1Executor, protocolData);
 
         vm.prank(ALICE);
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(

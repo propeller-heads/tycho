@@ -1,10 +1,9 @@
 use std::{
-    env,
-    fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
+    env, fs,
+    path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -17,7 +16,6 @@ use alloy::{
     sol_types::SolValue,
 };
 use num_bigint::BigUint;
-use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
 use tycho_common::Bytes;
 
@@ -291,49 +289,25 @@ pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Vec<u8> {
     encoded_action_data
 }
 
-static CALLDATA_WRITE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+/// Directory holding the calldata a solidity integration test replays, one
+/// `<test_identifier>.hex` file per test. One file per test keeps concurrent writes from the
+/// separate `tests/*.rs` binaries independent, and keeps two branches that add different tests
+/// from touching the same file.
+const CALLDATA_DIR: &str = "contracts/test/assets/calldata";
+
 // Function used in tests to write calldata to a file that then is used by the corresponding
 // solidity tests.
 pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
-    let _lock = CALLDATA_WRITE_MUTEX
-        .lock()
-        .expect("Couldn't acquire lock");
-
-    let file_path = "contracts/test/assets/calldata.txt";
-    let file = OpenOptions::new()
-        .read(true)
-        .open(file_path)
-        .expect("Failed to open calldata file for reading");
-    let reader = BufReader::new(file);
-
-    let mut lines = Vec::new();
-    let mut found = false;
-    for line in reader.lines().map_while(Result::ok) {
-        let mut parts = line.splitn(2, ':'); // split at the :
-        let key = parts.next().unwrap_or("");
-        if key == test_identifier {
-            lines.push(format!("{test_identifier}:{hex_calldata}"));
-            found = true;
-        } else {
-            lines.push(line);
-        }
-    }
-
-    // If the test identifier wasn't found, append a new line
-    if !found {
-        lines.push(format!("{test_identifier}:{hex_calldata}"));
-    }
-
-    // Write the updated contents back to the file
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(file_path)
-        .expect("Failed to open calldata file for writing");
-
-    for line in lines {
-        writeln!(file, "{line}").expect("Failed to write calldata");
-    }
+    assert!(
+        test_identifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "Test identifier {test_identifier} is used as a file name, so it must consist of ASCII \
+         alphanumerics and underscores only"
+    );
+    let path = Path::new(CALLDATA_DIR).join(format!("{test_identifier}.hex"));
+    fs::write(&path, hex_calldata)
+        .unwrap_or_else(|e| panic!("Failed to write calldata to {}: {e}", path.display()));
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ import {Vault__UnexpectedNonZeroCount} from "@src/Vault.sol";
 import {
     TransferManager__ExceededTransferFromAllowance
 } from "@src/TransferManager.sol";
+import {UniswapV3Executor} from "../src/executors/UniswapV3Executor.sol";
 
 contract HackedCallbackDataPool is Constants {
     // A hacked USV3-compatible pool. When called via swap(), it triggers a
@@ -63,7 +64,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
         // WBTC -> USDC
@@ -71,7 +72,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(1),
             uint8(3),
             uint24(0),
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(USDC_WBTC_POOL, WBTC_ADDR, USDC_ADDR)
         );
         // WETH -> DAI
@@ -79,7 +80,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(2),
             uint24(0),
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
 
@@ -88,7 +89,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(2),
             uint8(3),
             uint24(0),
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_USDC_POOL, DAI_ADDR, USDC_ADDR)
         );
 
@@ -282,7 +283,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             uint24((0xffffff * 60) / 100), // 60%
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
         // WETH -> WBTC (60%)
@@ -290,7 +291,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             uint24((0xffffff * 60) / 100), // 60%
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -396,7 +397,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(usv3Executor),
+            usv3Executor,
             usdcWethV3Pool1ZeroOneData
         );
         // USDC -> WETH (40% remainder)
@@ -404,16 +405,12 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             uint24(0),
-            address(usv3Executor),
+            usv3Executor,
             usdcWethV3Pool2ZeroOneData
         );
         // WETH -> USDC
         swaps[2] = encodeSplitSwap(
-            uint8(1),
-            uint8(0),
-            uint24(0),
-            address(usv2Executor),
-            wethUsdcV2OneZeroData
+            uint8(1), uint8(0), uint24(0), usv2Executor, wethUsdcV2OneZeroData
         );
         // Set transient storage to allow transferFrom from ALICE
         tychoRouter.tstoreExposed(USDC_ADDR, amountIn, false, false);
@@ -460,7 +457,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(balancerv2Executor),
+            balancerv2Executor,
             protocolData
         );
 
@@ -469,7 +466,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             uint24(0), // remaining 40%
-            address(balancerv2Executor),
+            balancerv2Executor,
             protocolData
         );
         tychoRouter.splitSwap(
@@ -514,7 +511,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -523,7 +520,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -580,14 +577,14 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](3);
         // USDC -> WETH
         swaps[0] = encodeSplitSwap(
-            uint8(0), uint8(1), uint24(0), address(usv2Executor), usdcWethV2Data
+            uint8(0), uint8(1), uint24(0), usv2Executor, usdcWethV2Data
         );
         // WETH -> USDC
         swaps[1] = encodeSplitSwap(
             uint8(1),
             uint8(0),
             (0xffffff * 60) / 100,
-            address(usv3Executor),
+            usv3Executor,
             usdcWethV3Pool1OneZeroData
         );
 
@@ -596,7 +593,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(1),
             uint8(0),
             uint24(0),
-            address(usv3Executor),
+            usv3Executor,
             usdcWethV3Pool2OneZeroData
         );
 
@@ -622,7 +619,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(USDC_MAG7_POOL, BASE_USDC, BASE_MAG7);
 
         bytes memory swap = encodeSplitSwap(
-            uint8(0), uint8(1), uint24(0), address(usv2Executor), protocolData
+            uint8(0), uint8(1), uint24(0), usv2Executor, protocolData
         );
         bytes[] memory swaps = new bytes[](1);
         swaps[0] = swap;
@@ -750,7 +747,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             uint24(0),
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
         );
 
@@ -760,7 +757,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             uint8(1),
             uint8(2),
             (0xffffff * 60) / 100, // 60%
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_USDC_POOL, DAI_ADDR, USDC_ADDR)
         );
 
@@ -776,7 +773,7 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
             true //  zeroForOne
         );
         swaps[2] = encodeSplitSwap(
-            uint8(1), uint8(2), uint24(0), address(usv3Executor), v3Data
+            uint8(1), uint8(2), uint24(0), usv3Executor, v3Data
         );
 
         tychoRouter.splitSwap(
@@ -826,16 +823,12 @@ contract TychoRouterSplitSwapTest is TychoRouterTestSetup {
 
         // DAI -> USDC (60%)
         swaps[0] = encodeSplitSwap(
-            uint8(0),
-            uint8(1),
-            (0xffffff * 60) / 100,
-            address(curveExecutor),
-            curveData
+            uint8(0), uint8(1), (0xffffff * 60) / 100, curveExecutor, curveData
         );
 
         // DAI -> USDC (remaining 40%)
         swaps[1] = encodeSplitSwap(
-            uint8(0), uint8(1), uint24(0), address(curveExecutor), curveData
+            uint8(0), uint8(1), uint24(0), curveExecutor, curveData
         );
 
         uint256 amountOut = tychoRouter.splitSwap(

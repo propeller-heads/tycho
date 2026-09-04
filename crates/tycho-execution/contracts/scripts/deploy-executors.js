@@ -7,90 +7,23 @@ const {verifyOnExplorer} = require("./utils");
 // See config/executor_deployments.json.
 const executorDeployments = require("../../config/executor_deployments.json");
 
-// Which protocols to deploy per network. Comment out the protocols you
-// don't want to deploy.
-const deploy_protocols = {
-    "ethereum": [
-        "uniswap_v2",
-        "ring_swap_v2",
-        "pancakeswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "vm:balancer_v2",
-        "ekubo_v2",
-        "vm:curve",
-        "vm:maverick_v2",
-        "vm:balancer_v3",
-        "rfq:bebop",
-        "rfq:hashflow",
-        "fluid_v1",
-        "erc4626",
-        "rocketpool",
-        "ekubo_v3",
-        "native_wrapper",
-        "rfq:liquorice",
-        "vm:fermiswap",
-        "vm:liquidityparty",
-        "vm:bopamm",
-        "rfq:metric",
-        "pricelevelstream",
-        "propammfallback",
-        "sky",
-    ],
-    "base": [
-        "uniswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "rfq:bebop",
-        "aerodrome_slipstreams",
-        "aerodrome_v1",
-        "native_wrapper",
-        "lunarbase",
-        "rfq:metric",
-    ],
-    "unichain": [
-        "uniswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "vm:curve",
-        "velodrome_slipstreams",
-        "native_wrapper",
-    ],
-    "arbitrum": [
-        "uniswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "native_wrapper",
-        "rfq:metric",
-    ],
-    "polygon": [
-        "uniswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "native_wrapper",
-        "rfq:metric",
-    ],
-    "bsc": [
-        "uniswap_v2",
-        "pancakeswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "native_wrapper",
-        "rfq:metric",
-    ],
-    "plasma": [
-        "uniswap_v3",
-        "fluid_v1",
-        "vm:curve",
-        "native_wrapper",
-    ],
-    "robinhood": [
-        "uniswap_v2",
-        "uniswap_v3",
-        "uniswap_v4",
-        "native_wrapper",
-    ],
-};
+// Deploys every protocol configured for the network in executor_deployments.json. Set
+// EXECUTORS to a comma-separated list of protocol names to deploy only those, e.g.
+// EXECUTORS=uniswap_v2,rfq:bebop
+function protocolsToDeploy(network, networkDeployments) {
+    const configured = Object.keys(networkDeployments);
+    if (!process.env.EXECUTORS) {
+        return configured;
+    }
+    const requested = process.env.EXECUTORS.split(",");
+    const unknown = requested.filter(name => !configured.includes(name));
+    if (unknown.length > 0) {
+        throw new Error(
+            `EXECUTORS names ${unknown.join(", ")} are not configured for network '${network}' in executor_deployments.json`
+        );
+    }
+    return requested;
+}
 
 async function main() {
     const network = hre.network.name;
@@ -105,23 +38,15 @@ async function main() {
     const create2FactoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
     console.log(`Using CREATE2 factory at: ${create2FactoryAddress}`);
 
-    const protocols = deploy_protocols[network];
-    if (!protocols) {
-        throw new Error(`No deploy protocols configured for network: ${network}`);
-    }
     const networkDeployments = executorDeployments[network];
     if (!networkDeployments) {
         throw new Error(`No executor deployments configured for network '${network}' in executor_deployments.json`);
     }
+    const protocols = protocolsToDeploy(network, networkDeployments);
+    console.log(`Deploying ${protocols.length} executors: ${protocols.join(", ")}`);
 
     for (const protocol of protocols) {
-        const deployment = networkDeployments[protocol];
-        if (!deployment) {
-            throw new Error(
-                `No deployment config for protocol '${protocol}' on network '${network}' in executor_deployments.json`
-            );
-        }
-        const {contract: contractName, args} = deployment;
+        const {contract: contractName, args} = networkDeployments[protocol];
         const Executor = await ethers.getContractFactory(contractName);
         // The Blockscout verification path needs the fully qualified name.
         const {sourceName} = await hre.artifacts.readArtifact(contractName);
@@ -197,4 +122,4 @@ if (require.main === module) {
         });
 }
 
-module.exports = {deploy_protocols, executorDeployments};
+module.exports = {executorDeployments};

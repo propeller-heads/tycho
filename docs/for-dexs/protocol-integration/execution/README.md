@@ -239,7 +239,7 @@ Use the helper functions:
 * `write_calldata_to_file()` in the encoding module (Rust)
 * `loadCallDataFromFile()` in the execution module (Solidity)
 
-These helpers save and load the calldata to/from `calldata.txt`.
+These helpers save and load the calldata to/from `contracts/test/assets/calldata/<test name>.hex`.
 
 #### 2. Full TychoRouterV3 Integration Test
 

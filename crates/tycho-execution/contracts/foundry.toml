@@ -10,7 +10,14 @@ via_ir = true
 # (protocols/testing/fixtures) are reproducible across Foundry versions.
 solc = '0.8.33'
 bytecode_hash = 'none'
-fs_permissions = [{ access = "read", path = "./test/assets" }, { access = "write", path = "./test" }]
+fs_permissions = [
+    # `loadCallDataFromFile` (test/TestUtils.sol) reads the calldata fixtures that the rust
+    # encoding tests generate.
+    { access = "read", path = "./test/assets" },
+    # `ExecutorAddresses.t.sol` reads the executor addresses the rust encoders are configured
+    # with, to check them against the ones the test setup deploys.
+    { access = "read", path = "../config/test_executor_addresses.json" },
+]
 
 [profile.production]
 src = 'src'
