@@ -54,14 +54,21 @@ CREATE TABLE IF NOT EXISTS trades (
     watermark                  TEXT,
     wrap_eth                   BOOLEAN NOT NULL,
     unwrap_eth                 BOOLEAN NOT NULL,
-    -- Filled after ingestion by pricing/price_trades.sql from the Tycho token_price table
-    -- (ETH-denominated, price of one whole token). NULL until priced.
-    price_in_eth               DOUBLE PRECISION,
-    price_out_eth              DOUBLE PRECISION,
+    -- Filled after ingestion by pricing/price_trades.sql. USD, price of one whole token. NULL
+    -- until priced.
+    price_in_usd               DOUBLE PRECISION,
+    price_out_usd              DOUBLE PRECISION,
     decimals_in                INTEGER,
     decimals_out               INTEGER,
-    -- amount_in valued at price_in_eth, falling back to amount_out at price_out_eth.
-    volume_eth                 DOUBLE PRECISION,
+    -- The trade valued from one side, in USD. Which side and on what basis is price_source:
+    -- <in|out>_<stable|preferred|tycho>. Only *_stable rows are valid for a trade older than the
+    -- pricing window, because Tycho holds no price history; filter on price_source before
+    -- summing.
+    volume_usd                 DOUBLE PRECISION,
+    price_source               TEXT,
+    -- USD price of the chain's native token at pricing time, the anchor every value above went
+    -- through. Kept so a row can be re-checked later.
+    native_usd                 DOUBLE PRECISION,
     priced_at                  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS trades_chain_block_idx ON trades (chain, block_number);

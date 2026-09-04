@@ -61,12 +61,23 @@ start_postgres "$main_db" router_trades
 start_postgres "$ethereum_db" tycho
 start_postgres "$base_db" tycho
 
+# ethereum source: a stable that puts the native token at 2000 USD, and a token worth 2 native.
 load_source_token "$ethereum_db" 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 18 500000000000000000 "0 minutes"
+load_source_token "$ethereum_db" 2 ffffffffffffffffffffffffffffffffffffffff 6 2000000000 "0 minutes"
+# base source: a different anchor on purpose, 1000 USD per native token.
 load_source_token "$base_db" 1 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 6 2000000 "0 minutes"
-load_source_token "$base_db" 2 cccccccccccccccccccccccccccccccccccccccc 6 200000 "2 hours"
+load_source_token "$base_db" 2 cccccccccccccccccccccccccccccccccccccccc 6 200000 "4 hours"
+load_source_token "$base_db" 3 fff1111111111111111111111111111111111111 6 1000000000 "0 minutes"
+load_source_token "$base_db" 4 eee1111111111111111111111111111111111111 6 500000 "0 minutes"
+# pinned but priced far below its band, so it must be ignored rather than trusted.
+load_source_token "$base_db" 5 deadbeef00000000000000000000000000000000 18 10000000000000000000 "0 minutes"
 
 docker exec -i "$main_db" psql -v ON_ERROR_STOP=1 -U tycho -d router_trades \
 	<"$workspace_dir/schema.sql"
+docker exec -i "$main_db" psql -v ON_ERROR_STOP=1 -U tycho -d router_trades \
+	<"$workspace_dir/pricing/preferred_tokens.sql"
+docker exec -i "$main_db" psql -v ON_ERROR_STOP=1 -U tycho -d router_trades \
+	<"$workspace_dir/pricing/test_preferred_tokens.sql"
 
 docker run --rm --network "$test_network" \
 	-v "$workspace_dir:/workspace:ro" \

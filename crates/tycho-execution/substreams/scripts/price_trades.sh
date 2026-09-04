@@ -7,6 +7,7 @@ set -euo pipefail
 DSN="${DSN:?set DSN to a libpq connection string}"
 INTERVAL="${1:-60}"
 MAX_AGE="${MAX_AGE:-1 hour}"
+PRICE_MAX_AGE="${PRICE_MAX_AGE:-3 hours}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SQL="$DIR/pricing/price_trades.sql"
 
@@ -17,7 +18,7 @@ price_all_chains() {
 	while IFS= read -r chain; do
 		found=1
 		if psql "$DSN" -q -v ON_ERROR_STOP=1 -v chain="$chain" -v max_age="$MAX_AGE" \
-			-f "$SQL"; then
+			-v price_max_age="$PRICE_MAX_AGE" -f "$SQL"; then
 			succeeded=1
 		else
 			echo "pricing failed for chain $chain; continuing" >&2

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use futures::{stream::select_all, StreamExt};
 use tycho_client::feed::{synchronizer::ComponentWithState, FeedMessage};
 use tycho_common::{
-    models::token::Token,
+    models::{token::Token, Chain},
     simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
     Bytes,
 };
@@ -33,15 +33,26 @@ use crate::{
 /// - Each `RFQClient`'s stream is expected to yield `Result<(String, StateSyncMessage), RFQError>`.
 /// - If a client's stream returns an `Err` (e.g., `RFQError::FatalError`), the client is
 ///   **removed** from the merged stream, and the system continues running without it.
-#[derive(Default)]
 pub struct RFQStreamBuilder {
     clients: Vec<Box<dyn RFQClient>>,
     decoder: TychoStreamDecoder<TimestampHeader>,
 }
 
+impl Default for RFQStreamBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RFQStreamBuilder {
     pub fn new() -> Self {
-        Self { clients: Vec::new(), decoder: TychoStreamDecoder::new() }
+        Self {
+            clients: Vec::new(),
+            // RFQ states carry a timestamp, never a block header, so the decoder's block-time
+            // projection is unreachable by type (`TimestampHeader::block()` is `None`) and the
+            // chain here is never read.
+            decoder: TychoStreamDecoder::new(Chain::Ethereum),
+        }
     }
 
     pub fn add_client<T>(mut self, name: &str, provider: Box<dyn RFQClient>) -> Self

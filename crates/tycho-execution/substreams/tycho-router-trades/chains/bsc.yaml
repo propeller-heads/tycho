@@ -21,7 +21,7 @@ binaries:
 modules:
   - name: map_fee_config_events
     kind: map
-    initialBlock: 50000000
+    initialBlock: 98458505
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -30,7 +30,7 @@ modules:
 
   - name: store_fee_config
     kind: store
-    initialBlock: 50000000
+    initialBlock: 98458505
     updatePolicy: set
     valueType: string
     inputs:
@@ -38,7 +38,7 @@ modules:
 
   - name: map_trades
     kind: map
-    initialBlock: 50000000
+    initialBlock: 98458505
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -48,7 +48,7 @@ modules:
 
   - name: db_out
     kind: map
-    initialBlock: 50000000
+    initialBlock: 98458505
     inputs:
       - map: map_trades
       - map: map_fee_config_events

@@ -17,7 +17,7 @@ extractor/
   supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
-  models.rs                 BlockChanges, BlockAggregatedChanges, TxWithChanges
+  models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
@@ -47,7 +47,8 @@ services/
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
-  client_metadata.rs        Parses bounded X-Tycho-Client-Metadata values for metric labels
+  client_metadata.rs        Parses the X-Tycho-Client-Metadata header into allowlisted Prometheus labels
+  debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
     compression.rs          Zstd response compression
@@ -65,7 +66,9 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 
 ### Normal (full-block) path
 
-1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas).
+1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas) via
+   `tycho-protobuf`'s `TryFromMessage` conversions; its `DecodeError` converts into
+   `ExtractionError`.
 2. Run post-processor if configured.
 3. Call `E::process_block_update()` (DCI — see below).
 4. Fetch metadata for any new token addresses via `T` (ERC-20 symbol / decimals over RPC).
@@ -131,8 +134,7 @@ hash-only `purge` on the block named by the broadcast revert message.
 `CachedGateway` enqueues `WriteOp` messages; `DBCacheWriteExecutor` flushes them when the next
 block batch arrives. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
 components → state → entry points → cursor). Every mutable row is versioned with `valid_from` /
-`valid_to`; inserting a version closes the previous row's validity window (see
-`tycho-storage/CLAUDE.md`).
+`valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
 
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
 they are provably behind the finality horizon.
@@ -151,9 +153,6 @@ would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
 `db_committed_block_height` on each message tells `PendingDeltasBuffer` when a block has been
 written; it auto-drains those blocks so memory usage stays bounded.
-
-HTTP and WebSocket services parse `X-Tycho-Client-Metadata`, discard invalid or excess entries,
-and expose an allowlisted subset as request/connection metric labels.
 
 ## Connections
 
@@ -190,4 +189,8 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — health check |
-| `/ws/` | GET — WebSocket upgrade for delta subscriptions |
+| `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
+
+Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at
+`/api-docs/openapi.json`) and `GET /debug/pprof/heap` (API-key gated, behind the `jemalloc`
+feature).

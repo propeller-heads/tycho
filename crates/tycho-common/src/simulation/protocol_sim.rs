@@ -15,6 +15,38 @@ use crate::{
     Bytes,
 };
 
+/// The block a quote is expected to execute in.
+///
+/// This is **not** the block a state was decoded from: a quote produced against block `N` is
+/// normally submitted for block `N + 1`, and a quote produced against a still-open (partial /
+/// flashblock) view of block `N` is submitted for block `N` itself. Protocols whose pricing
+/// depends on the execution block — Aerodrome Slipstream's initial-vs-dynamic fee branch, for
+/// instance — resolve it from this type rather than from the block they last observed.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlockContext {
+    number: u64,
+    timestamp: u64,
+}
+
+impl BlockContext {
+    pub fn new(number: u64, timestamp: u64) -> Self {
+        Self { number, timestamp }
+    }
+
+    /// Height of the block the quote is expected to execute in.
+    pub fn number(&self) -> u64 {
+        self.number
+    }
+
+    /// Unix timestamp of the block the quote is expected to execute in.
+    ///
+    /// All flashblocks of one block share this value, matching `block.timestamp` on chain.
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Balances {
     pub component_balances: HashMap<String, HashMap<Bytes, Bytes>>,
@@ -389,6 +421,18 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
     /// Cast as IndicativelyPriced. This is necessary for RFQ protocols
     fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
         Err(SimulationError::FatalError("Pool State does not implement IndicativelyPriced".into()))
+    }
+
+    /// Advances the state to the block a quote is expected to execute in.
+    ///
+    /// Returns `true` when quoting behavior changed and the state must be re-emitted to
+    /// consumers. The stream decoder calls this on every message — including messages in which
+    /// the pool itself did not change, since without that a state's notion of the execution
+    /// block would freeze at the pool's last update. Implementations must be idempotent for a
+    /// repeated block and must not use the value as a substitute for the block they were decoded
+    /// from: it describes the future, not the observed past.
+    fn apply_block(&mut self, _block: &BlockContext) -> bool {
+        false
     }
 }
 

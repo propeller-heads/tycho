@@ -53,6 +53,8 @@ price)
 	else
 		/opt/router-trades/scripts/fdw_setup.sh
 	fi
+	psql "$DSN" -q -v ON_ERROR_STOP=1 -f /opt/router-trades/pricing/migrate_usd.sql
+	psql "$DSN" -q -v ON_ERROR_STOP=1 -f /opt/router-trades/pricing/preferred_tokens.sql
 	exec /opt/router-trades/scripts/price_trades.sh "${INTERVAL:-60}"
 	;;
 *)
