@@ -4,7 +4,7 @@ use tycho_common::Bytes;
 
 use crate::rfq::errors::RFQError;
 
-pub const DEFAULT_METRIC_API_URL: &str = "http://54.199.103.16:8080";
+pub const DEFAULT_METRIC_API_URL: &str = "https://api.metric.xyz";
 
 /// Hashflow authentication configuration
 pub struct HashflowAuth {
@@ -20,7 +20,7 @@ pub struct BebopAuth {
 /// Metric API configuration
 pub struct MetricConfig {
     pub base_url: String,
-    pub secret_key: Option<String>,
+    pub api_key: Option<String>,
 }
 
 /// Read Hashflow authentication from environment variables
@@ -96,17 +96,18 @@ pub fn get_bebop_origins() -> Result<BebopOrigins, RFQError> {
 }
 
 /// Read Metric API configuration from environment variables.
-/// METRIC_API_URL defaults to the public Metric endpoint; METRIC_SECRET_KEY is optional.
+/// METRIC_API_URL defaults to the public Metric endpoint; METRIC_API_KEY is the Bearer trading key
+/// required by the authenticated endpoints (`bid_ask`).
 pub fn get_metric_config() -> MetricConfig {
     let base_url = env::var("METRIC_API_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_METRIC_API_URL.to_string());
-    let secret_key = env::var("METRIC_SECRET_KEY")
+    let api_key = env::var("METRIC_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty());
 
-    MetricConfig { base_url, secret_key }
+    MetricConfig { base_url, api_key }
 }
 
 #[cfg(test)]
@@ -171,20 +172,20 @@ mod tests {
     #[test]
     fn test_metric_config_defaults_and_reads_env() {
         env::remove_var("METRIC_API_URL");
-        env::remove_var("METRIC_SECRET_KEY");
+        env::remove_var("METRIC_API_KEY");
 
         let config = get_metric_config();
         assert_eq!(config.base_url, DEFAULT_METRIC_API_URL);
-        assert_eq!(config.secret_key, None);
+        assert_eq!(config.api_key, None);
 
         env::set_var("METRIC_API_URL", "https://metric.example");
-        env::set_var("METRIC_SECRET_KEY", "secret");
+        env::set_var("METRIC_API_KEY", "secret");
 
         let config = get_metric_config();
         assert_eq!(config.base_url, "https://metric.example");
-        assert_eq!(config.secret_key.as_deref(), Some("secret"));
+        assert_eq!(config.api_key.as_deref(), Some("secret"));
 
         env::remove_var("METRIC_API_URL");
-        env::remove_var("METRIC_SECRET_KEY");
+        env::remove_var("METRIC_API_KEY");
     }
 }
