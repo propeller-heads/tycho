@@ -47,8 +47,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv2Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv2Executor, protocolData);
 
         uint256 expectedAmountOut = 2008817438608734439722;
         bytes memory tychoRouterData = abi.encodeWithSelector(
@@ -165,8 +164,7 @@ contract UniswapXFillerTest is Test, TychoRouterTestSetup {
         bytes memory protocolData =
             encodeUniswapV3Swap(DAI_ADDR, USDT_ADDR, DAI_USDT_USV3, zeroForOne);
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv3Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv3Executor, protocolData);
 
         bytes memory tychoRouterData = abi.encodeWithSelector(
             tychoRouter.singleSwap.selector,

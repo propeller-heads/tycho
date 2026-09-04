@@ -397,8 +397,7 @@ contract TychoRouterForCurveTest is TychoRouterTestSetup {
             uint8(1) // j = 1 (stETH)
         );
 
-        bytes memory swap =
-            encodeSingleSwap(address(curveExecutor), curveStEthData);
+        bytes memory swap = encodeSingleSwap(curveExecutor, curveStEthData);
 
         uint256 amountOut = tychoRouter.singleSwap{value: amountIn}(
             amountIn,

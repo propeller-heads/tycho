@@ -9804,7 +9804,6 @@ dependencies = [
  "dotenvy",
  "hex",
  "num-bigint",
- "once_cell",
  "reqwest 0.12.23",
  "rstest 0.24.0",
  "serde",

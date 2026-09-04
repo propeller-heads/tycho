@@ -462,8 +462,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR, USDT_ADDR, true, false, pools
         );
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv4Executor, protocolData);
 
         tychoRouter.singleSwapPermit2(
             amountIn,
@@ -509,8 +508,7 @@ contract TychoRouterForUniswapV4Test is TychoRouterTestSetup {
             USDE_ADDR, WBTC_ADDR, true, false, pools
         );
 
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv4Executor, protocolData);
 
         vm.startPrank(ALICE);
         IERC20(USDE_ADDR).approve(tychoRouterAddr, amountIn);
@@ -853,8 +851,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes memory protocolData = UniswapV4Utils.encodeExactInput(
             USDE_ADDR, USDT_ADDR, true, true, pools
         );
-        bytes memory swap =
-            encodeSingleSwap(address(usv4Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv4Executor, protocolData);
 
         bytes memory tychoCalldata = abi.encodeCall(
             tychoRouter.singleSwap,
@@ -904,7 +901,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](2);
 
         swaps[0] = encodeSequentialSwap(
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WETH_ADDR, WBTC_ADDR)
         );
 
@@ -920,7 +917,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes memory v4ProtocolData = UniswapV4Utils.encodeExactInput(
             WBTC_ADDR, USDT_ADDR, true, true, v4Pools
         );
-        swaps[1] = encodeSequentialSwap(address(usv4Executor), v4ProtocolData);
+        swaps[1] = encodeSequentialSwap(usv4Executor, v4ProtocolData);
 
         bytes memory tychoCalldata = abi.encodeCall(
             tychoRouter.sequentialSwap,
@@ -978,10 +975,10 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
         bytes memory v4ProtocolData = UniswapV4Utils.encodeExactInput(
             USDT_ADDR, WBTC_ADDR, false, true, v4Pools
         );
-        swaps[0] = encodeSequentialSwap(address(usv4Executor), v4ProtocolData);
+        swaps[0] = encodeSequentialSwap(usv4Executor, v4ProtocolData);
 
         swaps[1] = encodeSequentialSwap(
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(WETH_WBTC_POOL, WBTC_ADDR, WETH_ADDR)
         );
 
@@ -1039,7 +1036,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[0] = encodeSequentialSwap(
-            address(usv4Executor),
+            usv4Executor,
             UniswapV4Utils.encodeExactInput(
                 USDE_ADDR, USDT_ADDR, true, true, v4PoolsHop1
             )
@@ -1055,7 +1052,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[1] = encodeSequentialSwap(
-            address(usv4Executor),
+            usv4Executor,
             UniswapV4Utils.encodeExactInput(
                 USDT_ADDR, WBTC_ADDR, false, true, v4PoolsHop2
             )
@@ -1119,14 +1116,14 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[0] = encodeSequentialSwap(
-            address(usv4Executor),
+            usv4Executor,
             UniswapV4Utils.encodeExactInput(
                 USDE_ADDR, USDT_ADDR, true, true, v4PoolsHop1
             )
         );
 
         swaps[1] = encodeSequentialSwap(
-            address(usv3Executor),
+            usv3Executor,
             encodeUniswapV3Swap(USDT_ADDR, DAI_ADDR, DAI_USDT_USV3, false)
         );
 
@@ -1140,7 +1137,7 @@ contract ExternalSettlerNoUnlockTest is TychoRouterTestSetup {
             hookData: bytes("")
         });
         swaps[2] = encodeSequentialSwap(
-            address(usv4Executor),
+            usv4Executor,
             UniswapV4Utils.encodeExactInput(
                 DAI_ADDR, USDC_ADDR, true, true, v4PoolsHop3
             )

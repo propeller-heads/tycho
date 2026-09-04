@@ -4,6 +4,7 @@ import "../TychoRouterTestSetup.sol";
 import {
     BalancerV3Executor__InvalidDataLength
 } from "../../src/executors/BalancerV3Executor.sol";
+import {BalancerV3Executor} from "../../src/executors/BalancerV3Executor.sol";
 
 contract BalancerV3ExecutorExposed is BalancerV3Executor {
     constructor() BalancerV3Executor() {}

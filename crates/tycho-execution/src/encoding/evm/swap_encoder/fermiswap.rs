@@ -70,7 +70,7 @@ mod tests {
 
     fn encoder() -> FermiSwapEncoder {
         FermiSwapEncoder::new(
-            Bytes::from("0xe8dc788818033232EF9772CB2e6622F1Ec8bc840"),
+            Bytes::from("0x6C3E8D2c39EF17ee74D64c3d95E30736Ea3Ce282"),
             Chain::Ethereum,
             None,
         )

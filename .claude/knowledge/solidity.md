@@ -60,8 +60,8 @@ values or callback arguments to determine transfer amounts.**
 
 ### Cross-language integration tests
 
-Rust encoding tests call `write_calldata_to_file(test_identifier, hex_calldata)`, which appends
-`name:hex` lines to `contracts/test/assets/calldata.txt`. Solidity tests read that file via
+Rust encoding tests call `write_calldata_to_file(test_identifier, hex_calldata)`, which writes
+`contracts/test/assets/calldata/<test_identifier>.hex`, one file per test. Solidity tests read it back via
 `loadCallDataFromFile(testName)` and execute the calldata against a mainnet fork. This verifies
 Rust-encoded calldata end-to-end.
 

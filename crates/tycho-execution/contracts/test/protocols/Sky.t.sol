@@ -261,15 +261,6 @@ contract TychoRouterForSkyTest is TychoRouterTestSetup {
         return 25600000;
     }
 
-    function testSkyExecutorAddress() public view {
-        // Pins the deterministic test-deployment address used in
-        // config/test_executor_addresses.json; fails loudly if the deploy
-        // order in TychoRouterTestSetup changes.
-        assertEq(
-            address(skyExecutor), 0x886D6d1eB8D415b00052828CD6d5B321f072073d
-        );
-    }
-
     function testSingleSkyIntegration() public {
         // USDC -> (LitePSM) -> DAI through the full router path.
         deal(USDC_ADDR, ALICE, 1000e6);

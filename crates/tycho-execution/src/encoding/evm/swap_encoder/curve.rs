@@ -306,7 +306,7 @@ mod tests {
             group_token_out: token_out.clone(),
         };
         let encoder = CurveSwapEncoder::new(
-            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Bytes::from("0x48f127dBE4B5e6013647A24fa16f41276bd95836"),
             Chain::Ethereum,
             curve_config(),
         )
@@ -367,7 +367,7 @@ mod tests {
             group_token_out: token_out.clone(),
         };
         let encoder = CurveSwapEncoder::new(
-            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Bytes::from("0x48f127dBE4B5e6013647A24fa16f41276bd95836"),
             Chain::Ethereum,
             curve_config(),
         )
@@ -429,7 +429,7 @@ mod tests {
             group_token_out: token_out.clone(),
         };
         let encoder = CurveSwapEncoder::new(
-            Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
+            Bytes::from("0x48f127dBE4B5e6013647A24fa16f41276bd95836"),
             Chain::Ethereum,
             None,
         )

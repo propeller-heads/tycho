@@ -9,6 +9,7 @@ import {
 import {IPropAMMRouter} from "@interfaces/IPropAMMRouter.sol";
 import {IPropAMM} from "@interfaces/IPropAMM.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
+import {PropAMMExecutor} from "../../src/executors/PropAMMExecutor.sol";
 
 /// @notice The `exactInputSingle` entry point of the Uniswap V3 router the PropAMMRouter retries
 /// on. Used only to price the retry against a direct call, in `testFallbackPathGas`.
@@ -357,11 +358,11 @@ contract PropAMMFallbackRouterTest is TychoRouterTestSetup {
 
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(
-            address(propAMMFallbackExecutor),
+            propAMMFallbackExecutor,
             abi.encodePacked(FERMI_PROPAMM_VENUE, WETH_ADDR, USDC_ADDR)
         );
         swaps[1] = encodeSequentialSwap(
-            address(usv2Executor),
+            usv2Executor,
             encodeUniswapV2Swap(DAI_USDC_POOL, USDC_ADDR, DAI_ADDR)
         );
 
@@ -396,14 +397,14 @@ contract PropAMMFallbackRouterTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(propAMMFallbackExecutor),
+            propAMMFallbackExecutor,
             abi.encodePacked(FERMI_PROPAMM_VENUE, WETH_ADDR, USDC_ADDR)
         );
         swaps[1] = encodeSplitSwap(
             uint8(0),
             uint8(1),
             uint24(0),
-            address(propAMMFallbackExecutor),
+            propAMMFallbackExecutor,
             abi.encodePacked(FERMI_PROPAMM_VENUE, WETH_ADDR, USDC_ADDR)
         );
 
@@ -433,7 +434,7 @@ contract PropAMMFallbackRouterTest is TychoRouterTestSetup {
         returns (bytes memory)
     {
         return encodeSingleSwap(
-            address(propAMMFallbackExecutor),
+            propAMMFallbackExecutor,
             abi.encodePacked(FERMI_PROPAMM_VENUE, WETH_ADDR, tokenOut)
         );
     }

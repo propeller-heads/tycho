@@ -206,8 +206,7 @@ contract TychoRouterForUniswapV3Test is TychoRouterTestSetup {
         bool zeroForOne = false;
         bytes memory protocolData =
             encodeUniswapV3Swap(WETH_ADDR, DAI_ADDR, DAI_WETH_USV3, zeroForOne);
-        bytes memory swap =
-            encodeSingleSwap(address(usv3Executor), protocolData);
+        bytes memory swap = encodeSingleSwap(usv3Executor, protocolData);
 
         tychoRouter.singleSwapPermit2(
             amountIn,

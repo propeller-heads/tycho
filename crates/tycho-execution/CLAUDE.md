@@ -431,8 +431,8 @@ Executors run via `delegatecall` inside TychoRouterV3 — they have full access 
 - Foundry tests use `TychoRouterTestSetup.sol` as the shared base
 - Test naming: `test_<description>` in Rust, `test<Description>` in Solidity
 - **Cross-language integration tests**: Rust encoding tests
-  call `write_calldata_to_file(test_identifier, hex_calldata)` (`src/encoding/evm/utils.rs`), which appends `name:hex`
-  lines to `contracts/test/assets/calldata.txt`. Solidity tests then read that file
+  call `write_calldata_to_file(test_identifier, hex_calldata)` (`src/encoding/evm/utils.rs`), which writes
+  `contracts/test/assets/calldata/<test_identifier>.hex`, one file per test. Solidity tests then read it back
   via `loadCallDataFromFile(testName)` (`contracts/test/TestUtils.sol`) and execute the calldata against a mainnet fork.
   This verifies that Rust-encoded calldata is valid and executes correctly end-to-end.
 
