@@ -376,6 +376,23 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
         balances: &Balances,
     ) -> Result<(), TransitionError>;
 
+    /// Whether [`delta_transition`](Self::delta_transition) can bring this state to the block
+    /// `delta` describes, and quote it afterwards, without reading anything beyond its own
+    /// arguments.
+    ///
+    /// `false` means the transition or a quote taken after it falls back to a source the caller
+    /// does not supply — for EVM protocols, contract storage held in a database that only the
+    /// confirmed indexing pipeline updates. Applying `delta` to such a state layers new
+    /// attributes over stale storage and reports no error, so callers that transition a state
+    /// outside that pipeline must refuse it instead.
+    ///
+    /// Defaults to `false`. Return `true` once both the transition and the quote path are known
+    /// to depend on the arguments alone.
+    #[allow(unused)]
+    fn transitions_from_delta_alone(&self, delta: &ProtocolStateDelta) -> bool {
+        false
+    }
+
     /// Calculates the swap volume required to achieve the provided goal when trading against this
     /// pool.
     ///
@@ -507,6 +524,10 @@ where
     ) -> Result<(), TransitionError> {
         self.delta_transition(TransitionParams::new(delta, tokens, balances))
             .map(|_| ())
+    }
+
+    fn transitions_from_delta_alone(&self, delta: &ProtocolStateDelta) -> bool {
+        <T as SwapQuoter>::transitions_from_delta_alone(self, delta)
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {

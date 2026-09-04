@@ -236,6 +236,14 @@ impl ProtocolSim for CurveState {
         Ok(())
     }
 
+    /// True only when the delta carries `pool_state_adjusted`. Without it the transition falls
+    /// back to reading the view getters against the confirmed VM storage.
+    fn transitions_from_delta_alone(&self, delta: &ProtocolStateDelta) -> bool {
+        delta
+            .updated_attributes
+            .contains_key(vm::POOL_STATE_ADJUSTED)
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
@@ -300,6 +308,20 @@ mod tests {
 
     fn delta(attributes: HashMap<String, Bytes>) -> ProtocolStateDelta {
         ProtocolStateDelta { updated_attributes: attributes, ..Default::default() }
+    }
+
+    /// Without `pool_state_adjusted` the transition reads the view getters against the confirmed
+    /// VM storage, which a pending block never reaches.
+    #[test]
+    fn test_delta_alone_suffices_only_with_the_readings_attribute() {
+        let curve = state(vec![u("1"), u("1"), u("1")]);
+        let attribute = encode_readings(&readings(vec![u("2"), u("2"), u("2")])).expect("encode");
+
+        let with_readings =
+            delta(HashMap::from([(vm::POOL_STATE_ADJUSTED.to_string(), attribute)]));
+
+        assert!(curve.transitions_from_delta_alone(&with_readings));
+        assert!(!curve.transitions_from_delta_alone(&delta(HashMap::new())));
     }
 
     #[test]

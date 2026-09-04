@@ -648,6 +648,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         fee_before != self.get_fee().ok()
     }
 
+    fn transitions_from_delta_alone(&self, _delta: &ProtocolStateDelta) -> bool {
+        true
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }

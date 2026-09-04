@@ -125,6 +125,10 @@ impl ProtocolSim for EkuboState {
         self.finish_transition(delta.updated_attributes, delta.deleted_attributes)
     }
 
+    fn transitions_from_delta_alone(&self, _delta: &ProtocolStateDelta) -> bool {
+        true
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
