@@ -417,6 +417,77 @@ pub struct BlockEnvOverrides {
     pub timestamp: Option<u64>,
 }
 
+/// State a view call runs against, overriding what the engine's database holds.
+///
+/// Built once per pending block and reused across every pool priced against it. `Default`
+/// overrides nothing, so a call reads the engine's confirmed state.
+#[derive(Debug, Clone, Default)]
+pub struct PendingOverrides {
+    pub storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+    pub native_balances: Option<HashMap<Address, U256>>,
+    pub block: Option<BlockEnvOverrides>,
+}
+
+impl PendingOverrides {
+    /// Parameters for a `data` view call to `to` from the zero address, under these overrides.
+    ///
+    /// Clones the override maps, which `SimulationParameters` owns. Callers that issue many
+    /// calls per pending block pay that clone per call.
+    pub fn view_call(&self, to: Address, data: Vec<u8>) -> SimulationParameters {
+        SimulationParameters {
+            caller: Address::ZERO,
+            to,
+            data,
+            overrides: self.storage.clone(),
+            native_balance_overrides: self.native_balances.clone(),
+            block_overrides: self.block.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_overrides_tests {
+    use std::collections::HashMap;
+
+    use alloy::primitives::{Address, U256};
+
+    use super::{BlockEnvOverrides, PendingOverrides};
+
+    /// Every override a caller sets must reach the parameters, or a pool would silently be
+    /// priced against confirmed state.
+    #[test]
+    fn test_view_call_carries_every_override() {
+        let account = Address::repeat_byte(7);
+        let overrides = PendingOverrides {
+            storage: Some(HashMap::from([(account, HashMap::from([(U256::ZERO, U256::from(1))]))])),
+            native_balances: Some(HashMap::from([(account, U256::from(2))])),
+            block: Some(BlockEnvOverrides { number: Some(3), timestamp: Some(4) }),
+        };
+
+        let params = overrides.view_call(account, vec![0xab]);
+
+        assert_eq!(params.overrides, overrides.storage);
+        assert_eq!(params.native_balance_overrides, overrides.native_balances);
+        assert_eq!(params.block_overrides, overrides.block);
+        assert_eq!(params.caller, Address::ZERO, "A view call must not impersonate an account.");
+        assert_eq!(params.to, account);
+        assert_eq!(params.data, vec![0xab]);
+        assert_eq!(params.value, U256::ZERO, "A view call must not transfer value.");
+    }
+
+    #[test]
+    fn test_default_view_call_overrides_nothing() {
+        let params = PendingOverrides::default().view_call(Address::ZERO, Vec::new());
+
+        assert!(params.overrides.is_none());
+        assert!(params
+            .native_balance_overrides
+            .is_none());
+        assert!(params.block_overrides.is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, str::FromStr, time::Instant};
