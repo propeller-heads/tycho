@@ -21,6 +21,7 @@ use tycho_simulation::{
             filters::{balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter},
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
+            sky::state::SkyState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -28,6 +29,7 @@ use tycho_simulation::{
         },
         stream::ProtocolStreamBuilder,
     },
+    price_level_stream::stream::PriceLevelStreamBuilder,
     protocol::models::Update,
     utils::{get_default_url, load_all_tokens},
 };
@@ -73,7 +75,8 @@ fn register_exchanges(
                     Some(ekubo_v3_extension_filter),
                 )
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
-                .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None);
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:maverick_v2", tvl_filter.clone(), None)
+                .exchange::<SkyState>("sky", tvl_filter.clone(), None);
         }
         Chain::Base => {
             builder = builder
@@ -81,6 +84,7 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>(
                     "aerodrome_slipstreams",
                     tvl_filter.clone(),
@@ -102,7 +106,21 @@ fn register_exchanges(
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
-            builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
+        Chain::Robinhood => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
         }
         _ => {}
     }
@@ -146,6 +164,32 @@ async fn main() {
         )
         .await
         .expect("Failed loading tokens");
+
+        let mut stream_tasks: Vec<JoinHandle<()>> = Vec::new();
+
+        // The Titan pAMM price level stream only serves Ethereum L1. It never terminates, so it
+        // forwards from its own task alongside the protocol stream's.
+        if chain == Chain::Ethereum {
+            let price_level_stream = PriceLevelStreamBuilder::new()
+                .with_known_pamms()
+                .auto_detect(true)
+                .with_tokens(all_tokens.clone())
+                .build();
+            let price_level_tx = tick_tx.clone();
+            stream_tasks.push(tokio::spawn(async move {
+                tokio::pin!(price_level_stream);
+                while let Some(update) = price_level_stream.next().await {
+                    if price_level_tx
+                        .send(update)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+
         let tvl_threshold = cli
             .tvl_threshold
             .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
@@ -160,16 +204,20 @@ async fn main() {
                 .build()
                 .await
                 .expect("Failed building protocol stream");
-        tokio::pin!(protocol_stream);
+        stream_tasks.push(tokio::spawn(async move {
+            tokio::pin!(protocol_stream);
+            while let Some(msg) = protocol_stream.next().await {
+                tick_tx
+                    .send(msg.unwrap())
+                    .await
+                    .expect("Sending tick failed!")
+            }
+        }));
 
-        // Loop through block updates
-        while let Some(msg) = protocol_stream.next().await {
-            tick_tx
-                .send(msg.unwrap())
-                .await
-                .expect("Sending tick failed!")
-        }
-        anyhow::Result::Ok(())
+        // The streams run indefinitely, so the first forwarder to end — stream closed, receiver
+        // dropped, or panic — ends message processing as a whole.
+        let (result, _index, _remaining) = select_all(stream_tasks).await;
+        result.map_err(anyhow::Error::from)
     });
 
     let terminal = ratatui::init();

@@ -15,6 +15,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
 - **RFQ Protocols**: Request-for-Quote protocols like Hashflow
+- **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
 
@@ -41,6 +42,9 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--metrics-port`           | `9898`     | Port for Prometheus metrics server                                                                               |
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
 | `--disable-rfq`            | `false`    | Skip RFQ protocol testing                                                                                        |
+| `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
+| `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |
+| `--price-level-stream-stale-threshold-secs` | `10` | Seconds without a Titan message before marking served pAMMs stale in metrics (0 disables)              |
 | `--skip-messages-duration` | `600`      | RFQ stream skip duration (seconds) after processing a message                                                    |
 | `--block-wait-time`        | `12`       | Time to wait (seconds) for block N+1 before executing debug_traceCall                                            |
 | `--always-test-components` | -          | Comma-separated list of component IDs to test every block                                                        |

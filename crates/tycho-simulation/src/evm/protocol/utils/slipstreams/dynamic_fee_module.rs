@@ -13,9 +13,10 @@ pub(crate) const DEFAULT_SCALING_FACTOR: u64 = 0;
 // The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
 pub(crate) const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
-const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 2] = [
+const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 3] = [
     address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
     address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
+    address!("87D8f999BBa9343E8099552426775B51C338E8CB"),
 ];
 const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 
@@ -128,6 +129,31 @@ impl DynamicFeeConfig {
     }
 }
 
+/// A resolved swap fee, in pips, plus whether resolving it required a TWAP `observe`.
+///
+/// Under the first-in-block assumption the module short-circuits to the initial fee before
+/// touching the oracle, so such a swap does not pay for the observation reads either. Under the
+/// worst-case default the oracle read is charged whenever the dynamic branch evaluated it, even
+/// when the initial fee wins the max — conservative on both fee and gas.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedFee {
+    pub(crate) fee: u32,
+    pub(crate) observed_twap: bool,
+}
+
+impl ResolvedFee {
+    fn flat(fee: u32) -> Self {
+        Self { fee, observed_twap: false }
+    }
+}
+
+/// Resolves the fee a swap executing at `execution_timestamp` would pay.
+///
+/// When no observation has been written in the execution block yet, the swap's position within
+/// the block is unknown: `assume_first_in_block` quotes the initial fee (betting the swap lands
+/// before any other on the pool), while the default quotes the worse of the initial and dynamic
+/// fees so the output is never over-quoted. Once the pool has been touched in the execution
+/// block, position is a known fact and the flag has no effect.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_dynamic_fee(
     dfc: &DynamicFeeConfig,
@@ -137,39 +163,86 @@ pub(crate) fn get_dynamic_fee(
     observation_index: u16,
     observation_cardinality: u16,
     observations: &Observations,
-    blocktime: u32,
-) -> Result<u32, SimulationError> {
+    execution_timestamp: u32,
+    assume_first_in_block: bool,
+) -> Result<ResolvedFee, SimulationError> {
     if dfc.base_fee == ZERO_FEE_INDICATOR {
-        return Ok(0);
+        return Ok(ResolvedFee::flat(0));
     }
     let base_fee = if dfc.base_fee != 0 { dfc.base_fee } else { default_base_fee };
 
     if dfc.initial_fee_enabled &&
-        observations.timestamp_at(observation_index, observation_cardinality)? != blocktime
+        observations.timestamp_at(observation_index, observation_cardinality)? !=
+            execution_timestamp
     {
-        return match dfc.initial_fee {
-            0 => Ok(base_fee),
-            ZERO_FEE_INDICATOR => Ok(0),
-            initial_fee => Ok(initial_fee),
+        let initial = match dfc.initial_fee {
+            0 => base_fee,
+            ZERO_FEE_INDICATOR => 0,
+            initial_fee => initial_fee,
         };
-    }
-
-    let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
-        (dfc.scaling_factor, dfc.fee_cap)
-    } else {
-        (DEFAULT_SCALING_FACTOR, DEFAULT_FEE_CAP)
-    };
-    let total_fee = base_fee +
-        calculate_dynamic_fee(
+        if assume_first_in_block {
+            // First in block: the module returns before touching the oracle.
+            return Ok(ResolvedFee::flat(initial));
+        }
+        // Position unknown: quote the worse of the two branches, since nothing stops a pool from
+        // configuring `initialFee` above its dynamic fee. Gas stays conservative too: the oracle
+        // read is charged whenever the dynamic branch evaluated it.
+        let dynamic = resolve_dynamic_fee(
+            dfc,
+            base_fee,
             current_tick,
             liquidity,
             observation_index,
             observation_cardinality,
             observations,
-            blocktime,
-            scaling_factor,
+            execution_timestamp,
         )?;
-    Ok(total_fee.min(fee_cap))
+        return Ok(ResolvedFee { fee: initial.max(dynamic.fee), ..dynamic });
+    }
+
+    resolve_dynamic_fee(
+        dfc,
+        base_fee,
+        current_tick,
+        liquidity,
+        observation_index,
+        observation_cardinality,
+        observations,
+        execution_timestamp,
+    )
+}
+
+/// The dynamic branch of the module: base fee plus the TWAP-deviation component, capped.
+#[allow(clippy::too_many_arguments)]
+fn resolve_dynamic_fee(
+    dfc: &DynamicFeeConfig,
+    base_fee: u32,
+    current_tick: i32,
+    liquidity: u128,
+    observation_index: u16,
+    observation_cardinality: u16,
+    observations: &Observations,
+    execution_timestamp: u32,
+) -> Result<ResolvedFee, SimulationError> {
+    let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
+        (dfc.scaling_factor, dfc.fee_cap)
+    } else {
+        (DEFAULT_SCALING_FACTOR, DEFAULT_FEE_CAP)
+    };
+    // The module runs the TWAP computation for any scaling factor — a zero factor just
+    // multiplies the deviation away — so the observe gas is paid whenever the cardinality guard
+    // passes. Verified with debug_traceCall of fee() on a zero-scaling pool: the observe subcall
+    // burns ~50k gas.
+    let (dynamic_component, observed_twap) = calculate_dynamic_fee(
+        current_tick,
+        liquidity,
+        observation_index,
+        observation_cardinality,
+        observations,
+        execution_timestamp,
+        scaling_factor,
+    )?;
+    Ok(ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap })
 }
 
 fn calculate_dynamic_fee(
@@ -180,9 +253,10 @@ fn calculate_dynamic_fee(
     observations: &Observations,
     blocktime: u32,
     scaling_factor: u64,
-) -> Result<u32, SimulationError> {
+) -> Result<(u32, bool), SimulationError> {
     if observation_cardinality < (DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO) as u16 {
-        return Ok(0);
+        // The module returns before reaching the oracle: no observe gas.
+        return Ok((0, false));
     };
     // Mirror the on-chain module's `try pool.observe(...) { ... } catch { return 0; }`: a failed
     // observation (e.g. a ring buffer Tycho only partially indexed) contributes no dynamic
@@ -196,19 +270,20 @@ fn calculate_dynamic_fee(
         observation_cardinality,
     ) {
         Ok(observed) => observed,
-        Err(_) => return Ok(0),
+        // The on-chain try/catch still paid for the attempted observe.
+        Err(_) => return Ok((0, true)),
     };
     let tw_avg_tick = match observed {
         (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {
             ((tick_cumulatives[1] - tick_cumulatives[0]) / DEFAULT_SECONDS_AGO as i64) as i32
         }
-        _ => return Ok(0),
+        _ => return Ok((0, true)),
     };
 
     let abs_tick_delta = (current_tick - tw_avg_tick).unsigned_abs();
 
     let dynamic_fee = (abs_tick_delta as u128 * scaling_factor as u128) / SCALING_PRECISION;
-    Ok(dynamic_fee as u32)
+    Ok((dynamic_fee as u32, true))
 }
 
 #[cfg(test)]
@@ -229,10 +304,10 @@ mod tests {
             ..Default::default()
         }]);
 
-        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100)
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100, true)
             .expect("Failed to calculate dynamic fee");
 
-        assert_eq!(fee, 30);
+        assert_eq!(fee, ResolvedFee::flat(30));
     }
 
     #[test]
@@ -245,10 +320,10 @@ mod tests {
             ..Default::default()
         }]);
 
-        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100)
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100, true)
             .expect("Failed to calculate dynamic fee");
 
-        assert_eq!(fee, 150);
+        assert_eq!(fee, ResolvedFee::flat(150));
     }
 
     #[rstest]
@@ -263,10 +338,10 @@ mod tests {
         }]);
 
         let dfc = DynamicFeeConfig::new(150, 400, 0, true, initial_fee);
-        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100)
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 100, true)
             .expect("Failed to calculate dynamic fee");
 
-        assert_eq!(fee, expected_fee);
+        assert_eq!(fee.fee, expected_fee);
     }
 
     #[test]
@@ -304,11 +379,20 @@ mod tests {
                 .is_ok());
         }
 
-        let dynamic_fee =
-            get_dynamic_fee(&dfc, 362, -195239, 1102101691356476042, 534, 3010, &obs, 1762330021)
-                .expect("Failed to calculate dynamic fee");
+        let dynamic_fee = get_dynamic_fee(
+            &dfc,
+            362,
+            -195239,
+            1102101691356476042,
+            534,
+            3010,
+            &obs,
+            1762330021,
+            true,
+        )
+        .expect("Failed to calculate dynamic fee");
 
-        assert_eq!(dynamic_fee, 380);
+        assert_eq!(dynamic_fee, ResolvedFee { fee: 380, observed_twap: true });
     }
 
     #[test]
@@ -353,17 +437,18 @@ mod tests {
             ..Default::default()
         }]);
 
-        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 0, 1, &observations, 100)
+        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 0, 1, &observations, 100, true)
             .expect("Failed to calculate dynamic fee");
 
-        assert_eq!(fee, 3000);
+        assert_eq!(fee, ResolvedFee::flat(3000));
     }
 
     #[test]
     fn observe_failure_falls_back_to_base_fee() {
         // cardinality clears the min-history guard but exceeds the indexed buffer, so observe()
         // errors out of bounds. Like the on-chain try/catch, the dynamic component is 0 and the
-        // fee falls back to the base fee, instead of failing the quote.
+        // fee falls back to the base fee instead of failing the quote — but the attempted
+        // observe still costs gas, so observed_twap stays true.
         let dfc = DynamicFeeConfig::default();
         let observations = Observations::new(vec![
             Observation {
@@ -380,9 +465,38 @@ mod tests {
             },
         ]);
 
-        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 1, 300, &observations, 1_000_000)
+        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 1, 300, &observations, 1_000_000, true)
             .expect("observe failure should fall back to the base fee, not error");
 
-        assert_eq!(fee, 3000);
+        assert_eq!(fee, ResolvedFee { fee: 3000, observed_twap: true });
+    }
+
+    #[test]
+    fn zero_scaling_still_pays_for_the_observe() {
+        // A zero scaling factor only multiplies the deviation away; the oracle is still read, so
+        // the observe gas is still paid. Only the cardinality guard skips the oracle.
+        let dfc = DynamicFeeConfig::new(2700, 0, 0, false, 0);
+        let observations = Observations::new(vec![
+            Observation {
+                block_timestamp: 999_000,
+                initialized: true,
+                index: 0,
+                ..Default::default()
+            },
+            Observation {
+                block_timestamp: 999_500,
+                initialized: true,
+                index: 1,
+                ..Default::default()
+            },
+        ]);
+
+        let fee = get_dynamic_fee(&dfc, 500, 0, 1, 1, 300, &observations, 1_000_000, true)
+            .expect("fee should be computable");
+        assert_eq!(fee, ResolvedFee { fee: 2700, observed_twap: true });
+
+        let guarded = get_dynamic_fee(&dfc, 500, 0, 1, 0, 1, &observations, 1_000_000, true)
+            .expect("fee should be computable");
+        assert_eq!(guarded, ResolvedFee::flat(2700), "cardinality guard skips the oracle");
     }
 }

@@ -42,7 +42,7 @@ Entry (e.g. splitSwap)
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 3 funding modes (transferFrom/Permit2/vault) = 9 public methods. `_takeFees()` deducts fees, `_settleOutput()` transfers/credits final output to receiver or vault                                  |
 | `Vault.sol`                    | ERC6909 multi-token vault (see subsection below)                                                                                                                                                                                                               |
-| `Dispatcher.sol`               | Executor dispatch. 3-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
+| `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
@@ -51,7 +51,8 @@ Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
-getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
+`IPropAMM` / `IPropAMMRouter` (the pAMM standard and Titan's fallback router) and `IUniversalRouter`.
 
 ### Vault (`Vault.sol`)
 
@@ -116,7 +117,10 @@ queryable via RPC:
 **Positive slippage** (`_positiveSlippageEnabled`, toggled via `setPositiveSlippageEnabled`): when enabled, the router
 takes the entire surplus (`actualAmountOut - expectedAmountOut`) before fees, and the remaining fees compute on
 `expectedAmountOut`. When disabled, fees compute on `actualAmountOut` and the surplus stays in the swap output. The flag
-also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap.
+also forces `mustOutputThroughRouter` to return true, since slippage direction is unknown before the swap. Per-client
+exemptions (`setPositiveSlippageExempt`, `_positiveSlippageExempt` mapping) opt a resolved client out while capture
+stays enabled globally: the surplus stays in the swap output, fees compute on `actualAmountOut`, and an exempt client
+with no fees skips the forced router hop.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
@@ -133,7 +137,10 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
-AerodromeV1, LiquidityParty, Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, WETH.
+AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ), Hashflow (RFQ),
+Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other native wrappers),
+PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
+address travels in the swap data) and PropAMMFallback (the same liquidity routed via Titan's PropAMMRouter).
 
 ### Executor Flow, Callbacks & Output Verification
 
@@ -146,15 +153,15 @@ amounts and handles fee-on-transfer/rebasing tokens universally.
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1 | `false`          | Dispatcher measures balance at receiver                                                          |
-| **Output-lands-at-router** | Curve, WETH, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                                    | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
 
 **Direct-transfer** (UniswapV2, BalancerV2, Curve): Dispatcher staticcalls `getTransferData()` to get
 the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs the transfer, then delegatecalls `swap()`.
 
-**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo): Also implement `ICallback`. Flow:
+**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, Metric): Also implement `ICallback`. Flow:
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool
@@ -202,23 +209,23 @@ Last swap's receiver is the final user/vault address.
 
 ## Rust Encoding Pipeline (`src/encoding/`)
 
-Encodes a `Solution` into EVM calldata through three trait layers:
+Encodes a `Solution` into EVM calldata through three layers:
 
 ```
 TychoEncoder (trait)                     -- public API, validates Solution
   └─ TychoRouterEncoder                 -- selects strategy, auto-inserts WETH swaps
-       └─ StrategyEncoder (trait)        -- encodes swap structure (single/sequential/split)
+       └─ strategy encoders             -- encode swap structure (single/sequential/split)
             └─ SwapEncoder (trait)       -- encodes protocol-specific pool data
 ```
 
 **TychoRouterEncoder** validates each `Solution` (exact input, has swaps, no invalid cycles), auto-inserts WETH
 wrap/unwrap where ETH↔WETH bridges are missing, then selects strategy: **Single** (1 swap or 1 groupable-protocol batch
-with no splits), **Sequential** (multiple swaps, all `split == 0.0`), **Split** (any `split > 0.0`). *
-*TychoExecutorEncoder** is a simplified variant that bypasses TychoRouterV3 and calls the executor directly.
+with no splits), **Sequential** (multiple swaps, all `split == 0.0`), **Split** (any `split > 0.0`).
 
-### StrategyEncoder
+### Strategy encoders
 
-Three implementations (`evm/strategy_encoder/`), each targeting a TychoRouterV3 method family. Protocol data within a
+Three concrete encoders (`evm/strategy_encoder/`), each with an `encode_strategy` method targeting a TychoRouterV3
+method family. Protocol data within a
 group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (`NON_PLE_ENCODED_PROTOCOLS`).
 
 | Strategy                        | Router methods                              | Encoding                                                                                                                           |
@@ -227,26 +234,43 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 | `SequentialSwapStrategyEncoder` | `sequentialSwap` / `Permit2` / `UsingVault` | Validates path connectivity, groups by protocol, PLE-encodes each group with executor header                                       |
 | `SplitSwapStrategyEncoder`      | `splitSwap` / `Permit2` / `UsingVault`      | Builds token array [tokenIn, intermediaries, tokenOut], encodes token indices + split percentages (U24) + executor + protocol data |
 
-**Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol (UniswapV4, BalancerV3,
-Ekubo) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
+**Parallel encoding**: `encode_swap_groups` (`strategy_encoders.rs`) and `TychoRouterEncoder::encode_solutions`
+spawn threads via `map_on_threads` (`evm/utils.rs`) **only when an encoder in the batch blocks on a quote** —
+`SwapEncoder::blocks_on_quote()` defaults to `false` and is `true` only for the RFQ encoders (Bebop, Hashflow,
+Liquorice, Metric). Otherwise encoding runs serially on the calling thread. Input order is preserved either way.
+
+**Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol
+(`GROUPABLE_PROTOCOLS` in `evm/constants.rs`: `uniswap_v4`, `uniswap_v4_hooks`, `vm:balancer_v3`,
+`ekubo_v2`, `ekubo_v3`) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
 encode an entire multi-pool route as a single swap if all hops are on the same groupable protocol.
 
 ### SwapEncoder
 
 **SwapEncoder trait** (`swap_encoder.rs` + `evm/swap_encoder/`): Each protocol
-implements `encode_swap(&Swap, &EncodingContext) -> Vec<u8>`, encoding pool-specific data (pool ID, fee tiers, direction
+implements `encode_swap(&Swap, &EncodingContext) -> Result<Vec<u8>, EncodingError>`, encoding pool-specific data (pool ID, fee tiers, direction
 flags) into packed bytes. Each encoder holds its executor address.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
-e.g. `uniswap_v2`, `fluid_v1`).
+e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
+with the venue name or, for auto-detected pAMMs, the venue address). Price-level-stream protocols
+resolve generically: a single `pricelevelstream` config entry serves the whole family via a
+`get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
+`pricelevelstream:{venue}` entries overriding per venue.
+
+`propammfallback:{venue}` is the same liquidity executed through Titan's PropAMMRouter
+(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the venue
+directly, so a stale maker quote falls back to a single-hop Uniswap V3 pool rather than reverting
+the route. It resolves the same
+way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only venues
+whitelisted on the PropAMMRouter may use the prefix.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 
 Angstrom's Uniswap V4 pools start every block locked. A swap against one carries a pool unlock attestation, signed by
 the current Angstrom leader, as its `hookData`. The attestation is scoped to a block number and says nothing about the
-swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 5) serves every swap, pool and route.
+swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, default 10) serves every swap, pool and route.
 
 `AttestationCache` therefore keeps the window in a process-wide cache instead of fetching it during encoding:
 
@@ -268,6 +292,43 @@ swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, defaul
 `Swap::new(component, token_in: Token, token_out: Token, estimated_gas: BigUint)` carries a per-swap simulation gas
 estimate (zero if unknown). Encoders aggregate these into `EncodedSolution.estimated_gas`, exposing a single estimate
 for the whole solution.
+
+## Router Trades Substreams (`substreams/`)
+
+Standalone WASM workspace (excluded from the root workspace) indexing every trade routed through
+the deployed TychoRouter contracts. Trades are recovered from EVM call traces — the router emits
+no swap event — decoded per ABI generation (`v2`, `v3_0`, `v3_1`), enriched with hop/executor
+data, `FeesTaken` amounts and the router fee configuration replayed from FeeCalculator events,
+then emitted as `DatabaseChanges` for `substreams-sink-sql` (`schema.sql`). Per-chain manifests
+live in `substreams/tycho-router-trades/chains/`.
+
+Trades are valued in USD after ingestion, not in the substreams. Tycho prices tokens in each
+chain's native token, so pricing anchors through the stablecoins pinned in
+`substreams/pricing/preferred_tokens.sql` and values a trade from one trusted side, implying the
+other side's price from the trade. See `substreams/README.md`.
+
+**Adding a chain** touches six places, and the last three fail silently when missed — follow
+"Adding a chain" in `substreams/README.md`:
+
+1. `substreams/tycho-router-trades/chains/<chain>.yaml` — new manifest: `network`, the router and
+   fee-calculator `params`, and `initialBlock` on all four modules.
+2. `initialBlock` set from the deployment block of the earliest router on that chain (binary
+   search `eth_getCode`), never a round number: the whole module graph is built from there.
+3. The chain must serve Extended (Firehose) blocks; trades come from call traces, so a chain
+   without them yields nothing rather than an error.
+4. `substreams/pricing/preferred_tokens.sql` — the native sentinel row plus at least one pinned
+   stablecoin, or the chain has no USD anchor and every trade stays unpriced. Pin by address and
+   verify the implied price; symbols are duplicated by fake tokens.
+5. `substreams/scripts/gen_tables.py` re-run, so `src/executors_table.rs` names the new chain's
+   executors.
+6. `substreams/docker-compose.yaml` and, in `helm-configuration`, the `$chains` list plus a
+   `TYCHO_<CHAIN>_DATABASE_URL` entry in
+   `helmwave/dev/values/tycho/router-trades/router-trades.yml`.
+
+**Changing a manifest or the Rust source changes the module hash**, which the sink cursors are
+keyed by; the affected containers then exit until their `cursors_<chain>` row is cleared, and
+because the sink writes plain `INSERT`s, any chain that re-reads written blocks needs its rows
+deleted too. See "Updating a deployed sink" in `substreams/README.md`.
 
 ## Build & Test
 
@@ -301,8 +362,9 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 
 ### CI
 
-- **evm-foundry-ci.yml**: Format check + forge test + gas snapshot on PRs and main pushes
-- **slither.yml**: Static analysis
+- **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
+  snapshot, a Slither static-analysis job, and a runtime-bytecode-fixtures freshness check
+- **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
 
@@ -335,11 +397,11 @@ When writing code that calls TychoRouterV3 swap functions:
   quoted output; `minAmountOut` is the revert guardrail —
   the tx reverts if the actual output falls below it. Compute it off-chain from your slippage
   tolerance. Example: 1000 USDC quoted, 5% tolerance → `expectedAmountOut = 1000 * 10**6`,
-  `minAmountOut = 950 * 10**6`. The router rejects `minAmountOut > expectedAmountOut` and any
-  `minAmountOut` more than `MAX_SLIPPAGE_TOLERANCE_BPS` below it, which also excludes zero.
-  Setting `minAmountOut` too low may result in a sandwiched swap.
-- **Verify the price data** used for `expectedAmountOut` against at least one independent source.
-  Incorrect price data may set the slippage floor too low.
+  `minAmountOut = 950 * 10**6`. The router rejects a zero `minAmountOut` and any
+  `minAmountOut > expectedAmountOut`.
+  Setting `minAmountOut` too low exposes the swap to MEV attacks.
+- **Verify the price data** used to compute `minAmountOut` against at least one independent source.
+  A `minAmountOut` derived from a bad quote may be too low to prevent a sandwiched swap.
 - **Never approve infinite allowances**, including Permit2. Set Permit2 allowance and deadline as low as practical.
 
 ### Building Executors (executor checklist)

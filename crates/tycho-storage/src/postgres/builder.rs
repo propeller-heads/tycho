@@ -13,7 +13,11 @@ pub struct GatewayBuilder {
     protocol_systems: Vec<String>,
     retention_horizon: NaiveDateTime,
     chains: Vec<Chain>,
+    token_cache: bool,
 }
+
+/// How often the token cache polls for token rows modified by other processes.
+const TOKEN_CACHE_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl GatewayBuilder {
     pub fn new(database_url: &str) -> Self {
@@ -32,6 +36,14 @@ impl GatewayBuilder {
 
     pub fn set_retention_horizon(mut self, horizon: NaiveDateTime) -> Self {
         self.retention_horizon = horizon;
+        self
+    }
+
+    /// Serves `get_tokens` from an in-memory copy of the token tables instead of SQL.
+    /// Costs a full token load at startup plus a periodic refresh query; intended for
+    /// the long-running `index` and `rpc` services.
+    pub fn enable_token_cache(mut self) -> Self {
+        self.token_cache = true;
         self
     }
 
@@ -59,7 +71,16 @@ impl GatewayBuilder {
         postgres::ensure_protocol_systems(&self.protocol_systems, &mut conn).await;
         drop(conn);
 
-        let inner_gw = PostgresGateway::new(pool.clone(), self.retention_horizon).await?;
+        let inner_gw = PostgresGateway::new(
+            pool.clone(),
+            self.retention_horizon,
+            self.token_cache
+                .then_some(self.chains.as_slice()),
+        )
+        .await?;
+        if let Some(token_cache) = &inner_gw.token_cache {
+            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
+        }
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
@@ -78,7 +99,16 @@ impl GatewayBuilder {
     pub async fn build_gw(self) -> Result<CachedGateway, StorageError> {
         let pool = postgres::connect(&self.database_url).await?;
 
-        let inner_gw = PostgresGateway::new(pool.clone(), self.retention_horizon).await?;
+        let inner_gw = PostgresGateway::new(
+            pool.clone(),
+            self.retention_horizon,
+            self.token_cache
+                .then_some(self.chains.as_slice()),
+        )
+        .await?;
+        if let Some(token_cache) = &inner_gw.token_cache {
+            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
+        }
         let (tx, _) = mpsc::channel(10);
 
         let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw.clone());
@@ -96,7 +126,16 @@ impl GatewayBuilder {
         postgres::ensure_protocol_systems(&self.protocol_systems, &mut conn).await;
         drop(conn);
 
-        let inner_gw = PostgresGateway::new(pool.clone(), self.retention_horizon).await?;
+        let inner_gw = PostgresGateway::new(
+            pool.clone(),
+            self.retention_horizon,
+            self.token_cache
+                .then_some(self.chains.as_slice()),
+        )
+        .await?;
+        if let Some(token_cache) = &inner_gw.token_cache {
+            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
+        }
 
         let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
         Ok(direct_gw)

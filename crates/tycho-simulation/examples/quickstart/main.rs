@@ -90,29 +90,40 @@ struct Cli {
 
 impl Cli {
     fn with_defaults(mut self) -> Self {
-        // By default, we swap a small amount of USDC to WETH on whatever chain we choose
+        // By default, we swap a small amount of the chain's main stablecoin into its wrapped
+        // native token.
 
         if self.buy_token.is_none() {
-            self.buy_token = Some(match self.chain.to_string().as_str() {
-                "ethereum" => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
-                "base" => "0x4200000000000000000000000000000000000006".to_string(),
-                "unichain" => "0x4200000000000000000000000000000000000006".to_string(),
-                "arbitrum" => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".to_string(),
-                _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
-            });
+            self.buy_token = Some(
+                self.chain
+                    .wrapped_native_token()
+                    .address
+                    .to_string(),
+            );
         }
 
         if self.sell_token.is_none() {
-            self.sell_token = Some(match self.chain.to_string().as_str() {
-                "ethereum" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                "base" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
-                "unichain" => "0x078d782b760474a361dda0af3839290b0ef57ad6".to_string(),
-                "arbitrum" => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
-                _ => panic!("Execution does not yet support chain {chain}", chain = self.chain),
-            });
+            self.sell_token = Some(default_stablecoin(self.chain).to_string());
         }
 
         self
+    }
+}
+
+/// Returns the stablecoin used as the default sell token on the given chain.
+///
+/// This is USDC everywhere except Robinhood Chain, whose canonical stablecoin is USDG.
+/// Panics on chains without a default — pass `--sell-token` for those.
+fn default_stablecoin(chain: Chain) -> &'static str {
+    match chain {
+        Chain::Ethereum => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        Chain::Base => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        Chain::Unichain => "0x078d782b760474a361dda0af3839290b0ef57ad6",
+        Chain::Arbitrum => "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        Chain::Bsc => "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        Chain::Polygon => "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        Chain::Robinhood => "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        _ => panic!("No default sell token for chain {chain}. Please pass --sell-token."),
     }
 }
 
@@ -220,6 +231,7 @@ async fn main() {
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>(
                     "aerodrome_slipstreams",
                     tvl_filter.clone(),
@@ -248,8 +260,21 @@ async fn main() {
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
-            protocol_stream =
-                protocol_stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+        }
+        Chain::Robinhood => {
+            protocol_stream = protocol_stream
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
         }
         _ => {}
     }

@@ -1,0 +1,61 @@
+name: Router Trades CI
+
+on:
+  pull_request:
+    paths:
+      - 'crates/tycho-execution/substreams/**'
+      - '.github/workflows/ci-router-trades.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/tycho-execution/substreams/**'
+      - '.github/workflows/ci-router-trades.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, build, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/tycho-execution/substreams
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
+        with:
+          toolchain: 1.96.0
+          targets: wasm32-unknown-unknown
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # nightly
+        with:
+          toolchain: nightly-2026-06-28
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        with:
+          cache-on-failure: true
+          workspaces: crates/tycho-execution/substreams
+
+      - name: Unit tests
+        run: make test
+
+      - name: Formatting
+        run: cargo +nightly-2026-06-28 fmt -- --check
+
+      - name: Clippy
+        run: cargo +nightly-2026-06-28 clippy --all --all-features --all-targets -- -D warnings
+
+      - name: WASM build
+        run: make build
+
+      - name: Pricing integration and outage isolation
+        run: |
+          make test-pricing
+          ./scripts/test_pricing.sh --outage-check

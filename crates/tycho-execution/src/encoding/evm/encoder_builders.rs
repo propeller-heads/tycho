@@ -3,9 +3,8 @@ use tycho_common::{models::Chain, Bytes};
 use crate::encoding::{
     errors::EncodingError,
     evm::{
-        constants::get_router_address,
-        swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-        tycho_encoders::{TychoExecutorEncoder, TychoRouterEncoder},
+        constants::get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+        tycho_encoders::TychoRouterEncoder,
     },
     tycho_encoder::TychoEncoder,
 };
@@ -57,49 +56,11 @@ impl TychoRouterEncoderBuilder {
                 get_router_address(&chain)?.clone()
             };
 
-            Ok(Box::new(TychoRouterEncoder::new(
-                chain,
-                swap_encoder_registry,
-                tycho_router_address,
-            )?))
+            Ok(Box::new(TychoRouterEncoder::new(swap_encoder_registry, tycho_router_address)?))
         } else {
             Err(EncodingError::FatalError(
                 "Please set the chain and swap encoder registry before building the encoder"
                     .to_string(),
-            ))
-        }
-    }
-}
-
-/// Builder pattern for constructing a `TychoExecutorEncoder` with customizable options.
-pub struct TychoExecutorEncoderBuilder {
-    swap_encoder_registry: Option<SwapEncoderRegistry>,
-}
-
-impl Default for TychoExecutorEncoderBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TychoExecutorEncoderBuilder {
-    pub fn new() -> Self {
-        TychoExecutorEncoderBuilder { swap_encoder_registry: None }
-    }
-
-    pub fn swap_encoder_registry(mut self, swap_encoder_registry: SwapEncoderRegistry) -> Self {
-        self.swap_encoder_registry = Some(swap_encoder_registry);
-        self
-    }
-
-    /// Builds the `TychoExecutorEncoder` instance using the configured chain and strategy.
-    /// Returns an error if either the chain or strategy has not been set.
-    pub fn build(self) -> Result<Box<dyn TychoEncoder>, EncodingError> {
-        if let Some(swap_encoder_registry) = self.swap_encoder_registry {
-            Ok(Box::new(TychoExecutorEncoder::new(swap_encoder_registry)?))
-        } else {
-            Err(EncodingError::FatalError(
-                "Please set the swap encoder registry before building the encoder".to_string(),
             ))
         }
     }

@@ -14,6 +14,7 @@ struct FeeInfo {
     router_fee_on_output_bps: i64,
     router_fee_on_client_fee_bps: i64,
     positive_slippage_enabled: bool,
+    positive_slippage_exempt: bool,
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
@@ -47,10 +48,19 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         false
     };
 
+    // The exemption only changes behavior while capture is enabled, so the
+    // parameter space stays smaller when capture is off.
+    let positive_slippage_exempt = if positive_slippage_enabled {
+        params.request("positive_slippage_exempt", vec![true, false])?
+    } else {
+        false
+    };
+
     Ok(FeeInfo {
         router_fee_on_output_bps,
         router_fee_on_client_fee_bps,
         positive_slippage_enabled,
+        positive_slippage_exempt,
     })
 }
 
@@ -92,7 +102,7 @@ pub fn calculate_fee(
 pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    if fee_info.positive_slippage_enabled {
+    if fee_info.positive_slippage_enabled && !fee_info.positive_slippage_exempt {
         return Ok(true);
     }
     if client_fee_bps > 0 {
@@ -149,13 +159,16 @@ fn _calculate_fee(
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
 /// Returns the positive slippage surplus, all of which goes to the router;
-/// zero if disabled or no surplus.
+/// zero if disabled, the client is exempt, or there is no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
     expected_amount_out: i64,
     fee_info: &FeeInfo,
 ) -> i64 {
-    if !fee_info.positive_slippage_enabled || actual_amount_out <= expected_amount_out {
+    if !fee_info.positive_slippage_enabled ||
+        fee_info.positive_slippage_exempt ||
+        actual_amount_out <= expected_amount_out
+    {
         return 0;
     }
 

@@ -56,6 +56,8 @@ This repo's documentation lives in two places:
 | `.claude/knowledge/rust.md` | Rust coding conventions for this project |
 | `.claude/knowledge/version_control.md` | Git/PR workflow for this project |
 | `.claude/knowledge/python.md` | Python conventions (tycho-client-py, dto/rpc changes) |
+| `.claude/knowledge/solidity.md` | Solidity / Foundry conventions (contracts, executors) |
+| `.claude/knowledge/gitbook.md` | GitBook conventions for docs under `docs/` |
 
 ### 2. Per-crate `CLAUDE.md` files
 
@@ -102,7 +104,7 @@ it only reports discrepancies.
 > - Compare feature flags table against each crate's `Cargo.toml` `[features]`
 > - Compare "End-to-End Data Flow" diagram against `crates/tycho-indexer/src/extractor/protocol_extractor.rs`,
 >   `crates/tycho-indexer/src/services/`, and `crates/tycho-client/src/feed/`
-> - Compare CLI commands table against `crates/tycho-indexer/src/cli/`
+> - Compare CLI commands table against `crates/tycho-indexer/src/cli.rs`
 > - Compare env vars table against actual usage (search for `env::var` / `std::env`)
 > - Compare testing section against CI config (`.github/workflows/`)
 >
@@ -185,9 +187,9 @@ that hash and HEAD to find changes that demand documentation updates.
 >    - Changed struct/enum definitions (added/removed/renamed fields/variants)
 >    - Changed RPC endpoints in `crates/tycho-indexer/src/services/rpc.rs`
 >    - Changed feature flags in any crate's `Cargo.toml`
->    - Changed CLI commands in `crates/tycho-indexer/src/cli/`
+>    - Changed CLI commands in `crates/tycho-indexer/src/cli.rs`
 >    - Changed data flow or extraction pipeline logic
->    - New DEX integrations added to `crates/tycho-simulation/src/protocol/` or `crates/tycho-execution/src/encoding/`
+>    - New DEX integrations added to `crates/tycho-simulation/src/evm/protocol/` or `crates/tycho-execution/src/encoding/`
 > 4. For each change that affects something documented in `.claude/CODEBASE.md` or any `CLAUDE.md`, report:
 >    - The commit(s) that introduced the change
 >    - Which doc file is affected

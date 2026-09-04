@@ -256,7 +256,7 @@ fn calculate_trade_price(
 
 /// Returns true if `actual` is within `[target, target * (1 + tolerance)]`.
 #[inline]
-fn is_within_tolerance(actual: f64, target: f64, tolerance: f64) -> bool {
+pub(crate) fn is_within_tolerance(actual: f64, target: f64, tolerance: f64) -> bool {
     actual >= target && actual <= target * (1.0 + tolerance)
 }
 

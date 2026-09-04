@@ -13,7 +13,7 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMess
 use tycho_common::{
     dto::{ChangeType, ProtocolStateDelta},
     models::{blockchain::BlockAggregatedChanges, token::Token, Chain},
-    simulation::protocol_sim::{Balances, ProtocolSim},
+    simulation::protocol_sim::{Balances, BlockContext, ProtocolSim},
     Bytes,
 };
 #[cfg(test)]
@@ -100,19 +100,13 @@ where
     skip_state_decode_failures: bool,
     min_token_quality: u32,
     registry: HashMap<String, Box<RegistryFn<H>>>,
-    inclusion_filters: HashMap<String, FilterFn>,
+    inclusion_filters: HashMap<String, Vec<FilterFn>>,
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
-}
-
-impl<H> Default for TychoStreamDecoder<H>
-where
-    H: HeaderLike + Clone + Sync + Send + 'static + std::fmt::Debug,
-{
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Seconds between blocks, used to project a confirmed block header onto the next block when
+    /// deriving the execution block for block-sensitive states.
+    block_time_secs: u64,
 }
 
 /// Curve migrated from the generic VM adapter (`EVMPoolState`) to the native [`CurveState`]
@@ -128,7 +122,12 @@ impl<H> TychoStreamDecoder<H>
 where
     H: HeaderLike + Clone + Sync + Send + 'static + std::fmt::Debug,
 {
-    pub fn new() -> Self {
+    /// Creates a decoder for `chain`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chain` is a custom chain with no registered config.
+    pub fn new(chain: Chain) -> Self {
         Self {
             state: Arc::new(RwLock::new(DecoderState::default())),
             skip_state_decode_failures: false,
@@ -136,6 +135,50 @@ where
             registry: HashMap::new(),
             inclusion_filters: HashMap::new(),
             override_providers: HashMap::new(),
+            block_time_secs: chain.block_time_secs(),
+        }
+    }
+
+    /// The block a quote produced from `header` is expected to execute in.
+    ///
+    /// A partial (flashblock) header describes a block that is still open, so a quote can still
+    /// land in it. A confirmed header describes a closed block, so the quote targets the next one.
+    fn execution_block(&self, header: &BlockHeader) -> BlockContext {
+        if header.partial_block_index.is_some() {
+            BlockContext::new(header.number, header.timestamp)
+        } else {
+            BlockContext::new(header.number + 1, header.timestamp + self.block_time_secs)
+        }
+    }
+
+    /// Advances every state to `execution_block` via [`ProtocolSim::apply_block`].
+    ///
+    /// States already being emitted are advanced in place. Stored states absent from this
+    /// message are advanced in place under the write guard and cloned into `updated_states`
+    /// only when their quoting behavior changed — so an idle block-sensitive pool costs one
+    /// virtual call per message and zero clones, and consumers are only told about pools whose
+    /// quotes actually moved. Stored states of failed or removed components are left untouched,
+    /// so a component the consumer was told is gone is never re-emitted.
+    fn refresh_execution_block<C>(
+        updated_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
+        stored_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
+        failed_components: &HashSet<String>,
+        removed_components: &HashMap<String, C>,
+        execution_block: &BlockContext,
+    ) {
+        for state in updated_states.values_mut() {
+            state.apply_block(execution_block);
+        }
+        for (id, state) in stored_states.iter_mut() {
+            if failed_components.contains(id) ||
+                removed_components.contains_key(id) ||
+                updated_states.contains_key(id)
+            {
+                continue;
+            }
+            if state.apply_block(execution_block) {
+                updated_states.insert(id.clone(), state.clone_box());
+            }
         }
     }
 
@@ -265,9 +308,23 @@ where
     /// For example, you might use a filter to exclude pools that are not fully supported in the
     /// protocol, or to ignore pools with certain attributes that are irrelevant to your
     /// application.
+    ///
+    /// Filters accumulate: registering a second predicate for the same exchange keeps the first,
+    /// and a component is admitted only when every registered predicate accepts it.
     pub fn register_filter(&mut self, exchange: &str, predicate: FilterFn) {
         self.inclusion_filters
-            .insert(exchange.to_string(), predicate);
+            .entry(exchange.to_string())
+            .or_default()
+            .push(predicate);
+    }
+
+    /// Whether every filter registered for `exchange` accepts `snapshot`. An exchange with no
+    /// registered filter admits every component.
+    fn admits(&self, exchange: &str, snapshot: &ComponentWithState) -> bool {
+        let Some(predicates) = self.inclusion_filters.get(exchange) else { return true };
+        predicates
+            .iter()
+            .all(|predicate| predicate(snapshot))
     }
 
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
@@ -516,11 +573,7 @@ where
                     .clone()
                 {
                     // Skip any unsupported pools
-                    if self
-                        .inclusion_filters
-                        .get(protocol.as_str())
-                        .is_some_and(|predicate| !predicate(&snapshot))
-                    {
+                    if !self.admits(protocol.as_str(), &snapshot) {
                         continue;
                     }
 
@@ -953,6 +1006,18 @@ where
                 .contains(id)
         });
 
+        if let Some(header) = current_block.as_ref() {
+            let execution_block = self.execution_block(header);
+            let decoder_state = &mut *state_guard;
+            Self::refresh_execution_block(
+                &mut updated_states,
+                &mut decoder_state.states,
+                &decoder_state.failed_components,
+                &removed_pairs,
+                &execution_block,
+            );
+        }
+
         state_guard
             .states
             .extend(updated_states.clone());
@@ -1047,6 +1112,17 @@ where
                 ) {
                     warn!(pool = id, error = %e, "EphemeralDeltaTransitionError");
                 }
+            }
+        }
+
+        // `header` is the block being built, so it already *is* the execution block — unlike
+        // `decode`, there is nothing to project forward here. Only the delta-applied clones need
+        // advancing: this path is read-only, and the stored states were already advanced to this
+        // block by `decode()` on the confirmed stream.
+        if let Some(header) = current_block.as_ref() {
+            let execution_block = BlockContext::new(header.number, header.timestamp);
+            for state in updated_states.values_mut() {
+                state.apply_block(&execution_block);
             }
         }
 
@@ -1263,6 +1339,174 @@ mod tests {
     use tycho_common::{models::Chain, Bytes};
 
     use super::*;
+
+    fn header_at(number: u64, timestamp: u64, partial: Option<u32>) -> BlockHeader {
+        BlockHeader {
+            hash: Bytes::from([0u8; 32]),
+            number,
+            parent_hash: Bytes::from([0u8; 32]),
+            revert: false,
+            timestamp,
+            partial_block_index: partial,
+        }
+    }
+
+    /// A block-sensitive state whose execution timestamp we can read back.
+    fn block_sensitive_state() -> Box<dyn ProtocolSim> {
+        use crate::evm::protocol::{
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            utils::{
+                slipstreams::{dynamic_fee_module::DynamicFeeConfig, observations::Observation},
+                uniswap::{tick_list::TickInfo, tick_math::get_sqrt_ratio_at_tick},
+            },
+        };
+
+        Box::new(
+            AerodromeSlipstreamsState::new(
+                "block-sensitive".to_string(),
+                0,
+                1_000_000_000_000_000_000,
+                get_sqrt_ratio_at_tick(0).unwrap(),
+                0,
+                1,
+                3000,
+                1,
+                0,
+                vec![TickInfo::new(-120, 0).unwrap(), TickInfo::new(120, 0).unwrap()],
+                vec![Observation { block_timestamp: 500, initialized: true, ..Default::default() }],
+                DynamicFeeConfig::new(2700, 30_000, 0, true, 750),
+            )
+            .expect("state should build")
+            // These fixtures exercise the fee-flip path, which needs the optimistic mode:
+            // under the worst-case default a flat-fee pool never flips.
+            .with_position_assumption(crate::protocol::models::BlockPositionAssumption::First),
+        )
+    }
+
+    #[test]
+    fn confirmed_header_targets_the_next_block() {
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Base);
+
+        let execution_block = decoder.execution_block(&header_at(100, 1_000, None));
+
+        assert_eq!(execution_block.number(), 101);
+        assert_eq!(execution_block.timestamp(), 1_000 + Chain::Base.block_time_secs());
+    }
+
+    #[test]
+    fn partial_header_targets_the_block_that_is_still_open() {
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+
+        let execution_block = decoder.execution_block(&header_at(100, 1_000, Some(3)));
+
+        assert_eq!(execution_block.number(), 100);
+        assert_eq!(execution_block.timestamp(), 1_000);
+    }
+
+    #[test]
+    fn refresh_re_emits_a_state_whose_fee_flipped_without_a_delta() {
+        // The pool traded in block 100 and has no delta afterwards. Crossing into block 101
+        // flips its fee branch (dynamic -> initial), so the refresh must advance the stored
+        // state in place and emit a copy to consumers.
+        let mut stored = HashMap::from([("block-sensitive".to_string(), {
+            let mut state = block_sensitive_state();
+            state.apply_block(&BlockContext::new(100, 500));
+            state
+        })]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &HashSet::new(),
+            &HashMap::<String, ()>::new(),
+            &BlockContext::new(101, 502),
+        );
+
+        let emitted = updated
+            .get("block-sensitive")
+            .expect("a fee flip must be emitted even without a delta");
+        assert_eq!(emitted.fee(), 750.0 / 1_000_000.0);
+        // The stored copy was advanced in place as well.
+        assert_eq!(stored["block-sensitive"].fee(), 750.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn refresh_never_re_emits_failed_components() {
+        // A failed component's stored state may linger; the sweep must not resurrect it for
+        // consumers that were told the component was removed — even when its fee flipped.
+        let mut stored = HashMap::from([("zombie".to_string(), {
+            let mut state = block_sensitive_state();
+            state.apply_block(&BlockContext::new(100, 500));
+            state
+        })]);
+        let failed = HashSet::from(["zombie".to_string()]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &failed,
+            &HashMap::<String, ()>::new(),
+            &BlockContext::new(101, 502),
+        );
+
+        assert!(updated.is_empty());
+    }
+
+    #[test]
+    fn refresh_never_re_emits_removed_components() {
+        // The stored state of a component reported in `removed_pairs` stays in place; the sweep
+        // must not surface it again, even when its fee flipped in the execution block.
+        let mut stored = HashMap::from([("gone".to_string(), {
+            let mut state = block_sensitive_state();
+            state.apply_block(&BlockContext::new(100, 500));
+            state
+        })]);
+        let removed = HashMap::from([("gone".to_string(), ())]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &HashSet::new(),
+            &removed,
+            &BlockContext::new(101, 502),
+        );
+
+        assert!(updated.is_empty());
+    }
+
+    #[test]
+    fn refresh_stays_quiet_when_no_fee_changed() {
+        // An idle block-sensitive pool (fee branch unchanged) and a block-insensitive pool:
+        // neither must be re-emitted.
+        let mut stored: HashMap<String, Box<dyn ProtocolSim>> = HashMap::from([
+            ("idle-sensitive".to_string(), {
+                let mut state = block_sensitive_state();
+                state.apply_block(&BlockContext::new(101, 502));
+                state
+            }),
+            (
+                "univ2".to_string(),
+                Box::new(crate::evm::protocol::uniswap_v2::state::UniswapV2State::new(
+                    U256::from(1_000_000u64),
+                    U256::from(1_000_000u64),
+                )) as Box<dyn ProtocolSim>,
+            ),
+        ]);
+        let mut updated: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+
+        TychoStreamDecoder::<BlockHeader>::refresh_execution_block(
+            &mut updated,
+            &mut stored,
+            &HashSet::new(),
+            &HashMap::<String, ()>::new(),
+            &BlockContext::new(102, 504),
+        );
+
+        assert!(updated.is_empty());
+    }
     use crate::evm::protocol::{curve::CurveState, uniswap_v2::state::UniswapV2State};
 
     #[test]
@@ -1276,7 +1520,7 @@ mod tests {
     }
 
     async fn setup_decoder(set_tokens: bool) -> TychoStreamDecoder<BlockHeader> {
-        let mut decoder = TychoStreamDecoder::new();
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
         decoder.register_decoder::<UniswapV2State>("uniswap_v2");
         if set_tokens {
             let tokens = [
@@ -1487,7 +1731,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_euler_hook_low_pool_manager_balance() {
-        let mut decoder = TychoStreamDecoder::new();
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
 
         decoder.register_decoder_with_context::<crate::evm::protocol::uniswap_v4::state::UniswapV4State>(
             "uniswap_v4_hooks", DecoderContext::new().vm_traces(true)
@@ -1527,5 +1771,38 @@ mod tests {
             .expect("Get amount out failed");
 
         assert_eq!(amount_out.amount, BigUint::from_str("1216190190361759119").unwrap());
+    }
+
+    fn component_with_id(id: &str) -> ComponentWithState {
+        use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { id: id.to_string(), ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
+    fn rejects_a(component: &ComponentWithState) -> bool {
+        component.component.id != "a"
+    }
+
+    fn rejects_b(component: &ComponentWithState) -> bool {
+        component.component.id != "b"
+    }
+
+    #[test]
+    fn test_admits_requires_every_registered_filter() {
+        // Two filters on one exchange both apply: the second registration does not replace the
+        // first, and a component must pass both. An exchange without filters admits everything.
+        let mut decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        decoder.register_filter("x", rejects_a);
+        decoder.register_filter("x", rejects_b);
+
+        assert!(!decoder.admits("x", &component_with_id("a")));
+        assert!(!decoder.admits("x", &component_with_id("b")));
+        assert!(decoder.admits("x", &component_with_id("c")));
+        assert!(decoder.admits("y", &component_with_id("a")));
     }
 }

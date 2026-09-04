@@ -14,8 +14,10 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map
+  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
-  models.rs                 BlockChanges, BlockAggregatedChanges, TxWithChanges
+  models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
@@ -45,6 +47,8 @@ services/
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
+  client_metadata.rs        Parses the X-Tycho-Client-Metadata header into allowlisted Prometheus labels
+  debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
     compression.rs          Zstd response compression
@@ -62,7 +66,9 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 
 ### Normal (full-block) path
 
-1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas).
+1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas) via
+   `tycho-protobuf`'s `TryFromMessage` conversions; its `DecodeError` converts into
+   `ExtractionError`.
 2. Run post-processor if configured.
 3. Call `E::process_block_update()` (DCI — see below).
 4. Fetch metadata for any new token addresses via `T` (ERC-20 symbol / decimals over RPC).
@@ -91,15 +97,37 @@ When no DCI is configured the call is a no-op.
 
 ### Revert handling
 
-On `BlockUndoSignal(target_hash)` from Substreams:
+On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
-1. `ReorgBuffer::purge(target_hash)` removes all buffered blocks after the common ancestor.
-2. A `BlockAggregatedChanges` with `revert = true` is broadcast.
-3. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted state
-   is always on the canonical chain.
+1. `ReorgBuffer::purge_to(target_hash, target_number)` removes invalidated blocks. A hash
+   match purges strictly after the target; when the hash is absent, a buffered target height
+   purges from that height inclusive (stale copy). A hash miss is fatal when the
+   target is below the buffer, at the buffer's oldest block (no predecessor left to
+   anchor the revert), or above the buffer without a pending partial at exactly that height
+   (the flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
+   fallbacks log a warning and increment `extractor_revert_hash_miss`.
+2. Pending partials are dropped only when above the target height; partials at the target
+   height are the still-valid prefix of the last valid block and are kept.
+3. Previous attribute values are restored from the buffer, then the DB. The buffer keeps
+   drained blocks in a committing section until `CachedGateway` reports their write
+   flushed, so lookups cover every block whose write has not landed and a DB miss proves
+   that no prior state exists — the revert never waits on the commit task. Attributes
+   first created inside the reverted range revert as deletions when they survive the
+   range, and revert to nothing otherwise. A delta that holds an attribute as both
+   created and deleted is malformed module output, so it goes through the lookup like a
+   pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
+   emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
+   `component_state_found` label says whether the DB returned state rows for the
+   component. The extractor registers both label sets at zero at startup so the first
+   miss is visible to `increase()`. Any hit means an upstream module emitted an Update
+   or Deletion for an attribute that never had a Creation.
+4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
+   a `BlockAggregatedChanges` with `revert = true` is broadcast.
+5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
+   state is always on the canonical chain.
 
-`PendingDeltasBuffer` (RPC side) mirrors this: it uses its own `ReorgBuffer` and discards
-non-canonical pending blocks on the same broadcast.
+`PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
+hash-only `purge` on the block named by the broadcast revert message.
 
 ## Persistence
 
@@ -110,6 +138,10 @@ components → state → entry points → cursor). Every mutable row is versione
 
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
 they are provably behind the finality horizon.
+
+Drained blocks stay in the buffer's committing section (shared with the commit task via
+`Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
+still see them while their write is in flight.
 
 ## Why extractor messages must be broadcast to the RPC service
 
@@ -125,15 +157,16 @@ written; it auto-drains those blocks so memory usage stays bounded.
 ## Connections
 
 ```
-ExtractorRunner (runner.rs)
-  ├─ SubstreamsStream (substreams/) → ProtocolExtractor (protocol_extractor.rs)
-  │    ├─ ReorgBuffer (reorg_buffer.rs) → CachedGateway → DB
-  │    ├─ ProtocolMemoryCache (protocol_cache.rs)
-  │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
-  └─ broadcast Arc<BlockAggregatedChanges>
-       ├─ WsService (services/ws.rs) → WebSocket clients
-       └─ PendingDeltasBuffer (services/deltas_buffer.rs)
-            └─ RpcHandlers (services/rpc.rs) → HTTP responses
+ExtractorSupervisor (supervisor.rs) — rebuilds the runner via ExtractorFactory (factory.rs) on failure
+  └─ ExtractorRunner (runner.rs)
+       ├─ SubstreamsStream (substreams/) → ProtocolExtractor (protocol_extractor.rs)
+       │    ├─ ReorgBuffer (reorg_buffer.rs) → CachedGateway → DB
+       │    ├─ ProtocolMemoryCache (protocol_cache.rs)
+       │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
+       └─ broadcast DeltaCommand (Block | ExtractorRestarted)
+            ├─ WsService (services/ws.rs) → WebSocket clients
+            └─ PendingDeltasBuffer (services/deltas_buffer.rs)
+                 └─ RpcHandlers (services/rpc.rs) → HTTP responses
 ```
 
 ## Client Sync
@@ -156,4 +189,8 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — health check |
-| `/ws/` | GET — WebSocket upgrade for delta subscriptions |
+| `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
+
+Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at
+`/api-docs/openapi.json`) and `GET /debug/pprof/heap` (API-key gated, behind the `jemalloc`
+feature).
