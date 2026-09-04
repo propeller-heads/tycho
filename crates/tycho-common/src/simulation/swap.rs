@@ -9,7 +9,7 @@ use crate::{
     simulation::{
         errors::{SimulationError, TransitionError},
         indicatively_priced::IndicativelyPriced,
-        protocol_sim::{Balances, Price, ProtocolSim},
+        protocol_sim::{Balances, BlockContext, Price, ProtocolSim},
     },
     Bytes,
 };
@@ -70,15 +70,23 @@ macro_rules! params_with_context {
 
 /// Blockchain context information used in swap simulations.
 ///
-/// Contains optional future block information that can be used for time-sensitive
-/// simulations or to simulate swaps at specific future blockchain states.
-#[derive(Debug, Clone)]
-pub struct Context {}
+/// Carries the block a quote is expected to execute in. `None` means the caller did not state one,
+/// and time-sensitive protocols fall back to whatever the state was last pointed at.
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    block: Option<BlockContext>,
+}
 
-impl Default for Context {
-    /// Creates a new `Context` with no future block information.
-    fn default() -> Self {
-        Self {}
+impl Context {
+    /// Targets the quote at `block`.
+    pub fn with_block(mut self, block: BlockContext) -> Self {
+        self.block = Some(block);
+        self
+    }
+
+    /// The block a quote is expected to execute in, if the caller stated one.
+    pub fn block(&self) -> Option<&BlockContext> {
+        self.block.as_ref()
     }
 }
 

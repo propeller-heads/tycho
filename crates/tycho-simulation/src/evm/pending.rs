@@ -334,7 +334,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         PendingBlockProcessor::new(
             indexers,
-            Arc::new(TychoStreamDecoder::<BlockHeader>::new()),
+            Arc::new(TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum)),
             Chain::Ethereum,
             rx,
         )

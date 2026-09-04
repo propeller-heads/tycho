@@ -51,7 +51,8 @@ Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
-getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
+`IPropAMM` / `IPropAMMRouter` (the pAMM standard and Titan's fallback router) and `IUniversalRouter`.
 
 ### Vault (`Vault.sol`)
 
@@ -135,11 +136,11 @@ receivers, and `outputToRouter` are hardcoded per-executor -- not encodable in c
 simple: they just call the protocol. All balance tracking, output verification, and transfer logic lives in the
 Dispatcher/TransferManager.
 
-Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
-Slipstreams, RamsesV3, MaverickV2, AerodromeV1, BopAMM, FermiSwap, LiquidityParty, LunarBase,
-Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626,
-Etherfi, WETH, PropAMM (a single generic executor shared by all pAMMs implementing the standard
-`IPropAMM` interface; the pAMM address travels in the swap data).
+Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
+AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ), Hashflow (RFQ),
+Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other native wrappers),
+PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
+address travels in the swap data) and PropAMMFallback (the same liquidity routed via Titan's PropAMMRouter).
 
 ### Executor Flow, Callbacks & Output Verification
 
@@ -152,16 +153,15 @@ amounts and handles fee-on-transfer/rebasing tokens universally.
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams/RamsesV3, MaverickV2, AerodromeV1, BopAMM, FermiSwap, LiquidityParty, LunarBase, Metric, ERC4626, FluidV1 | `false`          | Dispatcher measures balance at receiver                                                          |
-| **Output-lands-at-router** | Curve, WETH, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                                    | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
 
 **Direct-transfer** (UniswapV2, BalancerV2, Curve): Dispatcher staticcalls `getTransferData()` to get
 the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs the transfer, then delegatecalls `swap()`.
 
-**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo, EkuboV3, Slipstreams/RamsesV3,
-Metric): Also implement `ICallback`. Flow:
+**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, Metric): Also implement `ICallback`. Flow:
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool
@@ -235,16 +235,19 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 | `SplitSwapStrategyEncoder`      | `splitSwap` / `Permit2` / `UsingVault`      | Builds token array [tokenIn, intermediaries, tokenOut], encodes token indices + split percentages (U24) + executor + protocol data |
 
 **Parallel encoding**: `encode_swap_groups` (`strategy_encoders.rs`) and `TychoRouterEncoder::encode_solutions`
-encode groups and solutions in parallel via `map_on_threads` (`evm/utils.rs`), preserving input order.
+spawn threads via `map_on_threads` (`evm/utils.rs`) **only when an encoder in the batch blocks on a quote** —
+`SwapEncoder::blocks_on_quote()` defaults to `false` and is `true` only for the RFQ encoders (Bebop, Hashflow,
+Liquorice, Metric). Otherwise encoding runs serially on the calling thread. Input order is preserved either way.
 
-**Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol (UniswapV4, BalancerV3,
-Ekubo) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
+**Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol
+(`GROUPABLE_PROTOCOLS` in `evm/constants.rs`: `uniswap_v4`, `uniswap_v4_hooks`, `vm:balancer_v3`,
+`ekubo_v2`, `ekubo_v3`) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
 encode an entire multi-pool route as a single swap if all hops are on the same groupable protocol.
 
 ### SwapEncoder
 
 **SwapEncoder trait** (`swap_encoder.rs` + `evm/swap_encoder/`): Each protocol
-implements `encode_swap(&Swap, &EncodingContext) -> Vec<u8>`, encoding pool-specific data (pool ID, fee tiers, direction
+implements `encode_swap(&Swap, &EncodingContext) -> Result<Vec<u8>, EncodingError>`, encoding pool-specific data (pool ID, fee tiers, direction
 flags) into packed bytes. Each encoder holds its executor address.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
@@ -340,15 +343,10 @@ forge fmt                       # auto-format
 forge snapshot                  # gas snapshots
 ```
 
-Config: `contracts/foundry.toml` -- Osaka EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
+Config: `contracts/foundry.toml` -- Cancun EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
 Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
-
-Contract changes can alter the deployed runtime bytecode used by `protocol-testing`. From the
-repository root, run `./protocols/testing/scripts/update_runtime_bytecode.sh` and commit any changed
-`protocols/testing/fixtures/*.runtime.json`; CI runs the same script with `--check`. Foundry pins
-the compiler and omits the metadata hash to keep these fixtures reproducible.
 
 ### Rust
 
@@ -364,8 +362,9 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 
 ### CI
 
-- **ci-foundry.yaml**: Foundry format, build, test, gas snapshot, runtime-bytecode fixture,
-  and Slither checks
+- **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
+  snapshot, a Slither static-analysis job, and a runtime-bytecode-fixtures freshness check
+- **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
 
@@ -387,8 +386,6 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
-9. Regenerate and commit runtime-bytecode fixtures with
-   `./protocols/testing/scripts/update_runtime_bytecode.sh`.
 
 ## Security
 

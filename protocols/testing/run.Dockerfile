@@ -34,6 +34,8 @@ WORKDIR /build/tycho-protocol-sdk/protocols/substreams
 RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
@@ -73,6 +75,8 @@ COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams 
 RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \

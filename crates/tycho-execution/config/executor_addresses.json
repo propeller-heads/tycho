@@ -25,7 +25,8 @@
     "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F",
     "ring_swap_v2": "0x08BA9E85c8944098DEAacE0E164b7EC379A7e810",
     "pricelevelstream": "0xc196f22d69d41A2B1DbF6ef8d28C09bc2CA4E4fa",
-    "propammfallback": "0xA2F9f6f4a3F64EDa6014ce71A8ec8A874d690ADF"
+    "propammfallback": "0xA2F9f6f4a3F64EDa6014ce71A8ec8A874d690ADF",
+    "sky": "0x03AD6010948Ac034c0BbF7E449217798B4504E1D"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
