@@ -17,12 +17,17 @@ via_ir = true
 solc = '0.8.33'
 bytecode_hash = 'none'
 fs_permissions = [
+    # `loadCallDataFromFile` (test/TestUtils.sol) reads the calldata fixtures that the rust
+    # encoding tests generate.
     { access = "read", path = "./test/assets" },
-    { access = "write", path = "./test" },
-    # `test/RuntimeBytecodeFixtures.sol` reads the constructor arguments the executors deploy
-    # with; the test checks the runtime bytecode fixtures protocol-testing plants and
-    # `script/WriteRuntimeBytecodeFixtures.s.sol` writes them.
+    # `ExecutorAddresses.t.sol` checks the executor addresses the rust encoders are configured
+    # with.
+    { access = "read", path = "../config/test_executor_addresses.json" },
+    # `ExecutorAddresses.t.sol` reads which protocols each chain deploys, and
+    # `test/RuntimeBytecodeFixtures.sol` the constructor arguments the executors deploy with.
     { access = "read", path = "../config/executor_deployments.json" },
+    # `test/RuntimeBytecodeFixtures.t.sol` checks the runtime bytecode fixtures protocol-testing
+    # plants, and `script/WriteRuntimeBytecodeFixtures.s.sol` writes them.
     { access = "read-write", path = "../../../protocols/testing/fixtures" },
     # `test/protocols/EkuboV3MevCaptureV21Gas.t.sol` checks the swaps that
     # tycho-simulation's MEVCapture v2.1 gas model is fitted to, and rewrites

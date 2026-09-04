@@ -245,7 +245,7 @@ These helpers save and load the calldata to/from `contracts/test/assets/calldata
 
 * In `tests/protocol_integration_tests.rs`, write a Rust test that encodes a single swap and saves the calldata using `write_calldata_to_file()`.
 * Add `contracts/test/deployments/YourProtocol.sol` with your protocol system, your executor's contract name, the constructor arguments the tests deploy it with and your protocol's addresses the tests use (its singletons and pools), following the existing files. It defines the contract `YourProtocolDeployment`, which registers the deployment with `TychoRouterTestSetup` and holds the executor's address as `yourProtocolExecutor`.
-* Add your executor's address to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/test_executor_addresses.json" target="_blank" rel="noopener noreferrer">config/test\_executor\_addresses.json</a>. Executors are deployed with CREATE3 at an address that depends only on their protocol system: `yourProtocolExecutor` holds it before any deployment.
+* Add your executor's address to <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-execution/config/test_executor_addresses.json" target="_blank" rel="noopener noreferrer">config/test\_executor\_addresses.json</a>. Executors are deployed with CREATE3 at an address that depends only on their protocol system, so the address is known before any deployment: `ExecutorAddressesTest` prints it for a wrong or placeholder entry.
 * Create a new Solidity test contract that inherits from `TychoRouterTestSetup` and from the deployment of each executor its swaps go through. The setup deploys and registers those executors. For example:
 
 ```solidity
