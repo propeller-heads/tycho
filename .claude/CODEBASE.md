@@ -59,6 +59,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | Path | Description |
 |---|---|
 | `protocols/substreams/` | Substreams modules (WASM) producing the protobuf messages consumed by `tycho-indexer`; **separate WASM workspace** with its own toolchain — not in `[workspace.members]` |
+| `crates/tycho-execution/substreams/` | TychoRouter trade indexer: a **second, separate WASM workspace** (excluded from the root `Cargo.toml`) that decodes every router trade from call traces and sinks it to Postgres with `substreams-sink-sql`, priced in USD afterwards. Adding a chain, or changing a manifest or its Rust source, has deployment consequences — see `crates/tycho-execution/CLAUDE.md` and `crates/tycho-execution/substreams/README.md` |
 | `protocols/testing/` (`protocol-testing`) | Simulation accuracy test harness: runs protocol state through `tycho-simulation` and compares against on-chain results |
 | `protocols/adapter-integration/` | EVM adapter integration tests |
 
@@ -169,7 +170,7 @@ Configurable via `EXTRACTION_WORKER_THREADS` (default 2) and `MAIN_WORKER_THREAD
 |---|---|
 | `index` | Run all extractors from `extractors.yaml` + HTTP/WS server |
 | `run` | Run a single extractor (testing / debugging) |
-| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) |
+| `analyze-tokens` | Token quality analysis cron job; accepts `--settlement-contract <ADDRESS>` (default: CoW Swap settlement `0xc9f2e6ea1637E499406986ac50ddC92401ce1f58`) and `--recovery-lookback-days <N>` (default 1: re-check quality-5 tokens traded within N days; Bad keeps 5) |
 | `rpc` | HTTP RPC server only (no extractors) |
 
 ### Feature flags

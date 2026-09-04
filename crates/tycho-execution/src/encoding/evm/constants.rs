@@ -46,7 +46,7 @@ pub static ROUTER_ETH_ADDRESS: LazyLock<Bytes> = LazyLock::new(|| {
 /// It is important to note that fetching more blocks will send more attestations to the
 /// Tycho Router, resulting in a higher gas usage. Fetching fewer blocks may result in attestations
 /// expiring if the transaction is not sent fast enough.
-pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 5;
+pub const ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE: u64 = 10;
 
 /// The endpoint serving Angstrom pool unlock attestations.
 pub(crate) const ANGSTROM_DEFAULT_API_URL: &str =

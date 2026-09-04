@@ -13,6 +13,7 @@ pub const DYNAMIC_FEE_CONFIG_ATTRIBUTES: [&str; 5] =
 // Earliest deployment among the configured fee modules:
 // - 0x090b2a6bb475c00e2256e2095a60887cd710803b at block 44_221_569
 // - 0xf4ecd78ebeb6d36cf7f80b5b6b41453515fe2785 at block 44_221_840
+// - 0x87d8f999bba9343e8099552426775b51c338e8cb at block 44_394_736
 const FIRST_DYNAMIC_FEE_MODULE_DEPLOYMENT_BLOCK: u64 = 44_221_569;
 
 pub fn should_process_dynamic_fee_config(block_number: u64) -> bool {
@@ -21,6 +22,14 @@ pub fn should_process_dynamic_fee_config(block_number: u64) -> bool {
 
 pub fn dynamic_fee_config_key(pool: &[u8], attribute: &str) -> String {
     format!("{}:{attribute}", pool.to_hex())
+}
+
+/// Key for the fee a factory charges on a tick spacing.
+///
+/// Scoped by factory because each factory keeps its own tick spacing table, and two factories may
+/// enable the same tick spacing at different fees.
+pub fn tick_spacing_fee_key(factory: &[u8], tick_spacing: i32) -> String {
+    format!("{}:tick_spacing_{tick_spacing}", factory.to_hex())
 }
 
 pub fn dynamic_fee_config_initialized_key(pool: &[u8]) -> String {
@@ -105,7 +114,7 @@ impl Params {
 mod tests {
     use super::{
         dynamic_fee_config_initialized_key, dynamic_fee_config_key,
-        should_process_dynamic_fee_config,
+        should_process_dynamic_fee_config, tick_spacing_fee_key,
     };
 
     #[test]
@@ -126,5 +135,14 @@ mod tests {
             dynamic_fee_config_initialized_key(&pool),
             "0x3333333333333333333333333333333333333333:initialized"
         );
+    }
+
+    #[test]
+    fn tick_spacing_fee_keys_are_scoped_by_factory() {
+        assert_eq!(
+            tick_spacing_fee_key(&[0x11; 20], 200),
+            "0x1111111111111111111111111111111111111111:tick_spacing_200"
+        );
+        assert_ne!(tick_spacing_fee_key(&[0x11; 20], 200), tick_spacing_fee_key(&[0x22; 20], 200));
     }
 }

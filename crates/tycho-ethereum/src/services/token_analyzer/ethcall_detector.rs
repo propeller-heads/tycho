@@ -143,11 +143,24 @@ impl EthCallDetector {
             },
         );
 
-        let raw: AlloyBytes = self
+        let raw: AlloyBytes = match self
             .rpc
             .eth_call_with_state_overrides(tx, block_tag, overrides)
             .await
-            .map_err(|e| format!("eth_call with state overrides failed: {e}"))?;
+        {
+            Ok(raw) => raw,
+            // A revert is caused by the token itself (e.g. balanceOf reverting), not by the
+            // RPC: the injected Analyzer only propagates reverts raised by token calls.
+            // Report it as a Bad verdict so callers stop retrying the token indefinitely.
+            Err(e) if e.is_execution_reverted() => {
+                return Ok((
+                    TokenQuality::bad(format!("Token analysis simulation reverted: {e}")),
+                    None,
+                    None,
+                ))
+            }
+            Err(e) => return Err(format!("eth_call with state overrides failed: {e}")),
+        };
 
         let returns = analyzeCall::abi_decode_returns(raw.as_ref())
             .map_err(|e| format!("Failed to decode Analyzer return value: {e}"))?;
@@ -263,7 +276,7 @@ impl EthCallDetector {
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::{collections::HashMap, str::FromStr, sync::Arc};
 
     use alloy::primitives::{address, Address};
     use tycho_common::models::token::{TokenOwnerStore, TokenQuality};
@@ -358,6 +371,41 @@ mod tests {
             let finder = TokenOwnerStore::new(TOKEN_HOLDERS.clone());
             EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT)
         }
+    }
+
+    #[tokio::test]
+    async fn detect_impl_maps_execution_revert_to_bad() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted","data":"0x"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let rpc = EthereumRpcClient::new(&server.url()).expect("mock rpc client");
+        let token = Bytes::from_str("e172e9b6cfbeeb5593bdce3f077356fdb33af904").unwrap();
+        let holder = Bytes::from_str("000000000004444c5dc75cb358380d2e3de08a90").unwrap();
+        let finder = TokenOwnerStore::new(HashMap::from([(
+            token.clone(),
+            (holder, U256::from(1_000_000_u64).to_bytes()),
+        )]));
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+
+        let (quality, gas, tax) = detector
+            .analyze(token, BlockTag::Latest)
+            .await
+            .expect("a reverting simulation must yield a Bad verdict, not an error");
+
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert!(gas.is_none());
+        assert!(tax.is_none());
+        mock.assert_async().await;
     }
 
     #[tokio::test]

@@ -63,7 +63,7 @@ pub fn uniswap_v4_angstrom_hook_pool_filter(component: &ComponentWithState) -> b
 /// authenticated with `ANGSTROM_API_KEY`. Without the key the swap fails at encoding time —
 /// after route selection — so consumers without the key should exclude these pools up front.
 /// [`ProtocolStreamBuilder`](crate::evm::stream::ProtocolStreamBuilder) applies this filter to
-/// `uniswap_v4_hooks` automatically when no filter function is provided and the key is unset.
+/// `uniswap_v4_hooks` whenever the key is unset, alongside any filter function the caller passes.
 pub fn uniswap_v4_non_angstrom_hook_pool_filter(component: &ComponentWithState) -> bool {
     !uniswap_v4_angstrom_hook_pool_filter(component)
 }
@@ -183,6 +183,12 @@ pub fn erc4626_filter(component: &ComponentWithState) -> bool {
         "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
         "0xfE6eb3b609a7C8352A241f7F3A21CEA4e9209B8f",
+        // sDAI: `maxDeposit` returns `type(uint256).max`, which `ERC4626State` takes at face
+        // value as the deposit limit, so deposits quote unbounded. The real limit is not
+        // exposed on-chain in any form we can trace, and there is no generic fix.
+        // This is not the branch-tracing issue that excludes the Spark V2 vaults above:
+        // sDAI's rate lives on `pot` (`0x197E90f9FAD81970bA7976f33CbD77088E5D7cf7`), which
+        // both branches call and which DCI full-indexes since it is not a component token.
         "0x83f20f44975d03b1b09e64809b757c47f942beea",
     ];
     if UNSUPPORTED_POOLS.contains(

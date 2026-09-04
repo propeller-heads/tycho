@@ -80,6 +80,14 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []
+    },
+    "sky": {
+      "contract": "SkyExecutor",
+      "args": [
+        "0xf6e72Db5454dd049d0788e411b06CfAF16853042",
+        "0xA188EEC8F81263234dA3622A406892F3D630f98c",
+        "0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A"
+      ]
     }
   },
   "base": {

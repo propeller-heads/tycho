@@ -34,6 +34,7 @@ import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
+import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
 // Test utilities and mocks
 import "./Constants.sol";
 import "./TestUtils.sol";
@@ -135,6 +136,7 @@ contract TychoRouterTestSetup is
     RingSwapV2Executor public ringSwapV2Executor;
     PropAMMExecutor public propAMMExecutor;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
+    SkyExecutor public skyExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -259,8 +261,18 @@ contract TychoRouterTestSetup is
             new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
         propAMMExecutor = new PropAMMExecutor();
         propAMMFallbackExecutor = new PropAMMFallbackExecutor();
+        // The Sky venues exist only on mainnet, and the executor's constructor
+        // reads their token wiring, so it cannot deploy on forks where the
+        // venues have no code. Deployed last, so skipping it does not shift
+        // the other executors' deterministic addresses.
+        bool skyDeployable = SKY_DAI_USDS_CONVERTER.code.length != 0;
+        if (skyDeployable) {
+            skyExecutor = new SkyExecutor(
+                SKY_LITE_PSM, SKY_USDS_PSM_WRAPPER, SKY_DAI_USDS_CONVERTER
+            );
+        }
 
-        address[] memory executors = new address[](27);
+        address[] memory executors = new address[](skyDeployable ? 28 : 27);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -288,6 +300,9 @@ contract TychoRouterTestSetup is
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
         executors[26] = address(propAMMFallbackExecutor);
+        if (skyDeployable) {
+            executors[27] = address(skyExecutor);
+        }
         return executors;
     }
 

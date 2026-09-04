@@ -50,7 +50,7 @@ contract Dispatcher is TransferManager {
     uint256 private constant _SWAP_INPUT_TOKEN_SLOT =
         0x0c22c14aba48b0e26e3b58475c66f358c352532122e537c32e8184c0159e6e10;
 
-    uint256 public constant DELAY_EXECUTOR_ACTIVATION = 3 days;
+    uint256 public constant DELAY_EXECUTOR_ACTIVATION = 1 days;
 
     event ExecutorSet(address indexed executor, uint256 timelockExpiresAt);
     event ExecutorRemoved(address indexed executor);
