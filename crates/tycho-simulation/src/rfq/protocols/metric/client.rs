@@ -105,42 +105,45 @@ impl MetricClient {
             ..Default::default()
         };
 
-        let mut attributes = HashMap::new();
-
-        let entries: [(&str, Vec<u8>); 6] = [
-            ("bid_adj", bid_ask.bid_adj.to_string().into_bytes()),
-            ("ask_adj", bid_ask.ask_adj.to_string().into_bytes()),
+        let attributes = HashMap::from([
+            ("bid_adj".to_string(), Bytes::from(bid_ask.bid_adj.to_string().into_bytes())),
+            ("ask_adj".to_string(), Bytes::from(bid_ask.ask_adj.to_string().into_bytes())),
             (
-                "total_token0_available",
-                bid_ask
-                    .total_token0_available
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-                    .into_bytes(),
+                "total_token0_available".to_string(),
+                Bytes::from(
+                    bid_ask
+                        .total_token0_available
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                        .into_bytes(),
+                ),
             ),
             (
-                "total_token1_available",
-                bid_ask
-                    .total_token1_available
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-                    .into_bytes(),
+                "total_token1_available".to_string(),
+                Bytes::from(
+                    bid_ask
+                        .total_token1_available
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                        .into_bytes(),
+                ),
             ),
             (
-                "server_ts",
-                bid_ask
-                    .server_ts
-                    .to_string()
-                    .into_bytes(),
+                "server_ts".to_string(),
+                Bytes::from(
+                    bid_ask
+                        .server_ts
+                        .to_string()
+                        .into_bytes(),
+                ),
             ),
-            ("depth", serde_json::to_vec(&bid_ask.depth).unwrap_or_default()),
-        ];
-
-        for (key, bytes) in entries {
-            attributes.insert(key.to_string(), bytes.into());
-        }
+            (
+                "depth".to_string(),
+                Bytes::from(serde_json::to_vec(&bid_ask.depth).unwrap_or_default()),
+            ),
+        ]);
 
         ComponentWithState {
             state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
