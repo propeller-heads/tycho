@@ -1109,6 +1109,9 @@ async fn process_update(
                              {update_block_number}, skipping."
                         );
                         metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
                         return Ok(());
                     }
                 }

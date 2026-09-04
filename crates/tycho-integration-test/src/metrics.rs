@@ -230,10 +230,11 @@ pub fn record_protocol_pool_count(protocol: &str, count: usize) {
     .set(count as f64);
 }
 
-/// Record that an update was skipped because the RPC block was ahead of the update block.
+/// Record that an update was skipped because the RPC did not serve its block: the RPC was
+/// already ahead of the update block, or never reached it within the poll attempts.
 ///
 /// The protocol's `SynchronizerState` may report Ready in this case — the lag is only
-/// observable by comparing the update block against the RPC's latest block.
+/// observable by comparing the update block against the RPC's block.
 pub fn record_protocol_sync_state_skipped(protocol: &str) {
     gauge!(
         "tycho_integration_protocol_sync_state",
