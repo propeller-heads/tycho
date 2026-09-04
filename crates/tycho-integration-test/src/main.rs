@@ -187,18 +187,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     partial_blocks: bool,
 
-    /// Run the protocol-stream test pipeline only on blocks whose number is a multiple of this
-    /// value. 1 tests every block (current behavior). Use a higher value on fast chains (e.g.
-    /// Robinhood) where the harness cannot keep up with the head, or with --partial-blocks to
-    /// cap RPC usage (e.g. Base flashblocks). With --partial-blocks, every partial update of a
-    /// sampled block is tested (bursty by design) and blocks are still fetched via the
-    /// pending/latest polling path. State from every block is ingested either way.
+    /// Run the protocol-stream test pipeline on every Nth protocol update. 1 tests every update.
+    /// Use a higher value on fast chains where the harness cannot keep up with the head, or with
+    /// --partial-blocks to cap the RPC rate: one update arrives per flashblock, so the tested
+    /// updates spread evenly in time. State from every update is ingested either way.
     #[arg(
         long,
+        visible_alias = "test-every-n-blocks",
         default_value_t = 1,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
-    test_every_n_blocks: u64,
+    test_every_n_updates: u64,
 
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     /// 0 disables the watchdog.
@@ -1023,7 +1022,7 @@ async fn process_update(
 
             let update_block_number = update.update.block_number_or_timestamp;
 
-            if !update_seq.is_multiple_of(cli.test_every_n_blocks) {
+            if !update_seq.is_multiple_of(cli.test_every_n_updates) {
                 metrics::record_protocol_update_sampled_out();
                 return Ok(());
             }
@@ -1031,7 +1030,7 @@ async fn process_update(
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
             let by_number =
-                should_fetch_block_by_number(cli.test_every_n_blocks, cli.partial_blocks);
+                should_fetch_block_by_number(cli.test_every_n_updates, cli.partial_blocks);
 
             let block = if by_number {
                 // On fast chains the head is expected to be past the update, so fetch the target
@@ -2233,19 +2232,32 @@ mod tests {
     }
 
     #[test]
-    fn test_every_n_blocks_works_with_partial_blocks() {
-        let cli = Cli::try_parse_from([
+    fn test_every_n_updates_accepts_partial_blocks() {
+        Cli::try_parse_from([
             "tycho-integration-test",
             "--tycho-url",
             "localhost:4242",
             "--rpc-url",
             "http://localhost:8545",
             "--partial-blocks",
+            "--test-every-n-updates",
+            "10",
+        ])
+        .expect("--test-every-n-updates must be accepted alongside --partial-blocks");
+    }
+
+    #[test]
+    fn test_every_n_blocks_alias_sets_test_every_n_updates() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
             "--test-every-n-blocks",
             "10",
         ])
-        .expect("--test-every-n-blocks must be accepted alongside --partial-blocks");
-        assert!(cli.partial_blocks);
-        assert_eq!(cli.test_every_n_blocks, 10);
+        .expect("--test-every-n-blocks must stay accepted as an alias");
+        assert_eq!(cli.test_every_n_updates, 10);
     }
 }

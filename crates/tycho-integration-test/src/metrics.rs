@@ -292,7 +292,7 @@ pub fn record_protocol_update_skipped() {
     counter!("tycho_integration_protocol_updates_skipped_total").increment(1);
 }
 
-/// Record a protocol update whose block was not selected by `--test-every-n-blocks` sampling.
+/// Record a protocol update not selected by `--test-every-n-updates` sampling.
 ///
 /// Deliberately separate from `tycho_integration_protocol_updates_skipped_total`: skipped means
 /// the harness wanted to test the block but could not; sampled-out is a configured decision.
