@@ -64,6 +64,24 @@ fallback for protocols too complex to port, not a default.
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
 
+## Pending-block state for hybrid/VM protocols
+
+`apply_deltas_ephemeral` applies only `state_deltas`, so nothing on the pending path writes to the
+VM database. A protocol whose `delta_transition` re-reads the VM would therefore quote a pending
+block against confirmed state. Fluid and Curve close that gap the same way:
+
+1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
+   `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
+   accounts a `PendingBlock` carries.
+2. It reads the protocol's state under those overrides (`fluid::call_resolver`,
+   `curve::read_pool_readings`) and puts the result in a state-delta attribute
+   (`pool_reserves_adjusted`, `pool_state_adjusted`).
+3. `delta_transition` branches on that attribute and rebuilds from it, falling back to the VM read
+   when it is absent.
+
+Reading under the pending block's own number and timestamp matters: anything with on-chain time
+math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
+
 ## Features
 
 | Feature | Default | Contents |
