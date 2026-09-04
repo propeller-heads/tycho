@@ -242,6 +242,15 @@ struct TychoState {
     states: HashMap<String, Box<dyn ProtocolSim>>,
     components: HashMap<String, ProtocolComponent>,
     component_ids_by_protocol: HashMap<String, HashSet<String>>,
+    protocol_updates_seen: u64,
+}
+
+impl TychoState {
+    /// Counts one received protocol update and returns its 1-based sequence number.
+    fn next_update_seq(&mut self) -> u64 {
+        self.protocol_updates_seen += 1;
+        self.protocol_updates_seen
+    }
 }
 
 /// Shared, periodically-refreshed token-price snapshot (raw token units per ETH).
@@ -976,7 +985,7 @@ async fn process_update(
     let block = match update.update_type {
         UpdateType::Protocol => {
             // Update state cache before block alignment check
-            {
+            let update_seq = {
                 let mut current_state = tycho_state
                     .write()
                     .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
@@ -1009,11 +1018,12 @@ async fn process_update(
                 for (protocol, component_ids) in &current_state.component_ids_by_protocol {
                     metrics::record_protocol_pool_count(protocol, component_ids.len());
                 }
-            }
+                current_state.next_update_seq()
+            };
 
             let update_block_number = update.update.block_number_or_timestamp;
 
-            if !is_sampled_block(update_block_number, cli.test_every_n_blocks) {
+            if !update_seq.is_multiple_of(cli.test_every_n_blocks) {
                 metrics::record_protocol_update_sampled_out();
                 return Ok(());
             }
@@ -2028,11 +2038,6 @@ fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatis
     stats.blocks_processed >= max_blocks
 }
 
-/// True when `block_number` is selected by the `--test-every-n-blocks` sampling interval.
-fn is_sampled_block(block_number: u64, interval: u64) -> bool {
-    block_number.is_multiple_of(interval)
-}
-
 /// True when a sampled update's target block should be fetched by number rather than polled for.
 ///
 /// A flashblock's pending state cannot be fetched by number after the fact, so under
@@ -2170,7 +2175,7 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        is_oracle_stale_revert, is_sampled_block, pamm_venue, should_fetch_block_by_number, Cli,
+        is_oracle_stale_revert, pamm_venue, should_fetch_block_by_number, Cli, TychoState,
     };
 
     #[rstest]
@@ -2215,18 +2220,11 @@ mod tests {
         assert!(!is_oracle_stale_revert(pamm, reason));
     }
 
-    #[rstest]
-    #[case::interval_one_selects_every_block(1, 41513952, true)]
-    #[case::interval_one_selects_multiples_too(1, 41513950, true)]
-    #[case::multiple_of_interval(10, 41513950, true)]
-    #[case::not_a_multiple(10, 41513952, false)]
-    #[case::block_zero(10, 0, true)]
-    fn sampling_selects_multiples_of_interval(
-        #[case] interval: u64,
-        #[case] block: u64,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(is_sampled_block(block, interval), expected);
+    #[test]
+    fn update_sequence_starts_at_one_and_increments() {
+        let mut state = TychoState::default();
+        assert_eq!(state.next_update_seq(), 1);
+        assert_eq!(state.next_update_seq(), 2);
     }
 
     #[test]
