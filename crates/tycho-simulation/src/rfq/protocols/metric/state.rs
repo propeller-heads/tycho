@@ -85,21 +85,14 @@ impl MetricState {
             MetricDirection::OneForZero => &self.bid_ask.depth.asks,
         };
 
-        // Some pools still return an empty depth object. In that case the top-of-book quote is
-        // the best signal we have, so keep the flat-price path.
+        // `is_quotable` only requires one side of the book to be populated, so the traded side may
+        // still have no bins (one-sided depth, or a state rebuilt from a snapshot without a depth
+        // attribute). The top-of-book quote is then the best signal we have.
         let Some(depth_max_output) = depth_max_output(bins) else {
             return Ok(None);
         };
 
         let effective_max_output = depth_max_output.min(max_output.clone());
-        if effective_max_output.is_zero() {
-            return Ok(Some(DepthQuote {
-                amount_out: BigUint::ZERO,
-                max_output: effective_max_output,
-                exhausted: !amount_in.is_zero(),
-            }));
-        }
-
         let depth_fill = depth_output_for_input(bins, amount_in, &effective_max_output)?;
 
         Ok(Some(DepthQuote {
@@ -168,8 +161,9 @@ impl ProtocolSim for MetricState {
         };
 
         // Prefer size-aware depth when Metric exposes it. The depth walk runs entirely in raw
-        // integer units on Metric's own per-bin accounting, so its result is exact — including
-        // the cap returned when the depth is exhausted.
+        // integer units on Metric's own per-bin accounting, so the cap it reports when the depth
+        // is exhausted is exact (no f64 round-trip); see `depth_output_for_input` for the
+        // intra-bin rounding.
         if let Some(quote) = self.quote_with_depth(direction, &amount_in, &max_output)? {
             let res = GetAmountOutResult {
                 amount: quote.amount_out,
@@ -258,10 +252,11 @@ impl ProtocolSim for MetricState {
             }
         }
 
-        // No depth bins, or the aggregate inventory truncates the walkable depth: cap the output
-        // at the aggregate and estimate the matching input from the top-of-book price. Mirrors
-        // get_amount_out, which rejects anything beyond this cap as depth-exhausted.
-        let buy_limit = cap_to_depth(aggregate, bins);
+        // No depth bins, or the aggregate inventory truncates the walkable depth: either way the
+        // aggregate is the binding output cap, and get_amount_out rejects anything beyond it
+        // (as insufficient liquidity or depth-exhausted respectively). Estimate the matching
+        // input from the top-of-book price.
+        let buy_limit = aggregate;
         let buy_limit_human = buy_limit.to_f64().ok_or_else(|| {
             SimulationError::RecoverableError("Can't convert buy limit to f64".into())
         })? / 10_f64.powi(buy_decimals as i32);
@@ -319,18 +314,6 @@ impl ProtocolSim for MetricState {
 fn depth_max_output(bins: &[MetricDepthBin]) -> Option<BigUint> {
     bins.last()
         .map(|bin| bin.cumulative_volume.clone())
-}
-
-/// Caps an aggregate-inventory output limit by the published depth, when present.
-///
-/// Returns the smaller of `aggregate` and the cumulative depth volume so the reported limit
-/// never exceeds what a depth walk can actually fill. Pools that expose no depth bins fall back
-/// to `aggregate`.
-fn cap_to_depth(aggregate: BigUint, bins: &[MetricDepthBin]) -> BigUint {
-    match depth_max_output(bins) {
-        Some(depth) => depth.min(aggregate),
-        None => aggregate,
-    }
 }
 
 /// Walks the depth bins and computes the output bought by `amount_in`, entirely in raw integer
