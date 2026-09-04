@@ -9,6 +9,7 @@ import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
+import {TempestExecutor} from "../src/executors/TempestExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
 import {
     LiquidityPartyExecutor
@@ -131,6 +132,7 @@ contract TychoRouterTestSetup is
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
     FermiSwapExecutor public fermiSwapExecutor;
+    TempestExecutor public tempestExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
     RingSwapV2Executor public ringSwapV2Executor;
@@ -263,16 +265,20 @@ contract TychoRouterTestSetup is
         propAMMFallbackExecutor = new PropAMMFallbackExecutor();
         // The Sky venues exist only on mainnet, and the executor's constructor
         // reads their token wiring, so it cannot deploy on forks where the
-        // venues have no code. Deployed last, so skipping it does not shift
-        // the other executors' deterministic addresses.
+        // venues have no code. Deployed before Tempest so that skipping it does
+        // not shift any earlier executor's deterministic address.
         bool skyDeployable = SKY_DAI_USDS_CONVERTER.code.length != 0;
         if (skyDeployable) {
             skyExecutor = new SkyExecutor(
                 SKY_LITE_PSM, SKY_USDS_PSM_WRAPPER, SKY_DAI_USDS_CONVERTER
             );
         }
+        // Tempest is mainnet-only and its constructor makes no external calls,
+        // so it deploys everywhere; its address is taken from the mainnet fork,
+        // where Sky is deployable.
+        tempestExecutor = new TempestExecutor(TEMPEST_ROUTER);
 
-        address[] memory executors = new address[](skyDeployable ? 28 : 27);
+        address[] memory executors = new address[](skyDeployable ? 29 : 28);
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -302,6 +308,9 @@ contract TychoRouterTestSetup is
         executors[26] = address(propAMMFallbackExecutor);
         if (skyDeployable) {
             executors[27] = address(skyExecutor);
+            executors[28] = address(tempestExecutor);
+        } else {
+            executors[27] = address(tempestExecutor);
         }
         return executors;
     }

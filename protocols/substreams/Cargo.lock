@@ -1233,6 +1233,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-tempest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "getrandom 0.3.4",
+ "hex",
+ "home",
+ "indexmap 2.7.1",
+ "itertools 0.10.5",
+ "num-bigint",
+ "proc-macro-crate",
+ "serde",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "substreams-helper 0.0.2",
+ "tiny-keccak",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-template-factory"
 version = "0.1.0"
 dependencies = [
