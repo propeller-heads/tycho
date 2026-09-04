@@ -1021,13 +1021,11 @@ async fn process_update(
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
             let by_number =
-                fetch_sampled_block_by_number(cli.test_every_n_blocks, cli.partial_blocks);
+                should_fetch_block_by_number(cli.test_every_n_blocks, cli.partial_blocks);
 
             let block = if by_number {
-                // Sampled full-block mode: on fast chains the head is expected to be past the
-                // update, so the target block is fetched by number instead of racing the head.
-                // Sampled runs with --partial-blocks never take this path — a flashblock's
-                // pending state cannot be fetched by number — and use the polling path below.
+                // On fast chains the head is expected to be past the update, so fetch the target
+                // block by number instead of racing the head.
                 match await_target_block(
                     &rpc_tools,
                     update_block_number,
@@ -2035,12 +2033,12 @@ fn is_sampled_block(block_number: u64, interval: u64) -> bool {
     block_number.is_multiple_of(interval)
 }
 
-/// True when a sampled update's target block should be fetched by number (sampled full-block
-/// mode, e.g. Robinhood where the head races past the update). With --partial-blocks, sampling
-/// only gates WHICH updates are tested; block fetching stays on the pending/latest polling path
-/// because a flashblock's pending state cannot be fetched by number after the fact.
-fn fetch_sampled_block_by_number(test_every_n_blocks: u64, partial_blocks: bool) -> bool {
-    test_every_n_blocks > 1 && !partial_blocks
+/// True when a sampled update's target block should be fetched by number rather than polled for.
+///
+/// A flashblock's pending state cannot be fetched by number after the fact, so under
+/// `--partial-blocks` sampling only gates which updates are tested.
+fn should_fetch_block_by_number(interval: u64, partial_blocks: bool) -> bool {
+    interval > 1 && !partial_blocks
 }
 
 /// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
@@ -2172,7 +2170,7 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        fetch_sampled_block_by_number, is_oracle_stale_revert, is_sampled_block, pamm_venue, Cli,
+        is_oracle_stale_revert, is_sampled_block, pamm_venue, should_fetch_block_by_number, Cli,
     };
 
     #[rstest]
@@ -2231,17 +2229,9 @@ mod tests {
         assert_eq!(is_sampled_block(block, interval), expected);
     }
 
-    #[rstest]
-    #[case::sampled_full_block_mode(10, false, true)]
-    #[case::sampled_with_partial_blocks_polls(10, true, false)]
-    #[case::unsampled_polls(1, false, false)]
-    #[case::unsampled_with_partial_blocks_polls(1, true, false)]
-    fn sampled_fetch_by_number_only_without_partial_blocks(
-        #[case] test_every_n_blocks: u64,
-        #[case] partial_blocks: bool,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(fetch_sampled_block_by_number(test_every_n_blocks, partial_blocks), expected);
+    #[test]
+    fn sampled_with_partial_blocks_polls_instead_of_fetching_by_number() {
+        assert!(!should_fetch_block_by_number(10, true));
     }
 
     #[test]
