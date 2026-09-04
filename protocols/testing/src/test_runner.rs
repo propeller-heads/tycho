@@ -72,7 +72,10 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
+        ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("unichain-curve", "ethereum-curve"),
+        ("robinhood-ramses-v3", "polygon-ramses-v3"),
     ])
 });
 
@@ -1330,8 +1333,7 @@ impl TestRunner {
         let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &chain_model).await?;
 
         // Prepare router overwrites data
-        let router_overwrites_data =
-            Some(execution::create_router_overwrites_data(protocol_system)?);
+        let router_overwrites_data = execution::create_router_overwrites_data(protocol_system)?;
 
         info!("Executing {} simulations in batches ...", filtered_execution_data.len());
 

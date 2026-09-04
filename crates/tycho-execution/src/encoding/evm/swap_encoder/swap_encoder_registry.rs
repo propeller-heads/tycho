@@ -116,6 +116,17 @@ impl SwapEncoderRegistry {
         None
     }
 
+    /// The executor address of every encoder in this registry, keyed by protocol system.
+    ///
+    /// Several protocol systems may share one executor address, so the returned addresses are not
+    /// necessarily distinct.
+    pub fn executor_addresses(&self) -> HashMap<String, Bytes> {
+        self.encoders
+            .iter()
+            .map(|(protocol, encoder)| (protocol.clone(), encoder.executor_address().clone()))
+            .collect()
+    }
+
     fn create_encoder(
         &self,
         protocol_system: &str,
@@ -135,7 +146,7 @@ impl SwapEncoderRegistry {
             "vm:balancer_v2" => {
                 Ok(Box::new(BalancerV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "uniswap_v3" | "pancakeswap_v3" => {
+            "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "uniswap_v4" => {
@@ -321,6 +332,21 @@ mod tests {
                     .is_some(),
                 "chain {chain} is missing the uniswap_v3 encoder"
             );
+        }
+    }
+
+    #[test]
+    fn test_executor_addresses_match_registered_encoders() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum).unwrap();
+
+        let executor_addresses = registry.executor_addresses();
+
+        assert!(!executor_addresses.is_empty());
+        for (protocol, executor_address) in executor_addresses {
+            let encoder = registry
+                .get_encoder(&protocol)
+                .unwrap_or_else(|| panic!("no encoder registered for {protocol}"));
+            assert_eq!(encoder.executor_address(), &executor_address);
         }
     }
 }

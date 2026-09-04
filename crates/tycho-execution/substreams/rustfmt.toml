@@ -1,0 +1,16 @@
+reorder_imports = true
+imports_granularity = "Crate"
+use_small_heuristics = "Max"
+comment_width = 100
+wrap_comments = true
+binop_separator = "Back"
+trailing_comma = "Vertical"
+trailing_semicolon = false
+use_field_init_shorthand = true
+chain_width = 40
+ignore = [
+    # Abigen output. build.rs regenerates src/abi on every cargo check/build.
+    "*/src/abi",
+    "ethereum-uniswap-v4/*/src/abi",
+    "crates/tycho-substreams/src/abi",
+]

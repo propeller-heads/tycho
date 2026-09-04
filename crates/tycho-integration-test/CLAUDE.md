@@ -29,7 +29,14 @@ Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
 `--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
-`--test-every-n-blocks 10`.
+`--test-every-n-blocks 10`, `--bypass-executor-timelock`.
+
+`--bypass-executor-timelock` writes `executorsActivationTimestamp = 1` for every executor of the
+chain into the execution simulation's state overrides, so an executor that is unapproved or still
+inside its 3-day activation timelock does not make `Dispatcher._validateExecutor` revert. The
+router keeps its deployed bytecode, and only the read-only simulation call is affected. It cannot
+help an executor that has no bytecode deployed. Off by default so that a missing activation still
+shows up as a failure.
 
 ## Module Structure
 

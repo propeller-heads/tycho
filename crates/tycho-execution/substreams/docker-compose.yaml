@@ -1,0 +1,73 @@
+# Local setup: Postgres, one sink per chain and the pricing loop.
+#
+#   docker compose up -d db                      # database only (then `make sink CHAIN=...`)
+#   docker compose --profile sinks up -d         # database + all chain sinks + pricer
+#
+# Set SUBSTREAMS_API_TOKEN in the environment (or a .env file next to this file).
+x-sink: &sink
+  build:
+    context: ../../..
+    dockerfile: crates/tycho-execution/substreams/Dockerfile
+  image: tycho-router-trades
+  command: sink
+  restart: unless-stopped
+  profiles: [sinks]
+  depends_on:
+    db:
+      condition: service_healthy
+  environment: &sink-env
+    DSN: psql://tycho:tycho@db:5432/router_trades?sslmode=disable
+    SUBSTREAMS_API_TOKEN: ${SUBSTREAMS_API_TOKEN}
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tycho
+      POSTGRES_PASSWORD: tycho
+      POSTGRES_DB: router_trades
+    ports:
+      - "5433:5432"
+    volumes:
+      - router_trades_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tycho -d router_trades"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sink-ethereum:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: ethereum }
+  sink-base:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: base }
+  sink-unichain:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: unichain }
+  sink-arbitrum:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: arbitrum }
+  sink-bsc:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: bsc }
+  sink-polygon:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: polygon }
+  sink-plasma:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: plasma }
+  sink-robinhood:
+    <<: *sink
+    environment: { <<: *sink-env, CHAIN: robinhood }
+
+  pricer:
+    <<: *sink
+    command: price
+    environment:
+      DSN: postgres://tycho:tycho@db:5432/router_trades
+      LOCAL_PRICING: "1"
+
+volumes:
+  router_trades_pg:

@@ -61,6 +61,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 | Path | Description |
 |---|---|
 | `protocols/substreams/` | Substreams modules (WASM) producing the protobuf messages consumed by `tycho-indexer`; **separate WASM workspace** with its own toolchain — not in `[workspace.members]` |
+| `crates/tycho-execution/substreams/` | TychoRouter trade indexer: a **second, separate WASM workspace** (excluded from the root `Cargo.toml`) that decodes every router trade from call traces and sinks it to Postgres with `substreams-sink-sql`, priced in USD afterwards. Adding a chain, or changing a manifest or its Rust source, has deployment consequences — see `crates/tycho-execution/CLAUDE.md` and `crates/tycho-execution/substreams/README.md` |
 | `protocols/testing/` (`protocol-testing`) | Simulation accuracy test harness: runs protocol state through `tycho-simulation` and compares against on-chain results |
 | `protocols/adapter-integration/` | EVM adapter integration tests |
 

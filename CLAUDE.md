@@ -26,6 +26,7 @@ you've exhausted the path of documentation.
 | Python          | Python code, tycho-client-py, changes to dto.rs or rpc.rs               | `.claude/knowledge/python.md`          |
 | Solidity        | Solidity contracts, Foundry, forge, executors, tycho-execution          | `.claude/knowledge/solidity.md`        |
 | GitBook         | Writing, editing, or reviewing docs under `docs/`                       | `.claude/knowledge/gitbook.md`         |
+| Router trades   | Adding a chain to, or changing, the router trades substreams or its pricing | `crates/tycho-execution/substreams/README.md` |
 
 When spawning subagents, pass the relevant knowledge document contents to them.
 

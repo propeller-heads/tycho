@@ -1,11 +1,12 @@
 specVersion: v0.1.0
 package:
   name: "bsc_uniswap_v3_logs_only"
-  version: v0.1.2
+  version: v0.1.4
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v3-logs-only"
 
 protobuf:
   files:
+    - tycho/evm/v1/entity.proto
     - tycho/evm/v1/common.proto
     - tycho/evm/v1/utils.proto
     - uniswap.proto
@@ -29,7 +30,7 @@ modules:
       - params: string
       - source: sf.ethereum.type.v2.Block
     output:
-      type: proto:tycho.evm.v1.BlockChanges
+      type: proto:tycho.evm.v1.BlockEntityChanges
 
   - name: store_pools
     kind: store
@@ -125,4 +126,4 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_pools_created: "dB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7"
+  map_pools_created: "factory_address=dB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7&protocol_type_name=uniswap_v3_pool"

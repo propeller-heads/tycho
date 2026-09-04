@@ -1,0 +1,69 @@
+specVersion: v0.1.0
+package:
+  name: tycho_router_trades
+  version: v0.1.0
+  url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
+
+imports:
+  database_change: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
+
+protobuf:
+  files:
+    - tycho/router/v1/trades.proto
+  importPaths:
+    - ../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../../target/wasm32-unknown-unknown/release/tycho_router_trades.wasm
+
+modules:
+  - name: map_fee_config_events
+    kind: map
+    initialBlock: 16000000
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.FeeConfigEvents
+
+  - name: store_fee_config
+    kind: store
+    initialBlock: 16000000
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_fee_config_events
+
+  - name: map_trades
+    kind: map
+    initialBlock: 16000000
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_fee_config
+    output:
+      type: proto:tycho.router.v1.Trades
+
+  - name: db_out
+    kind: map
+    initialBlock: 16000000
+    inputs:
+      - map: map_trades
+      - map: map_fee_config_events
+    output:
+      type: proto:sf.substreams.sink.database.v1.DatabaseChanges
+
+network: unichain
+
+params:
+  map_fee_config_events: chain=unichain&routers=0xffa5ec2e444e4285108e4a17b82da495c178427b:v2,0x1d8dfe01731fcd0ac9b2fe4d0fb238c42d71cf74:v3_0,0x764bc67b1036b00bc91221e988261f971a1c7ce4:v3_0,0xa0498d0fa4081c9a735b137a2e6a1910faa0e0bc:v3_1,0xcba5574597ad00ea250fd106dab4fc7461949635:v3_1&fee_calculators=0x1d8dfe01731fcd0ac9b2fe4d0fb238c42d71cf74:0x957ea7a45a29f8d02485f3e08e47b540d3be93ab,0x764bc67b1036b00bc91221e988261f971a1c7ce4:0x957ea7a45a29f8d02485f3e08e47b540d3be93ab,0xa0498d0fa4081c9a735b137a2e6a1910faa0e0bc:0xfd1b57e41fe4b2bb48e288f8e68f3bc4aefb7b40,0xcba5574597ad00ea250fd106dab4fc7461949635:0x3a20aded2bacfab637dfda86543eb8e832402417
+  map_trades: chain=unichain&routers=0xffa5ec2e444e4285108e4a17b82da495c178427b:v2,0x1d8dfe01731fcd0ac9b2fe4d0fb238c42d71cf74:v3_0,0x764bc67b1036b00bc91221e988261f971a1c7ce4:v3_0,0xa0498d0fa4081c9a735b137a2e6a1910faa0e0bc:v3_1,0xcba5574597ad00ea250fd106dab4fc7461949635:v3_1&fee_calculators=0x1d8dfe01731fcd0ac9b2fe4d0fb238c42d71cf74:0x957ea7a45a29f8d02485f3e08e47b540d3be93ab,0x764bc67b1036b00bc91221e988261f971a1c7ce4:0x957ea7a45a29f8d02485f3e08e47b540d3be93ab,0xa0498d0fa4081c9a735b137a2e6a1910faa0e0bc:0xfd1b57e41fe4b2bb48e288f8e68f3bc4aefb7b40,0xcba5574597ad00ea250fd106dab4fc7461949635:0x3a20aded2bacfab637dfda86543eb8e832402417
+
+sink:
+  module: db_out
+  type: sf.substreams.sink.sql.v1.Service
+  config:
+    schema: "../../schema.sql"
+    engine: postgres
