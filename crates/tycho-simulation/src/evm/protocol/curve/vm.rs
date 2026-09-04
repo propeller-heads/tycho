@@ -161,71 +161,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    match variant {
-        CurveVariant::StableSwapV0 => Ok(CurvePoolReadings {
-            balances: read_balances_int128(engine, pool, n_coins, overrides)?,
-            amp: call(engine, pool, ICurve::ACall {}, overrides)?,
-            fee: Some(call(engine, pool, ICurve::feeCall {}, overrides)?),
-            ..Default::default()
-        }),
-        CurveVariant::StableSwapV1 => Ok(CurvePoolReadings {
-            balances: read_balances(engine, pool, n_coins, overrides)?,
-            amp: call(engine, pool, ICurve::ACall {}, overrides)?,
-            fee: Some(call(engine, pool, ICurve::feeCall {}, overrides)?),
-            ..Default::default()
-        }),
-        CurveVariant::StableSwapV2 | CurveVariant::StableSwapSTETH => Ok(CurvePoolReadings {
-            balances: read_balances(engine, pool, n_coins, overrides)?,
-            amp: read_ramped_amp(engine, pool, overrides)?,
-            fee: Some(call(engine, pool, ICurve::feeCall {}, overrides)?),
-            ..Default::default()
-        }),
-        CurveVariant::StableSwapALend => Ok(CurvePoolReadings {
-            balances: read_balances(engine, pool, n_coins, overrides)?,
-            amp: read_ramped_amp(engine, pool, overrides)?,
-            fee: Some(call(engine, pool, ICurve::feeCall {}, overrides)?),
-            offpeg_fee_multiplier: Some(call(
-                engine,
-                pool,
-                ICurve::offpeg_fee_multiplierCall {},
-                overrides,
-            )?),
-            ..Default::default()
-        }),
-        CurveVariant::StableSwapNG => Ok(CurvePoolReadings {
-            balances: read_balances(engine, pool, n_coins, overrides)?,
-            amp: read_ramped_amp(engine, pool, overrides)?,
-            fee: Some(call(engine, pool, ICurve::feeCall {}, overrides)?),
-            // v5+ crvUSD factory pools lack offpeg_fee_multiplier; build_pool defaults it.
-            offpeg_fee_multiplier: call_opt(
-                engine,
-                pool,
-                ICurve::offpeg_fee_multiplierCall {},
-                overrides,
-            ),
-            dynamic_rates: read_stored_rates(engine, pool, n_coins, overrides),
-            ..Default::default()
-        }),
-        CurveVariant::StableSwapMeta => {
-            let mut dynamic_rates = vec![None; n_coins];
-            if let Some(last) = dynamic_rates.last_mut() {
-                *last = Some(read_base_virtual_price(engine, pool, overrides)?);
-            }
-            Ok(CurvePoolReadings {
-                balances: read_balances(engine, pool, n_coins, overrides)?,
-                amp: read_ramped_amp(engine, pool, overrides)?,
-                fee: Some(call(engine, pool, ICurve::feeCall {}, overrides)?),
-                dynamic_rates: Some(dynamic_rates),
-                ..Default::default()
-            })
-        }
-        CurveVariant::TwoCryptoV1 | CurveVariant::TwoCryptoNG | CurveVariant::TwoCryptoStable => {
-            read_twocrypto(engine, pool, variant, overrides)
-        }
-        CurveVariant::TriCryptoV1 | CurveVariant::TriCryptoNG => {
-            read_tricrypto(engine, pool, overrides)
-        }
-    }
+    PoolReader::new(engine, overrides).read_pool(pool, variant, n_coins)
 }
 
 /// Assemble `readings` into a quotable [`Pool`] for a pool of `variant` whose coins have
@@ -258,171 +194,248 @@ pub fn build_from_readings(
         .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))
 }
 
-fn read_twocrypto<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    variant: CurveVariant,
-    overrides: &PendingOverrides,
-) -> Result<CurvePoolReadings, SimulationError>
+/// Reads one pool's view getters from `engine`, under a fixed set of state overrides.
+///
+/// The engine and the overrides are never useful apart: every getter needs both, and a getter
+/// that lost the overrides would silently read confirmed state.
+struct PoolReader<'a, D: EngineDatabaseInterface + Clone + Debug>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let balances = read_balances(engine, pool, 2, overrides)?;
-    let price_scale = call(engine, pool, ICurve::price_scaleCall {}, overrides)?;
-    let precisions =
-        call_opt(engine, pool, ICurveTwo::precisionsCall {}, overrides).map(|p| p.to_vec());
-    let gamma = if variant == CurveVariant::TwoCryptoStable {
-        None
-    } else {
-        Some(call(engine, pool, ICurve::gammaCall {}, overrides)?)
-    };
-    let eth_variant =
-        if variant == CurveVariant::TwoCryptoV1 { Some(detect_eth_variant(*pool)) } else { None };
-    Ok(CurvePoolReadings {
-        balances,
-        amp: call(engine, pool, ICurve::ACall {}, overrides)?,
-        mid_fee: Some(call(engine, pool, ICurve::mid_feeCall {}, overrides)?),
-        out_fee: Some(call(engine, pool, ICurve::out_feeCall {}, overrides)?),
-        fee_gamma: Some(call(engine, pool, ICurve::fee_gammaCall {}, overrides)?),
-        d: Some(call(engine, pool, ICurve::DCall {}, overrides)?),
-        gamma,
-        price_scale: Some(vec![price_scale]),
-        precisions,
-        eth_variant,
-        ..Default::default()
-    })
+    engine: &'a SimulationEngine<D>,
+    overrides: &'a PendingOverrides,
 }
 
-fn read_tricrypto<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    overrides: &PendingOverrides,
-) -> Result<CurvePoolReadings, SimulationError>
+impl<'a, D: EngineDatabaseInterface + Clone + Debug> PoolReader<'a, D>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let balances = read_balances(engine, pool, 3, overrides)?;
-    let ps0 = call(engine, pool, ICurveTri::price_scaleCall { i: U256::from(0) }, overrides)?;
-    let ps1 = call(engine, pool, ICurveTri::price_scaleCall { i: U256::from(1) }, overrides)?;
-    let precisions =
-        call_opt(engine, pool, ICurveTri::precisionsCall {}, overrides).map(|p| p.to_vec());
-    Ok(CurvePoolReadings {
-        balances,
-        amp: call(engine, pool, ICurve::ACall {}, overrides)?,
-        mid_fee: Some(call(engine, pool, ICurve::mid_feeCall {}, overrides)?),
-        out_fee: Some(call(engine, pool, ICurve::out_feeCall {}, overrides)?),
-        fee_gamma: Some(call(engine, pool, ICurve::fee_gammaCall {}, overrides)?),
-        d: Some(call(engine, pool, ICurve::DCall {}, overrides)?),
-        gamma: Some(call(engine, pool, ICurve::gammaCall {}, overrides)?),
-        price_scale: Some(vec![ps0, ps1]),
-        precisions,
-        ..Default::default()
-    })
-}
-
-fn read_ramped_amp<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    overrides: &PendingOverrides,
-) -> Result<U256, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let initial_a = call_opt(engine, pool, ICurve::initial_ACall {}, overrides);
-    let future_a = call_opt(engine, pool, ICurve::future_ACall {}, overrides);
-    match (initial_a, future_a) {
-        (Some(ia), Some(fa)) if ia == fa => Ok(ia),
-        // While ramping we read `A()`, which the pool interpolates to the read block. The adapter
-        // docs suggest instead interpolating `initial_A`/`future_A` and calling `Pool::set_amp`
-        // per quote — but the pool has no access to the current block timestamp outside
-        // `delta_transition`, so per-quote interpolation isn't feasible yet. `A()` is refreshed on
-        // every `delta_transition` (i.e. on every swap), and ramps span days, so intra-interval
-        // drift is negligible. Revisit if the pool gains access to the block timestamp.
-        _ => Ok(call(engine, pool, ICurve::ACall {}, overrides)? * U256::from(A_PRECISION)),
+    fn new(engine: &'a SimulationEngine<D>, overrides: &'a PendingOverrides) -> Self {
+        Self { engine, overrides }
     }
-}
 
-fn read_balances<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    n_coins: usize,
-    overrides: &PendingOverrides,
-) -> Result<Vec<U256>, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let mut balances = Vec::with_capacity(n_coins);
-    for i in 0..n_coins {
-        balances.push(call(engine, pool, ICurve::balancesCall { i: U256::from(i) }, overrides)?);
+    fn read_pool(
+        &self,
+        pool: &AlloyAddress,
+        variant: CurveVariant,
+        n_coins: usize,
+    ) -> Result<CurvePoolReadings, SimulationError> {
+        match variant {
+            CurveVariant::StableSwapV0 => Ok(CurvePoolReadings {
+                balances: self.read_balances_int128(pool, n_coins)?,
+                amp: self.call(pool, ICurve::ACall {})?,
+                fee: Some(self.call(pool, ICurve::feeCall {})?),
+                ..Default::default()
+            }),
+            CurveVariant::StableSwapV1 => Ok(CurvePoolReadings {
+                balances: self.read_balances(pool, n_coins)?,
+                amp: self.call(pool, ICurve::ACall {})?,
+                fee: Some(self.call(pool, ICurve::feeCall {})?),
+                ..Default::default()
+            }),
+            CurveVariant::StableSwapV2 | CurveVariant::StableSwapSTETH => Ok(CurvePoolReadings {
+                balances: self.read_balances(pool, n_coins)?,
+                amp: self.read_ramped_amp(pool)?,
+                fee: Some(self.call(pool, ICurve::feeCall {})?),
+                ..Default::default()
+            }),
+            CurveVariant::StableSwapALend => Ok(CurvePoolReadings {
+                balances: self.read_balances(pool, n_coins)?,
+                amp: self.read_ramped_amp(pool)?,
+                fee: Some(self.call(pool, ICurve::feeCall {})?),
+                offpeg_fee_multiplier: Some(self.call(pool, ICurve::offpeg_fee_multiplierCall {})?),
+                ..Default::default()
+            }),
+            CurveVariant::StableSwapNG => Ok(CurvePoolReadings {
+                balances: self.read_balances(pool, n_coins)?,
+                amp: self.read_ramped_amp(pool)?,
+                fee: Some(self.call(pool, ICurve::feeCall {})?),
+                // v5+ crvUSD factory pools lack offpeg_fee_multiplier; build_pool defaults it.
+                offpeg_fee_multiplier: self.call_opt(pool, ICurve::offpeg_fee_multiplierCall {}),
+                dynamic_rates: self.read_stored_rates(pool, n_coins),
+                ..Default::default()
+            }),
+            CurveVariant::StableSwapMeta => {
+                let mut dynamic_rates = vec![None; n_coins];
+                if let Some(last) = dynamic_rates.last_mut() {
+                    *last = Some(self.read_base_virtual_price(pool)?);
+                }
+                Ok(CurvePoolReadings {
+                    balances: self.read_balances(pool, n_coins)?,
+                    amp: self.read_ramped_amp(pool)?,
+                    fee: Some(self.call(pool, ICurve::feeCall {})?),
+                    dynamic_rates: Some(dynamic_rates),
+                    ..Default::default()
+                })
+            }
+            CurveVariant::TwoCryptoV1 |
+            CurveVariant::TwoCryptoNG |
+            CurveVariant::TwoCryptoStable => self.read_twocrypto(pool, variant),
+            CurveVariant::TriCryptoV1 | CurveVariant::TriCryptoNG => self.read_tricrypto(pool),
+        }
     }
-    Ok(balances)
-}
 
-fn read_balances_int128<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    n_coins: usize,
-    overrides: &PendingOverrides,
-) -> Result<Vec<U256>, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let mut balances = Vec::with_capacity(n_coins);
-    for i in 0..n_coins {
-        balances.push(call(engine, pool, ICurveOld::balancesCall { i: i as i128 }, overrides)?);
-    }
-    Ok(balances)
-}
-
-/// Resolve a StableSwapMeta pool's base LP token rate via the base pool's `get_virtual_price()`.
-fn read_base_virtual_price<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    overrides: &PendingOverrides,
-) -> Result<U256, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let base_pool = call(engine, pool, ICurve::base_poolCall {}, overrides)?;
-    call(engine, &base_pool, IBasePool::get_virtual_priceCall {}, overrides)
-}
-
-/// Read `stored_rates()` as `dynamic_rates`, handling both fixed-size and dynamic ABI encodings.
-fn read_stored_rates<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    n_coins: usize,
-    overrides: &PendingOverrides,
-) -> Option<Vec<Option<U256>>>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let res = engine
-        .simulate(&overrides.view_call(*pool, STORED_RATES_SELECTOR.to_vec()))
-        .ok()?;
-    let out = res.result.as_ref();
-    if out.len() < n_coins * 32 {
-        return None;
-    }
-    // If the first word is a small ABI offset (dynamic encoding) rather than a rate
-    // (rates are >= 10^18), skip the offset + length words.
-    let first_word = U256::from_be_slice(&out[..32]);
-    let data_offset =
-        if first_word <= U256::from(256u64) && out.len() >= (n_coins + 2) * 32 { 64 } else { 0 };
-    let rates = (0..n_coins)
-        .map(|i| {
-            let start = data_offset + i * 32;
-            Some(U256::from_be_slice(&out[start..start + 32]))
+    fn read_twocrypto(
+        &self,
+        pool: &AlloyAddress,
+        variant: CurveVariant,
+    ) -> Result<CurvePoolReadings, SimulationError> {
+        let balances = self.read_balances(pool, 2)?;
+        let price_scale = self.call(pool, ICurve::price_scaleCall {})?;
+        let precisions = self
+            .call_opt(pool, ICurveTwo::precisionsCall {})
+            .map(|p| p.to_vec());
+        let gamma = if variant == CurveVariant::TwoCryptoStable {
+            None
+        } else {
+            Some(self.call(pool, ICurve::gammaCall {})?)
+        };
+        let eth_variant = if variant == CurveVariant::TwoCryptoV1 {
+            Some(detect_eth_variant(*pool))
+        } else {
+            None
+        };
+        Ok(CurvePoolReadings {
+            balances,
+            amp: self.call(pool, ICurve::ACall {})?,
+            mid_fee: Some(self.call(pool, ICurve::mid_feeCall {})?),
+            out_fee: Some(self.call(pool, ICurve::out_feeCall {})?),
+            fee_gamma: Some(self.call(pool, ICurve::fee_gammaCall {})?),
+            d: Some(self.call(pool, ICurve::DCall {})?),
+            gamma,
+            price_scale: Some(vec![price_scale]),
+            precisions,
+            eth_variant,
+            ..Default::default()
         })
-        .collect();
-    Some(rates)
+    }
+
+    fn read_tricrypto(&self, pool: &AlloyAddress) -> Result<CurvePoolReadings, SimulationError> {
+        let balances = self.read_balances(pool, 3)?;
+        let ps0 = self.call(pool, ICurveTri::price_scaleCall { i: U256::from(0) })?;
+        let ps1 = self.call(pool, ICurveTri::price_scaleCall { i: U256::from(1) })?;
+        let precisions = self
+            .call_opt(pool, ICurveTri::precisionsCall {})
+            .map(|p| p.to_vec());
+        Ok(CurvePoolReadings {
+            balances,
+            amp: self.call(pool, ICurve::ACall {})?,
+            mid_fee: Some(self.call(pool, ICurve::mid_feeCall {})?),
+            out_fee: Some(self.call(pool, ICurve::out_feeCall {})?),
+            fee_gamma: Some(self.call(pool, ICurve::fee_gammaCall {})?),
+            d: Some(self.call(pool, ICurve::DCall {})?),
+            gamma: Some(self.call(pool, ICurve::gammaCall {})?),
+            price_scale: Some(vec![ps0, ps1]),
+            precisions,
+            ..Default::default()
+        })
+    }
+
+    fn read_ramped_amp(&self, pool: &AlloyAddress) -> Result<U256, SimulationError> {
+        let initial_a = self.call_opt(pool, ICurve::initial_ACall {});
+        let future_a = self.call_opt(pool, ICurve::future_ACall {});
+        match (initial_a, future_a) {
+            (Some(ia), Some(fa)) if ia == fa => Ok(ia),
+            // While ramping we read `A()`, which the pool interpolates to the read block. The
+            // adapter docs suggest instead interpolating `initial_A`/`future_A` and calling
+            // `Pool::set_amp` per quote — but the pool has no access to the current block
+            // timestamp outside `delta_transition`, so per-quote interpolation isn't feasible
+            // yet. `A()` is refreshed on every `delta_transition` (i.e. on every swap), and ramps
+            // span days, so intra-interval drift is negligible. Revisit if the pool gains access
+            // to the block timestamp.
+            _ => Ok(self.call(pool, ICurve::ACall {})? * U256::from(A_PRECISION)),
+        }
+    }
+
+    fn read_balances(
+        &self,
+        pool: &AlloyAddress,
+        n_coins: usize,
+    ) -> Result<Vec<U256>, SimulationError> {
+        let mut balances = Vec::with_capacity(n_coins);
+        for i in 0..n_coins {
+            balances.push(self.call(pool, ICurve::balancesCall { i: U256::from(i) })?);
+        }
+        Ok(balances)
+    }
+
+    fn read_balances_int128(
+        &self,
+        pool: &AlloyAddress,
+        n_coins: usize,
+    ) -> Result<Vec<U256>, SimulationError> {
+        let mut balances = Vec::with_capacity(n_coins);
+        for i in 0..n_coins {
+            balances.push(self.call(pool, ICurveOld::balancesCall { i: i as i128 })?);
+        }
+        Ok(balances)
+    }
+
+    /// Resolve a StableSwapMeta pool's base LP token rate via the base pool's
+    /// `get_virtual_price()`.
+    fn read_base_virtual_price(&self, pool: &AlloyAddress) -> Result<U256, SimulationError> {
+        let base_pool = self.call(pool, ICurve::base_poolCall {})?;
+        self.call(&base_pool, IBasePool::get_virtual_priceCall {})
+    }
+
+    /// Read `stored_rates()` as `dynamic_rates`, handling both fixed-size and dynamic ABI
+    /// encodings.
+    fn read_stored_rates(&self, pool: &AlloyAddress, n_coins: usize) -> Option<Vec<Option<U256>>> {
+        let res = self
+            .engine
+            .simulate(
+                &self
+                    .overrides
+                    .view_call(*pool, STORED_RATES_SELECTOR.to_vec()),
+            )
+            .ok()?;
+        let out = res.result.as_ref();
+        if out.len() < n_coins * 32 {
+            return None;
+        }
+        // If the first word is a small ABI offset (dynamic encoding) rather than a rate
+        // (rates are >= 10^18), skip the offset + length words.
+        let first_word = U256::from_be_slice(&out[..32]);
+        let data_offset = if first_word <= U256::from(256u64) && out.len() >= (n_coins + 2) * 32 {
+            64
+        } else {
+            0
+        };
+        let rates = (0..n_coins)
+            .map(|i| {
+                let start = data_offset + i * 32;
+                Some(U256::from_be_slice(&out[start..start + 32]))
+            })
+            .collect();
+        Some(rates)
+    }
+
+    fn call<C, R>(&self, to: &AlloyAddress, sol_call: C) -> Result<R, SimulationError>
+    where
+        C: SolCall<Return = R>,
+    {
+        let res = self
+            .engine
+            .simulate(
+                &self
+                    .overrides
+                    .view_call(*to, sol_call.abi_encode()),
+            )
+            .map_err(|e| {
+                SimulationError::RecoverableError(format!("curve getter call failed: {e}"))
+            })?;
+        C::abi_decode_returns(res.result.as_ref())
+            .map_err(|e| SimulationError::FatalError(format!("curve getter decode failed: {e}")))
+    }
+
+    fn call_opt<C, R>(&self, to: &AlloyAddress, sol_call: C) -> Option<R>
+    where
+        C: SolCall<Return = R>,
+    {
+        self.call(to, sol_call).ok()
+    }
 }
 
 /// Read the pool's `MATH()` contract address, if it exposes one (TwoCrypto-NG era pools).
@@ -434,8 +447,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let overrides = &PendingOverrides::default();
-    call_opt(engine, pool, ICurve::MATHCall {}, overrides)
+    PoolReader::new(engine, &PendingOverrides::default()).call_opt(pool, ICurve::MATHCall {})
 }
 
 /// Ensure the code of the pool's actual `MATH()` contract is loaded into the engine.
@@ -493,8 +505,7 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let overrides = &PendingOverrides::default();
-    call_opt(engine, address, ICurve::versionCall {}, overrides)
+    PoolReader::new(engine, &PendingOverrides::default()).call_opt(address, ICurve::versionCall {})
 }
 
 /// Probe the pool's on-chain interface to populate [`ProbingResults`] for variant detection.
@@ -512,62 +523,35 @@ where
 {
     // Which interface a pool exposes is fixed at deployment, so probing always reads
     // confirmed state — a pending block cannot change the answer.
-    let overrides = &PendingOverrides::default();
+    let overrides = PendingOverrides::default();
+    let reader = PoolReader::new(engine, &overrides);
+    let math: Option<AlloyAddress> = reader.call_opt(pool, ICurve::MATHCall {});
     ProbingResults {
-        has_gamma: call_opt(engine, pool, ICurve::gammaCall {}, overrides).is_some(),
+        has_gamma: reader
+            .call_opt(pool, ICurve::gammaCall {})
+            .is_some(),
         n_coins,
-        has_math: read_math_address(engine, pool).is_some(),
+        has_math: math.is_some(),
         // Read `MATH().version()` so `detect_variant` can split TwoCrypto NG (v2.x) from
         // TwoCryptoStable (v0.x) on the probe fallback path, matching `resolve_twocrypto`.
-        math_version: read_math_address(engine, pool).and_then(|math| read_version(engine, &math)),
-        has_offpeg_fee_multiplier: call_opt(
-            engine,
-            pool,
-            ICurve::offpeg_fee_multiplierCall {},
-            overrides,
-        )
-        .is_some(),
-        has_stored_rates: read_stored_rates(engine, pool, n_coins, overrides).is_some(),
-        has_version: call_opt(engine, pool, ICurve::versionCall {}, overrides).is_some(),
-        has_base_pool: call_opt(engine, pool, ICurve::base_poolCall {}, overrides).is_some(),
-        has_int128_balances: call_opt(engine, pool, ICurveOld::balancesCall { i: 0 }, overrides)
+        math_version: math.and_then(|math| reader.call_opt(&math, ICurve::versionCall {})),
+        has_offpeg_fee_multiplier: reader
+            .call_opt(pool, ICurve::offpeg_fee_multiplierCall {})
+            .is_some(),
+        has_stored_rates: reader
+            .read_stored_rates(pool, n_coins)
+            .is_some(),
+        has_version: reader
+            .call_opt(pool, ICurve::versionCall {})
+            .is_some(),
+        has_base_pool: reader
+            .call_opt(pool, ICurve::base_poolCall {})
+            .is_some(),
+        has_int128_balances: reader
+            .call_opt(pool, ICurveOld::balancesCall { i: 0 })
             .is_some(),
         pool_address: *pool,
     }
-}
-
-fn call<D, C, R>(
-    engine: &SimulationEngine<D>,
-    to: &AlloyAddress,
-    sol_call: C,
-    overrides: &PendingOverrides,
-) -> Result<R, SimulationError>
-where
-    D: EngineDatabaseInterface + Clone + Debug,
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-    C: SolCall<Return = R>,
-{
-    let res = engine
-        .simulate(&overrides.view_call(*to, sol_call.abi_encode()))
-        .map_err(|e| SimulationError::RecoverableError(format!("curve getter call failed: {e}")))?;
-    C::abi_decode_returns(res.result.as_ref())
-        .map_err(|e| SimulationError::FatalError(format!("curve getter decode failed: {e}")))
-}
-
-fn call_opt<D, C, R>(
-    engine: &SimulationEngine<D>,
-    to: &AlloyAddress,
-    sol_call: C,
-    overrides: &PendingOverrides,
-) -> Option<R>
-where
-    D: EngineDatabaseInterface + Clone + Debug,
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-    C: SolCall<Return = R>,
-{
-    call::<D, C, R>(engine, to, sol_call, overrides).ok()
 }
 
 #[cfg(test)]
@@ -605,15 +589,19 @@ mod test {
         <D as DatabaseRef>::Error: Debug,
         <D as EngineDatabaseInterface>::Error: Debug,
     {
-        let overrides = &PendingOverrides::default();
+        let overrides = PendingOverrides::default();
+        let reader = PoolReader::new(engine, &overrides);
         (0..n)
             .map(|i| {
-                let coin: AlloyAddress =
-                    call(engine, pool, coinsCall { i: U256::from(i) }, overrides).unwrap();
+                let coin: AlloyAddress = reader
+                    .call(pool, coinsCall { i: U256::from(i) })
+                    .unwrap();
                 if coin == ETH_PLACEHOLDER {
                     18
                 } else {
-                    call(engine, &coin, decimalsCall {}, overrides).unwrap()
+                    reader
+                        .call(&coin, decimalsCall {})
+                        .unwrap()
                 }
             })
             .collect()
@@ -642,13 +630,9 @@ mod test {
             .get_amount_out(i, j, dx)
             .expect("get_amount_out returned None");
 
-        let onchain: U256 = call(
-            &engine,
-            &pool,
-            get_dy_stableCall { i: i as i128, j: j as i128, dx },
-            &PendingOverrides::default(),
-        )
-        .expect("on-chain get_dy failed");
+        let onchain: U256 = PoolReader::new(&engine, &PendingOverrides::default())
+            .call(&pool, get_dy_stableCall { i: i as i128, j: j as i128, dx })
+            .expect("on-chain get_dy failed");
 
         assert_eq!(ours, onchain, "curve quote diverged from on-chain get_dy");
     }
