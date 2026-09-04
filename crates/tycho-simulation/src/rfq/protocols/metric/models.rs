@@ -103,8 +103,20 @@ pub struct MetricBidAskResponse {
     /// from component attributes).
     #[serde(rename = "priceProviderStatus", default)]
     pub price_provider_status: Option<String>,
-    #[serde(default)]
+    /// Per-side depth bins. Absent on older responses and explicitly `null` when the endpoint is
+    /// queried with `depth=false`; both decode to an empty book.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub depth: MetricDepth,
+}
+
+/// `#[serde(default)]` only covers a missing key; this also maps an explicit JSON `null` to the
+/// type's default.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -245,6 +257,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.total_token0_available, None);
+        assert!(!response.is_quotable());
+    }
+
+    #[test]
+    fn test_bid_ask_null_depth_decodes_as_empty() {
+        // `depth=false` makes the endpoint return an explicit null rather than omitting the key.
+        let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
+            "bidAdj": "55340232221128654848000",
+            "askAdj": "55524699661865750400000",
+            "totalToken0Available": "1000000000000000000",
+            "totalToken1Available": "3000000000",
+            "serverTs": 0,
+            "depth": null,
+        }))
+        .unwrap();
+
+        assert_eq!(response.depth, MetricDepth::default());
         assert!(!response.is_quotable());
     }
 
