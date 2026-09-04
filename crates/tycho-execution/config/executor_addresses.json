@@ -22,7 +22,6 @@
     "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
     "vm:liquidityparty": "0x95cA663A10736A748981139F3071cdb21BAAC954",
     "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C",
-    "rfq:metric": "0xD95D619fA709BA559D9CeE7645C5F71dbCf19f0F",
     "ring_swap_v2": "0x08BA9E85c8944098DEAacE0E164b7EC379A7e810",
     "pricelevelstream": "0xc196f22d69d41A2B1DbF6ef8d28C09bc2CA4E4fa",
     "propammfallback": "0xA2F9f6f4a3F64EDa6014ce71A8ec8A874d690ADF"
@@ -37,8 +36,7 @@
     "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
     "native_wrapper": "0x68AF9cDcc2e177e9D75c60f132b8DC52EAF1adBf",
     "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
-    "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
-    "rfq:metric": "0xb8644a264a4b765E60C4A65Fb8049EAE1A791D97"
+    "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
