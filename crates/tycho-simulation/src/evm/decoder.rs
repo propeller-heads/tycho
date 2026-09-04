@@ -1059,8 +1059,9 @@ where
     /// `DecoderState`. Calling this method twice with the same input produces identical results.
     ///
     /// Every state is rebuilt from `state_deltas` alone; nothing here writes to the VM database.
-    /// A protocol decoding into the generic VM adapter therefore cannot take part — its deltas
-    /// are applied to nothing and it keeps quoting confirmed state.
+    /// A protocol decoding into the generic VM adapter therefore cannot take part: it re-reads
+    /// pool state from that database, so its storage-derived values stay at the confirmed block —
+    /// even though the delta's balance and block-environment attributes do get applied.
     ///
     /// # Parameters
     /// * `pending_deltas` — map from extractor name to the `BlockAggregatedChanges` produced by the

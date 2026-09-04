@@ -592,8 +592,10 @@ impl ProtocolStreamBuilder {
     /// The exchange must decode into a state whose `delta_transition` can rebuild it from the
     /// `state_deltas` the indexer produces, because that is all
     /// [`apply_deltas_ephemeral`](crate::evm::decoder::TychoStreamDecoder::apply_deltas_ephemeral)
-    /// applies. Native and hybrid states qualify; the generic VM adapter does not, and an indexer
-    /// registered for one would have its deltas ignored without an error.
+    /// applies. Native and hybrid states qualify; the generic VM adapter does not, because it
+    /// re-reads pool state from the VM database — an indexer registered for one still gets its
+    /// balance and block-environment attributes applied, but every storage-derived value stays at
+    /// the confirmed block, with no error.
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,
