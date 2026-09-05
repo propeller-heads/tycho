@@ -23,8 +23,8 @@ import {
     MIN_SQRT_RATIO,
     MAX_SQRT_RATIO
 } from "@ekubo-v3/types/sqrtRatio.sol";
-import {TransferManager} from "../TransferManager.sol";
-import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
+import {TransferManager} from "../../TransferManager.sol";
+import {ETH_ADDRESS} from "../../../lib/NativeETH.sol";
 import {PoolKey} from "@ekubo-v3/types/poolKey.sol";
 import {PoolConfig} from "@ekubo-v3/types/poolConfig.sol";
 import {NATIVE_TOKEN_ADDRESS} from "@ekubo-v3/math/constants.sol";
@@ -50,20 +50,27 @@ address constant MEV_CAPTURE_ADDRESS =
 address constant SIGNED_EXCLUSIVE_SWAP_ADDRESS =
     0x55b703eED01b35641963da2FB2E14885993605A3;
 
+/// Chain-agnostic Ekubo V3 executor. Extensions deployed at the same
+/// deterministic address on every chain (MEVCapture, SignedExclusiveSwap)
+/// are handled here. Deployment-specific extensions (Ve33) live in per-chain
+/// executors, which override `_swapHop` — and `_hopEnd` when their hops carry
+/// a self-describing tail — so a deployed executor only contains extra code
+/// reachable on its chain.
 contract EkuboV3Executor is IExecutor, ICallback {
     error EkuboV3Executor__InvalidDataLength();
     error EkuboV3Executor__CoreOnly();
     error EkuboV3Executor__UnknownCallback();
 
     uint256 private constant _POOL_DATA_OFFSET = 56;
-    uint256 private constant _HOP_BYTE_LEN = 52;
+    uint256 internal constant _HOP_BYTE_LEN = 52;
+
+    uint256 private constant _SKIP_AHEAD = 0;
+
     // A signed hop appends meta(32) | minBalanceUpdate(32) | sigLen(2) | sig.
     // These name the fixed-width parts of that tail; the signature length is
     // read from the 2-byte big-endian `sigLen` field.
     uint256 private constant _SIGNED_FIXED_TAIL_LEN = 64;
     uint256 private constant _SIG_LEN_BYTES = 2;
-
-    uint256 private constant _SKIP_AHEAD = 0;
 
     using SafeERC20 for IERC20;
 
@@ -85,10 +92,10 @@ contract EkuboV3Executor is IExecutor, ICallback {
     {
         tokenIn = address(bytes20(data[0:20]));
 
-        // Length-aware walk to find the last hop's tokenOut (the group output).
-        // Here `data` is tokenIn(20) followed by the hops, so the first hop
-        // starts at offset 20. A signed hop carries a self-describing tail, so
-        // its stride is 52 + 64 + 2 + sigLen; normal hops advance by 52.
+        // Length-aware walk to find the last hop's tokenOut (the group
+        // output). Here `data` is tokenIn(20) followed by the hops, so the
+        // first hop starts at offset 20. Hops with a self-describing tail
+        // advance past it via `_hopEnd`; fixed-size hops advance by 52.
         uint256 offset = 20;
         uint256 lastHopOffset = offset;
         while (offset < data.length) {
@@ -98,20 +105,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
             lastHopOffset = offset;
             PoolConfig poolConfig =
                 PoolConfig.wrap(bytes32(data[offset + 20:offset + 52]));
-            if (poolConfig.extension() == SIGNED_EXCLUSIVE_SWAP_ADDRESS) {
-                uint256 sigLenOffset =
-                    offset + _HOP_BYTE_LEN + _SIGNED_FIXED_TAIL_LEN;
-                if (sigLenOffset + _SIG_LEN_BYTES > data.length) {
-                    revert EkuboV3Executor__InvalidDataLength();
-                }
-                uint256 sigLen = uint256(
-                    uint16(bytes2(data[sigLenOffset:sigLenOffset + 2]))
-                );
-                offset += _HOP_BYTE_LEN + _SIGNED_FIXED_TAIL_LEN
-                    + _SIG_LEN_BYTES + sigLen;
-            } else {
-                offset += _HOP_BYTE_LEN;
-            }
+            offset = _hopEnd(data, offset + _HOP_BYTE_LEN, poolConfig);
         }
         tokenOut = address(bytes20(data[lastHopOffset:lastHopOffset + 20]));
         // Ekubo uses flash accounting: no pre-swap transfer needed.
@@ -203,6 +197,95 @@ contract EkuboV3Executor is IExecutor, ICallback {
         }
     }
 
+    /// @dev Executes one hop against Core and returns its balance update and
+    /// the offset of the next hop. `offset` points just past the hop's fixed
+    /// 52-byte header (tokenOut | poolConfig), which the loop has already
+    /// parsed and bounds-checked. Implementations whose hops carry a
+    /// self-describing tail (e.g. signed hops) read it from `swapData`
+    /// starting at `offset`, must bounds-check it against `swapData.length`,
+    /// and return the advanced offset; fixed-size hops return `offset`
+    /// unchanged.
+    function _swapHop(
+        PoolKey memory poolKey,
+        SwapParameters swapParameters,
+        bytes calldata swapData,
+        uint256 offset
+    )
+        internal
+        virtual
+        returns (PoolBalanceUpdate balanceUpdate, uint256 nextOffset)
+    {
+        address extension = poolKey.config.extension();
+        if (extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS) {
+            // Signed hop tail: meta(32) | minBU(32) | sigLen(2) | sig(sigLen).
+            // _hopEnd bounds-checks the tail and returns the offset past it.
+            nextOffset = _hopEnd(swapData, offset, poolKey.config);
+            uint256 sigStart = offset + _SIGNED_FIXED_TAIL_LEN + _SIG_LEN_BYTES;
+
+            // slither-disable-next-line calls-loop
+            (balanceUpdate,) = abi.decode(
+                CORE.forward(
+                    SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+                    abi.encode(
+                        poolKey,
+                        swapParameters,
+                        // SignedSwapMeta (uint256)
+                        uint256(bytes32(swapData[offset:offset + 32])),
+                        // minBalanceUpdate
+                        PoolBalanceUpdate.wrap(
+                            bytes32(swapData[offset + 32:offset + 64])
+                        ),
+                        // signature
+                        bytes(swapData[sigStart:nextOffset])
+                    )
+                ),
+                (PoolBalanceUpdate, PoolState)
+            );
+        } else if (extension == MEV_CAPTURE_ADDRESS) {
+            (balanceUpdate,) = abi.decode(
+                // slither-disable-next-line calls-loop
+                CORE.forward(
+                    MEV_CAPTURE_ADDRESS, abi.encode(poolKey, swapParameters)
+                ),
+                (PoolBalanceUpdate, PoolState)
+            );
+            nextOffset = offset;
+        } else {
+            PoolState _stateAfter;
+            // slither-disable-next-line calls-loop
+            (balanceUpdate, _stateAfter) = CORE.swap(0, poolKey, swapParameters);
+            nextOffset = offset;
+        }
+    }
+
+    /// @dev Returns the offset just past a hop's tail. `offset` points just
+    /// past the hop's fixed 52-byte header. Signed hops carry a
+    /// self-describing signature tail; other fixed-size hops return `offset`
+    /// unchanged. Overrides handling further tailed hop kinds must
+    /// bounds-check them against `data.length`.
+    function _hopEnd(bytes calldata data, uint256 offset, PoolConfig poolConfig)
+        internal
+        pure
+        virtual
+        returns (uint256)
+    {
+        if (poolConfig.extension() != SIGNED_EXCLUSIVE_SWAP_ADDRESS) {
+            return offset;
+        }
+
+        uint256 sigLenOff = offset + _SIGNED_FIXED_TAIL_LEN;
+        if (sigLenOff + _SIG_LEN_BYTES > data.length) {
+            revert EkuboV3Executor__InvalidDataLength();
+        }
+        uint256 sigLen =
+            uint256(uint16(bytes2(data[sigLenOff:sigLenOff + _SIG_LEN_BYTES])));
+        uint256 sigEnd = sigLenOff + _SIG_LEN_BYTES + sigLen;
+        if (sigEnd > data.length) {
+            revert EkuboV3Executor__InvalidDataLength();
+        }
+        return sigEnd;
+    }
+
     function _locked(bytes calldata swapData) private {
         uint128 amountIn = uint128(bytes16(swapData[0:16]));
         int128 nextAmountIn = int128(amountIn);
@@ -215,14 +298,12 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
         address nextTokenIn = tokenIn;
 
-        // Length-aware walk over the hops. Normal hops advance by a fixed 52
-        // bytes (tokenOut + poolConfig); a signed hop carries a self-describing
-        // tail, so its stride is read from the embedded `sigLen`. For all-normal
-        // groups this is equivalent to the previous divide-by-52 iteration.
+        // Length-aware walk over the hops. Each hop begins with a fixed
+        // 52-byte header (tokenOut + poolConfig); `_swapHop` consumes any
+        // chain-specific tail and returns the offset of the next hop.
         uint256 offset = _POOL_DATA_OFFSET;
 
         while (offset < swapData.length) {
-            // Each hop begins with tokenOut(20) | poolConfig(32) = 52 bytes.
             if (offset + _HOP_BYTE_LEN > swapData.length) {
                 revert EkuboV3Executor__InvalidDataLength();
             }
@@ -253,61 +334,8 @@ contract EkuboV3Executor is IExecutor, ICallback {
             });
 
             PoolBalanceUpdate balanceUpdate;
-
-            if (poolConfig.extension() == SIGNED_EXCLUSIVE_SWAP_ADDRESS) {
-                // Signed hop tail: meta(32) | minBU(32) |
-                // sigLen(2) | sig(sigLen)
-                uint256 tailOff = offset + _HOP_BYTE_LEN;
-                uint256 sigLenOff = tailOff + _SIGNED_FIXED_TAIL_LEN;
-                if (sigLenOff + _SIG_LEN_BYTES > swapData.length) {
-                    revert EkuboV3Executor__InvalidDataLength();
-                }
-                uint256 sigLen = uint256(
-                    uint16(
-                        bytes2(swapData[sigLenOff:sigLenOff + _SIG_LEN_BYTES])
-                    )
-                );
-                uint256 sigEnd = sigLenOff + _SIG_LEN_BYTES + sigLen;
-                if (sigEnd > swapData.length) {
-                    revert EkuboV3Executor__InvalidDataLength();
-                }
-
-                // slither-disable-next-line calls-loop
-                (balanceUpdate,) = abi.decode(
-                    CORE.forward(
-                        SIGNED_EXCLUSIVE_SWAP_ADDRESS,
-                        abi.encode(
-                            pk,
-                            swapParameters,
-                            // SignedSwapMeta (uint256)
-                            uint256(bytes32(swapData[tailOff:tailOff + 32])),
-                            // minBalanceUpdate
-                            PoolBalanceUpdate.wrap(
-                                bytes32(swapData[tailOff + 32:tailOff + 64])
-                            ),
-                            // signature
-                            bytes(swapData[sigLenOff + _SIG_LEN_BYTES:sigEnd])
-                        )
-                    ),
-                    (PoolBalanceUpdate, PoolState)
-                );
-
-                offset = sigEnd;
-            } else if (poolConfig.extension() == MEV_CAPTURE_ADDRESS) {
-                (balanceUpdate,) = abi.decode(
-                    // slither-disable-next-line calls-loop
-                    CORE.forward(
-                        MEV_CAPTURE_ADDRESS, abi.encode(pk, swapParameters)
-                    ),
-                    (PoolBalanceUpdate, PoolState)
-                );
-                offset += _HOP_BYTE_LEN;
-            } else {
-                PoolState _stateAfter;
-                // slither-disable-next-line calls-loop
-                (balanceUpdate, _stateAfter) = CORE.swap(0, pk, swapParameters);
-                offset += _HOP_BYTE_LEN;
-            }
+            (balanceUpdate, offset) =
+                _swapHop(pk, swapParameters, swapData, offset + _HOP_BYTE_LEN);
 
             nextTokenIn = nextTokenOut;
             nextAmountIn =

@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-ekubo-v3"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 [lib]
@@ -9,6 +9,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 alloy-primitives = { version = "1.4.1", features = ["serde"] }
+serde = "1.0.204"
+serde_qs = "0.13.0"
 ekubo_sdk = { version = "1.0.2", features = ["evm"] }
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
