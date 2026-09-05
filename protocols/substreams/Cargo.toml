@@ -35,6 +35,7 @@ members = [
     "ethereum-ring-swap-v2",
     "ethereum-sky",
     "polygon-ramses-v3",
+    "ethereum-pendle",
 ]
 resolver = "2"
 

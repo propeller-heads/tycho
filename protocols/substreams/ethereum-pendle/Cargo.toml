@@ -1,0 +1,29 @@
+[package]
+name = "ethereum-pendle"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ethereum_pendle"
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = "0.8.1"
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+hex = "0.4.3"
+itertools = "0.10.5"
+num-bigint = "0.4.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_qs = "0.13.0"
+serde-sibor = "0.1.0"
+
+[build-dependencies]
+anyhow = "1"
+substreams-ethereum = "0.9.9"
+
+# Required so that ethabi > ethereum-types build correctly under wasm32-unknown-unknown
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
