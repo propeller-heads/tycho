@@ -93,6 +93,53 @@ impl ResponseError for RpcError {
     }
 }
 
+/// Tracks whether pending-data provenance permits response caching.
+///
+/// `Cache` means no mutable pending data affected the response. Callers may still bypass caching
+/// based on endpoint-specific rules such as pagination completeness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachePolicy {
+    Cache,
+    Bypass,
+}
+
+impl CachePolicy {
+    fn should_cache(self) -> bool {
+        matches!(self, Self::Cache)
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedStateVersions {
+    db_version: Version,
+    deltas_version: Option<BlockNumberOrTimestamp>,
+    cache_policy: CachePolicy,
+}
+
+impl ResolvedStateVersions {
+    fn new(
+        db_version: Version,
+        deltas_version: Option<BlockNumberOrTimestamp>,
+        cache_policy: CachePolicy,
+    ) -> Self {
+        Self { db_version, deltas_version, cache_policy }
+    }
+}
+
+/// Treats a missing extractor as no pending value while preserving operational failures.
+fn optional_pending_lookup<V>(
+    result: Result<Option<V>, PendingDeltasError>,
+) -> Result<Option<V>, RpcError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(PendingDeltasError::UnknownExtractor(protocol_system)) => {
+            debug!(%protocol_system, "No pending deltas available for protocol system.");
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub struct RpcHandler<G, T> {
     db_gateway: G,
     // TODO: remove use of Arc. It was introduced for ease of testing this deltas buffer, however
@@ -195,27 +242,23 @@ where
             BlockOrTimestamp::Timestamp(_) => return Ok(version.clone()),
         };
         // Check pending buffer first — the block may not be committed to DB yet.
-        let pending_ts = self
-            .pending_deltas
-            .as_ref()
-            .and_then(|pending| {
-                let predicate: Box<dyn Fn(&BlockAggregatedChanges) -> bool> = match &block_id {
-                    BlockIdentifier::Hash(hash) => {
-                        let hash = hash.clone();
-                        Box::new(move |b: &BlockAggregatedChanges| b.block.hash == hash)
-                    }
-                    BlockIdentifier::Number((_, no)) => {
-                        let no = *no as u64;
-                        Box::new(move |b: &BlockAggregatedChanges| b.block.number == no)
-                    }
-                    _ => return None,
-                };
-                pending
-                    .search_block(&predicate, protocol_system)
-                    .ok()
-                    .flatten()
-                    .map(|b| b.block.ts)
-            });
+        let pending_ts = match (&self.pending_deltas, &block_id) {
+            (Some(pending), BlockIdentifier::Hash(hash)) => {
+                optional_pending_lookup(pending.search_block(
+                    &|b: &BlockAggregatedChanges| &b.block.hash == hash,
+                    protocol_system,
+                ))?
+                .map(|b| b.block.ts)
+            }
+            (Some(pending), BlockIdentifier::Number((_, no))) => {
+                optional_pending_lookup(pending.search_block(
+                    &|b: &BlockAggregatedChanges| b.block.number == *no as u64,
+                    protocol_system,
+                ))?
+                .map(|b| b.block.ts)
+            }
+            _ => None,
+        };
         let ts = match pending_ts {
             Some(ts) => ts,
             None => {
@@ -244,22 +287,18 @@ where
             info!("Getting contract state (all contracts)");
         }
         self.contract_storage_cache
-            .get(request.clone(), |r| async {
-                self.get_contract_state_inner(r)
-                    .await
-                    .map(|res| (res, true))
-            })
+            .get(request.clone(), |r| self.get_contract_state_inner(r))
             .await
     }
 
     async fn get_contract_state_inner(
         &self,
         request: dto::StateRequestBody,
-    ) -> Result<dto::StateRequestResponse, RpcError> {
+    ) -> Result<(dto::StateRequestResponse, bool), RpcError> {
         let at = BlockOrTimestamp::try_from(&request.version)?;
         let chain = request.chain.into();
-        let (db_version, deltas_version) = self
-            .calculate_versions(&at, &request.protocol_system.clone(), chain)
+        let ResolvedStateVersions { db_version, deltas_version, cache_policy } = self
+            .calculate_versions(&at, &request.protocol_system, chain)
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
@@ -320,12 +359,15 @@ where
                                                              * addresses are not specified */
         };
 
-        Ok(dto::StateRequestResponse::new(
-            accounts
-                .into_iter()
-                .map(dto::ResponseAccount::from)
-                .collect(),
-            PaginationResponse::new(pagination_params.page, pagination_params.page_size, total),
+        Ok((
+            dto::StateRequestResponse::new(
+                accounts
+                    .into_iter()
+                    .map(dto::ResponseAccount::from)
+                    .collect(),
+                PaginationResponse::new(pagination_params.page, pagination_params.page_size, total),
+            ),
+            cache_policy.should_cache(),
         ))
     }
 
@@ -334,51 +376,38 @@ where
     /// This method will calculate:
     /// - The committed version to be retrieved from the database.
     /// - An "ordered" version to be retrieved from the pending deltas buffer.
+    /// - Whether the resolved state is immutable and therefore safe to cache.
     ///
-    /// To calculate the finalized version, it queries the pending deltas buffer for the requested
-    /// version's commit status. If the version is already committed, it can be simply passed on to
-    /// the db, no deltas version is required. In case it is an uncommitted version, we downgrade
-    /// the db version to the latest available version and will later apply any pending
-    /// changes from the buffer on top of the retrieved version. We also return a deltas
-    /// version which must be either block number or timestamps based.
+    /// It queries the pending deltas buffer to determine whether the database already covers the
+    /// requested version. Committed versions can be read directly from the database. For an
+    /// uncommitted version, it reads the latest database state and applies buffered changes up to
+    /// the requested block number or timestamp.
     async fn calculate_versions(
         &self,
         request_version: &BlockOrTimestamp,
         protocol_system: &str,
         chain: Chain,
-    ) -> Result<(Version, Option<BlockNumberOrTimestamp>), RpcError> {
+    ) -> Result<ResolvedStateVersions, RpcError> {
         let ordered_version = match request_version {
             BlockOrTimestamp::Block(BlockIdentifier::Number((_, no))) => {
                 BlockNumberOrTimestamp::Number(*no as u64)
             }
             BlockOrTimestamp::Block(BlockIdentifier::Hash(hash)) => {
-                let block_number = if let Some(block_number) = self
-                    .pending_deltas
-                    .as_ref()
-                    .and_then(|pending| {
-                        pending
-                            .search_block(
-                                &|b: &BlockAggregatedChanges| &b.block.hash == hash,
-                                protocol_system,
-                            )
-                            .ok()
-                    })
-                    .and_then(|block| block.map(|b| b.block.number))
-                {
-                    Some(block_number)
+                let pending_block = match &self.pending_deltas {
+                    Some(pending) => optional_pending_lookup(pending.search_block(
+                        &|b: &BlockAggregatedChanges| &b.block.hash == hash,
+                        protocol_system,
+                    ))?,
+                    None => None,
+                };
+                let block_number = if let Some(block) = pending_block {
+                    block.block.number
                 } else {
                     self.db_gateway
                         .get_block(&BlockIdentifier::Hash(hash.clone()))
                         .await
-                        .ok()
-                        .map(|block| block.number)
-                }
-                .ok_or_else(|| {
-                    RpcError::Storage(StorageError::NotFound(
-                        "Version".to_string(),
-                        format!("{request_version:?}",),
-                    ))
-                })?;
+                        .map(|block| block.number)?
+                };
 
                 BlockNumberOrTimestamp::Number(block_number)
             }
@@ -390,49 +419,67 @@ where
                     .number,
             ),
         };
-        let request_version_commit_status =
-            self.pending_deltas
-                .as_ref()
-                .map_or(CommitStatus::Committed, |pending| {
-                    pending
-                        .get_block_commit_status(ordered_version, protocol_system)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| {
-                            warn!(
-                                ?ordered_version,
-                                ?protocol_system,
-                                "No finality found for version."
-                            );
-                            CommitStatus::Committed
-                        })
-                });
+
+        let Some(pending_deltas) = &self.pending_deltas else {
+            // With no pending source, exact block identifiers are immutable database lookups.
+            // Timestamp lookups can still move while the database catches up to that timestamp.
+            let cache_policy = match request_version {
+                BlockOrTimestamp::Block(BlockIdentifier::Number(_) | BlockIdentifier::Hash(_)) => {
+                    CachePolicy::Cache
+                }
+                BlockOrTimestamp::Block(BlockIdentifier::Latest(_)) |
+                BlockOrTimestamp::Timestamp(_) => CachePolicy::Bypass,
+            };
+            return Ok(ResolvedStateVersions::new(
+                Version(request_version.clone(), VersionKind::Last),
+                None,
+                cache_policy,
+            ));
+        };
+
+        let Some(request_version_commit_status) = optional_pending_lookup(
+            pending_deltas.get_block_commit_status(ordered_version, protocol_system),
+        )?
+        else {
+            // Neither an empty buffer nor a missing extractor can prove that the database covers
+            // this version. Preserve the database-only response without caching it.
+            debug!(?ordered_version, ?protocol_system, "No commit status found for version.");
+            return Ok(ResolvedStateVersions::new(
+                Version(request_version.clone(), VersionKind::Last),
+                None,
+                CachePolicy::Bypass,
+            ));
+        };
 
         debug!(
             ?request_version_commit_status,
             ?request_version,
             ?ordered_version,
-            "Version finality calculated!"
+            "Version commit status calculated."
         );
 
         match request_version_commit_status {
-            CommitStatus::Committed => {
-                Ok((Version(request_version.clone(), VersionKind::Last), None))
-            }
-            CommitStatus::Uncommitted => Ok((
+            CommitStatus::Committed => Ok(ResolvedStateVersions::new(
+                Version(request_version.clone(), VersionKind::Last),
+                None,
+                CachePolicy::Cache,
+            )),
+            CommitStatus::Uncommitted => Ok(ResolvedStateVersions::new(
                 Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(chain)), VersionKind::Last),
                 Some(ordered_version),
+                CachePolicy::Bypass,
             )),
             CommitStatus::Unseen => {
                 match request_version {
                     BlockOrTimestamp::Timestamp(_) => {
                         // If the request is based on a timestamp, return the latest valid version
-                        Ok((
+                        Ok(ResolvedStateVersions::new(
                             Version(
                                 BlockOrTimestamp::Block(BlockIdentifier::Latest(chain)),
                                 VersionKind::Last,
                             ),
                             Some(ordered_version),
+                            CachePolicy::Bypass,
                         ))
                     }
                     BlockOrTimestamp::Block(_) => {
@@ -463,22 +510,18 @@ where
             info!("Getting protocol state (all protocols)");
         }
         self.protocol_state_cache
-            .get(request.clone(), |r| async {
-                self.get_protocol_state_inner(r)
-                    .await
-                    .map(|res| (res, true))
-            })
+            .get(request.clone(), |r| self.get_protocol_state_inner(r))
             .await
     }
 
     async fn get_protocol_state_inner(
         &self,
         request: dto::ProtocolStateRequestBody,
-    ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
+    ) -> Result<(dto::ProtocolStateRequestResponse, bool), RpcError> {
         let at = BlockOrTimestamp::try_from(&request.version)?;
         let chain = request.chain.into();
-        let (db_version, deltas_version) = self
-            .calculate_versions(&at, &request.protocol_system.clone(), chain)
+        let ResolvedStateVersions { db_version, deltas_version, cache_policy } = self
+            .calculate_versions(&at, &request.protocol_system, chain)
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
@@ -493,38 +536,40 @@ where
         // By precomputing the paginated IDs we also ensure that the fetched balances and
         // protocol state are paginated in the same way.
         // Also, by doing this in a single point prevents failures and increases performance.
-        let (paginated_ids, total): (Vec<String>, i64) = match ids {
-            Some(ids) => (
-                ids.iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
-                    .map(|s| s.to_string())
-                    .collect(),
-                ids.len() as i64,
-            ),
-            None => {
-                let req = dto::ProtocolComponentsRequestBody {
-                    chain: request.chain,
-                    protocol_system: request.protocol_system.clone(),
-                    component_ids: None,
-                    tvl_gt: None,
-                    pagination: request.pagination.clone(),
-                };
-                let protocol_components = self
-                    .get_protocol_components_inner(req)
-                    .await
-                    .expect("Failed to get protocol component IDs");
-                let total_components = protocol_components.pagination.total;
-                (
-                    protocol_components
-                        .protocol_components
-                        .into_iter()
-                        .map(|c| c.id)
+        let (paginated_ids, total, component_cache_policy): (Vec<String>, i64, CachePolicy) =
+            match ids {
+                Some(ids) => (
+                    ids.iter()
+                        .skip(pagination_params.offset() as usize)
+                        .take(pagination_params.page_size as usize)
+                        .map(|s| s.to_string())
                         .collect(),
-                    total_components,
-                )
-            }
-        };
+                    ids.len() as i64,
+                    CachePolicy::Cache,
+                ),
+                None => {
+                    let req = dto::ProtocolComponentsRequestBody {
+                        chain: request.chain,
+                        protocol_system: request.protocol_system.clone(),
+                        component_ids: None,
+                        tvl_gt: None,
+                        pagination: request.pagination.clone(),
+                    };
+                    let (protocol_components, component_cache_policy) = self
+                        .get_protocol_components_inner(req)
+                        .await?;
+                    let total_components = protocol_components.pagination.total;
+                    (
+                        protocol_components
+                            .protocol_components
+                            .into_iter()
+                            .map(|c| c.id)
+                            .collect(),
+                        total_components,
+                        component_cache_policy,
+                    )
+                }
+            };
         let paginated_ids: Vec<&str> = paginated_ids
             .iter()
             .map(AsRef::as_ref)
@@ -567,12 +612,19 @@ where
 
         trace!(db_state = ?states, "Updated states with buffer.");
 
-        Ok(dto::ProtocolStateRequestResponse::new(
-            states
-                .into_iter()
-                .map(dto::ResponseProtocolState::from)
-                .collect(),
-            PaginationResponse::new(pagination_params.page, pagination_params.page_size, total),
+        // Without explicit IDs, protocol state also depends on pending component discovery, so
+        // both pending-data policies must permit caching.
+        let should_cache = cache_policy.should_cache() && component_cache_policy.should_cache();
+
+        Ok((
+            dto::ProtocolStateRequestResponse::new(
+                states
+                    .into_iter()
+                    .map(dto::ResponseProtocolState::from)
+                    .collect(),
+                PaginationResponse::new(pagination_params.page, pagination_params.page_size, total),
+            ),
+            should_cache,
         ))
     }
 
@@ -751,23 +803,16 @@ where
         }
         self.component_cache
             .get(request.clone(), |r| async {
-                self.get_protocol_components_inner(r)
-                    .await
-                    .map(|res| {
-                        // If component ids were specified, check if we have all requested
-                        // components are in the response (should cache)
-                        if let Some(component_ids) = &request.component_ids {
-                            let all_found = component_ids.len() == res.pagination.total as usize;
-                            if all_found {
-                                return (res, true);
-                            } else {
-                                return (res, false);
-                            }
-                        }
-                        // Otherwise check if request is for the last page (shouldn't cache)
-                        let last_page = res.pagination.total_pages() - 1;
-                        (res, request.pagination.page < last_page)
-                    })
+                let (res, source_policy) = self
+                    .get_protocol_components_inner(r)
+                    .await?;
+                let stable_page = if let Some(component_ids) = &request.component_ids {
+                    component_ids.len() == res.pagination.total as usize
+                } else {
+                    let last_page = res.pagination.total_pages() - 1;
+                    request.pagination.page < last_page
+                };
+                Ok((res, source_policy.should_cache() && stable_page))
             })
             .await
     }
@@ -775,7 +820,7 @@ where
     async fn get_protocol_components_inner(
         &self,
         request: dto::ProtocolComponentsRequestBody,
-    ) -> Result<dto::ProtocolComponentRequestResponse, RpcError> {
+    ) -> Result<(dto::ProtocolComponentRequestResponse, CachePolicy), RpcError> {
         let system = request.protocol_system.clone();
         let pagination_params: PaginationParams = (&request.pagination).into();
 
@@ -786,16 +831,32 @@ where
 
         let ids_slice = ids_strs.as_deref();
 
-        let buffered_components = self
-            .pending_deltas
-            .as_ref()
-            .map_or(Ok(Vec::new()), |pending_delta| {
-                pending_delta.get_new_components(ids_slice, &system, request.tvl_gt)
-            })?;
+        let (buffered_components, cache_policy) = match &self.pending_deltas {
+            Some(pending) => match pending.get_new_components(ids_slice, &system, request.tvl_gt) {
+                Ok(components) => {
+                    // An open-ended lookup depends on which pending components are absent as well
+                    // as present. A reorg can change that set even when it is currently empty.
+                    let cache_policy = if ids_slice.is_none() || !components.is_empty() {
+                        CachePolicy::Bypass
+                    } else {
+                        // For explicit IDs, the outer completeness check caches only when the
+                        // database returned every requested component.
+                        CachePolicy::Cache
+                    };
+                    (components, cache_policy)
+                }
+                Err(PendingDeltasError::UnknownExtractor(protocol_system)) => {
+                    debug!(%protocol_system, "No pending components available for protocol system.");
+                    (Vec::new(), CachePolicy::Bypass)
+                }
+                Err(err) => return Err(err.into()),
+            },
+            None => (Vec::new(), CachePolicy::Cache),
+        };
 
         debug!(n_components = buffered_components.len(), "RetrievedBufferedComponents");
 
-        // Check if we have all requested components in the cache
+        // Return early if every explicitly requested component is still pending.
         if let Some(requested_ids) = ids_slice {
             let fetched_ids: HashSet<_> = buffered_components
                 .iter()
@@ -815,13 +876,16 @@ where
                     .map(dto::ProtocolComponent::from)
                     .collect();
 
-                return Ok(dto::ProtocolComponentRequestResponse::new(
-                    response_components,
-                    PaginationResponse::new(
-                        pagination_params.page,
-                        pagination_params.page_size,
-                        total,
+                return Ok((
+                    dto::ProtocolComponentRequestResponse::new(
+                        response_components,
+                        PaginationResponse::new(
+                            pagination_params.page,
+                            pagination_params.page_size,
+                            total,
+                        ),
                     ),
+                    cache_policy,
                 ));
             }
         }
@@ -869,13 +933,16 @@ where
                     .into_iter()
                     .map(dto::ProtocolComponent::from)
                     .collect::<Vec<dto::ProtocolComponent>>();
-                Ok(dto::ProtocolComponentRequestResponse::new(
-                    response_components,
-                    PaginationResponse::new(
-                        pagination_params.page,
-                        pagination_params.page_size,
-                        total,
+                Ok((
+                    dto::ProtocolComponentRequestResponse::new(
+                        response_components,
+                        PaginationResponse::new(
+                            pagination_params.page,
+                            pagination_params.page_size,
+                            total,
+                        ),
                     ),
+                    cache_policy,
                 ))
             }
             Err(err) => {
@@ -1122,9 +1189,10 @@ where
 /// This endpoint retrieves the state of contracts within a specific execution environment. If no
 /// contract ids are given, all contracts are returned. Note that `protocol_system` is not a filter;
 /// it's a way to specify the protocol system associated with the contracts requested and is used to
-/// ensure that the correct extractor's block status is used when querying the database. If omitted,
-/// the block status will be determined by a random extractor, which could be risky if the extractor
-/// is out of sync. Filtering by protocol system is not currently supported on this endpoint and
+/// ensure that the correct extractor's block status is used when querying the database. If omitted
+/// while pending deltas are enabled, pending state cannot be applied, so the response is read from
+/// the database and is not cached. Without a pending-deltas service, normal exact-block caching
+/// still applies. Filtering by protocol system is not currently supported on this endpoint and
 /// should be done client side.
 #[utoipa::path(
     post,
@@ -1502,7 +1570,12 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // reliably when it is placed on the macro invocation itself.
 #[allow(clippy::extra_unused_lifetimes)]
 mod tests {
-    use std::{collections::HashMap, env, str::FromStr};
+    use std::{
+        collections::HashMap,
+        env,
+        str::FromStr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use actix_web::{test, App};
     use chrono::{NaiveDateTime, TimeDelta};
@@ -1665,6 +1738,37 @@ mod tests {
         assert_eq!(result.version.block, expected.version.block);
     }
 
+    #[rstest]
+    #[case::exact_block(
+        BlockOrTimestamp::Block(BlockIdentifier::Number((Chain::Ethereum, 1))),
+        CachePolicy::Cache
+    )]
+    #[case::timestamp(BlockOrTimestamp::Timestamp(NaiveDateTime::default()), CachePolicy::Bypass)]
+    #[tokio::test]
+    async fn test_cache_policy_without_pending_deltas(
+        #[case] request_version: BlockOrTimestamp,
+        #[case] expected_policy: CachePolicy,
+    ) {
+        let req_handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let resolved = req_handler
+            .calculate_versions(&request_version, "uniswap_v2", Chain::Ethereum)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.cache_policy, expected_policy);
+        assert_eq!(resolved.db_version.0, request_version);
+        assert!(matches!(resolved.db_version.1, VersionKind::Last));
+        assert!(resolved.deltas_version.is_none());
+    }
+
     #[tokio::test]
     async fn test_get_contract_state() {
         let expected = Account::new(
@@ -1755,15 +1859,149 @@ mod tests {
             chain: dto::Chain::Ethereum,
             pagination: dto::PaginationParams::default(),
         };
-        let state = req_handler
+        let (state, should_cache) = req_handler
             .get_contract_state_inner(request)
             .await
             .unwrap();
 
+        assert!(!should_cache);
         assert_eq!(state.accounts.len(), 2);
         assert_eq!(state.accounts[0], expected.into());
         assert_eq!(state.accounts[1], buf_expected.into());
         assert_eq!(state.pagination.total, 2);
+    }
+
+    #[tokio::test]
+    async fn test_uncommitted_contract_state_bypasses_cache() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .times(2)
+            .returning(|_, _| Ok(Some(CommitStatus::Uncommitted)));
+        mock_buffer
+            .expect_update_vm_states()
+            .times(2)
+            .returning(|_, _, _, _| Ok(()));
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 2),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+
+        req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+        req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_committed_contract_state_is_cached() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .once()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .once()
+            .returning(|_, _| Ok(Some(CommitStatus::Committed)));
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 1),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+
+        let first = req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn test_contract_state_without_matching_pending_extractor_bypasses_cache() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .times(2)
+            .returning(|_, protocol_system| {
+                Err(PendingDeltasError::UnknownExtractor(protocol_system.to_string()))
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::StateRequestBody {
+            contract_ids: Some(vec![]),
+            protocol_system: String::new(),
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 1),
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+
+        let first = req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_contract_state(&request)
+            .await
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&first, &second));
     }
 
     /// Helper used to make tracing results comparisons deterministic.
@@ -2626,15 +2864,288 @@ mod tests {
             version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
             pagination: dto::PaginationParams::default(),
         };
-        let res = req_handler
+        let (res, should_cache) = req_handler
             .get_protocol_state_inner(request)
             .await
             .unwrap();
 
+        assert!(!should_cache);
         assert_eq!(res.states.len(), 2);
         assert_eq!(res.states[0], expected.into());
         assert_eq!(res.states[1], buf_expected.into());
         assert_eq!(res.pagination.total, 2);
+    }
+
+    #[tokio::test]
+    async fn test_uncommitted_protocol_state_is_recomputed() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_states()
+            .times(2)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .times(2)
+            .returning(|_, _| Ok(Some(CommitStatus::Uncommitted)));
+        let merge_count = Arc::new(AtomicUsize::new(0));
+        mock_buffer
+            .expect_merge_native_states()
+            .times(2)
+            .returning({
+                let merge_count = merge_count.clone();
+                move |_, states, _, _| {
+                    let value = merge_count.fetch_add(1, Ordering::SeqCst) as i32 + 1;
+                    states.push(ProtocolComponentState::new(
+                        "state",
+                        protocol_attributes([("reserve", value)]),
+                        HashMap::new(),
+                    ));
+                    Ok(())
+                }
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = protocol_state_request(2);
+
+        let first = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+
+        assert_ne!(first.states[0].attributes["reserve"], second.states[0].attributes["reserve"]);
+    }
+
+    #[tokio::test]
+    async fn test_committed_protocol_state_is_cached() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_states()
+            .once()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .once()
+            .returning(|_, _| Ok(Some(CommitStatus::Committed)));
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = protocol_state_request(1);
+
+        let first = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn test_protocol_state_does_not_cache_during_component_reorg_gap() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        gw.expect_get_protocol_states()
+            .times(2)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: None }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .times(2)
+            .returning(|_, _| Ok(Some(CommitStatus::Committed)));
+        mock_buffer
+            .expect_get_new_components()
+            .times(2)
+            .returning({
+                let lookup_count = Arc::new(AtomicUsize::new(0));
+                move |_, _, _| {
+                    if lookup_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(vec![])
+                    } else {
+                        Ok(vec![protocol_component("replacement", "pool")])
+                    }
+                }
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let mut request = protocol_state_request(1);
+        request.protocol_ids = None;
+        request.protocol_system = "ambient".to_string();
+
+        let first = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+
+        assert!(first.states.is_empty());
+        assert_eq!(first.pagination.total, 0);
+        assert!(second.states.is_empty());
+        assert_eq!(second.pagination.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_protocol_component_lookup_error_is_returned_from_state_request() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .once()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Err(StorageError::Unexpected("component lookup failed".into())) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .once()
+            .returning(|_, _| Ok(Some(CommitStatus::Committed)));
+        mock_buffer
+            .expect_get_new_components()
+            .once()
+            .returning(|_, _, _| Ok(vec![]));
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let mut request = protocol_state_request(1);
+        request.protocol_ids = None;
+
+        let error = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RpcError::Storage(StorageError::Unexpected(message))
+                if message == "component lookup failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_commit_status_protocol_state_bypasses_cache() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_states()
+            .times(2)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .times(2)
+            .returning(|_, _| Ok(None));
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = protocol_state_request(1);
+
+        let first = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_protocol_state(&request)
+            .await
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn test_commit_status_error_is_not_treated_as_committed() {
+        let gw = MockGateway::new();
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_block_commit_status()
+            .once()
+            .returning(|_, protocol_system| {
+                Err(PendingDeltasError::LockError(
+                    protocol_system.to_string(),
+                    "poisoned".to_string(),
+                ))
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let error = req_handler
+            .get_protocol_state(&protocol_state_request(1))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RpcError::DeltasError(PendingDeltasError::LockError(_, _))));
+    }
+
+    fn protocol_state_request(block_number: u64) -> dto::ProtocolStateRequestBody {
+        dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["state".to_string()]),
+            protocol_system: "uniswap_v2".to_string(),
+            chain: dto::Chain::Ethereum,
+            include_balances: true,
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block_number),
+            pagination: dto::PaginationParams::default(),
+        }
     }
 
     fn protocol_attributes<'a>(
@@ -2643,6 +3154,23 @@ mod tests {
         data.into_iter()
             .map(|(s, v)| (s.to_owned(), Bytes::from(u32::try_from(v).unwrap()).lpad(32, 0)))
             .collect()
+    }
+
+    fn protocol_component(id: &str, protocol_type_name: &str) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            "ambient",
+            protocol_type_name,
+            Chain::Ethereum,
+            vec![],
+            vec![],
+            HashMap::new(),
+            ChangeType::Creation,
+            "0x50449de1973d86f21bfafa7c72011854a7e33a226709dc3e2e4edcca34"
+                .parse()
+                .unwrap(),
+            NaiveDateTime::default(),
+        )
     }
 
     #[tokio::test]
@@ -2714,11 +3242,12 @@ mod tests {
             pagination: dto::PaginationParams::new(0, 2),
         };
 
-        let components = req_handler
+        let (components, cache_policy) = req_handler
             .get_protocol_components_inner(request)
             .await
             .unwrap();
 
+        assert_eq!(cache_policy, CachePolicy::Bypass);
         assert_eq!(components.protocol_components.len(), 2);
         assert_eq!(components.protocol_components[0], expected.into());
         assert_eq!(components.protocol_components[1], buf_expected.into());
@@ -2814,11 +3343,12 @@ mod tests {
             pagination: dto::PaginationParams::new(0, 2),
         };
 
-        let response1 = req_handler
+        let (response1, cache_policy1) = req_handler
             .get_protocol_components_inner(request)
             .await
             .unwrap();
 
+        assert_eq!(cache_policy1, CachePolicy::Bypass);
         assert_eq!(response1.protocol_components.len(), 2);
         assert_eq!(response1.protocol_components[0], expected.into());
         assert_eq!(response1.protocol_components[1], buf_expected1.into());
@@ -2832,14 +3362,166 @@ mod tests {
             pagination: dto::PaginationParams::new(1, 2),
         };
 
-        let response2 = req_handler
+        let (response2, cache_policy2) = req_handler
             .get_protocol_components_inner(request)
             .await
             .unwrap();
 
+        assert_eq!(cache_policy2, CachePolicy::Bypass);
         assert_eq!(response2.protocol_components.len(), 1);
         assert_eq!(response2.protocol_components[0], buf_expected2.into());
         assert_eq!(response2.pagination.total, 3);
+    }
+
+    #[tokio::test]
+    async fn test_pending_protocol_components_are_not_cached() {
+        let gw = MockGateway::new();
+        let mut mock_buffer = MockPendingDeltas::new();
+        let lookup_count = Arc::new(AtomicUsize::new(0));
+        mock_buffer
+            .expect_get_new_components()
+            .times(2)
+            .returning({
+                let lookup_count = lookup_count.clone();
+                move |_, _, _| {
+                    lookup_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![protocol_component("pending", "pool")])
+                }
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ambient".to_string(),
+            component_ids: Some(vec!["pending".to_string()]),
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+
+        req_handler
+            .get_protocol_components(&request)
+            .await
+            .unwrap();
+        req_handler
+            .get_protocol_components(&request)
+            .await
+            .unwrap();
+
+        assert_eq!(lookup_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_complete_protocol_component_lookup_is_cached() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .once()
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async {
+                    Ok(WithTotal {
+                        entity: vec![protocol_component("committed", "pool")],
+                        total: Some(1),
+                    })
+                })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_new_components()
+            .once()
+            .return_once(|_, _, _| Ok(vec![]));
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ambient".to_string(),
+            component_ids: Some(vec!["committed".to_string()]),
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+
+        let first = req_handler
+            .get_protocol_components(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_protocol_components(&request)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.protocol_components[0].id, "committed");
+    }
+
+    #[tokio::test]
+    async fn test_protocol_components_do_not_cache_during_reorg_gap() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async {
+                    Ok(WithTotal {
+                        entity: vec![protocol_component("committed", "pool")],
+                        total: Some(2),
+                    })
+                })
+            });
+
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_get_new_components()
+            .times(2)
+            .returning({
+                let lookup_count = Arc::new(AtomicUsize::new(0));
+                move |_, _, _| {
+                    if lookup_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(vec![])
+                    } else {
+                        Ok(vec![protocol_component("replacement", "pool")])
+                    }
+                }
+            });
+
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ambient".to_string(),
+            component_ids: None,
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::new(0, 1),
+        };
+
+        let first = req_handler
+            .get_protocol_components(&request)
+            .await
+            .unwrap();
+        let second = req_handler
+            .get_protocol_components(&request)
+            .await
+            .unwrap();
+
+        assert_eq!(first.pagination.total, 2);
+        assert_eq!(second.pagination.total, 3);
     }
 
     fn plans_config_with_restrictions() -> PlansConfig {

@@ -62,7 +62,7 @@ Tycho's RPC service allows clients to query historical data and current state in
 
 #### Protocol System Requirement
 
-In the current design, specifying the `protocol_system` in your RPC requests is optional. However, it plays a critical role in ensuring accurate data retrieval. The protocol_system determines which extractor is used to calculate where to query states from (the buffer or the database). If not provided, the system defaults to using a random extractor, which may not always be fully synchronized. This can lead to inconsistencies or faulty responses.
+Some state requests accept an omitted `protocol_system` for backwards compatibility. However, it plays a critical role in accurate current-state retrieval because it selects the pending-deltas buffer to apply on top of the database. When pending deltas are enabled but no matching extractor is available, Tycho serves database-only state and does not cache the response. If the server is configured without pending deltas, normal exact-block caching still applies.
 
 In a future version of Tycho, the protocol_system parameter will become mandatory to eliminate these risks and ensure reliable, consistent data retrieval. Therefore, it is strongly recommended to always include protocol_system in your requests to guarantee accurate results.
 
