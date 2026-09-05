@@ -45,6 +45,10 @@
       "contract": "HashflowExecutor",
       "args": ["0x55084eE0fEf03f14a305cd24286359A35D735151"]
     },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x8a2ddc0461Fcf96F81a05529Bed540d4f1eb2a00"]
+    },
     "fluid_v1": {
       "contract": "FluidV1Executor",
       "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
@@ -117,6 +121,10 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0xaEC634d949df14Be76dC317504C7b9a6a8A5f576"]
     }
   },
   "unichain": {
@@ -159,6 +167,10 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x0FC85a171bD0b53BF0bBace74F04B66170Ae3eAb"]
     }
   },
   "polygon": {
@@ -198,6 +210,10 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0xF064b069Ed18Eb5c61159247C55C5af79B28a968"]
     }
   },
   "plasma": {

@@ -16,8 +16,8 @@ use tycho_execution::encoding::{
 };
 
 use crate::common::{
-    alice_address, dai, encoding::encode_tycho_router_call, eth, eth_chain, get_signer,
-    get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
+    alice_address, bob_address, dai, encoding::encode_tycho_router_call, eth, eth_chain,
+    get_signer, get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
 };
 
 #[test]
@@ -3386,6 +3386,145 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_uniswap_v3_bsc", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_native() {
+    let token_in = usdc();
+    let token_out = eth();
+
+    let target_address = "0x8a2ddc0461Fcf96F81a05529Bed540d4f1eb2a00";
+    let target_bytes = Bytes::from_str(target_address).unwrap();
+    // Native firm quote recorded for the deterministic Tycho Router test address.
+    let calldata_hex = "0947c2d9000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c419e67388df0c0cfad15584fc5fc7e67a234c17000000000000000000000000129b3d9a0a6e4beab88f5cb1e57995d72a6e24f10000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c66000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b2d05e00000000000000000000000000000000000000000000000000116cf7ba5f609818000000000000000000000000000000000000000000000000116cf7ba5f609818000000000000000000000000000000000000000000000000000000006a8aa6100000000000000000000000000000000000000000000000005aa5f36ff82b036f000000000000000000000000000000000000000000000000000000006a8aa5c8000000000000000000000000000000000000000000000000000000006a8aa5f0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000001d404acb0b2548f59ceaba92a25527d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002800000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000300000000000000000000000000000000000000000000000000000000000000004189bf9ddad9bcf105b16f571fc78ef78bfb0bc41e5a820e43ccd0044aed5fc7f5254892fbb81401e12fe562aab582111e75dc83e6311ca4ab29ebb598964bb4151b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000414de0563de496f35b20cc17bfeeaae21bd93fcd773952e4561641764401b18a39328d73589afdbf338ebb978943b3300d07de02f28b159c30f960798cc25029771b00000000000000000000000000000000000000000000000000000000000000";
+    let calldata_bytes = Bytes::from(hex::decode(calldata_hex).unwrap());
+
+    let native_quote_data = vec![
+        ("target".to_string(), target_bytes),
+        ("calldata".to_string(), calldata_bytes),
+        ("deadline_timestamp".to_string(), Bytes::from(u64::MAX.to_be_bytes().to_vec())),
+    ];
+
+    let native_state = MockRFQState {
+        quote_amount_in: None,
+        quote_amount_out: BigUint::from_str("1255650775965669400").unwrap(),
+        quote_data: native_quote_data.into_iter().collect(),
+        ..Default::default()
+    };
+
+    let component =
+        ProtocolComponent { protocol_system: "rfq:native".to_string(), ..Default::default() };
+
+    let swap = Swap::new(
+        component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(BigUint::from_str("3000000000").unwrap())
+    .with_protocol_state(Arc::new(native_state));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        alice_address(),
+        bob_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("3000000000").unwrap(),
+        BigUint::from_str("1255650775965669400").unwrap(),
+        BigUint::from_str("1230537760446356012").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_native", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_native_eth_input() {
+    let token_in = eth();
+    let token_out = usdc();
+    let amount_in = BigUint::from_str("1000000000000000000").unwrap();
+    let amount_out = BigUint::from(2_388_254_994u64);
+
+    let target_address = "0x8a2ddc0461Fcf96F81a05529Bed540d4f1eb2a00";
+    let target_bytes = Bytes::from_str(target_address).unwrap();
+    // Native firm quote recorded for the deterministic Tycho Router test address.
+    let calldata_hex = "0947c2d9000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c419e67388df0c0cfad15584fc5fc7e67a234c17000000000000000000000000129b3d9a0a6e4beab88f5cb1e57995d72a6e24f10000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000de0b6b3a7640000000000000000000000000000000000000000000000000000000000008e59e112000000000000000000000000000000000000000000000000000000008e59e112000000000000000000000000000000000000000000000000000000006a8aa6110000000000000000000000000000000000000000000000007f6c6b40ff5e844e000000000000000000000000000000000000000000000000000000006a8aa5c7000000000000000000000000000000000000000000000000000000006a8aa5ef00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000132dee10cc564deb81e1a81b3f75d1a700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002800000000000000000000000006044eef7179034319e2c8636ea885b37cbfa9aba000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000041d88f2289b47e3339937a8a46cd873ad5f97c5fd229c3e352b0121d36d2e29f25145b043ba7660c9eed18624069d65be7fed509d0b4e01d661a51e30e08bceaad1b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000410f92e731538876d890d4052ca388f4b65600d8ecf3ce66e9bba356527b7ba7ab0ec9a954cb67749939eec52ac9679d42904e7e9e1dd28b794d42259ac63671921c00000000000000000000000000000000000000000000000000000000000000";
+    let calldata_bytes = Bytes::from(hex::decode(calldata_hex).unwrap());
+
+    let native_quote_data = vec![
+        ("target".to_string(), target_bytes),
+        ("calldata".to_string(), calldata_bytes),
+        ("deadline_timestamp".to_string(), Bytes::from(u64::MAX.to_be_bytes().to_vec())),
+    ];
+    let native_state = MockRFQState {
+        quote_amount_in: None,
+        quote_amount_out: amount_out.clone(),
+        quote_data: native_quote_data.into_iter().collect(),
+        ..Default::default()
+    };
+    let component =
+        ProtocolComponent { protocol_system: "rfq:native".to_string(), ..Default::default() };
+    let swap = Swap::new(
+        component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(amount_in.clone())
+    .with_protocol_state(Arc::new(native_state));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        bob_address(),
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        BigUint::from(2_340_489_894u64),
+        vec![swap],
+    );
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file(
+        "test_single_encoding_strategy_native_eth_input",
+        encode(&calldata).as_str(),
+    );
 }
 
 fn sky_component(id: &str, component_type: &str, gem: &str) -> ProtocolComponent {

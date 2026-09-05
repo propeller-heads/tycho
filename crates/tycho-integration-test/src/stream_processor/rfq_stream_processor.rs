@@ -23,6 +23,10 @@ use tycho_simulation::rfq::{
             client::LiquoriceClient, client_builder::LiquoriceClientBuilder, state::LiquoriceState,
         },
         metric::{client::MetricClient, client_builder::MetricClientBuilder, state::MetricState},
+        native::{
+            client::NativeClient, client_builder::NativeClientBuilder,
+            models::NativeSupportedChain, state::NativeState,
+        },
     },
     stream::RFQStreamBuilder,
 };
@@ -35,6 +39,7 @@ pub enum RFQProtocol {
     Hashflow,
     Liquorice,
     Metric,
+    Native,
 }
 
 impl Display for RFQProtocol {
@@ -44,6 +49,7 @@ impl Display for RFQProtocol {
             RFQProtocol::Hashflow => write!(f, "{}", HashflowClient::PROTOCOL_SYSTEM),
             RFQProtocol::Liquorice => write!(f, "{}", LiquoriceClient::PROTOCOL_SYSTEM),
             RFQProtocol::Metric => write!(f, "{}", MetricClient::PROTOCOL_SYSTEM),
+            RFQProtocol::Native => write!(f, "{}", NativeClient::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -89,6 +95,18 @@ impl RFQStreamProcessor {
         } else {
             info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
         }
+        if let Ok(key) = env::var("NATIVE_API_KEY") {
+            if NativeSupportedChain::try_from(chain).is_ok() {
+                info!("Native RFQ credentials found");
+                rfq_credentials.insert(RFQProtocol::Native, (String::new(), key));
+            } else {
+                info!("Native RFQ does not support chain {:?}, skipping", chain);
+            }
+        } else {
+            info!(
+                "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
+            );
+        }
 
         if rfq_credentials.is_empty() {
             if run_pamm_protocols {
@@ -96,7 +114,7 @@ impl RFQStreamProcessor {
                     "No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only."
                 );
             } else {
-                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols."));
+                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols."));
             }
         }
         Ok(Self {
@@ -179,6 +197,17 @@ impl RFQStreamProcessor {
                             .wrap_err("Failed to create Liquorice RFQ client")?;
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+                }
+                RFQProtocol::Native => {
+                    let native_client = NativeClientBuilder::new(self.chain, key.clone())
+                        .tokens(rfq_tokens.clone())
+                        .tvl_threshold(self.tvl_threshold)
+                        .poll_time(Duration::from_secs(30))
+                        .build()
+                        .into_diagnostic()
+                        .wrap_err("Failed to create Native RFQ client")?;
+                    rfq_stream_builder = rfq_stream_builder
+                        .add_client::<NativeState>("native", Box::new(native_client))
                 }
                 RFQProtocol::Metric => unreachable!("Metric RFQ does not use credential storage"),
             }

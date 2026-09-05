@@ -10,6 +10,9 @@ This quickstart guide enables you to:
 You need to set up the WebSocket credentials of the desired RFQs to access live pricing data:
 
 ```bash
+export TYCHO_URL=<tycho-api-url-for-chain>
+export TYCHO_API_KEY=<your-tycho-api-key>
+
 export BEBOP_KEY=<your-bebop-api-key>
 
 export HASHFLOW_USER=<your-ws-hashflow-username>
@@ -17,6 +20,8 @@ export HASHFLOW_KEY=<your-ws-hashflow-key>
 
 export LIQUORICE_USER=<your-liquorice-solver>
 export LIQUORICE_KEY=<your-liquorice-key>
+
+export NATIVE_API_KEY=<your-native-api-key>
 
 export METRIC_API_URL=<optional-custom-metric-api-url>
 export METRIC_SECRET_KEY=<optional-metric-secret-key>

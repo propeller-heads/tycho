@@ -1,5 +1,6 @@
 use std::{collections::HashSet, str::FromStr};
 
+use alloy_primitives::Address;
 use tycho_common::{models::Chain, Bytes};
 
 use crate::rfq::errors::RFQError;
@@ -24,5 +25,16 @@ pub fn default_quote_tokens_for_chain(chain: &Chain) -> Result<HashSet<Bytes>, R
             str_to_bytes("0xfde4c96c8593536e31f229ea8f37b2ada2699bb2")?, // USDT
         ])),
         _ => Ok(HashSet::new()),
+    }
+}
+
+pub fn bytes_to_address(address: &Bytes) -> Result<Address, RFQError> {
+    if address.len() == 20 {
+        Ok(Address::from_slice(address))
+    } else {
+        Err(RFQError::InvalidInput(format!(
+            "Invalid EVM address length: expected 20 bytes, got {}",
+            address.len()
+        )))
     }
 }

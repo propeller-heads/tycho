@@ -43,6 +43,7 @@ use tycho_simulation::{
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
             liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
             metric::{client_builder::MetricClientBuilder, state::MetricState},
+            native::{client_builder::NativeClientBuilder, state::NativeState},
         },
         stream::RFQStreamBuilder,
     },
@@ -130,14 +131,16 @@ async fn main() {
         (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
+    let native_key = env::var("NATIVE_API_KEY").ok();
     if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
-        (liquorice_user.is_none() || liquorice_key.is_none())
+        (liquorice_user.is_none() || liquorice_key.is_none()) &&
+        native_key.is_none()
     {
         if cli.run_pamm_protocols {
             println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
         } else {
-            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, or LIQUORICE_USER and LIQUORICE_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
         }
     }
 
@@ -232,6 +235,16 @@ async fn main() {
             .expect("Failed to create Liquorice RFQ client");
         rfq_stream_builder =
             rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+    }
+    if let Some(key) = native_key {
+        println!("Setting up Native RFQ client...\n");
+        let native_client = NativeClientBuilder::new(chain, key)
+            .tokens(rfq_tokens.clone())
+            .tvl_threshold(cli.tvl_threshold)
+            .build()
+            .expect("Failed to create Native RFQ client");
+        rfq_stream_builder =
+            rfq_stream_builder.add_client::<NativeState>("native", Box::new(native_client))
     }
     if cli.run_pamm_protocols {
         println!("Setting up Metric RFQ client...\n");

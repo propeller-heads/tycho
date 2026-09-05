@@ -37,6 +37,20 @@ pub fn get_hashflow_auth() -> Result<HashflowAuth, RFQError> {
     Ok(HashflowAuth { user, key })
 }
 
+/// Native Relay authentication configuration
+pub struct NativeAuth {
+    pub key: String,
+}
+
+/// Read Native Relay authentication from environment variables.
+/// Returns the NATIVE_API_KEY environment variable.
+pub fn get_native_auth() -> Result<NativeAuth, RFQError> {
+    let key = env::var("NATIVE_API_KEY").map_err(|_| {
+        RFQError::InvalidInput("NATIVE_API_KEY environment variable is required".into())
+    })?;
+
+    Ok(NativeAuth { key })
+}
 /// Liquorice authentication configuration
 pub struct LiquoriceAuth {
     pub solver: String,

@@ -34,6 +34,7 @@ import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
+import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
 import {SkyExecutor} from "../src/executors/SkyExecutor.sol";
 // Test utilities and mocks
 import "./Constants.sol";
@@ -134,6 +135,7 @@ contract TychoRouterTestSetup is
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
     RingSwapV2Executor public ringSwapV2Executor;
+    NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
     SkyExecutor public skyExecutor;
@@ -263,8 +265,8 @@ contract TychoRouterTestSetup is
         propAMMFallbackExecutor = new PropAMMFallbackExecutor();
         // The Sky venues exist only on mainnet, and the executor's constructor
         // reads their token wiring, so it cannot deploy on forks where the
-        // venues have no code. Deployed last, so skipping it does not shift
-        // the other executors' deterministic addresses.
+        // venues have no code. It is deployed after the fixed executor set, so
+        // skipping it does not shift those executors' deterministic addresses.
         bool skyDeployable = SKY_DAI_USDS_CONVERTER.code.length != 0;
         if (skyDeployable) {
             skyExecutor = new SkyExecutor(
@@ -272,7 +274,21 @@ contract TychoRouterTestSetup is
             );
         }
 
-        address[] memory executors = new address[](skyDeployable ? 28 : 27);
+        address nativeRouterV4 = getNativeRouterV4();
+        bool supportsNative = nativeRouterV4 != address(0);
+        if (supportsNative) {
+            // Some protocol tests use fork blocks from before Native V4 was
+            // deployed. The executor is not exercised in those tests, but its
+            // constructor still requires the configured Router to have code.
+            if (nativeRouterV4.code.length == 0) {
+                vm.etch(nativeRouterV4, bytes("1"));
+            }
+            nativeExecutor = new NativeExecutor(nativeRouterV4);
+        }
+
+        address[] memory executors = new address[](
+            27 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+        );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
         executors[2] = address(pancakev3Executor);
@@ -300,10 +316,23 @@ contract TychoRouterTestSetup is
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
         executors[26] = address(propAMMFallbackExecutor);
+        uint256 nextExecutorIndex = 27;
         if (skyDeployable) {
-            executors[27] = address(skyExecutor);
+            executors[nextExecutorIndex] = address(skyExecutor);
+            nextExecutorIndex++;
+        }
+        if (supportsNative) {
+            executors[nextExecutorIndex] = address(nativeExecutor);
         }
         return executors;
+    }
+
+    function getNativeRouterV4() internal view returns (address) {
+        if (block.chainid == 1) return NATIVE_ROUTER_V4_ETHEREUM;
+        if (block.chainid == 8453) return NATIVE_ROUTER_V4_BASE;
+        if (block.chainid == 42161) return NATIVE_ROUTER_V4_ARBITRUM;
+        if (block.chainid == 56) return NATIVE_ROUTER_V4_BSC;
+        return address(0);
     }
 
     function deployFeeCalculator() public {
