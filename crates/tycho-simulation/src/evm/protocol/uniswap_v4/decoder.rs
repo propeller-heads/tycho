@@ -122,10 +122,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             })
             .collect();
 
+        // A pool with no hook still carries the attribute, set to the zero address, so
+        // presence alone does not mean a hook is installed. Reading it that way gives
+        // every hookless pool a hook handler bound to `address(0)`, and `spot_price`
+        // delegates to it unconditionally — the CLMM formula is then never used.
         let hook_address = snapshot
             .component
             .static_attributes
-            .get("hooks");
+            .get("hooks")
+            .filter(|address| address.iter().any(|byte| *byte != 0));
 
         let mut ticks = match ticks {
             Ok(ticks) if !ticks.is_empty() => ticks
@@ -284,6 +289,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, expected);
+    }
+
+    /// A hookless pool carries `hooks` set to the zero address, which is how the indexer
+    /// reports "no hook" rather than omitting the attribute. Decoding it must leave the
+    /// state without a hook handler, so `spot_price` keeps using the CLMM formula, and
+    /// must still reject a snapshot that carries no tick liquidities.
+    #[tokio::test]
+    async fn test_usv4_zero_hook_address_is_no_hook() {
+        let mut component = usv4_component();
+        component
+            .static_attributes
+            .insert("hooks".to_string(), Bytes::from([0u8; 20].to_vec()));
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes: usv4_attributes(),
+                balances: HashMap::new(),
+            },
+            component: component.clone(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
+            .await
+            .unwrap();
+
+        let fees = UniswapV4Fees::new(0, 0, 500);
+        let expected = UniswapV4State::new(
+            100,
+            U256::from(79228162514264337593543950336_u128),
+            fees,
+            300,
+            60,
+            vec![TickInfo::new(60, 400).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(result, expected);
+
+        let mut attributes = usv4_attributes();
+        attributes.remove("ticks/60/net_liquidity");
+        let without_ticks = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(without_ticks).await;
+
+        assert!(matches!(
+            result.err().unwrap(),
+            InvalidSnapshotError::MissingAttribute(attr) if attr == "tick_liquidities"
+        ));
     }
 
     #[tokio::test]
