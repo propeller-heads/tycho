@@ -2,7 +2,8 @@ pragma solidity ^0.8.26;
 
 import "../TestUtils.sol";
 import "../TychoRouterTestSetup.sol";
-import "@src/executors/EkuboV3Executor.sol";
+import "@src/executors/ekubo_v3/EkuboV3Executor.sol";
+import "@src/executors/ekubo_v3/EkuboV3RobinhoodExecutor.sol";
 import {
     IFlashAccountant,
     ILocker
@@ -31,8 +32,6 @@ import {
 
 // Handles callbacks directly and receives the native token directly
 contract EkuboV3ExecutorStandalone is EkuboV3Executor, ILocker {
-    constructor() EkuboV3Executor() {}
-
     function locked_6416899205(
         uint256 /* id */
     )
@@ -69,18 +68,48 @@ contract EkuboV3ExecutorStandalone is EkuboV3Executor, ILocker {
     receive() external payable {}
 }
 
+contract EkuboV3RobinhoodExecutorStandalone is
+    EkuboV3RobinhoodExecutor,
+    EkuboV3ExecutorStandalone
+{
+    // Diamond-inheritance disambiguation only; super resolves to
+    // EkuboV3RobinhoodExecutor.
+    function _swapHop(
+        PoolKey memory poolKey,
+        SwapParameters swapParameters,
+        bytes calldata swapData,
+        uint256 offset
+    )
+        internal
+        override(EkuboV3Executor, EkuboV3RobinhoodExecutor)
+        returns (PoolBalanceUpdate, uint256)
+    {
+        return super._swapHop(poolKey, swapParameters, swapData, offset);
+    }
+}
+
 contract EkuboV3ExecutorTest is Constants, TestUtils {
+    using SignedExclusiveSwapLib for ISignedExclusiveSwap;
+
     EkuboV3ExecutorStandalone immutable executor =
         new EkuboV3ExecutorStandalone();
 
+    LiquidityHelper immutable liquidityHelper = new LiquidityHelper();
+
     IERC20 USDC = IERC20(USDC_ADDR);
     IERC20 USDT = IERC20(USDT_ADDR);
+
+    // Controller PK whose vm.addr() has high bit clear (first
+    // nibble 0-7) so SignedExclusiveSwap treats it as an EOA.
+    uint256 constant CONTROLLER_PK = 0xBEEF;
+    address constant SIGNED_SWAP_ADMIN = address(0xAD);
 
     bytes32 constant ORACLE_CONFIG =
         0x517E506700271AEa091b02f42756F5E174Af5230000000000000000000000000;
 
     constructor() {
         vm.makePersistent(address(executor));
+        vm.makePersistent(address(liquidityHelper));
     }
 
     modifier setUpFork(uint256 blockNumber) {
@@ -216,115 +245,6 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
         assertEq(
             USDT.balanceOf(CORE_ADDRESS), usdtBalanceBeforeCore - amountOut
         );
-    }
-}
-
-/// Adds liquidity to an Ekubo V3 pool via Core flash accounting.
-/// Tokens must be held by this contract before calling `provide`.
-contract LiquidityHelper {
-    function provide(
-        PoolKey memory poolKey,
-        int32 tickLower,
-        int32 tickUpper,
-        int128 liquidity
-    ) external {
-        // Start payment tracking before lock.
-        // slither-disable-next-line unused-return
-        LibCall.callContract(
-            CORE_ADDRESS,
-            abi.encodeWithSelector(
-                IFlashAccountant.startPayments.selector, poolKey.token0
-            )
-        );
-        // slither-disable-next-line unused-return
-        LibCall.callContract(
-            CORE_ADDRESS,
-            abi.encodeWithSelector(
-                IFlashAccountant.startPayments.selector, poolKey.token1
-            )
-        );
-
-        // slither-disable-next-line unused-return
-        LibCall.callContract(
-            CORE_ADDRESS,
-            abi.encodePacked(
-                IFlashAccountant.lock.selector,
-                abi.encode(poolKey, tickLower, tickUpper, liquidity)
-            )
-        );
-    }
-
-    function locked_6416899205(
-        uint256 /* id */
-    )
-        external
-    {
-        (
-            PoolKey memory poolKey,
-            int32 tickLower,
-            int32 tickUpper,
-            int128 liquidity
-        ) = abi.decode(msg.data[36:], (PoolKey, int32, int32, int128));
-
-        PositionId posId = createPositionId(bytes24(0), tickLower, tickUpper);
-        PoolBalanceUpdate bu = CORE.updatePosition(poolKey, posId, liquidity);
-
-        // Transfer exactly the required amounts to Core.
-        if (bu.delta0() > 0) {
-            SafeTransferLib.safeTransfer(
-                poolKey.token0, CORE_ADDRESS, uint128(bu.delta0())
-            );
-        }
-        if (bu.delta1() > 0) {
-            SafeTransferLib.safeTransfer(
-                poolKey.token1, CORE_ADDRESS, uint128(bu.delta1())
-            );
-        }
-
-        // slither-disable-next-line unused-return
-        LibCall.callContract(
-            CORE_ADDRESS,
-            abi.encodeWithSelector(
-                IFlashAccountant.completePayments.selector, poolKey.token0
-            )
-        );
-        // slither-disable-next-line unused-return
-        LibCall.callContract(
-            CORE_ADDRESS,
-            abi.encodeWithSelector(
-                IFlashAccountant.completePayments.selector, poolKey.token1
-            )
-        );
-    }
-}
-
-contract EkuboV3SignedSwapTest is Constants, TestUtils {
-    using SignedExclusiveSwapLib for ISignedExclusiveSwap;
-
-    EkuboV3ExecutorStandalone immutable executor =
-        new EkuboV3ExecutorStandalone();
-
-    LiquidityHelper immutable liquidityHelper = new LiquidityHelper();
-
-    IERC20 USDC = IERC20(USDC_ADDR);
-    IERC20 USDT = IERC20(USDT_ADDR);
-
-    // Controller PK whose vm.addr() has high bit clear (first
-    // nibble 0-7) so SignedExclusiveSwap treats it as an EOA.
-    uint256 constant CONTROLLER_PK = 0xBEEF;
-    address constant SIGNED_SWAP_ADMIN = address(0xAD);
-
-    constructor() {
-        vm.makePersistent(address(executor));
-        vm.makePersistent(address(liquidityHelper));
-    }
-
-    modifier setUpFork(uint256 blockNumber) {
-        vm.createSelectFork(vm.rpcUrl("mainnet"), blockNumber);
-        // TODO: remove once Foundry stable includes the Fusaka hardfork mapping.
-        address(vm)
-            .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
-        _;
     }
 
     function testSignedExclusiveSwap() public setUpFork(24218590) {
@@ -481,6 +401,141 @@ contract EkuboV3SignedSwapTest is Constants, TestUtils {
 
         assertEq(usdcSpent, amountIn);
         assertEq(usdtReceived, 99990);
+    }
+}
+
+/// Adds liquidity to an Ekubo V3 pool via Core flash accounting.
+/// Tokens must be held by this contract before calling `provide`.
+contract LiquidityHelper {
+    function provide(
+        PoolKey memory poolKey,
+        int32 tickLower,
+        int32 tickUpper,
+        int128 liquidity
+    ) external {
+        // Start payment tracking before lock.
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.startPayments.selector, poolKey.token0
+            )
+        );
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.startPayments.selector, poolKey.token1
+            )
+        );
+
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodePacked(
+                IFlashAccountant.lock.selector,
+                abi.encode(poolKey, tickLower, tickUpper, liquidity)
+            )
+        );
+    }
+
+    function locked_6416899205(
+        uint256 /* id */
+    )
+        external
+    {
+        (
+            PoolKey memory poolKey,
+            int32 tickLower,
+            int32 tickUpper,
+            int128 liquidity
+        ) = abi.decode(msg.data[36:], (PoolKey, int32, int32, int128));
+
+        PositionId posId = createPositionId(bytes24(0), tickLower, tickUpper);
+        PoolBalanceUpdate bu = CORE.updatePosition(poolKey, posId, liquidity);
+
+        // Transfer exactly the required amounts to Core.
+        if (bu.delta0() > 0) {
+            SafeTransferLib.safeTransfer(
+                poolKey.token0, CORE_ADDRESS, uint128(bu.delta0())
+            );
+        }
+        if (bu.delta1() > 0) {
+            SafeTransferLib.safeTransfer(
+                poolKey.token1, CORE_ADDRESS, uint128(bu.delta1())
+            );
+        }
+
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.completePayments.selector, poolKey.token0
+            )
+        );
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.completePayments.selector, poolKey.token1
+            )
+        );
+    }
+}
+
+contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
+    EkuboV3RobinhoodExecutorStandalone immutable executor =
+        new EkuboV3RobinhoodExecutorStandalone();
+
+    // The token pair of the deployed WETH/USDG Ve33 pool on Robinhood Chain.
+    address constant RHC_WETH = 0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73;
+    address constant RHC_USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
+
+    constructor() {
+        vm.makePersistent(address(executor));
+    }
+
+    modifier setUpFork(uint256 blockNumber) {
+        vm.createSelectFork(vm.rpcUrl("robinhood"), blockNumber);
+        // Precautionary, mirroring the mainnet fork workaround; Foundry
+        // defaults unknown chains to the latest hardfork.
+        address(vm)
+            .call(abi.encodeWithSignature("setEvmVersion(string)", "osaka"));
+        _;
+    }
+
+    // Runs on a Robinhood Chain fork against the deployed Ve33 extension,
+    // using the token pair of a live Ve33 pool. A fresh pool (distinct tick
+    // spacing) is initialized because the executor needs a funded position
+    // at a known price, not a specific market.
+    function testVe33Swap() public setUpFork(39875978) {
+        // Ve33 pools require zero fee and power-of-four tick spacing.
+        PoolConfig poolConfig = createConcentratedPoolConfig({
+            _fee: 0, _tickSpacing: 64, _extension: VE33_ADDRESS
+        });
+        PoolKey memory poolKey =
+            PoolKey({token0: RHC_WETH, token1: RHC_USDG, config: poolConfig});
+        CORE.initializePool(poolKey, 0);
+
+        LiquidityHelper liquidityHelper = new LiquidityHelper();
+        deal(RHC_WETH, address(liquidityHelper), 10_000_000_000);
+        deal(RHC_USDG, address(liquidityHelper), 10_000_000_000);
+        liquidityHelper.provide(poolKey, -960, 960, 1_000_000_000);
+
+        uint256 amountIn = 100_000;
+        deal(RHC_WETH, address(executor), amountIn);
+        uint256 usdgBalanceBefore =
+            IERC20(RHC_USDG).balanceOf(address(executor));
+
+        executor.swap(
+            amountIn,
+            abi.encodePacked(RHC_WETH, RHC_USDG, PoolConfig.unwrap(poolConfig)),
+            address(executor)
+        );
+
+        assertGt(
+            IERC20(RHC_USDG).balanceOf(address(executor)), usdgBalanceBefore
+        );
     }
 }
 

@@ -23,7 +23,7 @@ use tycho_common::{
 
 use super::pool::{
     concentrated::ConcentratedPool, full_range::FullRangePool, oracle::OraclePool,
-    twamm::TwammPool, EkuboPool,
+    twamm::TwammPool, ve33::Ve33Pool, EkuboPool, EkuboPoolQuote,
 };
 use crate::evm::protocol::{
     ekubo_v3::{
@@ -53,6 +53,7 @@ pub enum EkuboV3State {
     Twamm(TwammPool),
     MevCapture(MevCapturePool),
     BoostedFees(BoostedFeesPool),
+    Ve33(Ve33Pool),
 }
 
 fn sqrt_price_q128_to_f64(
@@ -79,7 +80,11 @@ impl EkuboV3State {
 #[typetag::serde]
 impl ProtocolSim for EkuboV3State {
     fn fee(&self) -> f64 {
-        self.key().config.fee as f64 / (2f64.powi(64))
+        let fee = match self {
+            Self::Ve33(pool) => pool.swap_fee(),
+            _ => self.key().config.fee,
+        };
+        fee as f64 / (2f64.powi(64))
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {

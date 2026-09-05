@@ -220,6 +220,7 @@
   },
   "robinhood": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ekubo_v3": { "contract": "EkuboV3RobinhoodExecutor", "args": [] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
       "contract": "UniswapV4Executor",

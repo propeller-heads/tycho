@@ -1,6 +1,6 @@
 specVersion: v0.1.0
 package:
-  name: "ethereum_ekubo_v3"
+  name: "robinhood_ekubo_v3"
   version: v0.2.3
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
@@ -22,23 +22,18 @@ binaries:
     type: wasm/rust-v1
     file: ../target/wasm32-unknown-unknown/release/ethereum_ekubo_v3.wasm
 
-network: mainnet
-networks:
-  mainnet:
-    initialBlock:
-      map_events: 24134506 # First pool creation
-
-# The Ve33 extension address for the indexed chain, or empty on chains
-# without a Ve33 deployment (e.g. Ethereum). Override at deployment time,
-# e.g. `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
+# The Ve33 extension address of the Robinhood deployment (see the v3.2.0
+# release notes of EkuboProtocol/evm-contracts). Enables Ve33 pool handling
+# in map_events and map_components.
 params:
-  map_events: ""
-  map_components: ""
+  map_events: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953"
+  map_components: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953"
 
 modules:
   # Stage 1
   - name: map_events
     kind: map
+    initialBlock: 42961 # First pool creation
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -156,6 +151,7 @@ modules:
   # Stage 7
   - name: map_protocol_changes
     kind: map
+    initialBlock: 42961
     inputs:
       - source: sf.ethereum.type.v2.Block
       - map: map_components

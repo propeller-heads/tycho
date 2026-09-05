@@ -19,7 +19,7 @@ fn component_extension_type(component: &ComponentWithState) -> Option<ExtensionT
         .static_attributes
         .get("extension")?;
 
-    extension_type(Address::try_from(&extension_bytes[..]).ok()?)
+    extension_type(Address::try_from(&extension_bytes[..]).ok()?, component.component.chain)
 }
 
 /// Filters out unsupported ekubo_v3 extensions, as well as SignedExclusiveSwap pools.

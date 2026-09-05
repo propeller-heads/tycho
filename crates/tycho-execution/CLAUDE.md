@@ -350,10 +350,15 @@ forge fmt                       # auto-format
 forge snapshot                  # gas snapshots
 ```
 
-Config: `contracts/foundry.toml` -- Cancun EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
+Config: `contracts/foundry.toml` -- Osaka EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
 Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
+
+Contract changes can alter the deployed runtime bytecode used by `protocol-testing`. From the
+repository root, run `./protocols/testing/scripts/update_runtime_bytecode.sh` and commit any changed
+`protocols/testing/fixtures/*.runtime.json`; CI runs the same script with `--check`. Foundry pins
+the compiler and omits the metadata hash to keep these fixtures reproducible.
 
 ### Rust
 
@@ -393,6 +398,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
+9. Regenerate and commit runtime-bytecode fixtures with
+   `./protocols/testing/scripts/update_runtime_bytecode.sh`.
 
 ## Security
 

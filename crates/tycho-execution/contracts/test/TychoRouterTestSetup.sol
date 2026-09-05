@@ -6,7 +6,7 @@ import {BalancerV3Executor} from "../src/executors/BalancerV3Executor.sol";
 import {BebopExecutor} from "../src/executors/BebopExecutor.sol";
 import {CurveExecutor} from "../src/executors/CurveExecutor.sol";
 import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
-import {EkuboV3Executor} from "../src/executors/EkuboV3Executor.sol";
+import {EkuboV3Executor} from "../src/executors/ekubo_v3/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";

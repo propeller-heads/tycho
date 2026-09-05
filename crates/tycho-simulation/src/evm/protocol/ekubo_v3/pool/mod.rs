@@ -6,6 +6,7 @@ pub mod oracle;
 pub mod stableswap;
 mod timed;
 pub mod twamm;
+pub mod ve33;
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,9 +42,6 @@ pub trait EkuboPool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError>;
 
-    fn quote(
-        &self,
-        token_amount: EvmTokenAmount,
-    ) -> Result<super::pool::EkuboPoolQuote, SimulationError>;
+    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError>;
     fn get_limit(&self, token_in: Address) -> Result<i128, SimulationError>;
 }
