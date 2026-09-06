@@ -30,7 +30,7 @@ Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
 `--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
-`--test-every-n-blocks 10`, `--bypass-executor-timelock`.
+`--test-every-n-updates 10`, `--bypass-executor-timelock`.
 
 `--bypass-executor-timelock` writes `executorsActivationTimestamp = 1` for every executor of the
 chain into the execution simulation's state overrides, so an executor that is unapproved or still
@@ -43,9 +43,11 @@ shows up as a failure.
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
-  dispatches blocks to stream processors, calls `poll_rpc_for_block` (every-block mode) or
-  `await_target_block` (`--test-every-n-blocks` > 1, fetches the sampled block by number) for
-  on-chain comparison
+  dispatches blocks to stream processors, tests every Nth protocol update
+  (`--test-every-n-updates`, alias `--test-every-n-blocks`), calls `poll_rpc_for_block`
+  (every-update mode, and sampled mode under `--partial-blocks`) or `await_target_block`
+  (sampled mode without `--partial-blocks`, fetches the sampled block by number) for on-chain
+  comparison
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution

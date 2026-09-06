@@ -187,17 +187,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     partial_blocks: bool,
 
-    /// Run the protocol-stream test pipeline only on blocks whose number is a multiple of this
-    /// value. 1 tests every block (current behavior). Use a higher value on fast chains (e.g.
-    /// Robinhood) where the harness cannot keep up with the head. State from every block is
-    /// still ingested. Incompatible with --partial-blocks.
+    /// Run the protocol-stream test pipeline on every Nth protocol update. 1 tests every update.
+    /// Use a higher value on fast chains where the harness cannot keep up with the head, or with
+    /// --partial-blocks to cap the RPC rate: one update arrives per flashblock, so the tested
+    /// updates spread evenly in time. State from every update is ingested either way.
     #[arg(
         long,
+        visible_alias = "test-every-n-blocks",
         default_value_t = 1,
-        value_parser = clap::value_parser!(u64).range(1..),
-        conflicts_with = "partial_blocks"
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
-    test_every_n_blocks: u64,
+    test_every_n_updates: u64,
 
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     /// 0 disables the watchdog.
@@ -241,6 +241,15 @@ struct TychoState {
     states: HashMap<String, Box<dyn ProtocolSim>>,
     components: HashMap<String, ProtocolComponent>,
     component_ids_by_protocol: HashMap<String, HashSet<String>>,
+    protocol_updates_seen: u64,
+}
+
+impl TychoState {
+    /// Counts one received protocol update and returns its 1-based sequence number.
+    fn next_update_seq(&mut self) -> u64 {
+        self.protocol_updates_seen += 1;
+        self.protocol_updates_seen
+    }
 }
 
 /// Shared, periodically-refreshed token-price snapshot (raw token units per ETH).
@@ -975,7 +984,7 @@ async fn process_update(
     let block = match update.update_type {
         UpdateType::Protocol => {
             // Update state cache before block alignment check
-            {
+            let update_seq = {
                 let mut current_state = tycho_state
                     .write()
                     .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
@@ -1008,21 +1017,24 @@ async fn process_update(
                 for (protocol, component_ids) in &current_state.component_ids_by_protocol {
                     metrics::record_protocol_pool_count(protocol, component_ids.len());
                 }
-            }
+                current_state.next_update_seq()
+            };
 
             let update_block_number = update.update.block_number_or_timestamp;
 
-            if !is_sampled_block(update_block_number, cli.test_every_n_blocks) {
+            if !update_seq.is_multiple_of(cli.test_every_n_updates) {
                 metrics::record_protocol_update_sampled_out();
                 return Ok(());
             }
 
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
-            let block = if cli.test_every_n_blocks > 1 {
-                // Sampled mode: on fast chains the head is expected to be past the update, so the
-                // target block is fetched by number instead of racing the head. clap rejects
-                // --partial-blocks in this mode, so the block is always full.
+            let by_number =
+                should_fetch_block_by_number(cli.test_every_n_updates, cli.partial_blocks);
+
+            let block = if by_number {
+                // On fast chains the head is expected to be past the update, so fetch the target
+                // block by number instead of racing the head.
                 match await_target_block(
                     &rpc_tools,
                     update_block_number,
@@ -1097,6 +1109,9 @@ async fn process_update(
                              {update_block_number}, skipping."
                         );
                         metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
                         return Ok(());
                     }
                 }
@@ -2025,9 +2040,12 @@ fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatis
     stats.blocks_processed >= max_blocks
 }
 
-/// True when `block_number` is selected by the `--test-every-n-blocks` sampling interval.
-fn is_sampled_block(block_number: u64, interval: u64) -> bool {
-    block_number.is_multiple_of(interval)
+/// True when a sampled update's target block should be fetched by number rather than polled for.
+///
+/// A flashblock's pending state cannot be fetched by number after the fact, so under
+/// `--partial-blocks` sampling only gates which updates are tested.
+fn should_fetch_block_by_number(interval: u64, partial_blocks: bool) -> bool {
+    interval > 1 && !partial_blocks
 }
 
 /// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
@@ -2158,7 +2176,9 @@ mod tests {
     use clap::Parser;
     use rstest::rstest;
 
-    use super::{is_oracle_stale_revert, is_sampled_block, pamm_venue, Cli};
+    use super::{
+        is_oracle_stale_revert, pamm_venue, should_fetch_block_by_number, Cli, TychoState,
+    };
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
@@ -2202,32 +2222,45 @@ mod tests {
         assert!(!is_oracle_stale_revert(pamm, reason));
     }
 
-    #[rstest]
-    #[case::interval_one_selects_every_block(1, 41513952, true)]
-    #[case::interval_one_selects_multiples_too(1, 41513950, true)]
-    #[case::multiple_of_interval(10, 41513950, true)]
-    #[case::not_a_multiple(10, 41513952, false)]
-    #[case::block_zero(10, 0, true)]
-    fn sampling_selects_multiples_of_interval(
-        #[case] interval: u64,
-        #[case] block: u64,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(is_sampled_block(block, interval), expected);
+    #[test]
+    fn update_sequence_starts_at_one_and_increments() {
+        let mut state = TychoState::default();
+        assert_eq!(state.next_update_seq(), 1);
+        assert_eq!(state.next_update_seq(), 2);
     }
 
     #[test]
-    fn test_every_n_blocks_conflicts_with_partial_blocks() {
-        let result = Cli::try_parse_from([
+    fn sampled_with_partial_blocks_polls_instead_of_fetching_by_number() {
+        assert!(!should_fetch_block_by_number(10, true));
+    }
+
+    #[test]
+    fn test_every_n_updates_accepts_partial_blocks() {
+        Cli::try_parse_from([
             "tycho-integration-test",
             "--tycho-url",
             "localhost:4242",
             "--rpc-url",
             "http://localhost:8545",
             "--partial-blocks",
+            "--test-every-n-updates",
+            "10",
+        ])
+        .expect("--test-every-n-updates must be accepted alongside --partial-blocks");
+    }
+
+    #[test]
+    fn test_every_n_blocks_alias_sets_test_every_n_updates() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
             "--test-every-n-blocks",
             "10",
-        ]);
-        assert!(result.is_err());
+        ])
+        .expect("--test-every-n-blocks must stay accepted as an alias");
+        assert_eq!(cli.test_every_n_updates, 10);
     }
 }
