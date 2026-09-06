@@ -267,6 +267,10 @@ where
                         .route(web::get().to(rpc::health)),
                 )
                 .service(
+                    web::resource(format!("/{}/version", self.prefix))
+                        .route(web::get().to(rpc::version)),
+                )
+                .service(
                     web::resource(format!("/{}/protocol_systems", self.prefix))
                         .route(web::post().to(rpc::protocol_systems::<G, EVMEntrypointService>)),
                 )

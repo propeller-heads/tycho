@@ -1495,6 +1495,23 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
     Ok(HttpResponse::Ok().json(dto::Health::Ready))
 }
 
+/// Version endpoint
+///
+/// This endpoint returns the application version.
+#[utoipa::path(
+    get,
+    path = "/v1/version",
+    responses(
+        (status = 200, description = "OK", body=AppVersion),
+    ),
+    security(
+         ("apiKey" = [])
+    )
+)]
+pub async fn version() -> Result<HttpResponse, RpcError> {
+    Ok(HttpResponse::Ok().json(dto::AppVersion { version: env!("CARGO_PKG_VERSION").to_string() }))
+}
+
 #[cfg(test)]
 // mockall::mock! parses method signatures as tokens and does not apply lifetime
 // elision, so the mocked trait methods need explicit lifetime parameters.
@@ -3408,5 +3425,20 @@ plans:
         } else {
             assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[actix_web::test]
+    async fn test_version() {
+        let app = test::init_service(App::new().route("/v1/version", web::get().to(version))).await;
+
+        let req = test::TestRequest::get()
+            .uri("/v1/version")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+        let body: dto::AppVersion = test::read_body_json(resp).await;
+        assert_eq!(body.version, env!("CARGO_PKG_VERSION"));
     }
 }
