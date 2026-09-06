@@ -178,11 +178,20 @@ fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
     })
 }
 
+/// Filters out ERC4626 vaults that cannot be quoted correctly.
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
-    const UNSUPPORTED_POOLS: [&str; 4] = [
-        "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
+    const UNSUPPORTED_POOLS: [&str; 3] = [
+        // Spark Vault V2 (spUSDC, spUSDT). Their rate is `nowChi()`, which reads `vsr` (slot 4)
+        // only on the `block.timestamp > rho` branch. Any deposit/withdraw leaves
+        // `rho == block.timestamp`, and entrypoints are traced once, at the component's first
+        // one — so the trace takes the `chi` branch and never touches `vsr`. The vault is one
+        // of the component's tokens, so DCI indexes only the slots the trace saw: `vsr` reads
+        // back as 0, `_rpow(0, dt)` collapses `nowChi()` to 0, and `convertToShares` reverts
+        // on the division, so the component fails to decode. Confirmed against production.
+        // spETH is not affected: a Curve pool holding it traces `convertToAssets` off a
+        // non-drip block, so `vsr` is captured and stays indexed.
+        "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
-        "0xfE6eb3b609a7C8352A241f7F3A21CEA4e9209B8f",
         // sDAI: `maxDeposit` returns `type(uint256).max`, which `ERC4626State` takes at face
         // value as the deposit limit, so deposits quote unbounded. The real limit is not
         // exposed on-chain in any form we can trace, and there is no generic fix.
@@ -229,6 +238,15 @@ mod tests {
         }
     }
 
+    fn erc4626_component(id: &str) -> ComponentWithState {
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { id: id.to_string(), ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
     #[test]
     fn non_angstrom_filter_excludes_angstrom_pools() {
         assert!(!uniswap_v4_non_angstrom_hook_pool_filter(&hooks_component(Some("angstrom_v1"))));
@@ -258,6 +276,14 @@ mod tests {
         // ETH/ETHx and legacy stETH expose a non-empty rebase_tokens list.
         let m = attrs(&[("rebase_tokens", r#"["0xa35b1b31ce002fbf2058d22f30f95d405200a15b"]"#)]);
         assert!(attr_json_list_non_empty(&m, "rebase_tokens"));
+    }
+
+    #[test]
+    fn erc4626_excludes_unsupported_pools_regardless_of_id_case() {
+        // Component ids arrive checksummed; the entries must be lower case to ever match.
+        assert!(!erc4626_filter(&erc4626_component("0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d")));
+        assert!(!erc4626_filter(&erc4626_component("0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d")));
+        assert!(erc4626_filter(&erc4626_component("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd")));
     }
 
     #[test]
