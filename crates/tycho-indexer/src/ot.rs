@@ -95,5 +95,11 @@ where
         .install_batch(runtime::Tokio)
         .context("install tracer")?;
 
-    Ok(tracing_opentelemetry::layer().with_tracer(tracer))
+    // Source location and thread identity are constant per span name and repeat on every
+    // exported span. Drop them; the span name and its parent chain already identify the code
+    // path. Busy/idle timings stay on, they differ per span.
+    Ok(tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_location(false)
+        .with_threads(false))
 }

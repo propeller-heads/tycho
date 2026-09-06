@@ -60,7 +60,7 @@ pub struct Inner {
     first_message_processed: bool,
 }
 
-type BatchCommitHandle = tracing::instrument::Instrumented<JoinHandle<Result<(), ExtractionError>>>;
+type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
 
 #[derive(Default)]
 struct GatewayInner<G> {
@@ -774,9 +774,7 @@ where
             let (extractor_name, chain) = (self.name.clone(), self.chain);
 
             if let Some(db_commit_handle_to_join) = commit_handle_guard.take() {
-                let needs_await = !db_commit_handle_to_join
-                    .inner()
-                    .is_finished();
+                let needs_await = !db_commit_handle_to_join.is_finished();
                 let now = chrono::Utc::now().naive_utc();
 
                 let result = db_commit_handle_to_join
@@ -803,31 +801,10 @@ where
                 }
             }
 
-            let new_handle = tokio::spawn(async move {
-                let now = std::time::Instant::now();
-
-                let mut it = blocks_to_commit.iter().peekable();
-                while let Some(block) = it.next() {
-                    let force_db_commit = if is_syncing { false } else { it.peek().is_none() };
-
-                    gateway
-                        .advance(block.block_update(), block.cursor(), force_db_commit)
-                        .await
-                        .map_err(ExtractionError::Storage)?;
-                }
-
-                let mut committed_hieght_guard = committed_block_height.lock().await;
-                *committed_hieght_guard = Some(last_block_height);
-
-                trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
-
-                histogram!(
-                    "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
-                )
-                .record(now.elapsed().as_millis() as f64);
-
-                Ok(())
-            });
+            // Detached from the caller because the commit outlives the block that queued it;
+            // the caller is recorded as a follows-from link instead. The span wraps the task
+            // body, not its `JoinHandle` -- instrumenting the handle would only cover the
+            // await and leave every gateway call inside the task without a parent.
             let commit_span = info_span!(
                 parent: None,
                 "commit_blocks_task",
@@ -837,7 +814,36 @@ where
                 chain = %self.chain,
             );
             commit_span.follows_from(tracing::Span::current().id());
-            let new_handle = new_handle.instrument(commit_span);
+
+            let new_handle = tokio::spawn(
+                async move {
+                    let now = std::time::Instant::now();
+
+                    let mut it = blocks_to_commit.iter().peekable();
+                    while let Some(block) = it.next() {
+                        let force_db_commit =
+                            if is_syncing { false } else { it.peek().is_none() };
+
+                        gateway
+                            .advance(block.block_update(), block.cursor(), force_db_commit)
+                            .await
+                            .map_err(ExtractionError::Storage)?;
+                    }
+
+                    let mut committed_hieght_guard = committed_block_height.lock().await;
+                    *committed_hieght_guard = Some(last_block_height);
+
+                    trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
+
+                    histogram!(
+                        "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
+                    )
+                    .record(now.elapsed().as_millis() as f64);
+
+                    Ok(())
+                }
+                .instrument(commit_span),
+            );
 
             *commit_handle_guard = Some(new_handle);
 
@@ -2365,7 +2371,7 @@ mod test {
             let guard = ex.gateway.commit_handle.lock().await;
             guard
                 .as_ref()
-                .is_some_and(|h| !h.inner().is_finished())
+                .is_some_and(|h| !h.is_finished())
         };
         let commit_task_is_none = async |ex: &ProtocolExtractor<_, _, _>| -> bool {
             ex.gateway
