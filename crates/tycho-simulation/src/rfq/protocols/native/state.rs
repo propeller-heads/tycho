@@ -1,8 +1,8 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -15,88 +15,36 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::{
-    client::RFQClient,
-    protocols::native::{client::NativeClient, models::NativePriceData},
+use crate::{
+    book::{
+        levels::Levels,
+        sim::{self, SwapDirection},
+    },
+    rfq::protocols::native::{client::NativeClient, models::NativePriceData},
 };
 
-// `Deserialize` bypasses `new`, so it does not validate the book or remove zero-quantity levels.
-// This is harmless while `delta_transition` cannot update the book; use `TryFrom`-based
-// deserialization before supporting state deltas.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct NativeState {
-    pub base_token: Token,
-    pub quote_token: Token,
-    pub book: NativePriceData,
-    pub client: NativeClient,
-}
+/// Approximate gas for one Native Relay swap.
+const NATIVE_SWAP_GAS: u64 = 134_000;
 
-impl fmt::Debug for NativeState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NativeState")
-            .field("base_token", &self.base_token)
-            .field("quote_token", &self.quote_token)
-            .finish_non_exhaustive()
-    }
+#[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
+pub struct NativeState {
+    pub(super) base_token: Token,
+    pub(super) quote_token: Token,
+    #[debug(skip)]
+    pub(super) book: NativePriceData,
+    #[debug(skip)]
+    pub(super) client: Arc<NativeClient>,
 }
 
 impl NativeState {
-    pub fn new(
-        base_token: Token,
-        quote_token: Token,
-        mut book: NativePriceData,
-        client: NativeClient,
-    ) -> Result<Self, SimulationError> {
-        // Zero-quantity levels carry no liquidity and must not influence spot prices or limits.
-        book.bids
-            .retain(|level| level.quantity != 0.0);
-        book.asks
-            .retain(|level| level.quantity != 0.0);
-        let state = NativeState { base_token, quote_token, book, client };
-        state.validate_book()?;
-        Ok(state)
+    /// The pair's base token (the token whose amounts the price levels are quoted in).
+    pub fn base_token(&self) -> &Token {
+        &self.base_token
     }
 
-    fn validate_book(&self) -> Result<(), SimulationError> {
-        if self.book.base_address != self.base_token.address ||
-            self.book.quote_address != self.quote_token.address
-        {
-            return Err(SimulationError::FatalError(
-                "Native book token addresses do not match state tokens".to_string(),
-            ));
-        }
-        let minimums = [
-            self.book.minimum_in_base,
-            self.book.minimum_in_quote,
-            self.book.minimum_out_base,
-            self.book.minimum_out_quote,
-        ];
-        if minimums
-            .iter()
-            .any(|minimum| !minimum.is_finite() || *minimum < 0.0)
-        {
-            return Err(SimulationError::FatalError(
-                "Native book contains an invalid minimum amount".to_string(),
-            ));
-        }
-        if self
-            .book
-            .bids
-            .iter()
-            .chain(self.book.asks.iter())
-            .any(|level| {
-                !level.quantity.is_finite() ||
-                    level.quantity < 0.0 ||
-                    !level.price.is_finite() ||
-                    level.price <= 0.0
-            })
-        {
-            return Err(SimulationError::FatalError(
-                "Native book contains an invalid price level".to_string(),
-            ));
-        }
-
-        Ok(())
+    /// The pair's quote token.
+    pub fn quote_token(&self) -> &Token {
+        &self.quote_token
     }
 
     fn enforce_minimum(
@@ -107,7 +55,6 @@ impl NativeState {
         if minimum == 0.0 {
             return Ok(())
         }
-
         // Native Relay reports minimums in atomic units, matching `amount`. Round up defensively
         // because the JSON number is deserialized into an f64 by the orderbook model.
         let minimum = BigUint::from_f64(minimum.ceil()).ok_or_else(|| {
@@ -120,8 +67,36 @@ impl NativeState {
                 "Amount below minimum {amount_kind}. Amount: {amount}, min amount: {minimum}"
             )))
         }
-
         Ok(())
+    }
+
+    fn direction(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<SwapDirection, SimulationError> {
+        SwapDirection::require(
+            &self.base_token.address,
+            &self.quote_token.address,
+            token_in,
+            token_out,
+        )
+    }
+
+    /// The ladder a swap in `direction` consumes, in the units of the token sold: the bids as
+    /// published for selling base, the asks re-expressed per quote unit for selling quote.
+    fn ladder(&self, direction: SwapDirection) -> Cow<'_, Levels> {
+        match direction {
+            SwapDirection::BaseToQuote => Cow::Borrowed(&self.book.bids),
+            SwapDirection::QuoteToBase => Cow::Owned(self.book.asks.invert()),
+        }
+    }
+
+    fn decimals(&self, direction: SwapDirection) -> (u32, u32) {
+        match direction {
+            SwapDirection::BaseToQuote => (self.base_token.decimals, self.quote_token.decimals),
+            SwapDirection::QuoteToBase => (self.quote_token.decimals, self.base_token.decimals),
+        }
     }
 }
 
@@ -132,21 +107,7 @@ impl ProtocolSim for NativeState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let inverse = if base.address == self.base_token.address &&
-            quote.address == self.quote_token.address
-        {
-            false
-        } else if base.address == self.quote_token.address &&
-            quote.address == self.base_token.address
-        {
-            true
-        } else {
-            return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {}, {}",
-                base.address, quote.address
-            )))
-        };
-
+        let direction = self.direction(&base.address, &quote.address)?;
         let best_bid = self
             .book
             .bids
@@ -157,7 +118,6 @@ impl ProtocolSim for NativeState {
             .asks
             .first()
             .map(|lvl| lvl.price);
-
         let average_price = match (best_bid, best_ask) {
             (Some(bid), Some(ask)) => bid.midpoint(ask),
             (Some(bid), None) => bid,
@@ -166,15 +126,15 @@ impl ProtocolSim for NativeState {
                 return Err(SimulationError::RecoverableError("No liquidity".to_string()))
             }
         };
-
-        let spot_price = if inverse { average_price.recip() } else { average_price };
-
+        let spot_price = match direction {
+            SwapDirection::BaseToQuote => average_price,
+            SwapDirection::QuoteToBase => average_price.recip(),
+        };
         if !spot_price.is_finite() || spot_price <= 0.0 {
             return Err(SimulationError::RecoverableError(
                 "Native spot price is not positive and finite".to_string(),
             ))
         }
-
         Ok(spot_price)
     }
 
@@ -184,71 +144,33 @@ impl ProtocolSim for NativeState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let is_sell_base = token_in.address == self.base_token.address &&
-            token_out.address == self.quote_token.address;
-        let is_sell_quote = token_in.address == self.quote_token.address &&
-            token_out.address == self.base_token.address;
-
-        if !is_sell_base && !is_sell_quote {
-            return Err(SimulationError::InvalidInput(
-                format!(
-                    "Invalid token addresses. Got in={}, out={}",
-                    token_in.address, token_out.address
-                ),
-                None,
-            ));
-        }
-
+        let direction = self.direction(&token_in.address, &token_out.address)?;
         if amount_in == BigUint::ZERO {
             return Err(SimulationError::InvalidInput(
                 "Native swap amount must be greater than zero".to_string(),
                 None,
             ));
         }
-
-        let (minimum_in, minimum_out) = if is_sell_base {
-            (self.book.minimum_in_base, self.book.minimum_out_quote)
-        } else {
-            (self.book.minimum_in_quote, self.book.minimum_out_base)
+        let (minimum_in, minimum_out) = match direction {
+            SwapDirection::BaseToQuote => (self.book.minimum_in_base, self.book.minimum_out_quote),
+            SwapDirection::QuoteToBase => (self.book.minimum_in_quote, self.book.minimum_out_base),
         };
         Self::enforce_minimum(&amount_in, minimum_in, "input")?;
-
-        let amount_in_f64 = amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".into())
-        })? / 10f64.powi(token_in.decimals as i32);
-
-        let levels = if is_sell_base {
-            self.book.bids.clone()
-        } else {
-            NativePriceData::invert_price_levels(&self.book.asks)
-        };
-
-        if levels.is_empty() {
+        let ladder = self.ladder(direction);
+        if ladder.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
-
-        let (amount_out_f64, remaining) =
-            NativePriceData::get_amount_out_from_levels(amount_in_f64, &levels);
-
-        let res = GetAmountOutResult {
-            amount: BigUint::from_f64(amount_out_f64 * 10f64.powi(token_out.decimals as i32))
-                .ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert amount out to BigUint".into())
-                })?,
-            gas: BigUint::from(134_000u64), // Approximate standard gas for Native swap
-            new_state: self.clone_box(),
-        };
-
-        if remaining > 0.0 {
-            return Err(SimulationError::InvalidInput(
-                format!("Pool has not enough liquidity to support complete swap. Input amount: {}, consumed: {}", amount_in_f64, amount_in_f64 - remaining),
-                Some(res),
-            ));
-        }
-
-        Self::enforce_minimum(&res.amount, minimum_out, "output")?;
-
-        Ok(res)
+        let amount_in = sim::to_human(&amount_in, token_in.decimals)?;
+        let fill = ladder.fill(amount_in);
+        let result = sim::fill_result(
+            fill,
+            amount_in,
+            token_out.decimals,
+            NATIVE_SWAP_GAS,
+            self.clone_box(),
+        )?;
+        Self::enforce_minimum(&result.amount, minimum_out, "output")?;
+        Ok(result)
     }
 
     fn get_limits(
@@ -256,50 +178,13 @@ impl ProtocolSim for NativeState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let is_sell_base =
-            sell_token == self.base_token.address && buy_token == self.quote_token.address;
-        let is_sell_quote =
-            sell_token == self.quote_token.address && buy_token == self.base_token.address;
-
-        if !is_sell_base && !is_sell_quote {
-            return Err(SimulationError::InvalidInput(
-                format!("Invalid token addresses. Got sell={}, buy={}", sell_token, buy_token),
-                None,
-            ));
-        }
-
-        let levels = if is_sell_base {
-            self.book.bids.clone()
-        } else {
-            NativePriceData::invert_price_levels(&self.book.asks)
-        };
-
-        if levels.is_empty() {
+        let direction = self.direction(&sell_token, &buy_token)?;
+        let ladder = self.ladder(direction);
+        if ladder.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
-
-        let (total_sell_amount, total_buy_amount) =
-            levels
-                .iter()
-                .fold((0.0, 0.0), |(sell_sum, buy_sum), level| {
-                    (sell_sum + level.quantity, buy_sum + level.quantity * level.price)
-                });
-
-        let sell_decimals =
-            if is_sell_base { self.base_token.decimals } else { self.quote_token.decimals };
-        let buy_decimals =
-            if is_sell_base { self.quote_token.decimals } else { self.base_token.decimals };
-
-        let sell_limit = BigUint::from_f64(total_sell_amount * 10f64.powi(sell_decimals as i32))
-            .ok_or_else(|| {
-                SimulationError::RecoverableError("Can't convert limit to BigUInt".into())
-            })?;
-        let buy_limit = BigUint::from_f64(total_buy_amount * 10f64.powi(buy_decimals as i32))
-            .ok_or_else(|| {
-                SimulationError::RecoverableError("Can't convert limit to BigUInt".into())
-            })?;
-
-        Ok((sell_limit, buy_limit))
+        let (sell_decimals, buy_decimals) = self.decimals(direction);
+        sim::limits(&ladder, sell_decimals, buy_decimals)
     }
 
     fn delta_transition(
@@ -356,14 +241,14 @@ impl IndicativelyPriced for NativeState {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::str::FromStr;
 
     use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::native::models::NativePriceLevel;
+    use crate::{book::levels::PriceLevel, rfq::protocols::native::models::NativeSupportedChain};
 
     fn token(address: &str, symbol: &str, decimals: u32) -> Token {
         Token::new(
@@ -387,133 +272,52 @@ mod tests {
             minimum_in_quote: 100.0,
             minimum_out_base: 0.0,
             minimum_out_quote: 0.0,
-            bids: vec![NativePriceLevel { quantity: 1.0, price: 2_000.0 }],
-            asks: vec![NativePriceLevel { quantity: 1.0, price: 2_000.0 }],
+            bids: Levels::new(vec![PriceLevel { quantity: 1.0, price: 2_000.0 }]).unwrap(),
+            asks: Levels::new(vec![PriceLevel { quantity: 1.0, price: 2_000.0 }]).unwrap(),
         };
-        let client = NativeClient::new(
-            Chain::Ethereum,
+        let client = Arc::new(NativeClient::new(
+            NativeSupportedChain::Ethereum,
+            "https://native.example".to_string(),
             String::new(),
-            HashSet::new(),
-            0.0,
-            HashSet::new(),
             Duration::from_secs(5),
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        ));
 
-        NativeState::new(base_token, quote_token, book, client).unwrap()
+        NativeState { base_token, quote_token, book, client }
     }
 
-    #[test]
-    fn accepts_base_sell_at_atomic_input_minimum() {
+    /// Selling base at the atomic input minimum is accepted, one unit below it is not; the same
+    /// for selling quote against its own minimum.
+    #[rstest]
+    #[case::base_sell_at_minimum(true, 100_000_000_000, true)]
+    #[case::base_sell_below_minimum(true, 99_999_999_999, false)]
+    #[case::quote_sell_at_minimum(false, 100, true)]
+    #[case::quote_sell_below_minimum(false, 99, false)]
+    fn enforces_atomic_input_minimums(
+        #[case] sell_base: bool,
+        #[case] amount_in: u64,
+        #[case] expect_ok: bool,
+    ) {
         let state = state();
+        let (token_in, token_out) = if sell_base {
+            (&state.base_token, &state.quote_token)
+        } else {
+            (&state.quote_token, &state.base_token)
+        };
 
-        let result = state.get_amount_out(
-            BigUint::from(100_000_000_000u64),
-            &state.base_token,
-            &state.quote_token,
-        );
+        let result = state.get_amount_out(BigUint::from(amount_in), token_in, token_out);
 
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn rejects_base_sell_below_atomic_input_minimum() {
-        let state = state();
-
-        let result = state.get_amount_out(
-            BigUint::from(99_999_999_999u64),
-            &state.base_token,
-            &state.quote_token,
-        );
-
-        assert!(matches!(result, Err(SimulationError::RecoverableError(_))));
-    }
-
-    #[test]
-    fn accepts_quote_sell_at_atomic_input_minimum() {
-        let state = state();
-
-        let result =
-            state.get_amount_out(BigUint::from(100u64), &state.quote_token, &state.base_token);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn rejects_quote_sell_below_atomic_input_minimum() {
-        let state = state();
-
-        let result =
-            state.get_amount_out(BigUint::from(99u64), &state.quote_token, &state.base_token);
-
-        assert!(matches!(result, Err(SimulationError::RecoverableError(_))));
-    }
-
-    #[test]
-    fn calculates_amount_out_for_base_sell() {
-        let state = state();
-
-        let result = state
-            .get_amount_out(
-                BigUint::from(500_000_000_000_000_000u64),
-                &state.base_token,
-                &state.quote_token,
-            )
-            .unwrap();
-
-        assert_eq!(result.amount, BigUint::from(1_000_000_000u64));
-    }
-
-    #[test]
-    fn ignores_zero_quantity_levels() {
-        let mut state = state();
-        state
-            .book
-            .bids
-            .insert(0, NativePriceLevel { quantity: 0.0, price: 1_000.0 });
-        let state = NativeState::new(state.base_token, state.quote_token, state.book, state.client)
-            .unwrap();
-
-        assert_eq!(state.book.bids.len(), 1);
-        assert_eq!(
-            state
-                .spot_price(&state.base_token, &state.quote_token)
-                .unwrap(),
-            2_000.0
-        );
-
-        let result = state
-            .get_amount_out(
-                BigUint::from(500_000_000_000_000_000u64),
-                &state.base_token,
-                &state.quote_token,
-            )
-            .unwrap();
-
-        assert_eq!(result.amount, BigUint::from(1_000_000_000u64));
-    }
-
-    #[test]
-    fn returns_finite_spot_price_for_large_finite_levels() {
-        let mut state = state();
-        state.book.bids[0] = NativePriceLevel { quantity: 1e-306, price: 1e308 };
-        state.book.asks[0] = NativePriceLevel { quantity: 1e-306, price: 1e308 };
-        let state = NativeState::new(state.base_token, state.quote_token, state.book, state.client)
-            .unwrap();
-
-        let price = state
-            .spot_price(&state.base_token, &state.quote_token)
-            .unwrap();
-
-        assert_eq!(price, 1e308);
+        if expect_ok {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(SimulationError::RecoverableError(_))));
+        }
     }
 
     #[test]
     fn calculates_midpoint_spot_price_in_both_directions() {
         let mut state = state();
-        state.book.bids[0].price = 1_900.0;
-        state.book.asks[0].price = 2_100.0;
+        state.book.bids = Levels::new(vec![PriceLevel { quantity: 1.0, price: 1_900.0 }]).unwrap();
+        state.book.asks = Levels::new(vec![PriceLevel { quantity: 1.0, price: 2_100.0 }]).unwrap();
 
         let direct = state
             .spot_price(&state.base_token, &state.quote_token)
@@ -526,33 +330,30 @@ mod tests {
         assert_eq!(inverse, direct.recip());
     }
 
+    /// The spot price must be positive and finite: a huge finite midpoint passes in the direct
+    /// direction, a subnormal one overflows to infinity when inverted and is rejected.
     #[test]
-    fn rejects_non_finite_inverted_spot_price() {
+    fn requires_a_finite_spot_price() {
         let mut state = state();
-        let smallest_positive_price = f64::from_bits(1);
-        state.book.bids[0].price = smallest_positive_price;
-        state.book.asks[0].price = smallest_positive_price;
-        let state = NativeState::new(state.base_token, state.quote_token, state.book, state.client)
-            .unwrap();
+        let extreme = Levels::new(vec![PriceLevel { quantity: 1e-306, price: 1e308 }]).unwrap();
+        state.book.bids = extreme.clone();
+        state.book.asks = extreme;
+        assert_eq!(
+            state
+                .spot_price(&state.base_token, &state.quote_token)
+                .unwrap(),
+            1e308
+        );
 
-        let result = state.spot_price(&state.quote_token, &state.base_token);
-
+        let subnormal =
+            Levels::new(vec![PriceLevel { quantity: 1.0, price: f64::from_bits(1) }]).unwrap();
+        state.book.bids = subnormal.clone();
+        state.book.asks = subnormal;
         assert!(matches!(
-            result,
+            state.spot_price(&state.quote_token, &state.base_token),
             Err(SimulationError::RecoverableError(message))
                 if message.contains("not positive and finite")
         ));
-    }
-
-    #[test]
-    fn calculates_amount_out_for_quote_sell() {
-        let state = state();
-
-        let result = state
-            .get_amount_out(BigUint::from(1_000_000_000u64), &state.quote_token, &state.base_token)
-            .unwrap();
-
-        assert_eq!(result.amount, BigUint::from(500_000_000_000_000_000u64));
     }
 
     #[rstest]
@@ -564,14 +365,16 @@ mod tests {
         #[case] expected_amount_out: u64,
     ) {
         let mut state = state();
-        state.book.bids = vec![
-            NativePriceLevel { quantity: 1.0, price: 2_000.0 },
-            NativePriceLevel { quantity: 2.0, price: 1_000.0 },
-        ];
-        state.book.asks = vec![
-            NativePriceLevel { quantity: 1.0, price: 2_048.0 },
-            NativePriceLevel { quantity: 2.0, price: 4_096.0 },
-        ];
+        state.book.bids = Levels::new(vec![
+            PriceLevel { quantity: 1.0, price: 2_000.0 },
+            PriceLevel { quantity: 2.0, price: 1_000.0 },
+        ])
+        .unwrap();
+        state.book.asks = Levels::new(vec![
+            PriceLevel { quantity: 1.0, price: 2_048.0 },
+            PriceLevel { quantity: 2.0, price: 4_096.0 },
+        ])
+        .unwrap();
         // Sell base: 1 * 2000 + 1.5 * 1000 = 3500 USDC.
         // Sell quote: 2048 buys the first WETH; the remaining 6144 buys 1.5 WETH.
         let (token_in, token_out) = if sell_base {
@@ -622,28 +425,11 @@ mod tests {
     }
 
     #[test]
-    fn returns_partial_result_when_amount_exceeds_depth() {
-        let state = state();
-
-        let result = state.get_amount_out(
-            BigUint::from(2_000_000_000_000_000_000u64),
-            &state.base_token,
-            &state.quote_token,
-        );
-
-        match result {
-            Err(SimulationError::InvalidInput(_, Some(partial))) => {
-                assert_eq!(partial.amount, BigUint::from(2_000_000_000u64));
-            }
-            other => panic!("Expected insufficient-liquidity result, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn rejects_sub_unit_partial_fill() {
         let mut state = state();
         state.book.minimum_in_base = 0.0;
-        state.book.bids[0].quantity = 0.5e-18;
+        state.book.bids =
+            Levels::new(vec![PriceLevel { quantity: 0.5e-18, price: 2_000.0 }]).unwrap();
 
         let result =
             state.get_amount_out(BigUint::from(1u64), &state.base_token, &state.quote_token);
@@ -651,6 +437,7 @@ mod tests {
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, Some(_)))));
     }
 
+    /// A zero amount is rejected before any ladder is consulted; Native's quote API refuses it.
     #[test]
     fn rejects_zero_amount() {
         let state = state();
@@ -660,28 +447,27 @@ mod tests {
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 
-    #[test]
-    fn gets_base_sell_limits() {
+    /// Limits follow the ladder of the swap direction and the decimals of the tokens on each side.
+    #[rstest]
+    #[case::sell_base(true, 1_000_000_000_000_000_000, 2_000_000_000)]
+    #[case::sell_quote(false, 2_000_000_000, 1_000_000_000_000_000_000)]
+    fn gets_limits_in_both_directions(
+        #[case] sell_base: bool,
+        #[case] expected_sell_limit: u64,
+        #[case] expected_buy_limit: u64,
+    ) {
         let state = state();
+        let (token_in, token_out) = if sell_base {
+            (&state.base_token, &state.quote_token)
+        } else {
+            (&state.quote_token, &state.base_token)
+        };
 
         let limits = state
-            .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
+            .get_limits(token_in.address.clone(), token_out.address.clone())
             .unwrap();
 
-        assert_eq!(limits.0, BigUint::from(1_000_000_000_000_000_000u64));
-        assert_eq!(limits.1, BigUint::from(2_000_000_000u64));
-    }
-
-    #[test]
-    fn gets_quote_sell_limits() {
-        let state = state();
-
-        let limits = state
-            .get_limits(state.quote_token.address.clone(), state.base_token.address.clone())
-            .unwrap();
-
-        assert_eq!(limits.0, BigUint::from(2_000_000_000u64));
-        assert_eq!(limits.1, BigUint::from(1_000_000_000_000_000_000u64));
+        assert_eq!(limits, (BigUint::from(expected_sell_limit), BigUint::from(expected_buy_limit)));
     }
 
     #[test]
@@ -699,52 +485,19 @@ mod tests {
         ));
 
         // Direction validation must win even when the book has no liquidity.
-        state.book.bids.clear();
-        state.book.asks.clear();
+        state.book.bids = Levels::default();
+        state.book.asks = Levels::default();
         assert!(matches!(
             state.spot_price(&other, &state.quote_token),
-            Err(SimulationError::RecoverableError(message))
+            Err(SimulationError::InvalidInput(message, None))
                 if message.contains("Invalid token addresses")
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_book_state() {
-        let mut state = state();
-        state.book.bids[0].price = 0.0;
-
-        assert!(matches!(
-            NativeState::new(state.base_token, state.quote_token, state.book, state.client),
-            Err(SimulationError::FatalError(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_output_minimum() {
-        let mut state = state();
-        state.book.minimum_out_base = -1.0;
-
-        assert!(matches!(
-            NativeState::new(state.base_token, state.quote_token, state.book, state.client),
-            Err(SimulationError::FatalError(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_mismatched_book_tokens() {
-        let mut state = state();
-        state.book.base_address = Bytes::zero(20);
-
-        assert!(matches!(
-            NativeState::new(state.base_token, state.quote_token, state.book, state.client),
-            Err(SimulationError::FatalError(_))
         ));
     }
 
     #[test]
     fn reports_no_liquidity_for_empty_direction() {
         let mut state = state();
-        state.book.bids.clear();
+        state.book.bids = Levels::default();
 
         assert!(matches!(
             state.get_amount_out(

@@ -24,7 +24,7 @@ use crate::{
 /// An ephemeral [`Update`] tagged with a caller-supplied label.
 ///
 /// The label is an opaque string chosen by the caller to distinguish parallel bundle evaluations
-/// (e.g. bundle ID, strategy name). It is separate from `update.block_number_or_timestamp`,
+/// (e.g. bundle ID, strategy name). It is separate from `update.block_number`,
 /// which carries the target block the bundle was evaluated against.
 pub struct PendingUpdate {
     pub label: String,
@@ -396,7 +396,7 @@ mod tests {
             .expect("pending update failed");
 
         assert_eq!(
-            update.update.block_number_or_timestamp, 3,
+            update.update.block_number, 3,
             "The update must be stamped with the pending block, not the confirmed tip."
         );
     }

@@ -45,7 +45,7 @@ use tycho_simulation::{
     protocol::models::Update,
 };
 
-use crate::stream_processor::{StreamUpdate, UpdateType};
+use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
 pub struct ProtocolStreamProcessor {
     chain: Chain,
@@ -141,8 +141,7 @@ impl ProtocolStreamProcessor {
                         }
                     };
                 let update = StreamUpdate {
-                    update_type: UpdateType::Protocol,
-                    update,
+                    payload: StreamUpdatePayload::Protocol(update),
                     is_first_update,
                     received_at,
                 };

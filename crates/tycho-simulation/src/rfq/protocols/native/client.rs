@@ -1,42 +1,25 @@
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    sync::LazyLock,
-    time::SystemTime,
-};
+use std::{collections::HashMap, str::FromStr, time::SystemTime};
 
-use alloy::primitives::{utils::keccak256, Address};
-use async_trait::async_trait;
-use futures::stream::BoxStream;
+use alloy::primitives::Address;
 use num_bigint::BigUint;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::time::{interval, timeout, Duration};
-use tracing::{error, info, warn};
+use tokio::time::{timeout, Duration};
+use tracing::{instrument, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
-    Bytes,
+    models::protocol::GetAmountOutParams, simulation::indicatively_priced::SignedQuote, Bytes,
 };
 
-use super::models::{NativeOrderbookEntry, NativeOrderbookSide, NativePriceData, NativePriceLevel};
 use crate::{
+    evm::protocol::utils::bytes_to_address,
     rfq::{
-        client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
-        protocols::{
-            native::models::{
-                FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeSupportedChain,
-            },
-            utils::bytes_to_address,
+        protocols::native::models::{
+            FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeSupportedChain,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
 };
 
-static NATIVE_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 const MAX_QUOTE_ATTEMPTS: u32 = 3;
 const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const NATIVE_API_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -51,44 +34,40 @@ enum QuoteAttemptError {
     Fatal(RFQError),
 }
 
-impl QuoteAttemptError {
-    fn into_error(self) -> RFQError {
-        match self {
-            Self::Retry { error, .. } | Self::Fatal(error) => error,
-        }
-    }
-}
-
-#[derive(Default)]
-struct AggregatedLevels {
-    levels: Vec<NativePriceLevel>,
-    // Maximum atomic minimum_in_base among the Native entries contributing these levels.
-    minimum: f64,
-}
-
-impl AggregatedLevels {
-    fn extend(&mut self, levels: Vec<NativePriceLevel>, minimum: f64) {
-        self.levels.extend(levels);
-        self.minimum = self.minimum.max(minimum);
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Requests binding Native Relay quotes. One instance is shared (via `Arc`) by every state a
+/// [`NativeFeed`](super::feed::NativeFeed) emits, so all of them reuse the same HTTP connection
+/// pool.
+///
+/// Serialization keeps the configuration but skips the credential and the HTTP client: a
+/// deserialized client gets a fresh connection pool and an empty key, so binding quotes fail at
+/// call time until re-configured. `Debug` output omits the credential as well.
+#[derive(derive_more::Debug, Serialize, Deserialize)]
 pub struct NativeClient {
-    chain: Chain,
+    chain: NativeSupportedChain,
+    /// Base URL of the swap API; the firm-quote path is appended per request.
     endpoint: String,
     #[serde(skip_serializing, default)]
+    #[debug(skip)]
     api_key: String,
-    tokens: HashSet<Bytes>,
-    tvl: f64,
-    quote_tokens: HashSet<Bytes>,
-    poll_time: Duration,
     quote_timeout: Duration,
+    #[serde(skip)]
+    http: Client,
 }
 
 impl NativeClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:native";
-    pub const DEFAULT_ENDPOINT: &'static str = "https://v2.api.native.org/swap-api-v2/v1";
+    pub fn new(
+        chain: NativeSupportedChain,
+        endpoint: String,
+        api_key: String,
+        quote_timeout: Duration,
+    ) -> Self {
+        NativeClient { chain, endpoint, api_key, quote_timeout, http: Client::new() }
+    }
+
+    /// The `apikey` header value, shared with the orderbook poll.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
 
     // Native API error codes:
     // <https://docs.native.org/native-dev/build-with-native/swap-aggregators/firmquote-swap-apis/miscellaneous/error-handling#error-codes>
@@ -122,255 +101,10 @@ impl NativeClient {
         }
     }
 
-    pub fn new(
-        chain: Chain,
-        api_key: String,
-        tokens: HashSet<Bytes>,
-        tvl: f64,
-        quote_tokens: HashSet<Bytes>,
-        poll_time: Duration,
-        quote_timeout: Duration,
-    ) -> Result<Self, RFQError> {
-        NativeSupportedChain::try_from(chain).map_err(RFQError::InvalidInput)?;
-        if poll_time.is_zero() {
-            return Err(RFQError::InvalidInput(
-                "Native polling interval must be greater than zero".to_string(),
-            ))
-        }
-        Ok(Self {
-            chain,
-            endpoint: Self::DEFAULT_ENDPOINT.to_string(),
-            api_key,
-            tokens,
-            tvl,
-            quote_tokens,
-            poll_time,
-            quote_timeout,
-        })
-    }
-
-    fn select_tvl_conversion_book<'a>(
-        &self,
-        quote_address: &Bytes,
-        books: &'a HashMap<String, NativePriceData>,
-    ) -> Option<&'a NativePriceData> {
-        books
-            .values()
-            .filter(|candidate| {
-                // `group_orderbook` keeps the configured quote token on the quote side, so every
-                // matching conversion book is valued in comparable approved-token units.
-                candidate.base_address == *quote_address &&
-                    self.quote_tokens
-                        .contains(&candidate.quote_address)
-            })
-            .filter_map(|candidate| {
-                candidate
-                    .calculate_tvl(None)
-                    .map(|liquidity| (candidate, liquidity))
-            })
-            .max_by(|(candidate_a, liquidity_a), (candidate_b, liquidity_b)| {
-                liquidity_a
-                    .total_cmp(liquidity_b)
-                    // Prefer the smaller token address when liquidity is equal so the result does
-                    // not depend on HashMap or HashSet iteration order.
-                    .then_with(|| {
-                        candidate_b
-                            .quote_address
-                            .as_ref()
-                            .cmp(candidate_a.quote_address.as_ref())
-                    })
-            })
-            .map(|(candidate, _)| candidate)
-    }
-
-    fn create_component_with_state(
-        &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
-        book: NativePriceData,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "native_relay_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![],
-            static_attributes: Default::default(),
-            change: Default::default(),
-            creation_tx: Default::default(),
-            created_at: Default::default(),
-        };
-
-        let mut attributes = HashMap::new();
-
-        let book_json = serde_json::to_string(&book).unwrap_or_default();
-        attributes.insert("book".to_string(), book_json.as_bytes().to_vec().into());
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }
-    }
-
-    async fn fetch_orderbook(&self) -> Result<Vec<NativeOrderbookEntry>, RFQError> {
-        let chain = NativeSupportedChain::try_from(self.chain).map_err(RFQError::InvalidInput)?;
-        let response = NATIVE_HTTP_CLIENT
-            .get(format!("{}/orderbook", self.endpoint))
-            // `showNative` is not boolean: its value selects the address used for native-token
-            // books. Request address(0) so the response matches Tycho's internal representation.
-            .query(&[("chain", chain.as_str()), ("showNative", "0x0")])
-            .header("accept", "application/json")
-            .header("apikey", &self.api_key)
-            .send()
-            .await
-            .map_err(|e| RFQError::ConnectionError(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .bytes()
-            .await
-            .map_err(|e| RFQError::ConnectionError(e.to_string()))?;
-
-        // Native can return an API error envelope with HTTP 200.
-        if let Ok(api_error) = serde_json::from_slice::<NativeApiErrorResponse>(&response_body) {
-            return Err(Self::classify_api_error(&api_error).into_error());
-        }
-
-        if !status.is_success() {
-            return Err(RFQError::ConnectionError(format!(
-                "Native Relay orderbook HTTP error {}: {}",
-                status,
-                String::from_utf8_lossy(&response_body)
-            )));
-        }
-
-        serde_json::from_slice(&response_body).map_err(|e| {
-            RFQError::ParsingError(format!("Failed to parse Native Relay orderbook: {e}"))
-        })
-    }
-
-    fn group_orderbook(
-        &self,
-        entries: Vec<NativeOrderbookEntry>,
-    ) -> HashMap<String, NativePriceData> {
-        let mut entries_by_pair: HashMap<(Bytes, Bytes), Vec<NativeOrderbookEntry>> =
-            HashMap::new();
-
-        for entry in entries {
-            let pair = if entry.base_address.as_ref() <= entry.quote_address.as_ref() {
-                (entry.base_address.clone(), entry.quote_address.clone())
-            } else {
-                (entry.quote_address.clone(), entry.base_address.clone())
-            };
-            entries_by_pair
-                .entry(pair)
-                .or_default()
-                .push(entry);
-        }
-
-        let mut books = HashMap::new();
-        for ((token0, token1), entries) in entries_by_pair {
-            // Keep the book direction stable even when Native publishes only one direction of a
-            // pair.
-            // Prefer exactly one configured quote token; if both or neither are configured, use
-            // the sorted pair order established by the grouping key above.
-            let token0_is_quote = self.quote_tokens.contains(&token0);
-            let token1_is_quote = self.quote_tokens.contains(&token1);
-            let (base_address, quote_address) = match (token0_is_quote, token1_is_quote) {
-                (true, false) => (token1.clone(), token0.clone()),
-                (false, true) => (token0.clone(), token1.clone()),
-                (true, true) | (false, false) => (token0.clone(), token1.clone()),
-            };
-            let mut direct_bids = AggregatedLevels::default();
-            let mut direct_asks = AggregatedLevels::default();
-            let mut mirrored_bids = AggregatedLevels::default();
-            let mut mirrored_asks = AggregatedLevels::default();
-
-            // Native's minimum_in_base is always denominated in entry.base_address. For a bid the
-            // taker sells base, so it is an input minimum; for an ask the taker receives base, so
-            // it is an output minimum. Mirroring swaps bid/ask and remaps that minimum into the
-            // canonical direction.
-            for entry in entries {
-                // A zero-only direct entry must not suppress usable mirrored liquidity for the
-                // same side. NativeState also filters zero quantities as a defensive measure for
-                // deserialized states that do not pass through this grouping path.
-                let levels: Vec<_> = entry
-                    .levels
-                    .into_iter()
-                    .filter(|level| level.quantity != 0.0)
-                    .collect();
-                if levels.is_empty() {
-                    continue
-                }
-
-                let is_direct =
-                    entry.base_address == base_address && entry.quote_address == quote_address;
-                if is_direct {
-                    match entry.side {
-                        NativeOrderbookSide::Bid => {
-                            direct_bids.extend(levels, entry.minimum_in_base)
-                        }
-                        NativeOrderbookSide::Ask => {
-                            direct_asks.extend(levels, entry.minimum_in_base)
-                        }
-                    }
-                } else {
-                    let levels = NativePriceData::invert_price_levels(&levels);
-                    match entry.side {
-                        NativeOrderbookSide::Bid => {
-                            mirrored_asks.extend(levels, entry.minimum_in_base)
-                        }
-                        NativeOrderbookSide::Ask => {
-                            mirrored_bids.extend(levels, entry.minimum_in_base)
-                        }
-                    }
-                }
-            }
-
-            // Use mirrored levels only when direct ones are absent to avoid double-counting. Keep
-            // the minimum from the selected representation so discarded levels cannot constrain
-            // the surviving side.
-            let (bids, minimum_in_base, minimum_out_quote) = if direct_bids.levels.is_empty() {
-                (mirrored_bids.levels, 0.0, mirrored_bids.minimum)
-            } else {
-                (direct_bids.levels, direct_bids.minimum, 0.0)
-            };
-            let (asks, minimum_in_quote, minimum_out_base) = if direct_asks.levels.is_empty() {
-                (mirrored_asks.levels, mirrored_asks.minimum, 0.0)
-            } else {
-                (direct_asks.levels, 0.0, direct_asks.minimum)
-            };
-            // Use the sorted pair key so the component ID remains stable if Native returns the
-            // opposite book direction in a later poll.
-            let pair = format!("native_{}/{}", hex::encode(&token0), hex::encode(&token1));
-            let component_id = keccak256(pair.as_bytes()).to_string();
-            books.insert(
-                component_id,
-                NativePriceData {
-                    base_address,
-                    quote_address,
-                    minimum_in_base,
-                    minimum_in_quote,
-                    minimum_out_base,
-                    minimum_out_quote,
-                    bids,
-                    asks,
-                },
-            );
-        }
-
-        books
-    }
-
     fn process_quote_response(
         quote_response: FirmQuoteResponse,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
-        // 1. Check API-level success
         if !quote_response.success {
             return Err(RFQError::QuoteNotFound(format!(
                 "Native Relay quote request failed: {}",
@@ -385,7 +119,6 @@ impl NativeClient {
             )));
         }
 
-        // Ensure we actually got an order
         let order = quote_response
             .orders
             .first()
@@ -397,8 +130,10 @@ impl NativeClient {
             })?;
 
         // Prevents silently accepting a mismatched/malicious quote.
-        let seller_token = bytes_to_address(&params.token_in)?;
-        let buyer_token = bytes_to_address(&params.token_out)?;
+        let seller_token = bytes_to_address(&params.token_in)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?;
+        let buyer_token = bytes_to_address(&params.token_out)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?;
         let order_seller_token = Address::from_str(&order.seller_token).map_err(|e| {
             RFQError::ParsingError(format!(
                 "Invalid Native seller token {}: {e}",
@@ -415,7 +150,8 @@ impl NativeClient {
             )));
         }
 
-        let receiver = bytes_to_address(&params.receiver)?;
+        let receiver = bytes_to_address(&params.receiver)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?;
         let order_recipient = Address::from_str(&order.recipient).map_err(|e| {
             RFQError::ParsingError(format!(
                 "Invalid Native order recipient {}: {e}",
@@ -428,7 +164,7 @@ impl NativeClient {
             )));
         }
 
-        // Security: reject already-expired quotes before we bother building a SignedQuote
+        // Reject already-expired quotes before building a SignedQuote.
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".to_string()))?
@@ -500,7 +236,7 @@ impl NativeClient {
                 "Native Relay quote did not include calldata".to_string(),
             ));
         }
-        // Decode calldata (pre-built by Native Relay, ready to submit as-is)
+        // Calldata is pre-built by Native Relay, ready to submit as-is.
         let calldata = hex::decode(
             quote_response
                 .tx_request
@@ -597,7 +333,8 @@ impl NativeClient {
         request_data: &FirmQuoteRequest,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, QuoteAttemptError> {
-        let response = NATIVE_HTTP_CLIENT
+        let response = self
+            .http
             .get(format!("{}/firm-quote", self.endpoint))
             .query(request_data)
             .header("apikey", &self.api_key)
@@ -654,126 +391,26 @@ impl NativeClient {
 
         Self::process_quote_response(quote_response, params).map_err(QuoteAttemptError::Fatal)
     }
-}
 
-#[async_trait]
-impl RFQClient for NativeClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
-        let client = self.clone();
-
-        Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
-            let mut ticker = interval(client.poll_time);
-
-            loop {
-                ticker.tick().await;
-
-                // Native Relay publishes a complete RFQ orderbook once per request. Polling the
-                // full book keeps component creation/removal deterministic and avoids per-pair REST
-                // fan-out.
-                let books = match client.fetch_orderbook().await {
-                    Ok(entries) => client.group_orderbook(entries),
-                    Err(e) => {
-                        error!("Failed to fetch Native Relay orderbook: {}", e);
-                        continue;
-                    }
-                };
-
-                let mut new_components = HashMap::new();
-
-                for (component_id, book) in &books {
-                    // Keep unrequested books available for TVL conversion, but only emit requested
-                    // markets as components.
-                    if !client.tokens.contains(&book.base_address) ||
-                        !client.tokens.contains(&book.quote_address)
-                    {
-                        continue;
-                    }
-
-                    let quote_price_data = if client.quote_tokens.contains(&book.quote_address) {
-                        None
-                    } else {
-                        // TVL thresholds are applied in approved quote-token units. If Native
-                        // quotes this market against another token, normalize through the most
-                        // liquid available approved quote-token market before filtering.
-                        client.select_tvl_conversion_book(&book.quote_address, &books)
-                    };
-
-                    if !client.quote_tokens.contains(&book.quote_address) &&
-                        quote_price_data.is_none()
-                    {
-                        continue;
-                    }
-
-                    let Some(incoming_tvl) = book.calculate_tvl(quote_price_data) else {
-                        warn!("Skipping Native Relay market {component_id} because its TVL is unavailable or non-finite");
-                        continue;
-                    };
-
-                    if incoming_tvl < client.tvl {
-                        info!("Filtering out Native Relay market {} due to low TVL: {:.2} < {:.2}", component_id, incoming_tvl, client.tvl);
-                        continue;
-                    }
-
-                    let tokens = vec![book.base_address.clone(), book.quote_address.clone()];
-                    let component_with_state = client.create_component_with_state(
-                        component_id.clone(),
-                        tokens,
-                        book.clone(),
-                        incoming_tvl,
-                    );
-                    new_components.insert(component_id.clone(), component_with_state);
-                }
-
-                // Emit removals for markets that disappeared from the Relay orderbook or no longer
-                // pass token/TVL filtering.
-                let removed_components: HashMap<String, ProtocolComponent> = current_components
-                    .iter()
-                    .filter(|&(id, _)| !new_components.contains_key(id))
-                    .map(|(k, v)| (k.clone(), v.component.clone()))
-                    .collect();
-
-                current_components = new_components.clone();
-
-                let snapshot = Snapshot {
-                    states: new_components,
-                    vm_storage: HashMap::new(),
-                };
-
-                // Native is off-chain and timestamped, not block-based. Downstream decoders use
-                // this wall-clock header to build a normal Tycho state update.
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let msg = StateSyncMessage::<TimestampHeader> {
-                    header: TimestampHeader { timestamp },
-                    snapshots: snapshot,
-                    deltas: None,
-                    removed_components,
-                };
-
-                yield Ok(("native".to_string(), msg));
-            }
-        })
-    }
-
-    async fn request_binding_quote(
+    #[instrument(
+        name = "quote_request",
+        skip_all,
+        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in)
+    )]
+    pub async fn request_binding_quote(
         &self,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
-        let receiver = bytes_to_address(&params.receiver)?;
-        let token_in = bytes_to_address(&params.token_in)?;
-        let token_out = bytes_to_address(&params.token_out)?;
-
-        let chain = NativeSupportedChain::try_from(self.chain).map_err(RFQError::FatalError)?;
+        let receiver = bytes_to_address(&params.receiver)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?;
+        let token_in = bytes_to_address(&params.token_in)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?;
+        let token_out = bytes_to_address(&params.token_out)
+            .map_err(|e| RFQError::InvalidInput(e.to_string()))?;
 
         let request_data = FirmQuoteRequest {
-            src_chain: chain,
-            dst_chain: chain,
+            src_chain: self.chain,
+            dst_chain: self.chain,
             from_address: receiver.to_string(),
             amount_wei: params.amount_in.to_string(),
             token_in: token_in.to_string(),
@@ -793,8 +430,10 @@ impl RFQClient for NativeClient {
                     Err(QuoteAttemptError::Fatal(error)) => return Err(error),
                     Err(QuoteAttemptError::Retry { error, delay }) => {
                         warn!(
-                            "Native quote attempt {}/{} failed: {}",
-                            attempt, MAX_QUOTE_ATTEMPTS, error
+                            attempt,
+                            max_attempts = MAX_QUOTE_ATTEMPTS,
+                            error = %error,
+                            "quote attempt failed, retrying"
                         );
                         last_error = Some(error);
 
@@ -812,8 +451,8 @@ impl RFQClient for NativeClient {
             }))
         };
 
-        // Bind the timeout result before inspecting last_error so the attempts future—and its
-        // mutable borrow—has been dropped.
+        // Bind the timeout result before inspecting last_error so the attempts future — and its
+        // mutable borrow — has been dropped.
         let result = timeout(self.quote_timeout, attempts).await;
         match result {
             Ok(result) => result,
@@ -830,24 +469,18 @@ impl RFQClient for NativeClient {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashMap,
         str::FromStr,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex,
         },
     };
 
-    use futures::StreamExt;
     use rstest::rstest;
-    use tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::TcpListener,
-    };
-    use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::native::client_builder::NativeClientBuilder;
+    use crate::book::http::test_support::{spawn_http_server, MockHttpServer, MockResponse};
 
     fn successful_quote_json(amount_in: &str) -> serde_json::Value {
         let calldata = format!("0x7083527c{:064x}{:064x}{:064x}", 0x60u8, 0u8, 0u8);
@@ -907,427 +540,13 @@ mod tests {
         serde_json::from_value(successful_quote_json(amount_in)).unwrap()
     }
 
-    fn conversion_book(
-        base_address: Bytes,
-        quote_address: Bytes,
-        quantity: f64,
-        price: f64,
-    ) -> NativePriceData {
-        NativePriceData {
-            base_address,
-            quote_address,
-            minimum_in_base: 0.0,
-            minimum_in_quote: 0.0,
-            minimum_out_base: 0.0,
-            minimum_out_quote: 0.0,
-            bids: vec![NativePriceLevel { quantity, price }],
-            asks: vec![],
-        }
-    }
-
-    #[test]
-    fn test_native_client_serialization() {
-        let mut tokens = HashSet::new();
-        tokens.insert(Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap());
-        tokens.insert(Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap());
-
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            tokens,
-            10.0,
-            HashSet::new(),
-            Duration::from_secs(1),
+    fn create_test_client(endpoint: String) -> NativeClient {
+        NativeClient::new(
+            NativeSupportedChain::Ethereum,
+            endpoint,
+            "secret_key".to_string(),
             Duration::from_secs(5),
         )
-        .unwrap();
-
-        let serialized = serde_json::to_string(&client).unwrap();
-        let deserialized: NativeClient = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.chain, client.chain);
-        assert_eq!(deserialized.endpoint, client.endpoint);
-        assert_eq!(deserialized.tokens, client.tokens);
-        assert_eq!(deserialized.tvl, client.tvl);
-        assert!(deserialized.api_key.is_empty());
-    }
-
-    #[test]
-    fn rejects_unsupported_chain_at_construction() {
-        let result = NativeClient::new(
-            Chain::Polygon,
-            "test-api-key".to_string(),
-            HashSet::new(),
-            0.0,
-            HashSet::new(),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        );
-
-        assert!(matches!(result, Err(RFQError::InvalidInput(_))));
-    }
-
-    #[test]
-    fn builder_rejects_zero_poll_time() {
-        let result = NativeClientBuilder::new(Chain::Ethereum, "test-api-key".to_string())
-            .poll_time(Duration::ZERO)
-            .build();
-
-        assert!(matches!(
-            result,
-            Err(RFQError::InvalidInput(message))
-                if message == "Native polling interval must be greater than zero"
-        ));
-    }
-
-    #[test]
-    fn selects_most_liquid_tvl_conversion_book() {
-        let weth = Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap();
-        let usdc = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
-        let usdt = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
-        let wbtc = Bytes::from_str("0x4444444444444444444444444444444444444444").unwrap();
-        let unapproved = Bytes::from_str("0x5555555555555555555555555555555555555555").unwrap();
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([
-                weth.clone(),
-                usdc.clone(),
-                usdt.clone(),
-                wbtc.clone(),
-                unapproved.clone(),
-            ]),
-            0.0,
-            HashSet::from([usdc.clone(), usdt.clone()]),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        let books = HashMap::from([
-            ("usdc".to_string(), conversion_book(weth.clone(), usdc.clone(), 1.0, 100.0)),
-            ("usdt".to_string(), conversion_book(weth.clone(), usdt.clone(), 2.0, 100.0)),
-            ("unrelated".to_string(), conversion_book(wbtc, usdc, 1_000.0, 100.0)),
-            ("unapproved".to_string(), conversion_book(weth.clone(), unapproved, 2_000.0, 100.0)),
-        ]);
-
-        let selected = client
-            .select_tvl_conversion_book(&weth, &books)
-            .expect("one conversion book");
-
-        assert_eq!(selected.quote_address, usdt);
-    }
-
-    #[test]
-    fn selects_lower_quote_address_for_equal_tvl_conversion_liquidity() {
-        let weth = Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap();
-        let lower_quote = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
-        let higher_quote = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([weth.clone(), lower_quote.clone(), higher_quote.clone()]),
-            0.0,
-            HashSet::from([lower_quote.clone(), higher_quote.clone()]),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        let books = HashMap::from([
-            ("higher".to_string(), conversion_book(weth.clone(), higher_quote, 2.0, 100.0)),
-            ("lower".to_string(), conversion_book(weth.clone(), lower_quote.clone(), 1.0, 200.0)),
-        ]);
-
-        let selected = client
-            .select_tvl_conversion_book(&weth, &books)
-            .expect("one conversion book");
-
-        assert_eq!(selected.quote_address, lower_quote);
-    }
-
-    #[test]
-    fn creates_indexer_compatible_component_from_relay_orderbook() {
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([weth.clone(), usdt.clone()]),
-            0.0,
-            HashSet::from([usdt.clone()]),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        let books = client.group_orderbook(vec![
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdt.clone(),
-                minimum_in_base: 0.0,
-                side: NativeOrderbookSide::Bid,
-                levels: vec![NativePriceLevel { quantity: 0.0001, price: 3213.12345 }],
-            },
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdt.clone(),
-                minimum_in_base: 0.0,
-                side: NativeOrderbookSide::Ask,
-                levels: vec![NativePriceLevel { quantity: 2.0, price: 3214.0 }],
-            },
-            NativeOrderbookEntry {
-                base_address: usdt.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 100.0,
-                side: NativeOrderbookSide::Bid,
-                levels: vec![NativePriceLevel { quantity: 6428.0, price: 1.0 / 3214.0 }],
-            },
-            NativeOrderbookEntry {
-                base_address: usdt.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 100.0,
-                side: NativeOrderbookSide::Ask,
-                levels: vec![NativePriceLevel { quantity: 0.321312345, price: 1.0 / 3213.12345 }],
-            },
-        ]);
-
-        let (component_id, book) = books
-            .into_iter()
-            .next()
-            .expect("one grouped book");
-        let component = client.create_component_with_state(
-            component_id.clone(),
-            vec![book.base_address.clone(), book.quote_address.clone()],
-            book.clone(),
-            book.calculate_tvl(None)
-                .expect("TVL should be finite"),
-        );
-
-        assert_eq!(component.component.id, component_id);
-        assert_eq!(component.component.protocol_system, NativeClient::PROTOCOL_SYSTEM);
-        assert_eq!(component.component.protocol_type_name, "native_relay_pool");
-        assert_eq!(component.component.tokens, vec![weth, usdt]);
-        assert_eq!(component.state.component_id, component_id);
-
-        let encoded_book = component
-            .state
-            .attributes
-            .get("book")
-            .expect("book attribute");
-        let decoded_book: NativePriceData = serde_json::from_slice(encoded_book).unwrap();
-        assert_eq!(decoded_book.bids.len(), 1);
-        assert_eq!(decoded_book.asks.len(), 1);
-        assert_eq!(decoded_book.bids[0].quantity, 0.0001);
-        assert_eq!(decoded_book.bids[0].price, 3213.12345);
-    }
-
-    #[test]
-    fn uses_stable_component_id_and_direction_when_merging_mirrored_books() {
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([weth.clone(), usdc.clone()]),
-            0.0,
-            HashSet::from([usdc.clone()]),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        let entries = vec![
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdc.clone(),
-                minimum_in_base: 100_000_000_000.0,
-                side: NativeOrderbookSide::Bid,
-                levels: vec![NativePriceLevel { quantity: 1.0, price: 2_000.0 }],
-            },
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdc.clone(),
-                minimum_in_base: 300_000_000_000.0,
-                side: NativeOrderbookSide::Ask,
-                levels: vec![NativePriceLevel { quantity: 1.0, price: 2_100.0 }],
-            },
-            NativeOrderbookEntry {
-                base_address: usdc.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 100.0,
-                side: NativeOrderbookSide::Bid,
-                levels: vec![NativePriceLevel { quantity: 2_000.0, price: 0.0005 }],
-            },
-            NativeOrderbookEntry {
-                base_address: usdc.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 250.0,
-                side: NativeOrderbookSide::Bid,
-                levels: vec![NativePriceLevel { quantity: 2_000.0, price: 0.0005 }],
-            },
-            NativeOrderbookEntry {
-                base_address: usdc.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 400.0,
-                side: NativeOrderbookSide::Ask,
-                levels: vec![NativePriceLevel { quantity: 2.0, price: 0.5 }],
-            },
-        ];
-
-        let forward_only = client.group_orderbook(entries[..2].to_vec());
-        let reverse_entries = entries[2..].to_vec();
-        let reverse_only = client.group_orderbook(reverse_entries.clone());
-        let reversed_reverse_only = client.group_orderbook(
-            reverse_entries
-                .into_iter()
-                .rev()
-                .collect(),
-        );
-        assert_eq!(reverse_only, reversed_reverse_only);
-        let pair = format!("native_{}/{}", hex::encode(&usdc), hex::encode(&weth));
-        let component_id = keccak256(pair.as_bytes()).to_string();
-
-        let forward_book = forward_only
-            .get(&component_id)
-            .expect("forward-only book uses the stable component ID");
-        assert_eq!(forward_book.base_address, weth);
-        assert_eq!(forward_book.quote_address, usdc);
-        assert_eq!(forward_book.minimum_in_base, 100_000_000_000.0);
-        assert_eq!(forward_book.minimum_in_quote, 0.0);
-        assert_eq!(forward_book.minimum_out_base, 300_000_000_000.0);
-        assert_eq!(forward_book.minimum_out_quote, 0.0);
-
-        let reverse_book = reverse_only
-            .get(&component_id)
-            .expect("reverse-only book uses the stable component ID");
-        assert_eq!(reverse_book.base_address, weth);
-        assert_eq!(reverse_book.quote_address, usdc);
-        assert_eq!(reverse_book.minimum_in_base, 0.0);
-        assert_eq!(reverse_book.minimum_in_quote, 250.0);
-        assert_eq!(reverse_book.minimum_out_base, 0.0);
-        assert_eq!(reverse_book.minimum_out_quote, 400.0);
-        assert_eq!(reverse_book.bids, vec![NativePriceLevel { quantity: 1.0, price: 2.0 }]);
-        assert_eq!(
-            reverse_book.asks,
-            vec![
-                NativePriceLevel { quantity: 1.0, price: 2_000.0 },
-                NativePriceLevel { quantity: 1.0, price: 2_000.0 },
-            ]
-        );
-
-        let mixed = client.group_orderbook(vec![entries[0].clone(), entries[2].clone()]);
-        let mixed_book = mixed.get(&component_id).unwrap();
-        assert_eq!(mixed_book.minimum_in_base, 100_000_000_000.0);
-        assert_eq!(mixed_book.minimum_in_quote, 100.0);
-        assert_eq!(mixed_book.minimum_out_base, 0.0);
-        assert_eq!(mixed_book.minimum_out_quote, 0.0);
-        assert_eq!(mixed_book.bids, vec![NativePriceLevel { quantity: 1.0, price: 2_000.0 }]);
-        assert_eq!(mixed_book.asks, vec![NativePriceLevel { quantity: 1.0, price: 2_000.0 }]);
-
-        let books = client.group_orderbook(entries.clone());
-        let reversed_books = client.group_orderbook(entries.into_iter().rev().collect());
-
-        assert_eq!(books, reversed_books);
-        assert_eq!(books.len(), 1);
-        let book = books.get(&component_id).unwrap();
-        assert_eq!(book.base_address, weth);
-        assert_eq!(book.quote_address, usdc);
-        assert_eq!(book.minimum_in_base, 100_000_000_000.0);
-        assert_eq!(book.minimum_in_quote, 0.0);
-        assert_eq!(book.minimum_out_base, 300_000_000_000.0);
-        assert_eq!(book.minimum_out_quote, 0.0);
-        assert_eq!(book.bids, vec![NativePriceLevel { quantity: 1.0, price: 2_000.0 }]);
-        assert_eq!(book.asks, vec![NativePriceLevel { quantity: 1.0, price: 2_100.0 }]);
-    }
-
-    #[test]
-    fn zero_only_direct_side_does_not_suppress_mirrored_liquidity() {
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([weth.clone(), usdc.clone()]),
-            0.0,
-            HashSet::from([usdc.clone()]),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        let books = client.group_orderbook(vec![
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdc.clone(),
-                minimum_in_base: 999.0,
-                side: NativeOrderbookSide::Bid,
-                levels: vec![NativePriceLevel { quantity: 0.0, price: 2_000.0 }],
-            },
-            NativeOrderbookEntry {
-                base_address: usdc,
-                quote_address: weth,
-                minimum_in_base: 250.0,
-                side: NativeOrderbookSide::Ask,
-                levels: vec![NativePriceLevel { quantity: 2.0, price: 0.5 }],
-            },
-        ]);
-
-        let book = books
-            .values()
-            .next()
-            .expect("one grouped book");
-        assert_eq!(book.bids, vec![NativePriceLevel { quantity: 1.0, price: 2.0 }]);
-        assert_eq!(book.minimum_in_base, 0.0);
-        assert_eq!(book.minimum_out_quote, 250.0);
-    }
-
-    #[rstest]
-    #[case::token0_only(true, false, true)]
-    #[case::token1_only(false, true, false)]
-    #[case::both_tokens(true, true, false)]
-    #[case::neither_token(false, false, false)]
-    fn selects_stable_direction_for_quote_token_preferences(
-        #[case] token0_is_quote: bool,
-        #[case] token1_is_quote: bool,
-        #[case] expected_quote_is_token0: bool,
-    ) {
-        let token0 = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
-        let token1 = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
-        assert!(token0.as_ref() < token1.as_ref());
-
-        let mut quote_tokens = HashSet::new();
-        if token0_is_quote {
-            quote_tokens.insert(token0.clone());
-        }
-        if token1_is_quote {
-            quote_tokens.insert(token1.clone());
-        }
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([token0.clone(), token1.clone()]),
-            0.0,
-            quote_tokens,
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        // Native returned only the direction opposite to the sorted fallback.
-        let books = client.group_orderbook(vec![NativeOrderbookEntry {
-            base_address: token1.clone(),
-            quote_address: token0.clone(),
-            minimum_in_base: 0.0,
-            side: NativeOrderbookSide::Bid,
-            levels: vec![NativePriceLevel { quantity: 1.0, price: 1.0 }],
-        }]);
-
-        let book = books
-            .values()
-            .next()
-            .expect("one grouped book");
-        let (expected_base, expected_quote) =
-            if expected_quote_is_token0 { (token1, token0) } else { (token0, token1) };
-        assert_eq!(book.base_address, expected_base);
-        assert_eq!(book.quote_address, expected_quote);
     }
 
     fn create_test_quote_params() -> GetAmountOutParams {
@@ -1338,6 +557,27 @@ mod tests {
             sender: Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap(),
             receiver: Bytes::from_str("0x4444444444444444444444444444444444444444").unwrap(),
         }
+    }
+
+    #[test]
+    fn serialization_keeps_config_and_drops_the_key() {
+        let client = create_test_client("https://native.example".to_string());
+
+        let serialized = serde_json::to_string(&client).unwrap();
+        let deserialized: NativeClient = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.chain, client.chain);
+        assert_eq!(deserialized.endpoint, client.endpoint);
+        assert_eq!(deserialized.quote_timeout, client.quote_timeout);
+        assert!(deserialized.api_key.is_empty());
+    }
+
+    #[test]
+    fn debug_output_omits_credentials() {
+        let rendered = format!("{:?}", create_test_client("https://native.example".to_string()));
+
+        assert!(!rendered.contains("secret_key"));
+        assert!(rendered.contains("native.example"));
     }
 
     #[test]
@@ -1605,92 +845,28 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn accepts_native_eth_orderbook_using_zero_address() {
-        let tycho_native_eth = Bytes::zero(20);
-        let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-        let client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::from([tycho_native_eth.clone(), usdc.clone()]),
-            0.0,
-            HashSet::from([usdc.clone()]),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-        let entry: NativeOrderbookEntry = serde_json::from_value(serde_json::json!({
-            "base_address": tycho_native_eth.to_string(),
-            "quote_address": usdc.to_string(),
-            "minimum_in_base": 1.0,
-            "side": "bid",
-            "levels": [[1.0, 3_000.0]]
-        }))
-        .unwrap();
-        let books = client.group_orderbook(vec![entry]);
-
-        let book = books.values().next().unwrap();
-        assert_eq!(book.base_address, tycho_native_eth);
-    }
-
-    fn create_test_client(endpoint: String) -> NativeClient {
-        let mut client = NativeClient::new(
-            Chain::Ethereum,
-            "test-api-key".to_string(),
-            HashSet::new(),
-            0.0,
-            HashSet::new(),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        client.endpoint = endpoint;
-        client
-    }
-
     #[tokio::test]
     async fn requests_v6_firm_quote() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .await
-                .unwrap();
-            let body = successful_quote_json("1").to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            reader
-                .into_inner()
-                .write_all(response.as_bytes())
-                .await
-                .unwrap();
-            request_line
-        });
-        let client = create_test_client(format!("http://{address}"));
+        let seen_target = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&seen_target);
+        let server = spawn_http_server(move |target| {
+            *record.lock().unwrap() = Some(target.to_string());
+            Some(("200 OK", successful_quote_json("1").to_string()))
+        })
+        .await;
+        let client = create_test_client(server.url());
         let params = create_test_quote_params();
 
         let quote = client
             .request_binding_quote(&params)
             .await
             .unwrap();
-        let request = server.await.unwrap();
-        let url = reqwest::Url::parse(&format!(
-            "http://{address}{}",
-            request
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-        ))
-        .unwrap();
+        let target = seen_target
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("one request");
+        let url = reqwest::Url::parse(&format!("{}{target}", server.url())).unwrap();
         let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
 
         assert_eq!(url.path(), "/firm-quote");
@@ -1704,168 +880,27 @@ mod tests {
         assert_eq!(quote.amount_in, params.amount_in);
     }
 
-    #[tokio::test]
-    async fn requests_native_token_orderbooks() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .await
-                .unwrap();
-            let mut stream = reader.into_inner();
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]";
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .unwrap();
-            request_line
-        });
-        let client = create_test_client(format!("http://{address}"));
-
-        let orderbook = client.fetch_orderbook().await.unwrap();
-        let request = server.await.unwrap();
-
-        assert!(orderbook.is_empty());
-        assert!(request.starts_with("GET /orderbook?"));
-        assert!(request.contains("chain=ethereum"));
-        assert!(request.contains("showNative=0x0"));
-    }
-
-    #[rstest]
-    #[case::with_conversion_helper(true, 300.0, Some(400.0))]
-    #[case::without_conversion_helper(false, 300.0, None)]
-    #[case::below_normalized_tvl_threshold(true, 401.0, None)]
-    #[tokio::test]
-    async fn stream_uses_unrequested_books_only_for_tvl_conversion(
-        #[case] include_helper: bool,
-        #[case] tvl_threshold: f64,
-        #[case] expected_tvl: Option<f64>,
-    ) {
-        let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
-        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
-        let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-        let mut entries = vec![serde_json::json!({
-            "base_address": weth.to_string(),
-            "quote_address": usdt.to_string(),
-            "minimum_in_base": 0.0,
-            "side": "bid",
-            "levels": [[2.0, 100.0]]
-        })];
-        if include_helper {
-            // Use a reversed helper with a non-unit price so the test distinguishes the market's
-            // 200 USDT of liquidity from its normalized value of 400 USDC.
-            entries.push(serde_json::json!({
-                "base_address": usdc.to_string(),
-                "quote_address": usdt.to_string(),
-                "minimum_in_base": 0.0,
-                "side": "bid",
-                "levels": [[1_000.0, 0.5]]
-            }));
-        }
-        let (address, _) =
-            create_quote_server("200 OK", serde_json::to_string(&entries).unwrap()).await;
-        let mut client = create_test_client(format!("http://{address}"));
-        client.tokens = HashSet::from([weth.clone(), usdt.clone()]);
-        client.quote_tokens = HashSet::from([usdc]);
-        client.tvl = tvl_threshold;
-
-        let (_, update) = timeout(Duration::from_secs(5), client.stream().next())
-            .await
-            .expect("orderbook poll timed out")
-            .expect("stream ended")
-            .expect("orderbook poll failed");
-
-        if let Some(tvl) = expected_tvl {
-            assert_eq!(update.snapshots.states.len(), 1, "helper must not be emitted");
-            let component = update
-                .snapshots
-                .states
-                .values()
-                .next()
-                .unwrap();
-            assert_eq!(component.component.tokens, vec![weth, usdt]);
-            assert_eq!(component.component_tvl, Some(tvl));
-        } else {
-            assert!(update.snapshots.states.is_empty());
-        }
-    }
-
-    async fn create_quote_server(
-        final_status: impl Into<String>,
-        final_body: impl Into<String>,
-    ) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
-        let final_status = final_status.into();
-        let final_body = final_body.into();
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let server_request_count = request_count.clone();
-
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                server_request_count.fetch_add(1, Ordering::SeqCst);
-                let response = format!(
-                    "HTTP/1.1 {final_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{final_body}",
-                    final_body.len()
-                );
-                let _ = stream
-                    .write_all(response.as_bytes())
-                    .await;
-                let _ = stream.shutdown().await;
-            }
-        });
-
-        (address, request_count)
-    }
-
-    async fn create_hanging_quote_server() -> std::net::SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (_stream, _) = listener.accept().await.unwrap();
-            std::future::pending::<()>().await;
-        });
-
-        address
-    }
-
-    #[tokio::test]
-    async fn handles_orderbook_api_error_with_http_200() {
-        let (address, request_count) = create_quote_server(
-            "200 OK",
-            r#"{"code":171015,"message":"quoted token not available"}"#,
-        )
-        .await;
-        let client = create_test_client(format!("http://{address}"));
-
-        let result = client.fetch_orderbook().await;
-
-        assert!(matches!(
-            result,
-            Err(RFQError::QuoteNotFound(message)) if message.contains("171015")
-        ));
-        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    /// Answers every request only after an hour, so any client deadline fires first.
+    async fn create_hanging_quote_server() -> MockHttpServer {
+        spawn_http_server(|_| {
+            Some(MockResponse {
+                delay: Duration::from_secs(3600),
+                ..MockResponse::from(("200 OK", String::new()))
+            })
+        })
+        .await
     }
 
     #[tokio::test]
     async fn handles_documented_quote_error_without_retrying() {
-        let (address, request_count) = create_quote_server(
-            "200 OK",
-            r#"{"code":171015,"message":"quoted token not available"}"#,
-        )
+        let server = spawn_http_server(|_| {
+            Some((
+                "200 OK",
+                r#"{"code":171015,"message":"quoted token not available"}"#.to_string(),
+            ))
+        })
         .await;
-        let client = create_test_client(format!("http://{address}"));
+        let client = create_test_client(server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -1878,7 +913,7 @@ mod tests {
             }
             other => panic!("Expected Native API error, got {other:?}"),
         }
-        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(server.request_count(), 1);
     }
 
     #[tokio::test]
@@ -1886,8 +921,9 @@ mod tests {
         let mut response = successful_quote_json("1");
         response["success"] = serde_json::Value::Bool(false);
         response["errorMessage"] = serde_json::Value::String("quote unavailable".to_string());
-        let (address, request_count) = create_quote_server("200 OK", response.to_string()).await;
-        let client = create_test_client(format!("http://{address}"));
+        let body = response.to_string();
+        let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
+        let client = create_test_client(server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -1897,32 +933,36 @@ mod tests {
             result,
             Err(RFQError::QuoteNotFound(message)) if message.contains("quote unavailable")
         ));
-        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(server.request_count(), 1);
     }
 
     #[tokio::test]
     async fn retries_documented_temporary_api_error() {
-        let (address, request_count) = create_quote_server(
-            "200 OK",
-            r#"{"code":301016,"message":"quote invalid, risk management checks failed"}"#,
-        )
+        let server = spawn_http_server(|_| {
+            Some((
+                "200 OK",
+                r#"{"code":301016,"message":"quote invalid, risk management checks failed"}"#
+                    .to_string(),
+            ))
+        })
         .await;
-        let client = create_test_client(format!("http://{address}"));
+        let client = create_test_client(server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
             .await;
 
         assert!(matches!(result, Err(RFQError::QuoteNotFound(_))));
-        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+        assert_eq!(server.request_count(), 3);
     }
 
     #[tokio::test]
     async fn retries_server_error_without_native_error_envelope() {
-        let (address, request_count) =
-            create_quote_server("503 Service Unavailable", "<html>upstream unavailable</html>")
-                .await;
-        let client = create_test_client(format!("http://{address}"));
+        let server = spawn_http_server(|_| {
+            Some(("503 Service Unavailable", "<html>upstream unavailable</html>".to_string()))
+        })
+        .await;
+        let client = create_test_client(server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -1932,28 +972,32 @@ mod tests {
             result,
             Err(RFQError::ConnectionError(message)) if message.contains("503 Service Unavailable")
         ));
-        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+        assert_eq!(server.request_count(), 3);
     }
 
     #[tokio::test]
     async fn retries_malformed_success_response() {
-        let (address, request_count) =
-            create_quote_server("200 OK", r#"{"unexpected":true}"#).await;
-        let client = create_test_client(format!("http://{address}"));
+        let server =
+            spawn_http_server(|_| Some(("200 OK", r#"{"unexpected":true}"#.to_string()))).await;
+        let client = create_test_client(server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
             .await;
 
         assert!(matches!(result, Err(RFQError::ParsingError(_))));
-        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+        assert_eq!(server.request_count(), 3);
     }
 
     #[tokio::test]
     async fn times_out_when_quote_response_stalls() {
-        let address = create_hanging_quote_server().await;
-        let mut client = create_test_client(format!("http://{address}"));
-        client.quote_timeout = Duration::from_millis(50);
+        let server = create_hanging_quote_server().await;
+        let client = NativeClient::new(
+            NativeSupportedChain::Ethereum,
+            server.url(),
+            "secret_key".to_string(),
+            Duration::from_millis(50),
+        );
 
         let result = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1970,40 +1014,33 @@ mod tests {
 
     #[tokio::test]
     async fn shares_quote_timeout_across_retries() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let server_request_count = request_count.clone();
         let params = create_test_quote_params();
         let success_body = successful_quote_json(&params.amount_in.to_string()).to_string();
         let quote_timeout = NATIVE_API_RETRY_DELAY * 2;
 
-        tokio::spawn(async move {
-            let retry_body =
-                r#"{"code":301016,"message":"quote invalid, risk management checks failed"}"#
-                    .to_string();
-            for body in [retry_body, success_body] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let attempt = server_request_count.fetch_add(1, Ordering::SeqCst);
-                if attempt == 1 {
-                    // This fits a fresh timeout, but not the time left after the retry backoff.
-                    tokio::time::sleep(quote_timeout * 3 / 4).await;
-                }
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream
-                    .write_all(response.as_bytes())
-                    .await;
-                let _ = stream.shutdown().await;
+        let attempts = AtomicUsize::new(0);
+        let server = spawn_http_server(move |_| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                let retry_body =
+                    r#"{"code":301016,"message":"quote invalid, risk management checks failed"}"#
+                        .to_string();
+                return Some(MockResponse::from(("200 OK", retry_body)));
             }
-        });
+            // This fits a fresh timeout, but not the time left after the retry backoff.
+            Some(MockResponse {
+                delay: quote_timeout * 3 / 4,
+                ..MockResponse::from(("200 OK", success_body.clone()))
+            })
+        })
+        .await;
 
-        let mut client = create_test_client(format!("http://{address}"));
-        client.quote_timeout = quote_timeout;
+        let client = NativeClient::new(
+            NativeSupportedChain::Ethereum,
+            server.url(),
+            "secret_key".to_string(),
+            quote_timeout,
+        );
 
         let result = timeout(Duration::from_secs(5), client.request_binding_quote(&params))
             .await
@@ -2013,23 +1050,25 @@ mod tests {
             result,
             Err(RFQError::QuoteNotFound(message)) if message.contains("301016")
         ));
-        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        assert_eq!(server.request_count(), 2);
     }
 
     #[tokio::test]
     async fn does_not_retry_documented_authentication_error() {
-        let (address, request_count) = create_quote_server(
-            "200 OK",
-            r#"{"code":201001,"message":"auth get api key is invalid"}"#,
-        )
+        let server = spawn_http_server(|_| {
+            Some((
+                "200 OK",
+                r#"{"code":201001,"message":"auth get api key is invalid"}"#.to_string(),
+            ))
+        })
         .await;
-        let client = create_test_client(format!("http://{address}"));
+        let client = create_test_client(server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
             .await;
 
         assert!(matches!(result, Err(RFQError::FatalError(_))));
-        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(server.request_count(), 1);
     }
 }

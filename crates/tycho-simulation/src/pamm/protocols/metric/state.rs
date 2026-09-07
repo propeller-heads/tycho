@@ -1,57 +1,45 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap};
 
-use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::{protocol::GetAmountOutParams, token::Token},
+    models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        indicatively_priced::{IndicativelyPriced, SignedQuote},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
     },
     Bytes,
 };
 
-use crate::rfq::protocols::metric::{
-    client::MetricClient,
-    models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
+use crate::pamm::protocols::metric::models::{
+    MetricBidAskResponse, MetricDepthBin, MetricMetadata,
 };
 
 /// Gas estimate for one MetricExecutor swap (pool swap + callback settlement).
 const METRIC_SWAP_GAS: u64 = 170_000;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
 pub struct MetricState {
-    pub base_token: Token,
-    pub quote_token: Token,
-    pub metadata: MetricMetadata,
-    pub bid_ask: MetricBidAskResponse,
-    pub client: MetricClient,
-}
-
-impl fmt::Debug for MetricState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MetricState")
-            .field("base_token", &self.base_token)
-            .field("quote_token", &self.quote_token)
-            .field("pool", &self.metadata.pool_address)
-            .field("server_ts", &self.bid_ask.server_ts)
-            .finish_non_exhaustive()
-    }
+    pub(super) base_token: Token,
+    pub(super) quote_token: Token,
+    #[debug("{{ pool_address: {:?}, .. }}", metadata.pool_address)]
+    pub(super) metadata: MetricMetadata,
+    /// The depth bins are too long for a log line; the timestamp says which quote this is.
+    #[debug("{{ server_ts: {}, .. }}", bid_ask.server_ts)]
+    pub(super) bid_ask: MetricBidAskResponse,
 }
 
 impl MetricState {
-    pub fn new(
-        base_token: Token,
-        quote_token: Token,
-        metadata: MetricMetadata,
-        bid_ask: MetricBidAskResponse,
-        client: MetricClient,
-    ) -> Self {
-        Self { base_token, quote_token, metadata, bid_ask, client }
+    /// The pool's token0, whose amounts the depth is quoted in.
+    pub fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    /// The pool's token1.
+    pub fn quote_token(&self) -> &Token {
+        &self.quote_token
     }
 
     fn direction(
@@ -268,10 +256,6 @@ impl ProtocolSim for MetricState {
         Ok((sell_limit, buy_limit))
     }
 
-    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
-        Ok(self)
-    }
-
     fn delta_transition(
         &mut self,
         _delta: ProtocolStateDelta,
@@ -397,42 +381,14 @@ fn depth_output_for_input(
     Ok(DepthFill { output, exhausted: !remaining_input.is_zero() })
 }
 
-#[async_trait]
-impl IndicativelyPriced for MetricState {
-    async fn request_signed_quote(
-        &self,
-        params: GetAmountOutParams,
-    ) -> Result<SignedQuote, SimulationError> {
-        let direction = self.direction(&params.token_in, &params.token_out)?;
-        let (token_in, token_out) = match direction {
-            MetricDirection::ZeroForOne => (&self.base_token, &self.quote_token),
-            MetricDirection::OneForZero => (&self.quote_token, &self.base_token),
-        };
-        let amount_out = self
-            .get_amount_out(params.amount_in.clone(), token_in, token_out)?
-            .amount;
-
-        // The v1 heartbeat updates the oracle on-chain every block, so execution relays no signed
-        // oracle-update args with the swap. The quote therefore carries no quote attributes.
-        Ok(SignedQuote {
-            base_token: params.token_in.clone(),
-            quote_token: params.token_out.clone(),
-            amount_in: params.amount_in.clone(),
-            amount_out,
-            quote_attributes: HashMap::new(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::str::FromStr;
 
-    use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::metric::{client::MetricClient, models::MetricDepth};
+    use crate::pamm::protocols::metric::models::MetricDepth;
 
     fn big(value: &str) -> BigUint {
         value.parse().unwrap()
@@ -506,17 +462,7 @@ mod tests {
             price_provider_status: Some("healthy".to_string()),
             depth: MetricDepth::default(),
         };
-        let client = MetricClient::new(
-            Chain::Ethereum,
-            HashSet::new(),
-            0.0,
-            "http://localhost:8080".to_string(),
-            None,
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-        MetricState::new(weth, usdc, metadata, bid_ask, client)
+        MetricState { base_token: weth, quote_token: usdc, metadata, bid_ask }
     }
 
     #[test]
@@ -863,28 +809,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "hits Metric's public API"]
-    async fn test_live_metric_api_state_get_amount_out_and_signed_quote() {
-        use crate::rfq::protocols::metric::models::PaginatedMetadataResponse;
+    #[ignore = "hits Metric's public API; requires METRIC_API_KEY"]
+    async fn test_live_metric_api_state_get_amount_out() {
+        use crate::pamm::protocols::metric::models::PaginatedMetadataResponse;
+
+        let api_key = std::env::var("METRIC_API_KEY").expect("METRIC_API_KEY not set");
 
         // Base: the only supported chain with pools published on the live API so far.
         let weth = base_weth();
         let usdc = base_usdc();
-        let config = crate::rfq::constants::get_metric_config();
-        let base_url = config
-            .base_url
-            .trim_end_matches('/')
-            .to_string();
-        let client = MetricClient::new(
-            Chain::Base,
-            HashSet::from([weth.address.clone(), usdc.address.clone()]),
-            0.0,
-            base_url.clone(),
-            config.api_key.clone(),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        let base_url = "https://api.metric.xyz";
 
         let http_client = reqwest::Client::new();
         let metadata: PaginatedMetadataResponse = http_client
@@ -906,13 +840,10 @@ mod tests {
         {
             let checksummed =
                 alloy::primitives::Address::from_slice(&pool.pool_address).to_checksum(None);
-            let mut request = http_client
+            let bid_ask: MetricBidAskResponse = http_client
                 .get(format!("{base_url}/public/v1/evm/8453/{checksummed}/bid_ask"))
-                .header("accept", "application/json");
-            if let Some(api_key) = &config.api_key {
-                request = request.bearer_auth(api_key);
-            }
-            let bid_ask: MetricBidAskResponse = request
+                .header("accept", "application/json")
+                .bearer_auth(&api_key)
                 .send()
                 .await
                 .unwrap()
@@ -934,30 +865,14 @@ mod tests {
             return;
         };
 
-        let state = MetricState::new(weth, usdc, metadata, bid_ask, client);
+        let state = MetricState { base_token: weth, quote_token: usdc, metadata, bid_ask };
         assert!(state.bid_ask.is_quotable());
 
         let amount_in = BigUint::from(1_000_000_000u64);
-        let indicative_quote = state
-            .get_amount_out(amount_in.clone(), &state.base_token, &state.quote_token)
-            .unwrap();
-        let trader = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
-        let signed_quote = state
-            .request_signed_quote(GetAmountOutParams {
-                amount_in,
-                token_in: state.base_token.address.clone(),
-                token_out: state.quote_token.address.clone(),
-                sender: trader.clone(),
-                receiver: trader,
-            })
-            .await
+        let quote = state
+            .get_amount_out(amount_in, &state.base_token, &state.quote_token)
             .unwrap();
 
-        assert!(indicative_quote.amount > BigUint::from(0u8));
-        assert!(signed_quote.amount_out > BigUint::from(0u8));
-        assert_eq!(signed_quote.base_token, state.base_token.address);
-        assert_eq!(signed_quote.quote_token, state.quote_token.address);
-        // The heartbeat model relays no oracle-update args, so the quote carries no attributes.
-        assert!(signed_quote.quote_attributes.is_empty());
+        assert!(quote.amount > BigUint::from(0u8));
     }
 }
