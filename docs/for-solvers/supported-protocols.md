@@ -28,7 +28,7 @@ Currently, Tycho supports the following protocols:
 </tbody>
 </table>
 
-For RFQ protocols that fetch prices from market makers via WebSocket or API, see [Request for Quote Protocols](request-for-quote-protocols.md).
+For venues that price off the chain — the RFQ market makers and the off-chain-priced pAMMs, whose books arrive over a WebSocket or an API — see [Off-Chain Book Protocols](request-for-quote-protocols.md).
 
 {% hint style="info" %}
 **Live tracker & Upcoming protocols**

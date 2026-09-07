@@ -30,8 +30,74 @@ for any protocol indexed by Tycho.
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
-- **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
-  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP
+- **`snapshot_feed/`**: latest-value snapshot feeds, both ends. `SnapshotFeed` is the contract —
+  `run(publisher)` consumes the source and publishes through a `Publisher<Self::Snapshot>` until
+  it ends with `Result<(), Self::Error>`. A feed cannot make a `Publisher`: the constructor is
+  crate-private and its only callers are the three consumer types, each of which creates the
+  watch channel, marks its `None` seed seen, and spawns the feed in its own task — so reading a
+  feed is the only way to run one, the channel coalesces for a slow consumer instead of
+  back-pressuring the venue, and no consumer can hold a feed's future and give it their own pace.
+  `publishing(max_age, snapshots)` is the publisher's whole public surface, so a feed hands over
+  its snapshots and the age at which one goes stale and nothing else is its to get right:
+  `Publisher`'s `Drop` withdraws whatever it leaves behind however it ends, and a feed nobody
+  reads is stopped by dropping its task rather than by noticing. The consumer types all spawn
+  the feed — hence `spawn`, not `new` — and abort it when dropped: `SnapshotFeedStream` yields
+  `Published` / `Withdrawn` and, as its last item, `Ended(SnapshotFeedOutcome)` — `RanOut`,
+  `Failed(E)` or `Panicked(JoinError)`, the same three the watch reports. `Ended` is an event
+  rather than just the stream ending because the keyed set needs it per feed: its own end comes
+  only once every feed has ended. `SnapshotFeedStreams` keys any number of those by label, is
+  itself a `Stream` of `(label, event)`, and hands a feed back from `add` when the label is
+  taken; and
+  `SnapshotFeedWatch` hands out `watch::Receiver` clones for a consumer that prices on demand,
+  with `ended()` for the `SnapshotFeedOutcome` a bare `None` in the channel cannot express —
+  reported once, then pending forever, so it can sit in a `select!` arm. The trait's
+  associated types carry the bounds every consumer needs (`Snapshot: Send + Sync + 'static`,
+  `Error: Send + 'static`), so a feed that compiles can be run. The trait and the streams are generic in both the snapshot and the error; behind the
+  `book-feeds` feature come the feeds this crate ships, with `snapshot_feed::errors::FeedError` as their
+  error and the transport loops that build one from a provider's source:
+  `snapshot_feed::ws::run_ws_feed` drives a `WsSource` (`request` + `decode`),
+  `snapshot_feed::http::run_http_poll_feed` an `HttpSource` (`fetch`), each with its tuning type beside it
+  (`WsFeedConfig`, `HttpFeedConfig`; no `Default` — spread from the builder's `default_feed_config()`).
+  The loops know nothing of a venue at all: the `snapshot_feed{provider}` span their events are
+  recorded in is raised by `SnapshotFeedStream::spawn(provider, feed)` from the name the consumer
+  reads the feed under, so a venue is spelled once. They publish what the source yields, count
+  failures and back off (`failures.rs`), and withdraw a snapshot that goes `max_snapshot_age`
+  without a refresh (`publisher.rs`, which also withdraws whatever a feed leaves behind when it
+  ends)
+- **`book/`**: the shared layer for off-chain market-maker venues, whose pricing arrives as a
+  complete book rather than as chain state. A feed publishes `BookSnapshot<A>` (a provider's whole
+  set of `Book`s at one anchor — `ReceivedAt` for every feed here; a block-anchored feed would pick
+  another `A`), and a `Book` is one pair's simulate-ready component + state, plus the provider's
+  `updated_at` where it reports one. A provider's `*Feed` implements `SnapshotFeed` directly, with
+  a `run` that calls one of the two loops and nothing else. `BookFeedConfig` (chain, tokens,
+  minimum book TVL in USD) is what every book feed needs whatever transport it runs on, and is the
+  first argument of every feed builder; `BookFeedStreams`/`BookFeedEvent` are `SnapshotFeedStreams`/`SnapshotFeedEvent`
+  with the book types filled in
+  - **`book::{levels,sim,component,tvl}`**: what level-based venues share — `Levels`, the
+    validated ladder every venue decodes its wire format into at ingestion (`fill`, `invert`,
+    `notional`, `average_price`), the direction/scaling/limit pieces every such `ProtocolSim`
+    impl needs, the pair component id and builder, and pricing a book's notional in USD through
+    the other pairs the same response carried
+  - Per provider: `feed.rs` (the `*Feed` and its builder), `client.rs` (everything that talks to
+    the venue — its endpoints, its credentials, one pooled `reqwest::Client`, and every request:
+    the book poll or WebSocket handshake the feed needs and, where the venue signs quotes, the
+    binding-quote request the states make), `source.rs` (what to make of the answers — decoding,
+    orientation, TVL normalization, building components and states), `state.rs`, `models.rs` and
+    a module-level `PROTOCOL_SYSTEM` constant. No source holds a credential or builds a request:
+    it asks its client. Feeds that price book TVL off their own levels also take the USD
+    quote-token set (`book::quote_tokens::usd_stablecoins_for_chain` is the curated default); how
+    a venue's books are oriented and deduplicated is that provider's business, decided in its
+    `source.rs`
+- **`rfq/`**: the book feeds that need binding quotes at execution time (Bebop, Hashflow,
+  Liquorice, Native) — their clients are shared via `Arc` by the emitted states, which request
+  signed quotes through `IndicativelyPriced`; the crate-private `RFQError` covers the quoting
+  layer and never reaches a public signature. Credentials are constructor arguments of the feed builders; the
+  library never reads the environment
+- **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
+  the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
+  and its client is held by the feed alone rather than by every state).
+  The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
+  it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are
@@ -88,7 +154,7 @@ math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent
 | Feature | Default | Contents |
 |---------|---------|----------|
 | `evm` | yes | `revm`, `SimulationEngine`, all EVM protocol impls |
-| `rfq` | yes | RFQ WebSocket client and protocol adapters |
+| `book-feeds` | yes | The off-chain book feeds: `snapshot_feed`'s transport loops, `book/`, `rfq/`, `pamm/` (implies `evm`). The `SnapshotFeed` trait is unconditional |
 | `price-level-stream` | yes | Titan pAMM price level stream client |
 | `network_tests` | no | Gates tests that require live network access |
 
@@ -97,6 +163,10 @@ math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent
 - CI pins a nightly toolchain for both `fmt` and `clippy` (see `.github/workflows/ci-rust.yaml`);
   stable for builds and tests
 - `rstest`: name each parametrised case with `#[case::descriptive_name(...)]`
+- A `tracing` span whose fields identify what an event is about (`snapshot_feed{provider}`,
+  `quote_request{...}`) is `error`-level: a span the subscriber's filter rejects is never entered,
+  so its fields attach to nothing and a `warn!` inside it prints bare. Spans that only time work
+  stay fieldless at `debug`
 - Mark every test that hits external services `#[ignore = "Requires RPC_URL ..."]`. CI runs
   `--all-features`, so `#[cfg_attr(not(feature = "network_tests"), ignore)]` does not exclude the
   test and it fails without `RPC_URL`
