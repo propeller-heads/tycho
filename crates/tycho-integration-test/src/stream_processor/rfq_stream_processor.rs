@@ -1,37 +1,36 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    fmt::Display,
-    time::Duration,
-};
+use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc, time::Duration};
 
 use miette::{miette, IntoDiagnostic, WrapErr};
 use rand::prelude::IteratorRandom;
-use tokio::{sync::mpsc::Sender, task::JoinHandle};
+use tokio::{
+    sync::mpsc::Sender,
+    task::{JoinHandle, JoinSet},
+};
+use tokio_stream::{wrappers::WatchStream, StreamExt, StreamMap};
 use tracing::{info, warn};
 use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
 };
-use tycho_simulation::rfq::{
-    protocols::{
-        bebop::{client::BebopClient, client_builder::BebopClientBuilder, state::BebopState},
-        hashflow::{
-            client::HashflowClient, client_builder::HashflowClientBuilder, state::HashflowState,
-        },
-        liquorice::{
-            client::LiquoriceClient, client_builder::LiquoriceClientBuilder, state::LiquoriceState,
-        },
-        metric::{client::MetricClient, client_builder::MetricClientBuilder, state::MetricState},
-        native::{
-            client::NativeClient, client_builder::NativeClientBuilder,
-            models::NativeSupportedChain, state::NativeState,
-        },
+use tycho_execution::encoding::evm::get_router_address;
+use tycho_simulation::{
+    book::{
+        constants::usd_stablecoins_for_chain,
+        errors::FeedError,
+        models::{BookSnapshot, CommonConfig, HttpFeedConfig, ReceivedAt},
     },
-    stream::RFQStreamBuilder,
+    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    rfq::protocols::{
+        bebop::{self, feed::BebopFeedBuilder},
+        hashflow::{self, feed::HashflowFeedBuilder},
+        liquorice::{self, feed::LiquoriceFeedBuilder},
+        native::{self, feed::NativeFeedBuilder},
+    },
+    snapshot_feed::SnapshotFeed,
 };
+use tycho_test::execution::encoding::USER_ADDR;
 
-use crate::stream_processor::{StreamUpdate, UpdateType};
+use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum RFQProtocol {
@@ -45,11 +44,11 @@ pub enum RFQProtocol {
 impl Display for RFQProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RFQProtocol::Bebop => write!(f, "{}", BebopClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Hashflow => write!(f, "{}", HashflowClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Liquorice => write!(f, "{}", LiquoriceClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Metric => write!(f, "{}", MetricClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Native => write!(f, "{}", NativeClient::PROTOCOL_SYSTEM),
+            RFQProtocol::Bebop => write!(f, "{}", bebop::PROTOCOL_SYSTEM),
+            RFQProtocol::Hashflow => write!(f, "{}", hashflow::PROTOCOL_SYSTEM),
+            RFQProtocol::Liquorice => write!(f, "{}", liquorice::PROTOCOL_SYSTEM),
+            RFQProtocol::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
+            RFQProtocol::Native => write!(f, "{}", native::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -96,12 +95,8 @@ impl RFQStreamProcessor {
             info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
         }
         if let Ok(key) = env::var("NATIVE_API_KEY") {
-            if NativeSupportedChain::try_from(chain).is_ok() {
-                info!("Native RFQ credentials found");
-                rfq_credentials.insert(RFQProtocol::Native, (String::new(), key));
-            } else {
-                info!("Native RFQ does not support chain {:?}, skipping", chain);
-            }
+            info!("Native RFQ credentials found");
+            rfq_credentials.insert(RFQProtocol::Native, (String::new(), key));
         } else {
             info!(
                 "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
@@ -133,142 +128,203 @@ impl RFQStreamProcessor {
         stream_tx: Sender<miette::Result<StreamUpdate>>,
     ) -> miette::Result<JoinHandle<()>> {
         info!("Starting RFQ stream processor for chain {:?}", self.chain);
-        // Set up RFQ stream
-        let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
-        let mut rfq_stream_builder = RFQStreamBuilder::new()
-            .set_tokens(all_tokens.clone())
-            .await;
-        let metric_enabled = if self.run_pamm_protocols {
-            match MetricClientBuilder::new(self.chain)
-                .tokens(rfq_tokens.clone())
-                .tvl_threshold(self.tvl_threshold)
-                .poll_time(Duration::from_secs(30))
-                .build()
-            {
-                Ok(metric_client) => {
-                    info!("Adding {} RFQ client...", RFQProtocol::Metric);
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<MetricState>("metric", Box::new(metric_client));
-                    true
-                }
-                Err(e) => {
-                    warn!("Metric RFQ not supported on chain {:?}, skipping: {e}", self.chain);
-                    false
+        // Set up the book feeds. They receive the full token map and construct
+        // ready-to-simulate states directly. Subscribing consumes a feed and yields its book
+        // view plus the feed future that keeps it fresh; each watch receiver always holds the
+        // provider's latest complete book, so a slow consumer coalesces to the freshest
+        // snapshot per provider instead of queueing stale ones.
+        let common = CommonConfig {
+            chain: self.chain,
+            tokens: Arc::new(all_tokens.clone()),
+            min_tvl_usd: self.tvl_threshold,
+        };
+        // The RFQ feeds price their books' TVL in these; Metric reports USD TVL itself.
+        let usd_quote_tokens = Arc::new(
+            usd_stablecoins_for_chain(&self.chain)
+                .ok_or_else(|| miette!("No curated USD stablecoins for chain {:?}", self.chain))?,
+        );
+        let mut feeds: StreamMap<String, WatchStream<Option<BookSnapshot<ReceivedAt>>>> =
+            StreamMap::new();
+        let mut drivers: JoinSet<(&'static str, Result<(), FeedError>)> = JoinSet::new();
+        if self.run_pamm_protocols {
+            match env::var("METRIC_API_KEY") {
+                Ok(api_key) => match MetricFeedBuilder::new(common.clone(), api_key)
+                    .feed_config(HttpFeedConfig {
+                        poll_interval: Duration::from_secs(30),
+                        ..MetricFeedBuilder::default_feed_config()
+                    })
+                    .build()
+                {
+                    Ok(metric_feed) => {
+                        info!("Adding {} feed...", RFQProtocol::Metric);
+                        subscribe_feed(
+                            metric::PROTOCOL_SYSTEM,
+                            metric_feed,
+                            &mut feeds,
+                            &mut drivers,
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Metric RFQ not supported on chain {:?}, skipping: {e}", self.chain);
+                    }
+                },
+                Err(_) => {
+                    info!("Metric credentials not found. Expected environment variable: METRIC_API_KEY");
                 }
             }
-        } else {
-            false
-        };
+        }
 
         for (protocol, (user, key)) in &self.rfq_credentials {
-            info!("Adding {protocol} RFQ client...");
+            info!("Adding {protocol} feed...");
             match protocol {
                 RFQProtocol::Bebop => {
-                    let bebop_client = BebopClientBuilder::new(self.chain, key.clone())
-                        .tokens(rfq_tokens.clone())
-                        .tvl_threshold(self.tvl_threshold)
+                    // Bebop can require origin identification per API account; identify the
+                    // simulated flow with the test user EOA and the router the encoded
+                    // transactions target.
+                    let mut bebop_builder = BebopFeedBuilder::new(
+                        common.clone(),
+                        Arc::clone(&usd_quote_tokens),
+                        key.clone(),
+                    )
+                    .origin_address(
+                        Bytes::from_str(USER_ADDR)
+                            .into_diagnostic()
+                            .wrap_err("Invalid test user address")?,
+                    )
+                    .origin_source("tycho-integration-test".to_string());
+                    if let Ok(router_address) = get_router_address(&self.chain) {
+                        bebop_builder = bebop_builder.origin_target(router_address.clone());
+                    }
+                    let bebop_feed = bebop_builder
                         .build()
                         .into_diagnostic()
-                        .wrap_err("Failed to create Bebop RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<BebopState>("bebop", Box::new(bebop_client));
+                        .wrap_err("Failed to create Bebop feed")?;
+                    subscribe_feed(bebop::PROTOCOL_SYSTEM, bebop_feed, &mut feeds, &mut drivers);
                 }
                 RFQProtocol::Hashflow => {
-                    let hashflow_client =
-                        HashflowClientBuilder::new(self.chain, user.clone(), key.clone())
-                            .tokens(rfq_tokens.clone())
-                            .tvl_threshold(self.tvl_threshold)
-                            .poll_time(Duration::from_secs(30))
-                            .build()
-                            .into_diagnostic()
-                            .wrap_err("Failed to create Hashflow RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
+                    let hashflow_feed = HashflowFeedBuilder::new(
+                        common.clone(),
+                        Arc::clone(&usd_quote_tokens),
+                        user.clone(),
+                        key.clone(),
+                    )
+                    .feed_config(HttpFeedConfig {
+                        poll_interval: Duration::from_secs(30),
+                        ..HashflowFeedBuilder::default_feed_config()
+                    })
+                    .build()
+                    .into_diagnostic()
+                    .wrap_err("Failed to create Hashflow feed")?;
+                    subscribe_feed(
+                        hashflow::PROTOCOL_SYSTEM,
+                        hashflow_feed,
+                        &mut feeds,
+                        &mut drivers,
+                    );
                 }
                 RFQProtocol::Liquorice => {
-                    let liquorice_client =
-                        LiquoriceClientBuilder::new(self.chain, user.clone(), key.clone())
-                            .tokens(rfq_tokens.clone())
-                            .tvl_threshold(self.tvl_threshold)
-                            .poll_time(Duration::from_secs(30))
-                            .build()
-                            .into_diagnostic()
-                            .wrap_err("Failed to create Liquorice RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+                    let liquorice_feed = LiquoriceFeedBuilder::new(
+                        common.clone(),
+                        Arc::clone(&usd_quote_tokens),
+                        user.clone(),
+                        key.clone(),
+                    )
+                    .feed_config(HttpFeedConfig {
+                        poll_interval: Duration::from_secs(30),
+                        ..LiquoriceFeedBuilder::default_feed_config()
+                    })
+                    .build()
+                    .into_diagnostic()
+                    .wrap_err("Failed to create Liquorice feed")?;
+                    subscribe_feed(
+                        liquorice::PROTOCOL_SYSTEM,
+                        liquorice_feed,
+                        &mut feeds,
+                        &mut drivers,
+                    );
                 }
                 RFQProtocol::Native => {
-                    let native_client = NativeClientBuilder::new(self.chain, key.clone())
-                        .tokens(rfq_tokens.clone())
-                        .tvl_threshold(self.tvl_threshold)
-                        .poll_time(Duration::from_secs(30))
-                        .build()
-                        .into_diagnostic()
-                        .wrap_err("Failed to create Native RFQ client")?;
-                    rfq_stream_builder = rfq_stream_builder
-                        .add_client::<NativeState>("native", Box::new(native_client))
+                    // Native serves a fixed set of chains; on any other chain the feed is
+                    // skipped rather than failing the whole processor.
+                    match NativeFeedBuilder::new(
+                        common.clone(),
+                        Arc::clone(&usd_quote_tokens),
+                        key.clone(),
+                    )
+                    .feed_config(HttpFeedConfig {
+                        poll_interval: Duration::from_secs(30),
+                        ..NativeFeedBuilder::default_feed_config()
+                    })
+                    .build()
+                    {
+                        Ok(native_feed) => subscribe_feed(
+                            native::PROTOCOL_SYSTEM,
+                            native_feed,
+                            &mut feeds,
+                            &mut drivers,
+                        ),
+                        Err(e) => {
+                            warn!(
+                                "Native RFQ not supported on chain {:?}, skipping: {e}",
+                                self.chain
+                            )
+                        }
+                    }
                 }
                 RFQProtocol::Metric => unreachable!("Metric RFQ does not use credential storage"),
             }
         }
 
-        // Start the RFQ stream
         let mut is_first_update = true;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let _handle = tokio::spawn(rfq_stream_builder.build(tx));
         let sample_size = self.sample_size;
         let skip_messages_duration = self.skip_messages_duration;
-        let mut next_stream_times: HashMap<String, tokio::time::Instant> = self
-            .rfq_credentials
-            .keys()
-            .map(|protocol| (protocol.to_string(), tokio::time::Instant::now()))
-            .collect();
-        if metric_enabled {
-            next_stream_times.insert(RFQProtocol::Metric.to_string(), tokio::time::Instant::now());
-        }
+        let mut next_stream_times: HashMap<String, tokio::time::Instant> = HashMap::new();
         let handle = tokio::spawn(async move {
             info!("RFQ stream processor started");
-            while let Some(mut update) = rx.recv().await {
-                // Handle throttling for the update's protocol
-                if let Some((_, component)) = update.new_pairs.iter().next() {
-                    let next_stream_time =
-                        if let Some(t) = next_stream_times.get_mut(&component.protocol_system) {
-                            t
-                        } else {
-                            if stream_tx
-                                .send(Err(miette!(
-                                    "Protocol system not configured: {}",
-                                    component.protocol_system
-                                )))
-                                .await
-                                .is_err()
-                            {
-                                warn!("Receiver dropped, stopping stream processor");
-                                _handle.abort();
-                                break;
+            loop {
+                let (protocol_system, snapshot) = tokio::select! {
+                    Some(next) = feeds.next() => next,
+                    // A feed future resolving means that provider is done; its (now ended)
+                    // stream falls out of the map.
+                    Some(joined) = drivers.join_next() => {
+                        let error = match joined {
+                            Ok((name, Err(error))) => {
+                                miette!(error).wrap_err(format!("{name} terminated"))
                             }
-                            continue;
+                            Ok((name, Ok(()))) => miette!("{name} feed stopped"),
+                            Err(e) => miette!(e).wrap_err("RFQ feed task panicked"),
                         };
-                    let now = tokio::time::Instant::now();
-                    if now < *next_stream_time {
+                        if stream_tx.send(Err(error)).await.is_err() {
+                            warn!("Receiver dropped, stopping stream processor");
+                            break;
+                        }
                         continue;
-                    } else {
-                        *next_stream_time = now + skip_messages_duration;
                     }
-                } else {
+                    else => break,
+                };
+                let Some(BookSnapshot { anchor, books }) = snapshot else {
                     continue;
                 };
 
-                // Sample random RFQ quotes
-                update.states = update
-                    .states
-                    .into_iter()
-                    .choose_multiple(&mut rand::rng(), sample_size)
-                    .into_iter()
-                    .collect();
-                update
-                    .new_pairs
-                    .retain(|key, _| update.states.contains_key(key));
+                // Handle throttling for the update's protocol
+                let next_stream_time = next_stream_times
+                    .entry(protocol_system.clone())
+                    .or_insert_with(tokio::time::Instant::now);
+                let now = tokio::time::Instant::now();
+                if now < *next_stream_time {
+                    continue;
+                }
+                *next_stream_time = now + skip_messages_duration;
+
+                // Sample random RFQ quotes from the complete book
+                let books = Arc::new(
+                    books
+                        .iter()
+                        .choose_multiple(&mut rand::rng(), sample_size)
+                        .into_iter()
+                        .map(|(id, book)| (id.clone(), book.clone()))
+                        .collect(),
+                );
 
                 let received_at =
                     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -288,8 +344,11 @@ impl RFQStreamProcessor {
 
                 // Send the latest update
                 let update = StreamUpdate {
-                    update_type: UpdateType::Rfq,
-                    update,
+                    payload: StreamUpdatePayload::Rfq {
+                        protocol_system,
+                        received_at: anchor.0,
+                        books,
+                    },
                     is_first_update,
                     received_at,
                 };
@@ -302,11 +361,28 @@ impl RFQStreamProcessor {
                     .is_err()
                 {
                     warn!("Receiver dropped, stopping stream processor");
-                    _handle.abort();
                     break;
                 }
             }
+            // Either every feed terminated (each already reported above) or the receiver
+            // dropped; dropping the JoinSet aborts any feed task still running.
+            info!("RFQ stream processor stopping");
         });
         Ok(handle)
     }
+}
+
+/// Subscribes one book feed, registering its book stream under `name` and its feed future on
+/// the driver set so terminations can be reported with the provider's name.
+fn subscribe_feed<C>(
+    name: &'static str,
+    client: C,
+    feeds: &mut StreamMap<String, WatchStream<Option<BookSnapshot<ReceivedAt>>>>,
+    drivers: &mut JoinSet<(&'static str, Result<(), FeedError>)>,
+) where
+    C: SnapshotFeed<Snapshot = Option<BookSnapshot<ReceivedAt>>, Output = Result<(), FeedError>>,
+{
+    let (rx, feed) = client.subscribe();
+    feeds.insert(name.to_string(), WatchStream::new(rx));
+    drivers.spawn(async move { (name, feed.await) });
 }

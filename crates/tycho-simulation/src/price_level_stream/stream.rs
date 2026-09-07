@@ -592,18 +592,12 @@ mod tests {
     #[test]
     fn first_snapshot_emits_new_pair_with_both_directions() {
         let mut tracker = tracker();
-        let Update {
-            block_number_or_timestamp,
-            is_partial,
-            sync_states,
-            states,
-            new_pairs,
-            removed_pairs,
-        } = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
+        let Update { block_number, is_partial, sync_states, states, new_pairs, removed_pairs } =
+            tracker
+                .process(message(100, wbtc_usdc_pairs()))
+                .expect("update expected");
 
-        assert_eq!(block_number_or_timestamp, 100);
+        assert_eq!(block_number, 100);
         assert!(is_partial);
         assert!(sync_states.is_empty());
         assert!(removed_pairs.is_empty());

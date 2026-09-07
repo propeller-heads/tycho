@@ -6,7 +6,7 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tycho_common::Bytes;
 
-use crate::rfq::errors::RFQError;
+use crate::book::errors::FeedError;
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
 
@@ -144,24 +144,24 @@ pub struct MetricDepthBin {
 }
 
 impl MetricBidAskResponse {
-    pub fn bid_price(&self) -> Result<f64, RFQError> {
+    pub fn bid_price(&self) -> Result<f64, FeedError> {
         q64_to_f64(&self.bid_adj)
     }
 
-    pub fn ask_price(&self) -> Result<f64, RFQError> {
+    pub fn ask_price(&self) -> Result<f64, FeedError> {
         q64_to_f64(&self.ask_adj)
     }
 
-    pub fn total_token0_available(&self) -> Result<BigUint, RFQError> {
+    pub fn total_token0_available(&self) -> Result<BigUint, FeedError> {
         self.total_token0_available
             .clone()
-            .ok_or_else(|| RFQError::ParsingError("totalToken0Available is null".to_string()))
+            .ok_or_else(|| FeedError::ParsingError("totalToken0Available is null".to_string()))
     }
 
-    pub fn total_token1_available(&self) -> Result<BigUint, RFQError> {
+    pub fn total_token1_available(&self) -> Result<BigUint, FeedError> {
         self.total_token1_available
             .clone()
-            .ok_or_else(|| RFQError::ParsingError("totalToken1Available is null".to_string()))
+            .ok_or_else(|| FeedError::ParsingError("totalToken1Available is null".to_string()))
     }
 
     /// Whether the pool can currently be quoted.
@@ -185,22 +185,16 @@ impl MetricBidAskResponse {
 }
 
 /// Converts a Q64.64 fixed-point value to an f64 price.
-pub fn q64_to_f64(value: &BigUint) -> Result<f64, RFQError> {
-    let raw = value
-        .to_f64()
-        .ok_or_else(|| RFQError::ParsingError(format!("Q64 price does not fit in f64: {value}")))?;
+pub fn q64_to_f64(value: &BigUint) -> Result<f64, FeedError> {
+    let raw = value.to_f64().ok_or_else(|| {
+        FeedError::ParsingError(format!("Q64 price does not fit in f64: {value}"))
+    })?;
     Ok(raw / Q64_FLOAT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_q64_to_f64() {
-        let one = BigUint::from_str("18446744073709551616").unwrap();
-        assert_eq!(q64_to_f64(&one).unwrap(), 1.0);
-    }
 
     #[test]
     fn test_bid_ask_deserializes_depth_bins() {

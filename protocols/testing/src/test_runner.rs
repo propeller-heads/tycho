@@ -401,7 +401,7 @@ impl TestRunner {
                         "Received protocol update with {} new pairs and {} states for block {}",
                         update.new_pairs.len(),
                         update.states.len(),
-                        update.block_number_or_timestamp
+                        update.block_number
                     );
 
                     match self.protocol_components.write() {
@@ -466,15 +466,12 @@ impl TestRunner {
                     // Step 2: Get the actual block from RPC
                     let block = match self
                         .rpc_provider
-                        .get_block(BlockNumberOrTag::Number(update.block_number_or_timestamp))
+                        .get_block(BlockNumberOrTag::Number(update.block_number))
                         .await
                     {
                         Ok(block) => block,
                         Err(e) => {
-                            error!(
-                                "Failed to fetch block {}: {}",
-                                update.block_number_or_timestamp, e
-                            );
+                            error!("Failed to fetch block {}: {}", update.block_number, e);
                             continue;
                         }
                     };
@@ -1001,7 +998,7 @@ impl TestRunner {
             .block_on(decoder.decode(&message))
             .into_diagnostic()
             .wrap_err("Failed to decode message")?;
-        debug!("Decoded message for block {}", block_msg.block_number_or_timestamp);
+        debug!("Decoded message for block {}", block_msg.block_number);
         debug!("Update contains {} component states", block_msg.states.len());
 
         Ok(block_msg)

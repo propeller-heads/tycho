@@ -1,4 +1,9 @@
-use std::{collections::HashSet, env, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    str::FromStr,
+    sync::Arc,
+};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -21,7 +26,8 @@ use dialoguer::{theme::ColorfulTheme, Select};
 use dotenv::dotenv;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio_stream::{wrappers::WatchStream, StreamExt, StreamMap};
 use tracing_subscriber::EnvFilter;
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::{
@@ -36,17 +42,20 @@ use tycho_execution::encoding::{
     models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
-    protocol::models::{ProtocolComponent, Update},
-    rfq::{
-        protocols::{
-            bebop::{client_builder::BebopClientBuilder, state::BebopState},
-            hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
-            liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
-            metric::{client_builder::MetricClientBuilder, state::MetricState},
-            native::{client_builder::NativeClientBuilder, state::NativeState},
-        },
-        stream::RFQStreamBuilder,
+    book::{
+        constants::usd_stablecoins_for_chain,
+        errors::FeedError,
+        models::{BookSnapshot, CommonConfig, ReceivedAt},
     },
+    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    protocol::models::ProtocolComponent,
+    rfq::protocols::{
+        bebop::{self, feed::BebopFeedBuilder},
+        hashflow::{self, feed::HashflowFeedBuilder},
+        liquorice::{self, feed::LiquoriceFeedBuilder},
+        native::{self, feed::NativeFeedBuilder},
+    },
+    snapshot_feed::SnapshotFeed,
     tycho_common::models::Chain,
     utils::{get_default_url, load_all_tokens},
 };
@@ -68,7 +77,7 @@ struct Cli {
     #[arg(long, default_value_t = 10.0)]
     sell_amount: f64,
     /// The minimum TVL threshold for RFQ quotes in USD
-    #[arg(long, default_value_t = 1000.0)]
+    #[arg(long, default_value_t = 100.0)]
     tvl_threshold: f64,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
@@ -197,111 +206,107 @@ async fn main() {
         .build()
         .expect("Failed to build encoder");
 
-    // Set up RFQ client using the builder pattern
-    let mut rfq_tokens = HashSet::new();
-    rfq_tokens.insert(sell_token_address.clone());
-    rfq_tokens.insert(buy_token_address.clone());
+    // Set up the book feeds. They receive the traded tokens with their metadata and construct
+    // ready-to-simulate states directly.
+    let mut rfq_tokens = HashMap::new();
+    for address in [&sell_token_address, &buy_token_address] {
+        let token = all_tokens
+            .get(address)
+            .expect("Traded token not found in Tycho token list")
+            .clone();
+        rfq_tokens.insert(address.clone(), token);
+    }
 
-    let mut rfq_stream_builder = RFQStreamBuilder::new()
-        .set_tokens(all_tokens.clone())
-        .await;
+    let common =
+        CommonConfig { chain, tokens: Arc::new(rfq_tokens), min_tvl_usd: cli.tvl_threshold };
+    // The RFQ feeds price their books' TVL in these; Metric reports USD TVL itself.
+    let usd_quote_tokens = Arc::new(
+        usd_stablecoins_for_chain(&chain)
+            .unwrap_or_else(|| panic!("No curated USD stablecoins for chain {chain:?}")),
+    );
+
+    // Subscribing consumes a feed and yields its book view plus the feed future that keeps
+    // it fresh. Each watch receiver always holds the provider's latest complete snapshot, so a
+    // consumer that falls behind (e.g. while the interactive prompt below is open) skips
+    // straight to the freshest book.
+    let mut feeds: StreamMap<String, WatchStream<Option<BookSnapshot<ReceivedAt>>>> =
+        StreamMap::new();
+    let mut drivers: JoinSet<(&'static str, Result<(), FeedError>)> = JoinSet::new();
+
     if let Some(key) = bebop_key {
-        println!("Setting up Bebop RFQ client...\n");
-        let bebop_client = BebopClientBuilder::new(chain, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
+        println!("Setting up Bebop feed...\n");
+        let bebop_feed = BebopFeedBuilder::new(common.clone(), Arc::clone(&usd_quote_tokens), key)
             .build()
-            .expect("Failed to create Bebop RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<BebopState>("bebop", Box::new(bebop_client))
+            .expect("Failed to create Bebop feed");
+        subscribe_feed(bebop::PROTOCOL_SYSTEM, bebop_feed, &mut feeds, &mut drivers);
     }
     if let (Some(user), Some(key)) = (hashflow_user, hashflow_key) {
-        println!("Setting up Hashflow RFQ client...\n");
-        let hashflow_client = HashflowClientBuilder::new(chain, user, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .poll_time(Duration::from_secs(5))
-            .build()
-            .expect("Failed to create Hashflow RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
+        println!("Setting up Hashflow feed...\n");
+        let hashflow_feed =
+            HashflowFeedBuilder::new(common.clone(), Arc::clone(&usd_quote_tokens), user, key)
+                .build()
+                .expect("Failed to create Hashflow feed");
+        subscribe_feed(hashflow::PROTOCOL_SYSTEM, hashflow_feed, &mut feeds, &mut drivers);
     }
     if let (Some(user), Some(key)) = (liquorice_user, liquorice_key) {
-        println!("Setting up Liquorice RFQ client...\n");
-        let liquorice_client = LiquoriceClientBuilder::new(chain, user, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
-            .expect("Failed to create Liquorice RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+        println!("Setting up Liquorice feed...\n");
+        let liquorice_feed =
+            LiquoriceFeedBuilder::new(common.clone(), Arc::clone(&usd_quote_tokens), user, key)
+                .build()
+                .expect("Failed to create Liquorice feed");
+        subscribe_feed(liquorice::PROTOCOL_SYSTEM, liquorice_feed, &mut feeds, &mut drivers);
     }
     if let Some(key) = native_key {
-        println!("Setting up Native RFQ client...\n");
-        let native_client = NativeClientBuilder::new(chain, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
-            .expect("Failed to create Native RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<NativeState>("native", Box::new(native_client))
+        println!("Setting up Native feed...\n");
+        match NativeFeedBuilder::new(common.clone(), Arc::clone(&usd_quote_tokens), key).build() {
+            Ok(native_feed) => {
+                subscribe_feed(native::PROTOCOL_SYSTEM, native_feed, &mut feeds, &mut drivers)
+            }
+            Err(e) => eprintln!("Skipping Native feed: {e}"),
+        }
     }
     if cli.run_pamm_protocols {
-        println!("Setting up Metric RFQ client...\n");
-        match MetricClientBuilder::new(chain)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
-        {
-            Ok(metric_client) => {
-                rfq_stream_builder =
-                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
-            }
-            Err(e) => eprintln!("Skipping Metric RFQ client: {e}"),
+        println!("Setting up Metric feed...\n");
+        match env::var("METRIC_API_KEY") {
+            Ok(api_key) => match MetricFeedBuilder::new(common, api_key).build() {
+                Ok(metric_feed) => {
+                    subscribe_feed(metric::PROTOCOL_SYSTEM, metric_feed, &mut feeds, &mut drivers)
+                }
+                Err(e) => eprintln!("Skipping Metric feed: {e}"),
+            },
+            Err(_) => eprintln!("Skipping Metric feed: METRIC_API_KEY not set"),
         }
     }
-
-    // Start the RFQ stream in a background task
-    let (tx, mut rx) = mpsc::channel::<Update>(100);
-    tokio::spawn(rfq_stream_builder.build(tx));
     println!("Connected to RFQs! Streaming live price levels...\n");
 
-    // Stream quotes from RFQ stream
-    while let Some(update) = rx.recv().await {
-        // Drain any additional buffered messages to get the most recent one
-        //
-        // ⚠️Warning: This works fine only if you assume that this message is entirely
-        // representative of the current state, as done in this quickstart.
-        // You should comment out this code portion if you would like to manually track removed
-        // components.
-        let mut latest_update = update;
-        let mut drained_count = 0;
-        while let Ok(newer_update) =
-            tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await
-        {
-            if let Some(newer_update) = newer_update {
-                latest_update = newer_update;
-                drained_count += 1;
-            } else {
-                break;
+    loop {
+        let (protocol_system, snapshot) = tokio::select! {
+            Some(next) = feeds.next() => next,
+            // A feed future resolving means that provider is done: report why and let its
+            // (now ended) stream fall out of the map.
+            Some(joined) = drivers.join_next() => {
+                match joined {
+                    Ok((name, Err(error))) => eprintln!("RFQ provider {name} terminated: {error}"),
+                    Ok((name, Ok(()))) => eprintln!("RFQ provider {name} feed stopped"),
+                    Err(e) => eprintln!("RFQ feed task panicked: {e}"),
+                }
+                continue;
             }
-        }
-        if drained_count > 0 {
-            println!(
-                "Fast-forwarded through {drained_count} older RFQ updates to get latest prices"
-            );
-        }
-        let update = latest_update;
+            else => break,
+        };
+        let Some(BookSnapshot { anchor, books }) = snapshot else { continue };
 
         println!(
-            "Received RFQ price levels with {} new pairs for block/timestamp {}",
-            update.states.len(),
-            update.block_number_or_timestamp
+            "Received {protocol_system} RFQ price levels with {} books at {}",
+            books.len(),
+            anchor.0,
         );
 
-        // Process state updates
-        for (comp_id, state) in &update.states {
-            if let Some(component) = update.new_pairs.get(comp_id) {
+        // Process the provider's complete snapshot
+        for pair in books.values() {
+            {
+                let component = &pair.component;
+                let state = &pair.state;
                 let tokens = &component.tokens;
 
                 // Check if this component trades our desired pair
@@ -468,7 +473,7 @@ async fn main() {
 
                                 let solution = create_solution(
                                     component.clone(),
-                                    Arc::from(state.clone_box()),
+                                    Arc::clone(state),
                                     sell_token.clone(),
                                     buy_token.clone(),
                                     amount_in.clone(),
@@ -640,7 +645,7 @@ async fn main() {
 
                                 let solution = create_solution(
                                     component.clone(),
-                                    Arc::from(state.clone_box()),
+                                    Arc::clone(state),
                                     sell_token.clone(),
                                     buy_token.clone(),
                                     amount_in.clone(),
@@ -742,16 +747,30 @@ async fn main() {
                         }
                     }
                 }
-            } else {
-                println!("No matching pair found in update.");
             }
         }
 
         println!("\nWaiting for more price levels... (Press Ctrl+C to exit)");
     }
+    eprintln!("All RFQ providers terminated, exiting.");
 }
 
 // Format token amounts to human-readable values
+/// Subscribes one book feed, registering its book stream under `name` and its feed future on
+/// the driver set so terminations can be reported with the provider's name.
+fn subscribe_feed<C>(
+    name: &'static str,
+    client: C,
+    feeds: &mut StreamMap<String, WatchStream<Option<BookSnapshot<ReceivedAt>>>>,
+    drivers: &mut JoinSet<(&'static str, Result<(), FeedError>)>,
+) where
+    C: SnapshotFeed<Snapshot = Option<BookSnapshot<ReceivedAt>>, Output = Result<(), FeedError>>,
+{
+    let (rx, feed) = client.subscribe();
+    feeds.insert(name.to_string(), WatchStream::new(rx));
+    drivers.spawn(async move { (name, feed.await) });
+}
+
 fn format_token_amount(amount: &BigUint, token: &Token) -> String {
     let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powi(token.decimals as i32);
     format!("{decimal_amount:.6}")

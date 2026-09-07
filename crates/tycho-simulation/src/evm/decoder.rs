@@ -345,7 +345,7 @@ where
             .header
             .clone();
 
-        let block_number_or_timestamp = header
+        let block_number = header
             .clone()
             .block_number_or_timestamp();
         let current_block = header.clone().block();
@@ -1022,7 +1022,7 @@ where
             .states
             .extend(updated_states.clone());
 
-        state_guard.current_block_number = block_number_or_timestamp;
+        state_guard.current_block_number = block_number;
 
         // Add new components to persistent state
         for (id, component) in new_pairs.iter() {
@@ -1045,7 +1045,7 @@ where
         }
 
         // Send the tick with all updated states
-        Ok(Update::new(block_number_or_timestamp, updated_states, new_pairs)
+        Ok(Update::new(block_number, updated_states, new_pairs)
             .set_is_partial(is_partial)
             .set_removed_pairs(removed_pairs)
             .set_sync_states(msg.sync_states.clone()))
@@ -1074,7 +1074,7 @@ where
         pending_deltas: &HashMap<String, BlockAggregatedChanges>,
         header: H,
     ) -> Result<Update, StreamDecodeError> {
-        let block_number_or_timestamp = header
+        let block_number = header
             .clone()
             .block_number_or_timestamp();
         let current_block = header.block();
@@ -1126,7 +1126,7 @@ where
             }
         }
 
-        Ok(Update::new(block_number_or_timestamp, updated_states, HashMap::new()))
+        Ok(Update::new(block_number, updated_states, HashMap::new()))
     }
 
     /// Add current block information (number and timestamp) to a ProtocolStateDelta.
