@@ -339,8 +339,22 @@ impl<T, O> WithOrdinal<T, O> {
 #[derive(Debug)]
 struct PostgresError(StorageError);
 
+/// Returns the Postgres message if the error aborted the transaction because it conflicted with a
+/// concurrent one (SQLSTATE class 40): a serialization failure or a deadlock.
+///
+/// Diesel maps 40001 to `SerializationFailure` but 40P01 to `Unknown`, hence the message check.
+fn transaction_conflict(err: &diesel::result::Error) -> Option<String> {
+    let diesel::result::Error::DatabaseError(kind, info) = err else { return None };
+    let is_conflict = matches!(kind, diesel::result::DatabaseErrorKind::SerializationFailure) ||
+        info.message() == "deadlock detected";
+    is_conflict.then(|| info.message().to_owned())
+}
+
 impl From<diesel::result::Error> for PostgresError {
     fn from(value: diesel::result::Error) -> Self {
+        if let Some(reason) = transaction_conflict(&value) {
+            return PostgresError(StorageError::TransactionConflict(reason));
+        }
         PostgresError(StorageError::Unexpected(format!("DieselError: {value}")))
     }
 }
@@ -379,6 +393,9 @@ fn storage_error_from_diesel(
     id: &str,
     fetch_args: Option<String>,
 ) -> PostgresError {
+    if let Some(reason) = transaction_conflict(&err) {
+        return PostgresError(StorageError::TransactionConflict(reason));
+    }
     let err_string = err.to_string();
     match err {
         diesel::result::Error::DatabaseError(
@@ -1475,6 +1492,63 @@ pub mod db_fixtures {
         .execute(conn)
         .await
         .expect("calculating fixture component tvl failed");
+    }
+}
+
+#[cfg(test)]
+mod tests_error_mapping {
+    use diesel::result::{DatabaseErrorKind, Error};
+
+    use super::*;
+
+    fn db_error(kind: DatabaseErrorKind, message: &str) -> Error {
+        Error::DatabaseError(kind, Box::new(message.to_string()))
+    }
+
+    #[test]
+    fn test_serialization_failure_maps_to_conflict() {
+        let message = "could not serialize access due to concurrent update";
+        let err = db_error(DatabaseErrorKind::SerializationFailure, message);
+
+        assert_eq!(
+            PostgresError::from(err).0,
+            StorageError::TransactionConflict(message.to_string())
+        );
+
+        let err = db_error(DatabaseErrorKind::SerializationFailure, message);
+        assert_eq!(
+            storage_error_from_diesel(err, "Token", "batch", None).0,
+            StorageError::TransactionConflict(message.to_string())
+        );
+    }
+
+    #[test]
+    fn test_deadlock_maps_to_conflict() {
+        let message = "deadlock detected";
+        let err = db_error(DatabaseErrorKind::Unknown, message);
+
+        assert_eq!(
+            PostgresError::from(err).0,
+            StorageError::TransactionConflict(message.to_string())
+        );
+
+        let err = db_error(DatabaseErrorKind::Unknown, message);
+        assert_eq!(
+            storage_error_from_diesel(err, "Token", "batch", None).0,
+            StorageError::TransactionConflict(message.to_string())
+        );
+    }
+
+    #[test]
+    fn test_other_database_error_stays_unexpected() {
+        let err = db_error(DatabaseErrorKind::Unknown, "some other error");
+        assert!(matches!(PostgresError::from(err).0, StorageError::Unexpected(_)));
+
+        let err = db_error(DatabaseErrorKind::Unknown, "some other error");
+        assert!(matches!(
+            storage_error_from_diesel(err, "Token", "batch", None).0,
+            StorageError::Unexpected(_)
+        ));
     }
 }
 

@@ -405,17 +405,16 @@ impl DBCacheWriteExecutor {
 
             match res {
                 Ok(_) => break,
-                Err(PostgresError(StorageError::Unexpected(ref e)))
-                    if e.contains("deadlock detected") =>
-                {
+                Err(PostgresError(StorageError::TransactionConflict(ref reason))) => {
                     retry_count += 1;
                     if retry_count < max_retries {
                         let delay = std::time::Duration::from_secs(retry_count);
                         warn!(
-                            "Deadlock detected, retrying in {:?} (attempt {}/{})",
+                            "Transaction conflict, retrying in {:?} (attempt {}/{}): {}",
                             delay,
                             retry_count + 1,
-                            max_retries
+                            max_retries,
+                            reason
                         );
                         tokio::time::sleep(delay).await;
                         continue;
@@ -1319,6 +1318,8 @@ impl Gateway for CachedGateway {}
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
+    use diesel::{sql_query, QueryableByName};
+    use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
@@ -1376,6 +1377,133 @@ mod test_serial_db {
                 .expect("Failed to fetch extraction state");
 
             assert_eq!(fetched_block, block);
+        })
+        .await;
+    }
+
+    #[derive(QueryableByName)]
+    struct LockWaiters {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
+    /// Waits until a backend of this database blocks on a lock, up to 10 seconds.
+    async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
+        for _ in 0..200 {
+            let waiters = sql_query(
+                "SELECT count(*) AS count FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock' AND datname = current_database()",
+            )
+            .get_result::<LockWaiters>(conn)
+            .await
+            .expect("Failed to query lock waiters");
+            if waiters.count >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("No backend blocked on a lock within 10 seconds");
+    }
+
+    #[tokio::test]
+    async fn test_write_retries_serialization_failure() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let eth_address = "0000000000000000000000000000000000000000";
+            db_fixtures::insert_token(&mut connection, chain_id, eth_address, "ETH", 18, Some(100))
+                .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+
+            let handle = write_executor.run();
+
+            // Open a transaction that updates the token row and holds the lock until released.
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let blocker_pool = connection_pool.clone();
+            let blocker = tokio::spawn(async move {
+                let mut conn = blocker_pool
+                    .get()
+                    .await
+                    .expect("Failed to get a connection from the pool");
+                conn.transaction(|conn| {
+                    async move {
+                        sql_query("UPDATE token SET quality = 50")
+                            .execute(conn)
+                            .await
+                            .expect("Failed to update the token quality");
+                        ready_tx
+                            .send(())
+                            .expect("Failed to signal the open update");
+                        release_rx
+                            .await
+                            .expect("Failed to await the release signal");
+                        Ok::<(), diesel::result::Error>(())
+                    }
+                    .scope_boxed()
+                })
+                .await
+                .expect("Blocking transaction failed");
+            });
+            ready_rx
+                .await
+                .expect("Blocking transaction never opened its update");
+
+            let block = get_sample_block(1);
+            let token = models::token::Token::new(
+                &Bytes::from_str(eth_address).expect("Invalid address"),
+                "ETH",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+
+            // The block upsert takes the batch snapshot, the token insert waits on the row lock.
+            await_lock_waiter(&mut connection).await;
+            release_tx
+                .send(())
+                .expect("Failed to release the blocking transaction");
+            blocker
+                .await
+                .expect("Blocking task panicked");
+
+            os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect("Transaction cached");
+
+            handle.abort();
+
+            let block_id = BlockIdentifier::Number((Chain::Ethereum, 1));
+            let fetched_block = gateway
+                .get_block(&block_id, &mut connection)
+                .await
+                .expect("Failed to fetch block");
+            assert_eq!(fetched_block, block);
+
+            let stored_token =
+                db_fixtures::get_token_by_symbol(&mut connection, "ETH".to_string()).await;
+            assert_eq!(stored_token.quality, 50);
         })
         .await;
     }
