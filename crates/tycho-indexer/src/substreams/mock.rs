@@ -41,6 +41,8 @@ pub enum MockResponse {
     Unauthenticated,
     /// One `BlockScopedData` carrying `cursor`, then `grpc-status: 16` trailers.
     BlockThenUnauthenticated { cursor: String },
+    /// One `BlockScopedData` carrying `cursor`, then silence with the stream left open.
+    BlockThenStall { cursor: String },
 }
 
 /// Response body that emits one gRPC data frame and then error trailers.
@@ -71,6 +73,36 @@ impl HttpBody for DataThenTrailers {
         let mut trailers = HeaderMap::new();
         trailers.insert("grpc-status", HeaderValue::from_static(self.grpc_status));
         Poll::Ready(Ok(Some(trailers)))
+    }
+}
+
+/// Response body that emits one gRPC data frame and then never resolves.
+///
+/// Models an endpoint that stops writing without closing the stream: the client keeps a
+/// healthy-looking connection that will never produce another message.
+struct DataThenStall {
+    data: Option<Bytes>,
+}
+
+impl HttpBody for DataThenStall {
+    type Data = Bytes;
+    type Error = Status;
+
+    fn poll_data(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+        match self.get_mut().data.take() {
+            Some(data) => Poll::Ready(Some(Ok(data))),
+            None => Poll::Pending,
+        }
+    }
+
+    fn poll_trailers(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
+        Poll::Pending
     }
 }
 
@@ -164,6 +196,15 @@ impl tonic::codegen::Service<http::Request<tonic::transport::Body>> for MockSubs
                         data: Some(grpc_frame(&block)),
                         grpc_status: GRPC_STATUS_UNAUTHENTICATED,
                     }))
+                }
+                MockResponse::BlockThenStall { cursor } => {
+                    let block = Response {
+                        message: Some(ResponseMessage::BlockScopedData(BlockScopedData {
+                            cursor,
+                            ..Default::default()
+                        })),
+                    };
+                    builder.body(BoxBody::new(DataThenStall { data: Some(grpc_frame(&block)) }))
                 }
             };
 
