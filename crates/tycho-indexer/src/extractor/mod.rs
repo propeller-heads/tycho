@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use deepsize::DeepSizeOf;
@@ -10,7 +13,7 @@ use tycho_common::{
         blockchain::{Block, BlockAggregatedChanges, BlockScoped},
         contract::AccountBalance,
         protocol::ComponentBalance,
-        Address, BlockHash, ExtractorIdentity, MergeError,
+        Address, BlockHash, ComponentId, ExtractorIdentity, MergeError,
     },
     storage::StorageError,
     Bytes,
@@ -263,5 +266,13 @@ where
     ) -> HashMap<(AccountStateIdType, AccountStateKeyType), AccountStateValueType> {
         self.block_update
             .get_filtered_account_state_update(keys)
+    }
+
+    fn get_filtered_protocol_components(
+        &self,
+        ids: &HashSet<&ComponentId>,
+    ) -> HashSet<ComponentId> {
+        self.block_update
+            .get_filtered_protocol_components(ids)
     }
 }

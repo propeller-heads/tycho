@@ -118,12 +118,12 @@ where
 
         // Register both label sets at zero so the first miss registers as a rise for
         // increase(); a series born at a nonzero value looks flat and no alert fires.
-        for state_found in ["true", "false"] {
+        for component_found in ["true", "false"] {
             counter!(
                 "extractor_revert_attr_miss",
                 "extractor" => name.to_string(),
                 "chain" => chain.to_string(),
-                "component_state_found" => state_found,
+                "component_found" => component_found,
             )
             .increment(0);
         }
@@ -1530,10 +1530,6 @@ where
         // both sets and it never existed before the range. Either way no prior value
         // exists and the revert deletes it. Substreams output is external input — a miss
         // is a data-quality signal, not a reason to kill the extractor.
-        // Both count per attribute. attr_misses: the component has state rows in the DB,
-        // just not this attribute. component_misses: no state rows for the component at all.
-        let mut attr_misses = 0_u64;
-        let mut component_misses = 0_u64;
         for (component_id, keys) in missing_map {
             let state = states_by_id
                 .get(component_id.as_str())
@@ -1543,36 +1539,75 @@ where
                     db_states.insert((component_id.clone(), key), value.clone());
                     continue;
                 }
-                if state.is_some() {
-                    attr_misses += 1;
-                } else {
-                    component_misses += 1;
-                }
                 not_found
                     .entry(component_id.clone())
                     .or_default()
                     .insert(key);
             }
         }
+
+        // A component with DB state rows is known; the rest need an existence check, first
+        // in the buffer history, then against the component table.
+        let mut unknown_components: HashSet<ComponentId> = HashSet::new();
         if !not_found.is_empty() {
-            let missed: Vec<(&str, usize)> = not_found
-                .iter()
-                .map(|(id, keys)| (id.as_str(), keys.len()))
+            let candidates: Vec<&ComponentId> = not_found
+                .keys()
+                .filter(|id| !states_by_id.contains_key(id.as_str()))
                 .collect();
+            let (_, absent_from_buffer) = reorg_buffer.lookup_components(&candidates);
+            if !absent_from_buffer.is_empty() {
+                let db_components = self
+                    .gateway
+                    .inner
+                    .get_protocol_components(
+                        &absent_from_buffer
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<&str>>(),
+                    )
+                    .await
+                    .map_err(ExtractionError::Storage)?;
+                let in_db: HashSet<&str> = db_components
+                    .iter()
+                    .map(|component| component.id.as_str())
+                    .collect();
+                unknown_components = absent_from_buffer
+                    .into_iter()
+                    .filter(|id| !in_db.contains(id.as_str()))
+                    .collect();
+            }
+        }
+
+        // Both count per attribute: known misses belong to a component Tycho saw created,
+        // unknown misses to a component that exists nowhere.
+        let mut known_misses = 0_u64;
+        let mut unknown_misses = 0_u64;
+        let mut known: Vec<(&str, usize)> = Vec::new();
+        let mut unknown: Vec<(&str, usize)> = Vec::new();
+        for (component_id, keys) in not_found.iter() {
+            if unknown_components.contains(component_id) {
+                unknown_misses += keys.len() as u64;
+                unknown.push((component_id.as_str(), keys.len()));
+            } else {
+                known_misses += keys.len() as u64;
+                known.push((component_id.as_str(), keys.len()));
+            }
+        }
+        if !not_found.is_empty() {
             warn!(
-                components = ?missed,
-                total = attr_misses + component_misses,
+                known = ?known,
+                unknown = ?unknown,
                 "Attributes with no prior state in buffer or DB during revert; \
                  reverting them as deletions"
             );
         }
-        for (misses, state_found) in [(attr_misses, "true"), (component_misses, "false")] {
+        for (misses, component_found) in [(known_misses, "true"), (unknown_misses, "false")] {
             if misses > 0 {
                 counter!(
                     "extractor_revert_attr_miss",
                     "extractor" => self.name.clone(),
                     "chain" => self.chain.to_string(),
-                    "component_state_found" => state_found,
+                    "component_found" => component_found,
                 )
                 .increment(misses);
             }
@@ -1797,6 +1832,19 @@ pub trait ExtractorGateway: Send + Sync {
         &self,
         component_ids: &[&'a str],
     ) -> Result<Vec<ProtocolComponentState>, StorageError>;
+
+    /// Returns the protocol components identified by `component_ids`.
+    ///
+    /// Only components that exist in the store are returned: unknown ids are silently omitted
+    /// rather than producing an error, so the result may be shorter than `component_ids` (and
+    /// empty if none are found).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] only on an underlying store failure, never for missing ids.
+    async fn get_protocol_components<'a>(
+        &self,
+        component_ids: &[&'a str],
+    ) -> Result<Vec<ProtocolComponent>, StorageError>;
 
     /// Returns the contracts at the given `addresses`, including their storage slots.
     ///
@@ -2138,6 +2186,17 @@ impl ExtractorGateway for ExtractorPgGateway {
             .get_protocol_states(&self.chain, None, None, Some(component_ids), false, None)
             .await
             .map(|state_data| state_data.entity)
+    }
+
+    /// Component ids are unique per chain, so the protocol system is left unconstrained.
+    async fn get_protocol_components<'a>(
+        &self,
+        component_ids: &[&'a str],
+    ) -> Result<Vec<ProtocolComponent>, StorageError> {
+        self.state_gateway
+            .get_protocol_components(&self.chain, None, Some(component_ids), None, None)
+            .await
+            .map(|component_data| component_data.entity)
     }
 
     async fn get_contracts(&self, addresses: &[Address]) -> Result<Vec<Account>, StorageError> {
@@ -3253,6 +3312,8 @@ mod test {
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
             .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_components()
+            .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
         gw.expect_get_account_balances()
@@ -3364,6 +3425,8 @@ mod test {
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
@@ -3595,6 +3658,8 @@ mod test {
         gw.expect_get_contracts()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
@@ -4585,6 +4650,8 @@ mod test {
                 );
                 Ok(Vec::new())
             });
+        gw.expect_get_protocol_components()
+            .returning(|_| Ok(Vec::new()));
         gw.expect_get_components_balances()
             .returning(|_| Ok(HashMap::new()));
         gw.expect_get_account_balances()
@@ -4807,6 +4874,18 @@ mod test {
                             HashMap::new(),
                         )])
                     });
+                // pool_y is answered by the buffer and pool_w by its state rows, so only
+                // pool_ghost and pool_z reach the component table.
+                gw.expect_get_protocol_components()
+                    .returning(|component_ids| {
+                        let mut ids = component_ids.to_vec();
+                        ids.sort();
+                        assert_eq!(ids, vec!["pool_ghost", "pool_z"]);
+                        Ok(vec![ProtocolComponent {
+                            id: "pool_z".to_string(),
+                            ..Default::default()
+                        }])
+                    });
                 gw.expect_get_components_balances()
                     .returning(|_| Ok(HashMap::new()));
                 gw.expect_get_account_balances()
@@ -4818,9 +4897,10 @@ mod test {
                 full_block(&extractor, 1, 1, vec![]).await;
                 full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_y", &[])])
                     .await;
-                // fee: pool_y has a buffered creation but no attrs and no DB rows → "false".
-                // rate: pool_ghost was never created anywhere → "false".
+                // fee: pool_y has a buffered creation but no attrs and no DB rows → "true".
                 // gone: pool_w has DB state rows, but not this attribute → "true".
+                // depth: pool_z has a component row but no state rows → "true".
+                // rate: pool_ghost was never created anywhere → "false".
                 full_block(
                     &extractor,
                     3,
@@ -4829,6 +4909,7 @@ mod test {
                         entity_change_tx(3, 0, "pool_y", "fee", 30, PbChangeType::Update),
                         entity_change_tx(3, 1, "pool_ghost", "rate", 7, PbChangeType::Update),
                         entity_change_tx(3, 2, "pool_w", "gone", 9, PbChangeType::Update),
+                        entity_change_tx(3, 3, "pool_z", "depth", 5, PbChangeType::Update),
                     ],
                 )
                 .await;
@@ -4849,11 +4930,11 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_state_found", "false")
+                    ("component_found", "false")
                 ],
             ),
-            2,
-            "pool_y (no state rows) and pool_ghost (never created) miss without DB rows"
+            1,
+            "only pool_ghost exists neither in the buffer nor in the DB"
         );
         assert_eq!(
             counter_value(
@@ -4862,11 +4943,116 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_state_found", "true")
+                    ("component_found", "true")
+                ],
+            ),
+            3,
+            "pool_y (buffered creation), pool_w (state rows) and pool_z (component row) are known"
+        );
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
+    // #[tokio::test]; it drives its own current-thread runtime instead.
+    #[test]
+    fn test_revert_attr_miss_on_retained_creation_is_component_found() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let mut gw = MockExtractorGateway::new();
+                gw.expect_ensure_protocol_types()
+                    .times(1)
+                    .returning(|_| Ok(()));
+                gw.expect_get_cursor()
+                    .times(1)
+                    .returning(|| Ok(("cursor".into(), Bytes::default())));
+                gw.expect_get_block()
+                    .times(1)
+                    .returning(|_| Ok(Block::default()));
+                gw.expect_advance()
+                    .returning(|_, _, _| Ok(()));
+                // The write never lands: the creation stays reachable in the committing
+                // section.
+                gw.expect_flushed_block_height()
+                    .returning(|| None);
+                gw.expect_get_contracts()
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_protocol_states()
+                    .returning(|_| Ok(Vec::new()));
+                // The buffer answers the only candidate, so the DB is never asked.
+                gw.expect_get_protocol_components()
+                    .times(0)
+                    .returning(|_| Ok(Vec::new()));
+                gw.expect_get_components_balances()
+                    .returning(|_| Ok(HashMap::new()));
+                gw.expect_get_account_balances()
+                    .returning(|_| Ok(HashMap::new()));
+
+                let extractor = create_extractor(gw).await;
+
+                // Block 1: create `pool_x` without attributes.
+                full_block(&extractor, 1, 1, vec![component_creation_tx(1, 0, "pool_x", &[])])
+                    .await;
+                // Block 2: finality 2 drains block 1 into the committing section.
+                full_block(&extractor, 2, 2, vec![]).await;
+                // Block 3: the attribute gets its first-ever value, mis-marked as an
+                // Update. Finality stays 2, so block 2 stays buffered.
+                full_block(
+                    &extractor,
+                    3,
+                    2,
+                    vec![entity_change_tx(
+                        3,
+                        0,
+                        "pool_x",
+                        "protocol_fees",
+                        500,
+                        PbChangeType::Update,
+                    )],
+                )
+                .await;
+
+                extractor
+                    .handle_revert(undo_to(2))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            })
+        });
+
+        let map = snapshot_to_map(snapshotter.snapshot());
+        assert_eq!(
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_found", "true")
                 ],
             ),
             1,
-            "pool_w has state rows but not the reverted attribute"
+            "a creation drained but not yet flushed must count as a known component"
+        );
+        assert_eq!(
+            counter_value(
+                &map,
+                "extractor_revert_attr_miss",
+                &[
+                    ("extractor", EXTRACTOR_NAME),
+                    ("chain", "ethereum"),
+                    ("component_found", "false")
+                ],
+            ),
+            0,
+            "the production shape must not alert"
         );
     }
 
@@ -4901,11 +5087,11 @@ mod test {
         });
 
         let map = snapshot_to_map(snapshotter.snapshot());
-        for state_found in ["true", "false"] {
+        for component_found in ["true", "false"] {
             let labels = std::collections::BTreeMap::from([
                 ("extractor".to_string(), EXTRACTOR_NAME.to_string()),
                 ("chain".to_string(), "ethereum".to_string()),
-                ("component_state_found".to_string(), state_found.to_string()),
+                ("component_found".to_string(), component_found.to_string()),
             ]);
             assert!(
                 map.contains_key(&(
@@ -4913,7 +5099,7 @@ mod test {
                     "extractor_revert_attr_miss".to_string(),
                     labels,
                 )),
-                "series with component_state_found={state_found} must exist at startup; \
+                "series with component_found={component_found} must exist at startup; \
                  a series born on the first miss looks flat to increase() and no alert fires"
             );
         }

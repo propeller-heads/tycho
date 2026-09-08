@@ -231,6 +231,23 @@ impl StateUpdateBufferEntry for BlockChanges {
 
         res
     }
+
+    fn get_filtered_protocol_components(
+        &self,
+        ids: &HashSet<&ComponentId>,
+    ) -> HashSet<ComponentId> {
+        let mut res = HashSet::new();
+
+        for update in self.txs_with_update.iter() {
+            for component_id in update.protocol_components.keys() {
+                if ids.contains(component_id) {
+                    res.insert(component_id.clone());
+                }
+            }
+        }
+
+        res
+    }
 }
 
 #[cfg(test)]
