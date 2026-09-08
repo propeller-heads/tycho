@@ -231,6 +231,37 @@ where
         Ok(())
     }
 
+    /// Returns the ids among `ids` with no protocol component entry in the reorg buffer history
+    /// and no component row in the DB.
+    async fn missing_components(
+        &self,
+        reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+        ids: Vec<&ComponentId>,
+    ) -> Result<HashSet<ComponentId>, ExtractionError> {
+        let (_, absent_from_buffer) = reorg_buffer.lookup_components(&ids);
+        if absent_from_buffer.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let in_db: HashSet<ComponentId> = self
+            .gateway
+            .inner
+            .get_protocol_components(
+                &absent_from_buffer
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<&str>>(),
+            )
+            .await
+            .map_err(ExtractionError::Storage)?
+            .into_iter()
+            .map(|component| component.id)
+            .collect();
+        Ok(absent_from_buffer
+            .into_iter()
+            .filter(|id| !in_db.contains(id))
+            .collect())
+    }
+
     async fn is_first_message(&self) -> bool {
         !self
             .inner
@@ -1546,70 +1577,35 @@ where
             }
         }
 
-        // A component with DB state rows is known; the rest need an existence check, first
-        // in the buffer history, then against the component table.
-        let mut unknown_components: HashSet<ComponentId> = HashSet::new();
-        if !not_found.is_empty() {
-            let candidates: Vec<&ComponentId> = not_found
-                .keys()
-                .filter(|id| !states_by_id.contains_key(id.as_str()))
-                .collect();
-            let (_, absent_from_buffer) = reorg_buffer.lookup_components(&candidates);
-            if !absent_from_buffer.is_empty() {
-                let db_components = self
-                    .gateway
-                    .inner
-                    .get_protocol_components(
-                        &absent_from_buffer
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<&str>>(),
-                    )
-                    .await
-                    .map_err(ExtractionError::Storage)?;
-                let in_db: HashSet<&str> = db_components
-                    .iter()
-                    .map(|component| component.id.as_str())
-                    .collect();
-                unknown_components = absent_from_buffer
-                    .into_iter()
-                    .filter(|id| !in_db.contains(id.as_str()))
-                    .collect();
-            }
-        }
+        let missing_components = self
+            .missing_components(&reorg_buffer, not_found.keys().collect())
+            .await?;
 
-        // Both count per attribute: known misses belong to a component Tycho saw created,
-        // unknown misses to a component that exists nowhere.
-        let mut known_misses = 0_u64;
-        let mut unknown_misses = 0_u64;
-        let mut known: Vec<(&str, usize)> = Vec::new();
-        let mut unknown: Vec<(&str, usize)> = Vec::new();
-        for (component_id, keys) in not_found.iter() {
-            if unknown_components.contains(component_id) {
-                unknown_misses += keys.len() as u64;
-                unknown.push((component_id.as_str(), keys.len()));
-            } else {
-                known_misses += keys.len() as u64;
-                known.push((component_id.as_str(), keys.len()));
-            }
-        }
+        // Per attribute: an attribute miss belongs to a component Tycho knows, a component
+        // miss to one that exists nowhere.
+        let (component_misses, attribute_misses): (Vec<(&str, usize)>, Vec<(&str, usize)>) =
+            not_found
+                .iter()
+                .map(|(id, keys)| (id.as_str(), keys.len()))
+                .partition(|(id, _)| missing_components.contains(*id));
         if !not_found.is_empty() {
             warn!(
-                known = ?known,
-                unknown = ?unknown,
+                ?attribute_misses,
+                ?component_misses,
                 "Attributes with no prior state in buffer or DB during revert; \
                  reverting them as deletions"
             );
         }
-        for (misses, component_found) in [(known_misses, "true"), (unknown_misses, "false")] {
-            if misses > 0 {
+        for (misses, component_found) in [(attribute_misses, "true"), (component_misses, "false")] {
+            let count: usize = misses.iter().map(|(_, n)| n).sum();
+            if count > 0 {
                 counter!(
                     "extractor_revert_attr_miss",
                     "extractor" => self.name.clone(),
                     "chain" => self.chain.to_string(),
                     "component_found" => component_found,
                 )
-                .increment(misses);
+                .increment(count as u64);
             }
         }
 
@@ -4874,17 +4870,20 @@ mod test {
                             HashMap::new(),
                         )])
                     });
-                // pool_y is answered by the buffer and pool_w by its state rows, so only
-                // pool_ghost and pool_z reach the component table.
+                // pool_y is answered by the buffer; the rest reach the component table, where
+                // pool_w and pool_z exist and pool_ghost does not.
                 gw.expect_get_protocol_components()
                     .returning(|component_ids| {
                         let mut ids = component_ids.to_vec();
                         ids.sort();
-                        assert_eq!(ids, vec!["pool_ghost", "pool_z"]);
-                        Ok(vec![ProtocolComponent {
-                            id: "pool_z".to_string(),
-                            ..Default::default()
-                        }])
+                        assert_eq!(ids, vec!["pool_ghost", "pool_w", "pool_z"]);
+                        Ok(["pool_w", "pool_z"]
+                            .into_iter()
+                            .map(|id| ProtocolComponent {
+                                id: id.to_string(),
+                                ..Default::default()
+                            })
+                            .collect())
                     });
                 gw.expect_get_components_balances()
                     .returning(|_| Ok(HashMap::new()));
