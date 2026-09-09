@@ -206,15 +206,25 @@ impl EthCallDetector {
             .checked_sub(r.balanceBeforeIn)
             .ok_or("settlement balance underflow after successful transfer in")?;
 
-        let fees = calculate_fee(
+        // A balance that overflows U256 when the amount sent is added to it is token behaviour,
+        // not an RPC fault. Both transfers ran, so gas is known and the tax is not.
+        let fees = match calculate_fee(
             amount,
             middle_amount,
             r.balanceBeforeIn,
             r.balanceAfterIn,
             r.recipientBefore,
             r.recipientAfter,
-        )
-        .map_err(|e| format!("Failed to calculate transfer fee: {e}"))?;
+        ) {
+            Ok(fees) => fees,
+            Err(e) => {
+                return Ok((
+                    TokenQuality::bad(format!("Failed to calculate transfer fee: {e}")),
+                    Some(gas_per_transfer),
+                    None,
+                ))
+            }
+        };
 
         let computed_balance_after_in = r
             .balanceBeforeIn
@@ -363,6 +373,35 @@ mod tests {
         assert!(gas.is_some());
         // Fee should be ~100 bps (1%)
         assert_eq!(tax, Some(U256::from(100_u64)));
+    }
+
+    #[test]
+    fn handle_response_fee_on_transfer_with_settlement_dust() {
+        // Settlement already holds 50_000 when the 1% fee token credits it with 990_000.
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceBeforeIn = U256::from(50_000_u64);
+        r.balanceAfterIn = U256::from(1_040_000_u64);
+        r.balanceAfterOut = U256::from(50_000_u64);
+        r.recipientAfter = U256::from(990_000_u64);
+        let (quality, gas, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert!(gas.is_some());
+        assert_eq!(tax, Some(U256::from(100_u64)));
+    }
+
+    #[test]
+    fn handle_response_fee_overflow_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceBeforeIn = U256::MAX;
+        r.balanceAfterIn = U256::MAX;
+        let (quality, gas, tax) = EthCallDetector::handle_response(r, amount, Address::ZERO)
+            .expect("a balance near U256::MAX must yield a Bad verdict, not an error");
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(gas, Some(U256::from(27_500_u64)));
+        assert!(tax.is_none());
     }
 
     impl TestFixture {
