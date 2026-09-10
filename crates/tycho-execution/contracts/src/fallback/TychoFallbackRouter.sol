@@ -39,10 +39,10 @@ error TychoFallbackRouter__InvalidUniswapV2Fee(uint256 feeBps);
 error TychoFallbackRouter__NoOutput();
 error TychoFallbackRouter__NotPoolManager();
 error TychoFallbackRouter__NotSelf();
-error TychoFallbackRouter__UnknownVenue(uint8 venue);
+error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 
 /// @title TychoFallbackRouter
-/// @notice Runs a pAMM and, only if it fails, the caller's chosen fallback venue.
+/// @notice Runs a pAMM and, only if it fails, the caller's chosen fallback protocol.
 /// @dev Exists because an executor cannot fall back: the Dispatcher transfers a swap's input before
 /// it delegatecalls `swap()`, so a reverting pAMM has already been paid and a Uniswap V3 retry,
 /// which pays in a callback, cannot be funded. Here the tokens stay in this contract.
@@ -54,8 +54,8 @@ error TychoFallbackRouter__UnknownVenue(uint8 venue);
 contract TychoFallbackRouter is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
-    /// @notice The venue kinds a fallback may use.
-    enum Venue {
+    /// @notice The protocols a fallback may use.
+    enum FallbackProtocol {
         UniswapV2,
         UniswapV3,
         UniswapV4,
@@ -94,7 +94,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// @notice Where `dexCallback` pays a Fluid dex.
     address public immutable fluidLiquidity;
 
-    /// @notice The pAMM failed and `venue` filled instead. Absence of this event on a filled swap
+    /// @notice The pAMM failed and `protocol` filled instead. Absence of this event on a filled swap
     /// means the pAMM served it, which is the pAMM fill rate.
     /// @dev The pAMM's revert reason is deliberately not carried: reading it would copy
     /// caller-controlled returndata of any size into this frame.
@@ -103,7 +103,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         address indexed tokenIn,
         address indexed tokenOut,
         uint256 amountIn,
-        Venue venue
+        FallbackProtocol protocol
     );
 
     constructor(IPoolManager poolManager_, address fluidLiquidity_) {
@@ -134,11 +134,11 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
             return;
         } catch {}
 
-        Venue venue = _executeFallback(swap_, fallbackSwap);
+        FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
         // Reentrancy cannot happen: the function is nonReentrant.
         // slither-disable-next-line reentrancy-events
         emit FallbackSwap(
-            pamm, swap_.tokenIn, swap_.tokenOut, swap_.amountIn, venue
+            pamm, swap_.tokenIn, swap_.tokenOut, swap_.amountIn, protocol
         );
     }
 
@@ -161,50 +161,43 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
                 block.timestamp
             );
 
-        _requireOutput(swap_.tokenOut, swap_.receiver, balanceBefore);
-    }
-
-    /// @dev Runs the tagged venue, which pays `swap_.receiver` directly. No output measurement
-    /// here: the Dispatcher's balance-diff at the receiver is the single source of truth.
-    function _executeFallback(Swap calldata swap_, bytes calldata encodedSwap)
-        internal
-        returns (Venue venue)
-    {
-        if (encodedSwap.length == 0) {
-            revert TychoFallbackRouter__InvalidSwapLength(encodedSwap.length);
-        }
-
-        uint8 venueByte = uint8(encodedSwap[0]);
-        if (venueByte > uint8(type(Venue).max)) {
-            revert TychoFallbackRouter__UnknownVenue(venueByte);
-        }
-        venue = Venue(venueByte);
-        bytes calldata venueData = encodedSwap[1:];
-
-        if (venue == Venue.UniswapV2) {
-            _swapUniswapV2(swap_, venueData);
-        } else if (venue == Venue.UniswapV3) {
-            _swapUniswapV3(swap_, venueData);
-        } else if (venue == Venue.UniswapV4) {
-            _swapUniswapV4(swap_, venueData);
-        } else if (venue == Venue.Curve) {
-            _swapCurve(swap_, venueData);
-        } else if (venue == Venue.FluidV1) {
-            _swapFluidV1(swap_, venueData);
-        } else {
-            revert TychoFallbackRouter__UnknownVenue(venueByte);
-        }
-    }
-
-    /// @dev Reverts on zero delivered, so a pAMM that fills with nothing still falls through to
-    /// the fallback.
-    function _requireOutput(
-        address tokenOut,
-        address receiver,
-        uint256 balanceBefore
-    ) internal view {
-        if (IERC20(tokenOut).balanceOf(receiver) <= balanceBefore) {
+        // Reverts on zero delivered, so a pAMM that fills with nothing still falls through
+        // to the fallback.
+        if (IERC20(swap_.tokenOut).balanceOf(swap_.receiver) <= balanceBefore) {
             revert TychoFallbackRouter__NoOutput();
+        }
+    }
+
+    /// @dev Runs the tagged protocol, which pays or forwards to `swap_.receiver`. No output
+    /// measurement here: the Dispatcher's balance-diff at the receiver is the single source of
+    /// truth.
+    function _executeFallback(Swap calldata swap_, bytes calldata fallbackSwap)
+        internal
+        returns (FallbackProtocol protocol)
+    {
+        if (fallbackSwap.length == 0) {
+            revert TychoFallbackRouter__InvalidSwapLength(fallbackSwap.length);
+        }
+
+        uint8 protocolByte = uint8(fallbackSwap[0]);
+        if (protocolByte > uint8(type(FallbackProtocol).max)) {
+            revert TychoFallbackRouter__UnknownProtocol(protocolByte);
+        }
+        protocol = FallbackProtocol(protocolByte);
+        bytes calldata protocolData = fallbackSwap[1:];
+
+        if (protocol == FallbackProtocol.UniswapV2) {
+            _swapUniswapV2(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.UniswapV3) {
+            _swapUniswapV3(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.UniswapV4) {
+            _swapUniswapV4(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.Curve) {
+            _swapCurve(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.FluidV1) {
+            _swapFluidV1(swap_, protocolData);
+        } else {
+            revert TychoFallbackRouter__UnknownProtocol(protocolByte);
         }
     }
 
@@ -354,10 +347,11 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         IERC20(tokenIn).safeTransfer(fluidLiquidity, amountIn);
     }
 
-    /// @notice Runs the Uniswap V4 swap inside the PoolManager's unlock: pays `swap_.amountIn`, swaps
-    /// the single pool named by the venue data, and sends the output to `swap_.receiver`.
-    /// @dev The pool key's currencies come from the sort order of `swap_.tokenIn` and `swap_.tokenOut`,
-    /// so the venue data carries no direction.
+    /// @notice Runs the Uniswap V4 swap inside the PoolManager's unlock: decodes `data`, pays the
+    /// encoded `amountIn`, swaps the single pool the encoded protocol data names, and sends the
+    /// output to the encoded receiver.
+    /// @dev The pool key's currencies come from the sort order of the encoded `tokenIn` and
+    /// `tokenOut`, so the protocol data carries no direction.
     function unlockCallback(bytes calldata data)
         external
         returns (bytes memory)
@@ -400,7 +394,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
 
         int128 amountOut = zeroForOne ? delta.amount1() : delta.amount0();
         // A negative delta (hostile hook) wraps to an amount `take` cannot pay, so it reverts
-        // there; a zero delta fails the route-level minAmountOut like any other empty venue.
+        // there; a zero delta fails the route-level minAmountOut like any other fallback
+        // that pays nothing.
         poolManager.take(
             Currency.wrap(swap_.tokenOut),
             swap_.receiver,
@@ -424,7 +419,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
     }
 
-    /// @dev Clears the context, so one callback cannot pay twice.
+    /// @dev Rejects a `msg.sender` that is not the stored source, and clears the context so one
+    /// callback cannot pay twice.
     function _consumeCallbackContext()
         internal
         returns (address token, uint256 amount)

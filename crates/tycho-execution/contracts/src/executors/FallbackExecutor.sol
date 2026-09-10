@@ -6,16 +6,18 @@ import {TychoFallbackRouter} from "../fallback/TychoFallbackRouter.sol";
 import {TransferManager} from "../TransferManager.sol";
 
 error FallbackExecutor__AddressZero();
-error FallbackExecutor__InvalidDataLength();
+error FallbackExecutor__InvalidDataLength(uint256 length);
 
 /// @title FallbackExecutor
 /// @notice Runs one swap through `TychoFallbackRouter`.
 /// @dev `TransferType.Transfer` sends `amountIn` to the fallback router, which then owns the
-/// tokens and pays each venue itself. The router address is immutable, so no swap data can select
-/// a call target outside it.
+/// tokens and pays each protocol itself. The router address is immutable, so the executor only
+/// ever calls this one contract. Every address inside the swap data is called by the router, not
+/// by the executor.
 ///
-/// Every venue gets `minAmountOut = 0`, since a binding value would revert the trades the fallback
-/// exists to rescue. The TychoRouter's route-level `minAmountOut` must clear the fallback venue.
+/// Every protocol gets `minAmountOut = 0`, since a binding value would revert the trades the
+/// fallback exists to rescue. The TychoRouter's route-level `minAmountOut` must clear the price
+/// the fallback fills at.
 contract FallbackExecutor is IExecutor {
     TychoFallbackRouter public immutable fallbackRouter;
 
@@ -78,8 +80,8 @@ contract FallbackExecutor is IExecutor {
     }
 
     /// @dev Data layout: `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback: rest]`, where the
-    /// fallback is `[venue: uint8][venue data]`. The pAMM is a bare address, so no length prefix
-    /// is needed to find where the fallback starts.
+    /// fallback is `[protocol: uint8][protocol data]`. The pAMM is a bare address, so no length
+    /// prefix is needed to find where the fallback starts.
     function _decodeData(bytes calldata data)
         internal
         pure
@@ -91,7 +93,7 @@ contract FallbackExecutor is IExecutor {
         )
     {
         if (data.length <= 60) {
-            revert FallbackExecutor__InvalidDataLength();
+            revert FallbackExecutor__InvalidDataLength(data.length);
         }
 
         tokenIn = address(bytes20(data[0:20]));

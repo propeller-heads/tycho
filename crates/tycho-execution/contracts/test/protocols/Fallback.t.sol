@@ -18,12 +18,12 @@ import {
     TychoFallbackRouter__InvalidCallback,
     TychoFallbackRouter__InvalidUniswapV2Fee,
     TychoFallbackRouter__NotPoolManager,
-    TychoFallbackRouter__UnknownVenue,
+    TychoFallbackRouter__UnknownProtocol,
     TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
 import {UniswapV2Math__ZeroReserves} from "../../lib/UniswapV2Math.sol";
 
-/// @notice Builds the venue entries `TychoFallbackRouter` decodes.
+/// @notice Builds the protocol entries `TychoFallbackRouter` decodes.
 library FallbackSwaps {
     function swap(
         address tokenIn,
@@ -45,13 +45,14 @@ library FallbackSwaps {
         returns (bytes memory)
     {
         return abi.encodePacked(
-            uint8(TychoFallbackRouter.Venue.UniswapV2), pair, feeBps
+            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV2), pair, feeBps
         );
     }
 
     function uniswapV3(address pool) internal pure returns (bytes memory) {
-        return
-            abi.encodePacked(uint8(TychoFallbackRouter.Venue.UniswapV3), pool);
+        return abi.encodePacked(
+            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV3), pool
+        );
     }
 
     function uniswapV4(
@@ -61,7 +62,7 @@ library FallbackSwaps {
         bytes memory hookData
     ) internal pure returns (bytes memory) {
         return abi.encodePacked(
-            uint8(TychoFallbackRouter.Venue.UniswapV4),
+            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4),
             bytes3(fee),
             tickSpacing,
             hook,
@@ -75,7 +76,11 @@ library FallbackSwaps {
         returns (bytes memory)
     {
         return abi.encodePacked(
-            uint8(TychoFallbackRouter.Venue.Curve), pool, poolType, i, j
+            uint8(TychoFallbackRouter.FallbackProtocol.Curve),
+            pool,
+            poolType,
+            i,
+            j
         );
     }
 
@@ -85,7 +90,7 @@ library FallbackSwaps {
         returns (bytes memory)
     {
         return abi.encodePacked(
-            uint8(TychoFallbackRouter.Venue.FluidV1), dex, zero2one
+            uint8(TychoFallbackRouter.FallbackProtocol.FluidV1), dex, zero2one
         );
     }
 }
@@ -150,16 +155,17 @@ contract SilentPropAMM {
     }
 }
 
-/// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every venue test
-/// repeats. Subclasses name the fork block, since the venues are not all live at the same one.
+/// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every fallback
+/// test repeats. Subclasses name the fork block, since the protocols are not all live at the
+/// same one.
 abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
     TychoFallbackRouter router;
     MockPropAMM pamm;
 
-    function _forkBlock() internal pure virtual returns (uint256);
+    function getForkBlock() internal pure virtual returns (uint256);
 
     function setUp() public virtual {
-        vm.createSelectFork(vm.rpcUrl("mainnet"), _forkBlock());
+        vm.createSelectFork(vm.rpcUrl("mainnet"), getForkBlock());
         router = new TychoFallbackRouter(
             IPoolManager(POOL_MANAGER), FLUIDV1_LIQUIDITY
         );
@@ -176,8 +182,9 @@ abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
     }
 }
 
-/// @notice The claim the contract exists for: a reverting pAMM still delivers `tokenOut`, through
-/// a venue an executor could never reach.
+/// @notice The claim the contract exists for: a reverting pAMM still delivers `tokenOut`,
+/// because the input is still here to fund the retry -- which is what an executor cannot do,
+/// since the Dispatcher has already paid the pAMM by the time it reverts.
 contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     /// The USDC/WETH, DAI/USDC and USDE/USDT pools this contract quotes all
     /// hold enough liquidity to fill `USDC_IN` here. Moving the block moves
@@ -187,7 +194,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     uint256 constant USDC_IN = 10_000e6;
 
     /// Measured at FORK_BLOCK against the pools each test names. An exact
-    /// amount is what separates a correct fill from one the venue still
+    /// amount is what separates a correct fill from one the protocol still
     /// accepted at the wrong fee, direction or scale.
     uint256 constant V2_WETH_OUT = 3_611_787_219_421_119_156;
     uint256 constant V2_USDC_OUT = 10_994_711_547;
@@ -198,18 +205,18 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     uint256 constant CURVE_USDC_OUT = 999_895_324;
     uint256 constant CURVE_CRYPTO_USDC_OUT = 2_766_051_040;
 
-    function _forkBlock() internal pure override returns (uint256) {
+    function getForkBlock() internal pure override returns (uint256) {
         return FORK_BLOCK;
     }
 
-    /// The enum ordinals are the wire format the encoder emits (the venue
+    /// The enum ordinals are the wire format the encoder emits (the protocol
     /// table in CLAUDE.md); reordering the enum must fail here, not silently.
-    function testVenueWireFormatIsStable() public pure {
-        assertEq(uint8(TychoFallbackRouter.Venue.UniswapV2), 0);
-        assertEq(uint8(TychoFallbackRouter.Venue.UniswapV3), 1);
-        assertEq(uint8(TychoFallbackRouter.Venue.UniswapV4), 2);
-        assertEq(uint8(TychoFallbackRouter.Venue.Curve), 3);
-        assertEq(uint8(TychoFallbackRouter.Venue.FluidV1), 4);
+    function testProtocolWireFormatIsStable() public pure {
+        assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV2), 0);
+        assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV3), 1);
+        assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4), 2);
+        assertEq(uint8(TychoFallbackRouter.FallbackProtocol.Curve), 3);
+        assertEq(uint8(TychoFallbackRouter.FallbackProtocol.FluidV1), 4);
     }
 
     /// 30 bps is the highest accepted fee; 31 reverts naming the value. The
@@ -251,10 +258,10 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    /// Every venue pins its payload width: truncated and over-long payloads
+    /// Every protocol pins its payload width: truncated and over-long payloads
     /// revert `InvalidSwapLength` naming the offending length. Uniswap V4 is a
     /// lower bound (variable hookData), so only truncation applies to it.
-    function testVenueDataLengthGuards() public {
+    function testProtocolDataLengthGuards() public {
         deal(USDC_ADDR, address(router), USDC_IN);
 
         bytes[] memory entries = new bytes[](5);
@@ -268,7 +275,8 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
 
         for (uint256 i = 0; i < entries.length; i++) {
-            // The first byte is the venue tag, so the guarded width is one less.
+            // The first byte is the protocol tag, so the guarded width is one
+            // less.
             uint256 width = entries[i].length - 1;
 
             vm.expectRevert(
@@ -278,7 +286,8 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             );
             router.swap(swap_, address(pamm), _truncate(entries[i]));
 
-            bool isUniswapV4 = i == uint256(TychoFallbackRouter.Venue.UniswapV4);
+            bool isUniswapV4 =
+                i == uint256(TychoFallbackRouter.FallbackProtocol.UniswapV4);
             if (!isUniswapV4) {
                 vm.expectRevert(
                     abi.encodeWithSelector(
@@ -334,7 +343,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     }
 
     /// `FallbackSwap` is the pAMM fill-rate signal: it marks the swaps the pAMM
-    /// did not serve, and names the venue that filled instead.
+    /// did not serve, and names the protocol that filled instead.
     function testFallingBackEmitsFallbackSwap() public {
         deal(USDC_ADDR, address(router), USDC_IN);
 
@@ -344,7 +353,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             USDC_ADDR,
             WETH_ADDR,
             USDC_IN,
-            TychoFallbackRouter.Venue.UniswapV3
+            TychoFallbackRouter.FallbackProtocol.UniswapV3
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -503,7 +512,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     }
 
     /// Zero output counts as a failure and takes back the `tokenIn` already sent.
-    function testVenuePayingNothingFallsThrough() public {
+    function testPropAMMPayingNothingFallsThrough() public {
         SilentPropAMM silent = new SilentPropAMM();
         deal(USDC_ADDR, address(router), USDC_IN);
 
@@ -518,7 +527,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
 
-    /// A failing fallback reverts the swap with the venue's own error -- no try/catch around the
+    /// A failing fallback reverts the swap with the fallback's own error -- no try/catch around the
     /// fallback slot, and no third attempt.
     function testFallbackFailureReverts() public {
         RevertingPool pool = new RevertingPool();
@@ -532,12 +541,12 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    function testUnknownFallbackVenueReverts() public {
+    function testUnknownFallbackProtocolReverts() public {
         deal(USDC_ADDR, address(router), USDC_IN);
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TychoFallbackRouter__UnknownVenue.selector, uint8(9)
+                TychoFallbackRouter__UnknownProtocol.selector, uint8(9)
             )
         );
         router.swap(
@@ -571,7 +580,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    /// No swap is running, so there is no venue that may be paid.
+    /// No swap is running, so there is no protocol that may be paid.
     function testUniswapV3CallbackRejectsStranger() public {
         vm.expectRevert(TychoFallbackRouter__InvalidCallback.selector);
         router.uniswapV3SwapCallback(1, -1, bytes(""));
@@ -601,7 +610,7 @@ contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
     uint256 constant FLUID_USDT_OUT = 12_006_909;
     uint256 constant FLUID_SUSDE_OUT = 8_326_872_266_375_000_000;
 
-    function _forkBlock() internal pure override returns (uint256) {
+    function getForkBlock() internal pure override returns (uint256) {
         return FORK_BLOCK;
     }
 
@@ -725,7 +734,11 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
     }
 
     function testInvalidDataLength() public {
-        vm.expectRevert(FallbackExecutor__InvalidDataLength.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                FallbackExecutor__InvalidDataLength.selector, 40
+            )
+        );
         fallbackExecutor.getTransferData(abi.encodePacked(USDC_ADDR, WETH_ADDR));
     }
 
@@ -893,7 +906,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
     }
 
-    /// A fallback venue that reports success but pays nothing is caught by the
+    /// A fallback protocol that reports success but pays nothing is caught by the
     /// route-level minAmountOut -- the backstop that replaces any in-slot
     /// output check in the fallback slot.
     function testZeroOutputFallbackFailsRouteMinAmountOut() public {
