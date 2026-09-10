@@ -14,7 +14,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
