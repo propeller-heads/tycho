@@ -52,6 +52,13 @@ error TychoFallbackRouter__ZeroGasCap();
 /// Holds no funds between transactions. A balance that does end up here (Curve rounding dust, a
 /// mistaken transfer) is claimable by anyone through `swap` and is considered lost, which is also
 /// why a Curve approval is left in place rather than revoked. Native ETH unsupported.
+///
+/// Fee-on-transfer and rebasing tokens are unsupported, and a route carrying one must not name
+/// this contract. Every other executor is paid by the Dispatcher, which measures what landed at
+/// the pool. This contract adds a second transfer, from here to the venue, and nothing measures
+/// it: each venue is told `swap_.amountIn` while it receives less, so it fails its own input
+/// check. A Uniswap V2 pair fails its K check, a V3 pool reverts `IIA`, and V4 reverts
+/// `CurrencyNotSettled` because `settle` credits less than `poolManager.swap` specifies.
 contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -135,7 +142,8 @@ contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
     /// swap; there is no third attempt.
     /// @dev Permissionless: the caller names every parameter, so a balance sitting in this
     /// contract can be taken by anyone and is considered lost. Push-payment: the caller MUST
-    /// transfer `swap_.amountIn` of `swap_.tokenIn` here first. Native ETH is not supported.
+    /// transfer `swap_.amountIn` of `swap_.tokenIn` here first. Native ETH is not supported, and
+    /// neither are fee-on-transfer or rebasing tokens -- see the contract doc for why.
     /// `fallbackSwap` names one of Uniswap V2, V3 or V4, Curve, or Fluid V1.
     /// No output is returned: the caller measures its own `swap_.tokenOut` balance diff at
     /// `swap_.receiver`, which is how the Dispatcher verifies every swap.
