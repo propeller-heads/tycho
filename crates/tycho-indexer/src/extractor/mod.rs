@@ -268,10 +268,7 @@ where
             .get_filtered_account_state_update(keys)
     }
 
-    fn get_filtered_protocol_components(
-        &self,
-        ids: &HashSet<&ComponentId>,
-    ) -> HashSet<ComponentId> {
+    fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId> {
         self.block_update
             .get_filtered_protocol_components(ids)
     }

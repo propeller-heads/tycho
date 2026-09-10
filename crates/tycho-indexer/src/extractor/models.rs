@@ -232,10 +232,7 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    fn get_filtered_protocol_components(
-        &self,
-        ids: &HashSet<&ComponentId>,
-    ) -> HashSet<ComponentId> {
+    fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId> {
         let mut res = HashSet::new();
 
         for update in self.txs_with_update.iter() {

@@ -233,20 +233,23 @@ where
 
     /// Returns the ids among `ids` with no protocol component entry in the reorg buffer history
     /// and no component row in the DB.
-    async fn missing_components(
+    ///
+    /// The protocol cache is not consulted: it keeps creations that a revert undid, so it would
+    /// label a reverted ghost as known.
+    async fn find_unknown_components(
         &self,
         reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
-        ids: Vec<&ComponentId>,
+        ids: &[&ComponentId],
     ) -> Result<HashSet<ComponentId>, ExtractionError> {
-        let (_, absent_from_buffer) = reorg_buffer.lookup_components(&ids);
-        if absent_from_buffer.is_empty() {
-            return Ok(HashSet::new());
+        let mut unknown = reorg_buffer.missing_components(ids);
+        if unknown.is_empty() {
+            return Ok(unknown);
         }
         let in_db: HashSet<ComponentId> = self
             .gateway
             .inner
             .get_protocol_components(
-                &absent_from_buffer
+                &unknown
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<&str>>(),
@@ -256,10 +259,8 @@ where
             .into_iter()
             .map(|component| component.id)
             .collect();
-        Ok(absent_from_buffer
-            .into_iter()
-            .filter(|id| !in_db.contains(id))
-            .collect())
+        unknown.retain(|id| !in_db.contains(id));
+        Ok(unknown)
     }
 
     async fn is_first_message(&self) -> bool {
@@ -1577,8 +1578,8 @@ where
             }
         }
 
-        let missing_components = self
-            .missing_components(&reorg_buffer, not_found.keys().collect())
+        let unknown_components = self
+            .find_unknown_components(&reorg_buffer, &not_found.keys().collect::<Vec<_>>())
             .await?;
 
         // Per attribute: an attribute miss belongs to a component Tycho knows, a component
@@ -1587,7 +1588,7 @@ where
             not_found
                 .iter()
                 .map(|(id, keys)| (id.as_str(), keys.len()))
-                .partition(|(id, _)| missing_components.contains(*id));
+                .partition(|(id, _)| unknown_components.contains(*id));
         if !not_found.is_empty() {
             warn!(
                 ?attribute_misses,

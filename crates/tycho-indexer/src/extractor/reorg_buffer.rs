@@ -443,8 +443,7 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
 
     /// Returns the ids among `ids` that have a protocol component entry in this block,
     /// whatever the change type.
-    fn get_filtered_protocol_components(&self, ids: &HashSet<&ComponentId>)
-        -> HashSet<ComponentId>;
+    fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId>;
 }
 
 impl<B> ReorgBuffer<B>
@@ -489,33 +488,24 @@ where
         (res, remaining_keys.into_iter().collect())
     }
 
-    /// Looks up buffered protocol component entries for the provided ids. Returns the ids found
-    /// in the buffered blocks and the ids for which no entry was found.
-    pub fn lookup_components(
-        &self,
-        ids: &[&ComponentId],
-    ) -> (HashSet<ComponentId>, Vec<ComponentId>) {
-        let mut found = HashSet::new();
-        let mut remaining_ids: HashSet<ComponentId> = ids
+    /// Returns the ids among `ids` with no protocol component entry in the buffered blocks,
+    /// live and committing sections included.
+    pub fn missing_components(&self, ids: &[&ComponentId]) -> HashSet<ComponentId> {
+        let mut missing: HashSet<ComponentId> = ids
             .iter()
             .map(|&id| id.clone())
             .collect();
 
         for block_message in self.history() {
-            if remaining_ids.is_empty() {
+            if missing.is_empty() {
                 break;
             }
-
-            for id in
-                block_message.get_filtered_protocol_components(&remaining_ids.iter().collect())
-            {
-                if remaining_ids.remove(&id) {
-                    found.insert(id);
-                }
+            for id in block_message.get_filtered_protocol_components(&missing) {
+                missing.remove(&id);
             }
         }
 
-        (found, remaining_ids.into_iter().collect())
+        missing
     }
 
     /// Looks up buffered account state updates for the provided keys. Returns a map of updates and
@@ -640,7 +630,7 @@ mod test {
     use tycho_common::models::{
         blockchain::{Transaction, TxWithChanges},
         protocol::{ProtocolComponent, ProtocolComponentStateDelta},
-        Chain,
+        Chain, ChangeType,
     };
 
     use super::*;
@@ -1112,7 +1102,11 @@ mod test {
             vec![TxWithChanges {
                 protocol_components: HashMap::from([(
                     component_id.to_string(),
-                    ProtocolComponent { id: component_id.to_string(), ..Default::default() },
+                    ProtocolComponent {
+                        id: component_id.to_string(),
+                        change: ChangeType::Creation,
+                        ..Default::default()
+                    },
                 )]),
                 tx: transaction(),
                 ..Default::default()
@@ -1122,7 +1116,7 @@ mod test {
     }
 
     #[test]
-    fn test_lookup_components_reads_live_and_committing_blocks() {
+    fn test_missing_components_reads_live_and_committing_blocks() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer
             .insert_block(component_creation_block(1, "c1"))
@@ -1143,16 +1137,13 @@ mod test {
         let c3 = "c3".to_string();
         let ghost = "ghost".to_string();
 
-        let (found, missing) = reorg_buffer.lookup_components(&[&c1, &c3, &ghost]);
-        assert_eq!(found, HashSet::from([c1.clone(), c3.clone()]));
-        assert_eq!(missing, vec![ghost.clone()]);
+        let missing = reorg_buffer.missing_components(&[&c1, &c3, &ghost]);
+        assert_eq!(missing, HashSet::from([ghost.clone()]));
 
         // Releasing block 1 drops its creation from the history.
         reorg_buffer.release_committed(2);
-        let (found, mut missing) = reorg_buffer.lookup_components(&[&c1, &c3, &ghost]);
-        assert_eq!(found, HashSet::from([c3]));
-        missing.sort();
-        assert_eq!(missing, vec![c1, ghost]);
+        let missing = reorg_buffer.missing_components(&[&c1, &c3, &ghost]);
+        assert_eq!(missing, HashSet::from([c1, ghost]));
     }
 
     #[test]
