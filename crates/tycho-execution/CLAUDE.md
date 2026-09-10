@@ -202,11 +202,8 @@ Constraints:
 
 - **Native ETH is not supported.** Routes use the wrapped token; `TychoRouterEncoder` already inserts the WETH wrap and
   unwrap legs around a swap that needs them.
-- **Fee-on-transfer and rebasing tokens are not supported**, and a route carrying one must not name this contract. The
-  Dispatcher's balance-diff covers the transfer into this contract, but this contract then makes a second, unmeasured
-  transfer to the venue. Each venue is told `swap_.amountIn` while it receives less, so it fails its own input check: a
-  Uniswap V2 pair on its K check, a V3 pool with `IIA`, V4 with `CurrencyNotSettled`. Curve depends on the pool -- the
-  `stable-ng` pools measure what they received, the older stable and crypto pools do not.
+- **Fee-on-transfer and rebasing tokens are not supported.** This contract transfers to the venue itself, and that hop
+  is outside the Dispatcher's balance-diff, so each venue is told more than it receives.
 - **Every venue gets `minAmountOut = 0`.** A binding per-venue value would revert the routes the fallback exists to
   rescue. The TychoRouter's route-level `minAmountOut` is the price check, so the caller must set it low enough for the
   fallback venue to clear.
@@ -220,9 +217,8 @@ Constraints:
 **Balance-diff verification**: The Dispatcher independently verifies every swap output. It
 measures `balanceOf(measureAt, tokenOut)` before and after every `swap()` delegatecall. The measured diff becomes the
 single source of truth for fees, delta accounting, and sequential chaining. This eliminates trust in protocol-reported
-amounts and handles fee-on-transfer/rebasing tokens for every executor that the Dispatcher pays directly. The one
-exception is `FallbackExecutor`, which pays `TychoFallbackRouter`, which then transfers to the venue itself; that
-second transfer is outside the Dispatcher's measurement, so fee-on-transfer and rebasing tokens are unsupported there.
+amounts and handles fee-on-transfer/rebasing tokens for every executor the Dispatcher pays directly. `FallbackExecutor`
+is the exception: `TychoFallbackRouter` transfers to the venue itself, outside this measurement.
 
 **Two output categories** (via `outputToRouter` flag from `getTransferData()`):
 
