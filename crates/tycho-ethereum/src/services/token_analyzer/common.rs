@@ -121,42 +121,44 @@ mod tests {
     }
 
     #[test]
-    fn calculate_fee_no_fee() {
+    fn calculate_fee_bps_no_fee() {
         assert_eq!(fee(1_000_000, 0, 1_000_000, 0, 1_000_000), Ok(U256::ZERO));
     }
 
     #[test]
-    fn calculate_fee_one_percent() {
+    fn calculate_fee_bps_one_percent() {
         assert_eq!(fee(1_000_000, 0, 990_000, 0, 980_100), Ok(U256::from(100)));
     }
 
     #[test]
-    fn calculate_fee_settlement_dust_above_fee() {
+    fn calculate_fee_bps_settlement_balance_exceeds_fee() {
         assert_eq!(fee(1_000_000, 50_000, 1_040_000, 0, 990_000), Ok(U256::from(100)));
     }
 
     #[test]
-    fn calculate_fee_rounding_token_with_settlement_dust() {
+    fn calculate_fee_bps_one_wei_short_is_zero() {
         assert_eq!(fee(1_000_000, 2, 1_000_001, 0, 999_999), Ok(U256::ZERO));
     }
 
     #[test]
-    fn calculate_fee_bonus_token() {
+    fn calculate_fee_bps_credits_more_than_sent_is_zero() {
         assert_eq!(fee(1_000_000, 0, 1_000_001, 0, 1_000_001), Ok(U256::ZERO));
     }
 
     #[test]
-    fn calculate_fee_takes_the_higher_leg() {
+    fn calculate_fee_bps_takes_the_higher_rate() {
+        // 1% inbound, 20% outbound of the 990_000 that arrived.
         assert_eq!(fee(1_000_000, 0, 990_000, 0, 792_000), Ok(U256::from(2_000)));
     }
 
     #[test]
-    fn calculate_fee_full_fee() {
+    fn calculate_fee_bps_full_fee() {
+        // Nothing arrived, so nothing is sent on.
         assert_eq!(fee(1_000_000, 7, 7, 0, 0), Ok(U256::from(10_000)));
     }
 
     #[test]
-    fn calculate_fee_balance_near_max_errors() {
+    fn calculate_fee_bps_balance_near_max_errors() {
         let result = calculate_fee_bps(
             ObservedTransfer {
                 sent: U256::from(1_000_000),

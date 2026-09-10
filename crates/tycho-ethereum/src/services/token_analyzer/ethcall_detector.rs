@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_response_fee_on_transfer_with_settlement_dust() {
+    fn handle_response_fee_on_transfer_with_settlement_balance() {
         // Settlement already holds 50_000 when the 1% fee token credits it with 990_000.
         let amount = U256::from(1_000_000_u64);
         let mut r = good_return(amount);
