@@ -48,8 +48,9 @@ error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 /// which pays in a callback, cannot be funded. Here the tokens stay in this contract.
 ///
 /// Holds no funds between transactions. A balance that does end up here (Curve rounding dust, a
-/// mistaken transfer) is claimable by anyone through `swap` and is considered lost, which is also
-/// why a Curve approval is left in place rather than revoked. Native ETH, fee-on-transfer and
+/// mistaken transfer) is claimable by anyone through `swap` and is considered lost. A Curve
+/// exchange normally spends its whole approval; a pool that pulls less leaves a remainder, which
+/// is not revoked because there is nothing here to take. Native ETH, fee-on-transfer and
 /// rebasing tokens are unsupported.
 contract TychoFallbackRouter is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;

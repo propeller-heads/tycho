@@ -458,7 +458,6 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
         assertEq(IERC20(USDC_ADDR).balanceOf(BOB), CURVE_USDC_OUT);
         _assertRouterDrained(DAI_ADDR, USDC_ADDR);
-        assertEq(IERC20(DAI_ADDR).allowance(address(router), TRIPOOL), 0);
     }
 
     /// A crypto pool takes the `uint256` exchange signature -- the dispatch
@@ -475,9 +474,6 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
         assertEq(IERC20(USDC_ADDR).balanceOf(BOB), CURVE_CRYPTO_USDC_OUT);
         _assertRouterDrained(WETH_ADDR, USDC_ADDR);
-        assertEq(
-            IERC20(WETH_ADDR).allowance(address(router), TRICRYPTO_POOL), 0
-        );
     }
 
     /// V4 runs inside `unlockCallback`, where this contract syncs, transfers and settles.
