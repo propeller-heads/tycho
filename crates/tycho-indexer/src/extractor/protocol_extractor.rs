@@ -1582,32 +1582,33 @@ where
             .find_unknown_components(&reorg_buffer, &not_found.keys().collect::<Vec<_>>())
             .await?;
 
-        // Per attribute: an attribute miss belongs to a component Tycho knows, a component
-        // miss to one that exists nowhere.
-        let (component_misses, attribute_misses): (Vec<(&str, usize)>, Vec<(&str, usize)>) =
-            not_found
-                .iter()
-                .map(|(id, keys)| (id.as_str(), keys.len()))
-                .partition(|(id, _)| unknown_components.contains(*id));
+        // Both count per attribute. An attribute miss belongs to a known component. A
+        // component miss belongs to an unknown component.
+        let (component_misses, attr_misses): (Vec<_>, Vec<_>) = not_found
+            .iter()
+            .map(|(id, keys)| (id.as_str(), keys.len()))
+            .partition(|(id, _)| unknown_components.contains(*id));
         if !not_found.is_empty() {
             warn!(
-                ?attribute_misses,
+                ?attr_misses,
                 ?component_misses,
                 "Attributes with no prior state in buffer or DB during revert; \
                  reverting them as deletions"
             );
         }
-        for (misses, component_known) in [(attribute_misses, "true"), (component_misses, "false")] {
-            let count: usize = misses.iter().map(|(_, n)| n).sum();
-            if count > 0 {
-                counter!(
-                    "extractor_revert_attr_miss",
-                    "extractor" => self.name.clone(),
-                    "chain" => self.chain.to_string(),
-                    "component_known" => component_known,
-                )
-                .increment(count as u64);
-            }
+        for (misses, component_known) in [(attr_misses, "true"), (component_misses, "false")] {
+            counter!(
+                "extractor_revert_attr_miss",
+                "extractor" => self.name.clone(),
+                "chain" => self.chain.to_string(),
+                "component_known" => component_known,
+            )
+            .increment(
+                misses
+                    .iter()
+                    .map(|(_, n)| *n as u64)
+                    .sum(),
+            );
         }
 
         let empty = HashSet::<String>::new();
