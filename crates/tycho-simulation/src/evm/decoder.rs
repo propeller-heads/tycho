@@ -1825,15 +1825,14 @@ mod tests {
 
     const EPHEMERAL_POOL: &str = "0x0000000000000000000000000000000000000bad1";
 
-    fn reserve_deltas() -> HashMap<String, BlockAggregatedChanges> {
+    fn pending_deltas(
+        extractor: &str,
+        attributes: HashMap<String, Bytes>,
+    ) -> HashMap<String, BlockAggregatedChanges> {
         use tycho_common::models::protocol::ProtocolComponentStateDelta;
 
-        let attributes = HashMap::from([
-            ("reserve0".to_string(), Bytes::from(1_000_u64.to_be_bytes().to_vec())),
-            ("reserve1".to_string(), Bytes::from(2_000_u64.to_be_bytes().to_vec())),
-        ]);
         HashMap::from([(
-            "uniswap_v2".to_string(),
+            extractor.to_string(),
             BlockAggregatedChanges {
                 state_deltas: HashMap::from([(
                     EPHEMERAL_POOL.to_string(),
@@ -1842,6 +1841,16 @@ mod tests {
                 ..Default::default()
             },
         )])
+    }
+
+    fn reserve_deltas() -> HashMap<String, BlockAggregatedChanges> {
+        pending_deltas(
+            "uniswap_v2",
+            HashMap::from([
+                ("reserve0".to_string(), Bytes::from(1_000_u64.to_be_bytes().to_vec())),
+                ("reserve1".to_string(), Bytes::from(2_000_u64.to_be_bytes().to_vec())),
+            ]),
+        )
     }
 
     async fn decoder_holding(state: Box<dyn ProtocolSim>) -> TychoStreamDecoder<BlockHeader> {
@@ -1904,5 +1913,65 @@ mod tests {
             .expect("an unknown pool must not fail the update");
 
         assert!(update.states.is_empty());
+    }
+
+    /// An Angstrom hook reads only the delta: `delta_transition` copies three attributes off it
+    /// and the swap maths is pure Rust. A V4 pool carrying one transitions on the pending path.
+    #[tokio::test]
+    async fn test_apply_deltas_ephemeral_angstrom_hooked_v4_pool() {
+        use alloy::primitives::aliases::U24;
+
+        use crate::evm::protocol::{
+            uniswap_v4::{
+                hooks::angstrom::hook_handler::{AngstromFees, AngstromHookHandler},
+                state::{UniswapV4Fees, UniswapV4State},
+            },
+            utils::uniswap::tick_list::TickInfo,
+        };
+
+        let mut pool = UniswapV4State::new(
+            1_000_000_000_000_000_000,
+            U256::from_str("79228162514264337593543950336").unwrap(),
+            UniswapV4Fees { zero_for_one: 100, one_for_zero: 100, lp_fee: 100 },
+            0,
+            60,
+            vec![
+                TickInfo::new(-600, 500_000_000_000_000_000).unwrap(),
+                TickInfo::new(600, -500_000_000_000_000_000).unwrap(),
+            ],
+        )
+        .unwrap();
+        pool.set_hook_handler(Box::new(AngstromHookHandler::new(
+            Address::ZERO,
+            Address::ZERO,
+            AngstromFees { unlock: U24::from(338), protocol_unlock: U24::from(112) },
+            false,
+        )));
+        let deltas = pending_deltas(
+            "uniswap_v4_hooks",
+            HashMap::from([(
+                "liquidity".to_string(),
+                Bytes::from(
+                    2_000_000_000_000_000_000_u128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            )]),
+        );
+
+        let update = decoder_holding(Box::new(pool))
+            .await
+            .apply_deltas_ephemeral(&deltas, BlockHeader::default())
+            .await
+            .expect("an Angstrom hook rebuilds from the delta");
+
+        let state = update
+            .states
+            .get(EPHEMERAL_POOL)
+            .expect("the pool must appear in the ephemeral update")
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .expect("the ephemeral state must still be a UniswapV4State");
+        assert!(state.hook.is_some(), "the transition must keep the hook attached");
     }
 }
