@@ -63,7 +63,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         FluidV1
     }
 
-    /// @notice One swap swap: what goes in, what comes out, and who receives it.
+    /// @notice One swap: what goes in, what comes out, and who receives it.
     struct Swap {
         address tokenIn;
         address tokenOut;

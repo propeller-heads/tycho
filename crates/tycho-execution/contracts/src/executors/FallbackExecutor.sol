@@ -79,8 +79,6 @@ contract FallbackExecutor is IExecutor {
         outputToRouter = false;
     }
 
-    /// @dev The pAMM is a bare address, so no length prefix is needed to find where the fallback
-    /// starts.
     function _decodeData(bytes calldata data)
         internal
         pure
