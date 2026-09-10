@@ -3303,7 +3303,8 @@ mod test {
         gw.expect_advance()
             .times(0)
             .returning(|_, _, _| Ok(()));
-        // Revert lookups: contracts, protocol states, component balances, account balances.
+        // Revert lookups: contracts, protocol states, protocol components, component
+        // balances, account balances.
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -4616,6 +4617,52 @@ mod test {
                 .updated_attributes
                 .is_empty(),
             "a value must not be both restored and deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_miss_component_lookup_error_fails_revert() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_advance()
+            .times(0)
+            .returning(|_, _, _| Ok(()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_contracts()
+            .returning(|_| Ok(Vec::new()));
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        // The component table lookup is the only call that fails.
+        gw.expect_get_protocol_components()
+            .returning(|_| Err(StorageError::Unexpected("connection reset".to_string())));
+        let extractor = create_extractor(gw).await;
+
+        full_block(&extractor, 1, 1, vec![]).await;
+        // `pool_ghost` has no creation anywhere, so the revert reaches the component table.
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_ghost", "reserve", 42, PbChangeType::Update)],
+        )
+        .await;
+
+        let err = extractor
+            .handle_revert(undo_to(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ExtractionError::Storage(StorageError::Unexpected(_))),
+            "a component table failure must abort the revert, got {err:?}"
         );
     }
 

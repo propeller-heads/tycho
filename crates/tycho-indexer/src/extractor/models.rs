@@ -512,9 +512,9 @@ mod test {
         models::{
             blockchain::{Block, Transaction, TxWithChanges},
             contract::AccountBalance,
-            protocol::ComponentBalance,
+            protocol::{ComponentBalance, ProtocolComponent},
             token::Token,
-            Address, Chain, MergeError,
+            Address, Chain, ChangeType, MergeError,
         },
         Bytes,
     };
@@ -748,6 +748,36 @@ mod test {
                 ((c_id, attr_fee), Bytes::from(50u64).lpad(32, 0)),
             ])
         );
+    }
+
+    #[test]
+    fn test_block_changes_protocol_components_filter() {
+        // The fixture txs carry `pool_0` as an Update; a third tx adds a Deletion so the filter
+        // is checked across txs and change types.
+        let mut block_changes = block_changes_from_fixtures();
+        block_changes
+            .txs_with_update
+            .push(TxWithChanges {
+                protocol_components: HashMap::from([(
+                    "pool_gone".to_string(),
+                    ProtocolComponent {
+                        id: "pool_gone".to_string(),
+                        change: ChangeType::Deletion,
+                        ..Default::default()
+                    },
+                )]),
+                tx: default_tx(),
+                ..Default::default()
+            });
+
+        let ids: HashSet<ComponentId> = ["pool_0", "pool_gone", "missing"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let filtered = block_changes.get_filtered_protocol_components(&ids);
+
+        assert_eq!(filtered, HashSet::from(["pool_0".to_string(), "pool_gone".to_string()]));
     }
 
     #[test]
