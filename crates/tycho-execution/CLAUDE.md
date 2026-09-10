@@ -212,9 +212,8 @@ Constraints:
   `fluidLiquidity` from `config/executor_deployments.json` (`uniswap_v4` and `fluid_v1`), so a network missing either
   entry fails there. Deployed on Ethereum only.
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
-  transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange normally
-  spends its whole approval; a pool that pulls less leaves a remainder, which is not revoked for the same reason --
-  there is nothing here to take. The Curve tests assert no allowance value, since it depends on the pool.
+  transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
+  approval in place; the same reasoning covers it, since there is nothing here to take.
 
 ### Executor Flow, Callbacks & Output Verification
 
