@@ -470,7 +470,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         router.swap(
             FallbackSwaps.swap(WETH_ADDR, USDC_ADDR, amountIn, BOB),
             address(pamm),
-            FallbackSwaps.curve(TRICRYPTO_POOL, 0, 2, 0)
+            FallbackSwaps.curve(TRICRYPTO_POOL, 3, 2, 0)
         );
 
         assertEq(IERC20(USDC_ADDR).balanceOf(BOB), CURVE_CRYPTO_USDC_OUT);
@@ -652,7 +652,10 @@ contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
     }
 
     /// `zero2one = true` means the dex pulls sUSDE, but the swap pays USDT, so
-    /// `dexCallback` is asked for the wrong token and names the cause.
+    /// `dexCallback` is asked for the wrong token and names the cause. The
+    /// amount carries sUSDE's 18 decimals rather than USDT's 6 because the dex
+    /// prices `amountIn` against the sUSDE side first: a realistic USDT amount
+    /// is dust there and reverts inside the dex, which is the test below.
     function testFluidWrongDirectionNamesCause() public {
         uint256 amountIn = 10e18;
         deal(USDT_ADDR, address(router), amountIn);
@@ -696,6 +699,8 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
     /// value check is independent of the router's minAmountOut check.
     uint256 constant SINGLE_WETH_OUT = 3_611_998_638_539_827_447;
     uint256 constant SEQUENTIAL_DAI_OUT = 9_916_791_090_861_983_461_371;
+    uint256 constant SEQUENTIAL_FALLBACK_SECOND_DAI_OUT =
+        9_916_211_621_040_833_220_196;
     uint256 constant FEE_WETH_OUT = 3_575_878_652_154_429_173;
     uint256 constant SPLIT_WETH_OUT = 3_612_457_039_884_311_273;
 
@@ -822,6 +827,48 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertEq(amountOut, SEQUENTIAL_DAI_OUT);
         assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), amountOut);
         assertEq(IERC20(WETH_ADDR).balanceOf(address(fallbackRouter)), 0);
+    }
+
+    /// The fallback as the second hop, which `TransferManager._transfer` funds
+    /// with no transfer of its own: the leg relies entirely on hop one having
+    /// paid `fundsExpectedAddress()`.
+    function testSequentialSwapFallbackSecond() public {
+        uint256 amountIn = 10_000e6;
+        deal(USDC_ADDR, ALICE, amountIn);
+
+        bytes[] memory swaps = new bytes[](2);
+        swaps[0] = encodeSequentialSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(USDC_WETH_USV2, USDC_ADDR, WETH_ADDR)
+        );
+        swaps[1] = encodeSequentialSwap(
+            address(fallbackExecutor),
+            abi.encodePacked(
+                WETH_ADDR,
+                DAI_ADDR,
+                address(pamm),
+                FallbackSwaps.uniswapV2(DAI_WETH_UNIV2_POOL, 30)
+            )
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
+        uint256 amountOut = tychoRouter.sequentialSwap(
+            amountIn,
+            USDC_ADDR,
+            DAI_ADDR,
+            1000e18,
+            1000e18,
+            ALICE,
+            noClientFee(),
+            pleEncode(swaps)
+        );
+        vm.stopPrank();
+
+        assertEq(amountOut, SEQUENTIAL_FALLBACK_SECOND_DAI_OUT);
+        assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), amountOut);
+        assertEq(IERC20(WETH_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(DAI_ADDR).balanceOf(address(fallbackRouter)), 0);
     }
 
     /// With fees active the swap's receiver is redirected to the router itself,
