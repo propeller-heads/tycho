@@ -30,6 +30,18 @@ fn restart_backoff() -> ExponentialBackoff {
         .max_delay(MAX_RESTART_BACKOFF)
 }
 
+/// Registers the counter at zero. A series born at one looks flat to `increase()` on Prometheus,
+/// so the first restart would raise no alert.
+fn restart_counter(id: &ExtractorIdentity) -> metrics::Counter {
+    let restarts = metrics::counter!(
+        "extractor_restarts_total",
+        "extractor" => id.name.clone(),
+        "chain" => id.chain.to_string()
+    );
+    restarts.increment(0);
+    restarts
+}
+
 /// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
 ///
 /// The supervisor:
@@ -37,6 +49,8 @@ fn restart_backoff() -> ExponentialBackoff {
 /// - Runs the runner and waits for it to exit.
 /// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
 ///   backoff, then rebuilds from scratch. Each subscriber decides how to handle the restart.
+/// - Counts every rebuild in `extractor_restarts_total`, registered at zero when supervision
+///   starts.
 /// - Forwards `ControlMessage::Subscribe` from the `ExtractorHandle` to the subscription map.
 /// - Forwards `ControlMessage::Stop` by signalling the runner's stop channel.
 pub struct ExtractorSupervisor {
@@ -104,6 +118,7 @@ impl ExtractorSupervisor {
     pub async fn run(mut self) -> Result<(), ExtractionError> {
         let mut restart_count: u32 = 0;
         let mut backoff_strategy = restart_backoff();
+        let restarts = restart_counter(&self.id);
 
         loop {
             let (stop_tx, stop_rx) = oneshot::channel();
@@ -294,6 +309,67 @@ impl ExtractorSupervisor {
                 "Restarting extractor after backoff"
             );
             restart_count += 1;
+            restarts.increment(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use metrics_util::{
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+        MetricKind,
+    };
+    use tycho_common::models::Chain;
+
+    use super::*;
+
+    fn restarts_series(snapshotter: &Snapshotter) -> Vec<(BTreeMap<String, String>, u64)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                key.kind() == MetricKind::Counter && key.key().name() == "extractor_restarts_total"
+            })
+            .map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect();
+                let DebugValue::Counter(count) = value else {
+                    panic!("extractor_restarts_total must be a counter");
+                };
+                (labels, count)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restart_counter_exists_at_zero_and_counts_restarts() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
+        let labels = BTreeMap::from([
+            ("extractor".to_string(), "uniswap_v2".to_string()),
+            ("chain".to_string(), "ethereum".to_string()),
+        ]);
+
+        metrics::with_local_recorder(&recorder, || {
+            let restarts = restart_counter(&id);
+            assert_eq!(
+                restarts_series(&snapshotter),
+                vec![(labels.clone(), 0)],
+                "the series must exist at zero before the first restart"
+            );
+
+            restarts.increment(1);
+            restarts.increment(1);
+        });
+
+        assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
     }
 }
