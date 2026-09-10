@@ -408,6 +408,19 @@ mod tests {
         assert!(tax.is_none());
     }
 
+    #[test]
+    fn handle_response_credits_more_than_sent_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceAfterIn = amount + U256::from(1_u64);
+        r.recipientAfter = amount + U256::from(1_u64);
+        let (quality, gas, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(gas, Some(U256::from(27_500_u64)));
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
     impl TestFixture {
         pub(crate) fn create_ethcall_detector(&self) -> EthCallDetector {
             let rpc = self.create_rpc_client(false);

@@ -171,7 +171,28 @@ mod tests {
                 balance_after: U256::ZERO,
             },
         );
-        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .ends_with("+ 1000000 overflows"));
+    }
+
+    #[test]
+    fn calculate_fee_bps_shortfall_near_max_errors() {
+        let result = calculate_fee_bps(
+            ObservedTransfer {
+                sent: U256::MAX,
+                balance_before: U256::ZERO,
+                balance_after: U256::ZERO,
+            },
+            ObservedTransfer {
+                sent: U256::ZERO,
+                balance_before: U256::ZERO,
+                balance_after: U256::ZERO,
+            },
+        );
+        assert!(result
+            .unwrap_err()
+            .ends_with("* 10_000 overflows"));
     }
 
     #[test]
