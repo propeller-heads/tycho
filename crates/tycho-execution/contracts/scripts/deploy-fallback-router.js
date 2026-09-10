@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
+const {verifyOnExplorer} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
@@ -17,11 +17,7 @@ async function main() {
         throw new Error(`Unsupported network: ${network}`);
     }
 
-    // The admin holds DEFAULT_ADMIN_ROLE, whose only power is setPammGasCap.
-    const admin = resolveRolesNetwork(network).EXECUTOR_SETTER_ROLE[0];
-
     console.log(`Deploying TychoFallbackRouter to ${network} with:`);
-    console.log(`- admin: ${admin}`);
     console.log(`- poolManager: ${poolManager}`);
     console.log(`- fluidLiquidity: ${fluidLiquidity}`);
 
@@ -40,7 +36,6 @@ async function main() {
     const TychoFallbackRouter =
         await ethers.getContractFactory("TychoFallbackRouter");
     const deployTx = TychoFallbackRouter.getDeployTransaction(
-        admin,
         poolManager,
         fluidLiquidity
     );
@@ -102,7 +97,7 @@ async function main() {
             address: computedAddress,
             contractFqn:
                 "src/fallback/TychoFallbackRouter.sol:TychoFallbackRouter",
-            constructorArgs: [admin, poolManager, fluidLiquidity],
+            constructorArgs: [poolManager, fluidLiquidity],
         });
         console.log(
             "TychoFallbackRouter verified successfully on blockchain explorer!"

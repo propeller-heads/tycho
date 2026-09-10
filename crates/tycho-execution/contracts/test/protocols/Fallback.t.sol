@@ -3,9 +3,6 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {
-    IAccessControl
-} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {MockPropAMM} from "./PropAMM.t.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
@@ -22,8 +19,7 @@ import {
     TychoFallbackRouter__InvalidUniswapV2Fee,
     TychoFallbackRouter__NotPoolManager,
     TychoFallbackRouter__UnknownVenue,
-    TychoFallbackRouter__NotSelf,
-    TychoFallbackRouter__ZeroGasCap
+    TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
 import {UniswapV2Math__ZeroReserves} from "../../lib/UniswapV2Math.sol";
 
@@ -154,27 +150,6 @@ contract SilentPropAMM {
     }
 }
 
-/// @notice Fails by consuming all forwarded gas -- the failure mode the pAMM gas cap exists for.
-contract GasBurnerPropAMM {
-    function swap(
-        address, /* tokenIn */
-        address, /* tokenOut */
-        uint256, /* amountIn */
-        uint256, /* minAmountOut */
-        address, /* recipient */
-        uint256 /* deadline */
-    )
-        external
-        pure
-        returns (uint256 amountOut)
-    {
-        // slither-disable-next-line assembly
-        assembly {
-            for {} 1 {} {}
-        }
-    }
-}
-
 /// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every venue test
 /// repeats. Subclasses name the fork block, since the venues are not all live at the same one.
 abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
@@ -186,7 +161,7 @@ abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
     function setUp() public virtual {
         vm.createSelectFork(vm.rpcUrl("mainnet"), _forkBlock());
         router = new TychoFallbackRouter(
-            ADMIN, IPoolManager(POOL_MANAGER), FLUIDV1_LIQUIDITY
+            IPoolManager(POOL_MANAGER), FLUIDV1_LIQUIDITY
         );
         pamm = new MockPropAMM();
     }
@@ -329,23 +304,14 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         }
     }
 
-    function testConstructorRejectsZeroAdmin() public {
-        vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(
-            address(0), IPoolManager(POOL_MANAGER), FLUIDV1_LIQUIDITY
-        );
-    }
-
     function testConstructorRejectsZeroPoolManager() public {
         vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(
-            ADMIN, IPoolManager(address(0)), FLUIDV1_LIQUIDITY
-        );
+        new TychoFallbackRouter(IPoolManager(address(0)), FLUIDV1_LIQUIDITY);
     }
 
     function testConstructorRejectsZeroFluidLiquidity() public {
         vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(ADMIN, IPoolManager(POOL_MANAGER), address(0));
+        new TychoFallbackRouter(IPoolManager(POOL_MANAGER), address(0));
     }
 
     /// A live pAMM fills and the fallback is never touched.
@@ -550,44 +516,6 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(silent)), 0);
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
-    }
-
-    /// A pAMM that fails by consuming gas burns only the cap. With a realistic
-    /// 2M budget an uncapped try would leave the fallback ~1/64 and starve it.
-    function testGasBurningPropAMMFallsBack() public {
-        GasBurnerPropAMM burner = new GasBurnerPropAMM();
-        deal(USDC_ADDR, address(router), USDC_IN);
-
-        router.swap{gas: 2_000_000}(
-            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
-            address(burner),
-            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
-        );
-
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
-        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
-    }
-
-    function testSetPammGasCap() public {
-        assertEq(router.pammGasCap(), 1_000_000);
-
-        vm.prank(BOB);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector,
-                BOB,
-                bytes32(0)
-            )
-        );
-        router.setPammGasCap(2_000_000);
-
-        vm.prank(ADMIN);
-        vm.expectRevert(TychoFallbackRouter__ZeroGasCap.selector);
-        router.setPammGasCap(0);
-
-        vm.prank(ADMIN);
-        router.setPammGasCap(2_000_000);
-        assertEq(router.pammGasCap(), 2_000_000);
     }
 
     /// A failing fallback reverts the swap with the venue's own error -- no try/catch around the

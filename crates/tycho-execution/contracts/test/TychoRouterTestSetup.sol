@@ -280,7 +280,7 @@ contract TychoRouterTestSetup is
         }
 
         fallbackRouter =
-            new TychoFallbackRouter(ADMIN, poolManager, FLUIDV1_LIQUIDITY);
+            new TychoFallbackRouter(poolManager, FLUIDV1_LIQUIDITY);
         fallbackExecutor = new FallbackExecutor(address(fallbackRouter));
 
         address[] memory executors = new address[](skyDeployable ? 29 : 28);

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.26;
 
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {
     ReentrancyGuardTransient
 } from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
@@ -41,7 +40,6 @@ error TychoFallbackRouter__NoOutput();
 error TychoFallbackRouter__NotPoolManager();
 error TychoFallbackRouter__NotSelf();
 error TychoFallbackRouter__UnknownVenue(uint8 venue);
-error TychoFallbackRouter__ZeroGasCap();
 
 /// @title TychoFallbackRouter
 /// @notice Runs a pAMM and, only if it fails, the caller's chosen fallback venue.
@@ -59,7 +57,7 @@ error TychoFallbackRouter__ZeroGasCap();
 /// it: each venue is told `swap_.amountIn` while it receives less, so it fails its own input
 /// check. A Uniswap V2 pair fails its K check, a V3 pool reverts `IIA`, and V4 reverts
 /// `CurrencyNotSettled` because `settle` credits less than `poolManager.swap` specifies.
-contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
+contract TychoFallbackRouter is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     /// @notice The venue kinds a fallback may use.
@@ -102,18 +100,10 @@ contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
     /// @notice Where `dexCallback` pays a Fluid dex.
     address public immutable fluidLiquidity;
 
-    /// @notice Gas forwarded to the pAMM try. Bounds what a gas-burning pAMM
-    /// can consume, so the fallback always keeps enough to fill; a pAMM
-    /// needing more than this falls back instead of filling.
-    uint256 public pammGasCap = 1_000_000;
-
-    event PammGasCapUpdated(uint256 oldCap, uint256 newCap);
-
     /// @notice The pAMM failed and `venue` filled instead. Absence of this event on a filled swap
     /// means the pAMM served it, which is the pAMM fill rate.
     /// @dev The pAMM's revert reason is deliberately not carried: reading it would copy
-    /// caller-controlled returndata of any size into this frame, and that cost sits outside
-    /// `pammGasCap` and could starve the fallback it exists to protect.
+    /// caller-controlled returndata of any size into this frame.
     event FallbackSwap(
         address indexed pamm,
         address indexed tokenIn,
@@ -122,18 +112,12 @@ contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
         Venue venue
     );
 
-    constructor(
-        address admin,
-        IPoolManager poolManager_,
-        address fluidLiquidity_
-    ) {
+    constructor(IPoolManager poolManager_, address fluidLiquidity_) {
         if (
-            admin == address(0) || address(poolManager_) == address(0)
-                || fluidLiquidity_ == address(0)
+            address(poolManager_) == address(0) || fluidLiquidity_ == address(0)
         ) {
             revert TychoFallbackRouter__AddressZero();
         }
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
         poolManager = poolManager_;
         fluidLiquidity = fluidLiquidity_;
     }
@@ -152,7 +136,7 @@ contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
         address pamm,
         bytes calldata fallbackSwap
     ) external nonReentrant {
-        try this.executePropAMM{gas: pammGasCap}(swap_, pamm) {
+        try this.executePropAMM(swap_, pamm) {
             return;
         } catch {}
 
@@ -228,18 +212,6 @@ contract TychoFallbackRouter is AccessControl, ReentrancyGuardTransient {
         if (IERC20(tokenOut).balanceOf(receiver) <= balanceBefore) {
             revert TychoFallbackRouter__NoOutput();
         }
-    }
-
-    /// @notice Sets the gas forwarded to the pAMM try.
-    function setPammGasCap(uint256 newCap)
-        external
-        onlyRole(DEFAULT_ADMIN_ROLE)
-    {
-        if (newCap == 0) {
-            revert TychoFallbackRouter__ZeroGasCap();
-        }
-        emit PammGasCapUpdated(pammGasCap, newCap);
-        pammGasCap = newCap;
     }
 
     /// @dev Uniswap V2's `swap` takes explicit output amounts, so this computes the output from

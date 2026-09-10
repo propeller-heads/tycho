@@ -165,7 +165,7 @@ contract never picks a venue itself -- the encoder decides which fallback to use
 
 `FallbackSwap(pamm, tokenIn, tokenOut, amountIn, venue)` is emitted when the pAMM fails and the fallback runs. A filled leg
 without it was served by the pAMM, so counting the event against filled legs gives the pAMM fill rate. The pAMM's
-revert reason is not carried: reading caller-controlled returndata costs gas outside `pammGasCap`.
+revert reason is not carried: reading caller-controlled returndata of any size costs gas.
 
 A pAMM that reports success but delivers nothing reverts `TychoFallbackRouter__NoOutput`, so a silent fill still falls
 through to the fallback. The fallback slot measures nothing: the Dispatcher's balance-diff at the receiver is the
