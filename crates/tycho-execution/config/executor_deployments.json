@@ -45,6 +45,10 @@
       "contract": "HashflowExecutor",
       "args": ["0x55084eE0fEf03f14a305cd24286359A35D735151"]
     },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"]
+    },
     "fluid_v1": {
       "contract": "FluidV1Executor",
       "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
@@ -79,7 +83,7 @@
     "propammfallback": { "contract": "PropAMMFallbackExecutor", "args": [] },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     },
     "sky": {
       "contract": "SkyExecutor",
@@ -116,7 +120,11 @@
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
+    },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x9706D3fff42571305Fc201F996ADC0e768d72911"]
     }
   },
   "unichain": {
@@ -156,9 +164,9 @@
       "contract": "NativeWrapExecutor",
       "args": ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
     },
-    "rfq:metric": {
-      "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"]
     }
   },
   "polygon": {
@@ -174,10 +182,6 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
-    },
-    "rfq:metric": {
-      "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
     }
   },
   "bsc": {
@@ -195,9 +199,9 @@
       "contract": "NativeWrapExecutor",
       "args": ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
     },
-    "rfq:metric": {
-      "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x1fDED89D98CBeADd96a109D28689c2638025dad3"]
     }
   },
   "plasma": {
@@ -220,6 +224,7 @@
   },
   "robinhood": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ekubo_v3": { "contract": "EkuboV3RobinhoodExecutor", "args": [] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
       "contract": "UniswapV4Executor",
@@ -231,6 +236,10 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
     }
   }
 }

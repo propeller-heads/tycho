@@ -113,6 +113,45 @@ impl Observations {
         Ok(())
     }
 
+    /// Mirrors `Oracle.write`: appends the observation the pool would record for a swap
+    /// executing at `timestamp`, and returns the new observation index.
+    ///
+    /// `tick` and `liquidity` are the pool's values *before* the swap, matching
+    /// `CLPool.swap`, which passes `slot0Start.tick` and `cache.liquidityStart`. A repeat write
+    /// within the same block is a no-op, as on chain.
+    pub fn write(
+        &mut self,
+        index: u16,
+        timestamp: u32,
+        tick: i32,
+        liquidity: u128,
+        cardinality: u16,
+    ) -> Result<u16, SimulationError> {
+        if cardinality == 0 {
+            return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()));
+        }
+        let idx = index as usize;
+        if idx >= self.observations.len() {
+            return Err(self.observation_index_err(idx, index, cardinality));
+        }
+        let last = self.observations[idx];
+        if last.block_timestamp == timestamp {
+            return Ok(index);
+        }
+
+        let next_index = (index + 1) % cardinality;
+        let mut observation = transform(&last, timestamp, tick, liquidity)?;
+        observation.index = next_index as i32;
+
+        let next_idx = next_index as usize;
+        while self.observations.len() <= next_idx {
+            self.observations
+                .push(Observation::default());
+        }
+        self.observations[next_idx] = observation;
+        Ok(next_index)
+    }
+
     pub fn timestamp_at(&self, index: u16, cardinality: u16) -> Result<u32, SimulationError> {
         let idx = index as usize;
         if idx >= self.observations.len() {
@@ -318,7 +357,20 @@ fn transform(
     tick: i32,
     liquidity: u128,
 ) -> Result<Observation, SimulationError> {
-    let delta = target - before.block_timestamp;
+    // The execution block is supplied by the caller, so a stale or mismatched block context can
+    // put `target` behind the observation. On chain this is unreachable; here it would silently
+    // wrap into a garbage cumulative.
+    let delta = target
+        .checked_sub(before.block_timestamp)
+        .ok_or_else(|| {
+            SimulationError::InvalidInput(
+                format!(
+                    "Execution timestamp {target} precedes the last observation at {}",
+                    before.block_timestamp
+                ),
+                None,
+            )
+        })?;
     let tick_cumulative = before.tick_cumulative + tick as i64 * delta as i64;
 
     // seconds_per_liquidity_cumulative_x128 += delta / liquidity
@@ -347,6 +399,71 @@ mod tests {
     use hex_literal::hex;
 
     use super::*;
+
+    fn seeded(timestamp: u32) -> Observations {
+        Observations::new(vec![Observation {
+            block_timestamp: timestamp,
+            tick_cumulative: 100,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }])
+    }
+
+    #[test]
+    fn write_is_a_no_op_within_the_same_block() {
+        let mut observations = seeded(1_000);
+
+        let index = observations
+            .write(0, 1_000, 50, 1_000_000, 4)
+            .expect("write should succeed");
+
+        assert_eq!(index, 0);
+        assert_eq!(observations.observations.len(), 1);
+    }
+
+    #[test]
+    fn write_advances_the_ring_and_uses_the_pre_swap_tick() {
+        let mut observations = seeded(1_000);
+
+        let index = observations
+            .write(0, 1_010, 50, 1_000_000, 4)
+            .expect("write should succeed");
+
+        assert_eq!(index, 1);
+        let written = observations.observations[1];
+        assert_eq!(written.block_timestamp, 1_010);
+        // 100 + pre-swap tick 50 * 10 seconds
+        assert_eq!(written.tick_cumulative, 600);
+        assert!(written.initialized);
+        assert_eq!(written.index, 1);
+    }
+
+    #[test]
+    fn write_wraps_at_cardinality() {
+        let mut observations = Observations::new(vec![
+            Observation { block_timestamp: 900, initialized: true, index: 0, ..Default::default() },
+            Observation { block_timestamp: 950, initialized: true, index: 1, ..Default::default() },
+        ]);
+
+        let index = observations
+            .write(1, 1_000, 0, 1, 2)
+            .expect("write should succeed");
+
+        assert_eq!(index, 0);
+        assert_eq!(observations.observations[0].block_timestamp, 1_000);
+    }
+
+    #[test]
+    fn transform_rejects_a_target_before_the_observation() {
+        let observations = seeded(1_000);
+
+        let err = observations
+            .observe_single(900, 0, 0, 0, 1, 1)
+            .expect_err("a target behind the last observation must not wrap");
+
+        assert!(matches!(err, SimulationError::InvalidInput(_, _)), "got {err:?}");
+    }
 
     #[test]
     fn test_lte_basic_cases() {

@@ -266,6 +266,16 @@ impl ProtocolStreamProcessor {
                     "ramses_v3".to_string(),
                 ]
             }
+            Chain::Robinhood => {
+                vec![
+                    "uniswap_v2".to_string(),
+                    "uniswap_v3".to_string(),
+                    "uniswap_v4".to_string(),
+                    "sushiswap_v3".to_string(),
+                    "robinswap_v3".to_string(),
+                    "ramses_v3".to_string(),
+                ]
+            }
             Chain::Arbitrum => {
                 vec![
                     "uniswap_v2".to_string(),
@@ -302,6 +312,14 @@ impl ProtocolStreamProcessor {
             }
             "uniswap_v3" => {
                 stream = stream.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None);
+            }
+            "sushiswap_v3" => {
+                stream =
+                    stream.exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None);
+            }
+            "robinswap_v3" => {
+                stream =
+                    stream.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None);
             }
             "pancakeswap_v3" => {
                 stream =

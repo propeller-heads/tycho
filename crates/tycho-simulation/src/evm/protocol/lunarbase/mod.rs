@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn registers_decoder_with_tycho_stream_decoder() {
-        let mut decoder = TychoStreamDecoder::<BlockHeader>::new();
+        let mut decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
         register_lunarbase_decoder(&mut decoder);
     }
 

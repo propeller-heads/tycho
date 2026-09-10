@@ -16,6 +16,7 @@ runs:
         UNICHAIN_RPC_URL: ${{ env.UNICHAIN_RPC_URL }}
         BSC_RPC_URL: ${{ env.BSC_RPC_URL }}
         POLYGON_RPC_URL: ${{ env.POLYGON_RPC_URL }}
+        ROBINHOOD_RPC_URL: ${{ env.ROBINHOOD_RPC_URL }}
         SUBSTREAMS_API_TOKEN: ${{ env.SUBSTREAMS_API_TOKEN }}
         AUTH_API_KEY: ${{ env.AUTH_API_KEY }}
       run: |

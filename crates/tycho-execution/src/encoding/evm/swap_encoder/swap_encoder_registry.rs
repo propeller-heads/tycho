@@ -17,11 +17,11 @@ use crate::encoding::{
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
-            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            metric::MetricSwapEncoder, native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
+            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
+            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -116,6 +116,17 @@ impl SwapEncoderRegistry {
         None
     }
 
+    /// The executor address of every encoder in this registry, keyed by protocol system.
+    ///
+    /// Several protocol systems may share one executor address, so the returned addresses are not
+    /// necessarily distinct.
+    pub fn executor_addresses(&self) -> HashMap<String, Bytes> {
+        self.encoders
+            .iter()
+            .map(|(protocol, encoder)| (protocol.clone(), encoder.executor_address().clone()))
+            .collect()
+    }
+
     fn create_encoder(
         &self,
         protocol_system: &str,
@@ -135,7 +146,7 @@ impl SwapEncoderRegistry {
             "vm:balancer_v2" => {
                 Ok(Box::new(BalancerV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "uniswap_v3" | "pancakeswap_v3" => {
+            "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "uniswap_v4" => {
@@ -171,6 +182,9 @@ impl SwapEncoderRegistry {
             "rfq:metric" => {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "rfq:native" => {
+                Ok(Box::new(NativeSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "fluid_v1" => {
                 Ok(Box::new(FluidV1SwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -194,6 +208,11 @@ impl SwapEncoderRegistry {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "velodrome_slipstreams" => {
+                Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            // UP on Robinhood Chain deploys the Slipstream contracts verbatim, and its pools price
+            // swaps through a dynamic fee module, so it encodes like the other Slipstream forks.
+            "up_v3" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
             }
             // Ramses V3 reuses the standard Uniswap V3 executor unchanged, encoded via the
@@ -321,6 +340,21 @@ mod tests {
                     .is_some(),
                 "chain {chain} is missing the uniswap_v3 encoder"
             );
+        }
+    }
+
+    #[test]
+    fn test_executor_addresses_match_registered_encoders() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum).unwrap();
+
+        let executor_addresses = registry.executor_addresses();
+
+        assert!(!executor_addresses.is_empty());
+        for (protocol, executor_address) in executor_addresses {
+            let encoder = registry
+                .get_encoder(&protocol)
+                .unwrap_or_else(|| panic!("no encoder registered for {protocol}"));
+            assert_eq!(encoder.executor_address(), &executor_address);
         }
     }
 }

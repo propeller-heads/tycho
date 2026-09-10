@@ -1,0 +1,27 @@
+substreams_yaml_path: ./robinhood-robinswap-v3.yaml
+protocol_system: "robinswap_v3"
+protocol_type_names:
+  - "robinswap_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / USDG, the first pool RobinSwap V3 created on Robinhood Chain.
+  - name: test_weth_usdg_pool
+    # PoolCreated, Initialize and the first Mint all land in the creation transaction.
+    start_block: 6066330
+    # Stop once Burn, Collect and the first Swap have been emitted:
+    #   Burn:    block 6068711
+    #   Collect: block 6068711
+    #   Swap:    block 6069523
+    stop_block: 6069523
+    expected_components:
+      - id: "0x216a13f93031ae9e15305b038d5c9dc5f46cf418"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0x74e511f532ce3312cb099caef5de93f69ef9ca94277d96d3fa35410c03cec3e6"
+        skip_simulation: false

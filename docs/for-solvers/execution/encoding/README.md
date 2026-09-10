@@ -234,7 +234,7 @@ The `ClientFeeParams` struct is defined as:
 <thead><tr><th width="210">Field</th><th width="490">Description</th></tr></thead>
 <tbody>
 <tr><td><code>clientFeeBps</code></td><td>Client fee as a <code>uint32</code> in fee units, where <code>100_000_000</code> = 100% (see <a href="#fee-units">Fee units</a>). Set to <code>0</code> to take no fee</td></tr>
-<tr><td><code>clientFeeReceiver</code></td><td>Address that receives the client fee (credited to their vault balance)</td></tr>
+<tr><td><code>clientFeeReceiver</code></td><td>Address that identifies the client and receives the client fee (credited to their vault balance). The router resolves negotiated fee rates and positive-slippage exemptions against it, so a signed receiver is worth passing even with <code>clientFeeBps</code> set to <code>0</code></td></tr>
 <tr><td><code>maxClientContribution</code></td><td>Maximum amount the client is willing to pay out of pocket if slippage causes the output to fall below <code>minAmountOut</code>. If the shortfall exceeds this value, the transaction reverts. Set to <code>0</code> if the client should not subsidize</td></tr>
 <tr><td><code>deadline</code></td><td>Unix timestamp after which the signature is no longer valid</td></tr>
 <tr><td><code>clientSignature</code></td><td>EIP-712 signature over the fee fields <strong>and</strong> the full swap intent, signed by <code>clientFeeReceiver</code>: a 65-byte ECDSA signature when that address is an EOA, or an ERC-1271 signature of any length when it is a contract</td></tr>
@@ -261,8 +261,12 @@ constructing and signing it — the encoder does not use it internally. Call `.i
 ABI-encodable tuple for calldata construction.
 
 ```rust
-// No fee
+// No fee, no client identity
 let params = ClientFeeParams::default().into_abi_params();
+
+// No fee, but identify the client — the router applies any rate negotiated for
+// `client_fee_receiver` instead of looking one up by `tx.origin`
+let params = ClientFeeParams::new_without_fee(receiver, signature, deadline).into_abi_params();
 
 // With a 1 BPS fee (10_000 fee units)
 let params = ClientFeeParams::new(receiver, signature, deadline, 10_000u32)

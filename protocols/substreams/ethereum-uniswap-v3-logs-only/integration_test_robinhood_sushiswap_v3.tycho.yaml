@@ -1,0 +1,26 @@
+substreams_yaml_path: ./robinhood-sushiswap-v3.yaml
+protocol_system: "sushiswap_v3"
+protocol_type_names:
+  - "sushiswap_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / USDG, the deepest SushiSwap V3 pool on Robinhood Chain.
+  - name: test_weth_usdg_pool
+    # PoolCreated, Initialize and the first Mint all land in the creation transaction.
+    start_block: 10548743
+    # Stop once a second Mint and the first Swap have been emitted:
+    #   Mint: block 10558036
+    #   Swap: block 10560104
+    stop_block: 10560104
+    expected_components:
+      - id: "0xc5a01c57b2851202dcf8507a0f2bd08a8025e2c8"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0xdfd05af25618173ace6ab4800612d728ddd82826d4dbdb45b2772793c8f4219d"
+        skip_simulation: false

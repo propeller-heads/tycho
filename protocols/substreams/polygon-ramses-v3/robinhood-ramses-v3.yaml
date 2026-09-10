@@ -1,0 +1,121 @@
+specVersion: v0.1.0
+package:
+  name: "robinhood_ramses_v3"
+  version: v0.1.1
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/polygon-ramses-v3"
+
+protobuf:
+  files:
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - ramses.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+  excludePaths:
+    - google
+    - tycho
+    - sf/ethereum
+    - sf/substreams
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/polygon_ramses_v3.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 16079383 # First PoolCreated event
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_pools
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: proto:ramses.v3.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_events
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:ramses.v3.Events
+
+  - name: map_balance_changes
+    kind: map
+    inputs:
+      - map: map_events
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_ticks_changes
+    kind: map
+    inputs:
+      - map: map_events
+    output:
+      type: proto:ramses.v3.TickDeltas
+
+  - name: store_ticks_liquidity
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_ticks_changes
+
+  - name: store_pool_current_tick
+    kind: store
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_events
+
+  - name: map_liquidity_changes
+    kind: map
+    inputs:
+      - map: map_events
+      - store: store_pool_current_tick
+    output:
+      type: proto:ramses.v3.LiquidityChanges
+
+  - name: store_liquidity
+    kind: store
+    updatePolicy: set_sum
+    valueType: bigint
+    inputs:
+      - map: map_liquidity_changes
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - map: map_events
+      - map: map_balance_changes
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_ticks_changes
+      - store: store_ticks_liquidity
+        mode: deltas
+      - map: map_liquidity_changes
+      - store: store_liquidity
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: "0xE0c4ceb92d08CA985bB70fe0a22fEb121A9854A8"

@@ -11,7 +11,7 @@ use substreams_ethereum::{
 use crate::{
     abi::{
         boosted_fees::events as boosted_fees_events, core::events as core_events,
-        twamm::events as twamm_events,
+        twamm::events as twamm_events, ve33::events as ve33_events,
     },
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, CORE_ADDRESS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
@@ -20,7 +20,8 @@ use crate::{
         block_transaction_events::{
             transaction_events::{
                 pool_log::{
-                    Event, PoolInitialized, PositionUpdated, RateUpdated, Swapped, VirtualExecution,
+                    Event, PoolInitialized, PositionUpdated, RateUpdated, SwapFeeUpdated, Swapped,
+                    VirtualExecution,
                 },
                 PoolLog,
             },
@@ -31,14 +32,16 @@ use crate::{
 };
 
 #[substreams::handlers::map]
-fn map_events(block: eth::v2::Block) -> BlockTransactionEvents {
+fn map_events(params: String, block: eth::v2::Block) -> BlockTransactionEvents {
+    let ve33_address = crate::params::ve33_address(&params);
+
     BlockTransactionEvents {
         block_transaction_events: block
             .transactions()
             .flat_map(|trace| {
                 let pool_logs = trace
                     .logs_with_calls()
-                    .filter_map(|(log, _)| maybe_pool_log(log))
+                    .filter_map(|(log, _)| maybe_pool_log(log, ve33_address))
                     .collect_vec();
 
                 (!pool_logs.is_empty())
@@ -58,7 +61,7 @@ fn map_events(block: eth::v2::Block) -> BlockTransactionEvents {
     }
 }
 
-fn maybe_pool_log(log: &Log) -> Option<PoolLog> {
+fn maybe_pool_log(log: &Log, ve33_address: Option<Address>) -> Option<PoolLog> {
     let emitter = Address::from_slice(&log.address);
 
     let (pool_id, ev) = if emitter == CORE_ADDRESS {
@@ -196,6 +199,18 @@ fn maybe_pool_log(log: &Log) -> Option<PoolLog> {
                 }),
             )
         }
+    } else if Some(emitter) == ve33_address {
+        let ev = ve33_events::VoteWeightApplied::match_and_decode(log)?;
+        (
+            ev.pool_id.to_vec(),
+            Event::SwapFeeUpdated(SwapFeeUpdated {
+                swap_fee: ev
+                    .swap_fee
+                    .to_u64()
+                    .to_be_bytes()
+                    .to_vec(),
+            }),
+        )
     } else {
         return None;
     };

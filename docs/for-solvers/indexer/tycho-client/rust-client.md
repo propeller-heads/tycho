@@ -79,18 +79,19 @@ async fn main() {
 You can also use the client to interact with Tycho RPC for fetching static information. For example, you can fetch tokens (available at [#v1-tokens](../tycho-rpc.md#v1-tokens "mention") endpoint) with the following:
 
 ```rust
-use tycho_client::rpc::HttpRPCClient;
+use tycho_client::rpc::{AllTokensParams, HttpRPCClient, HttpRPCClientOptions, RPCClient};
 use tycho_common::dto::Chain;
 
-let client = HttpRPCClient::new("insert_tycho_url", Some("my_auth_token"));
+let options = HttpRPCClientOptions::new().with_auth_key(Some("my_auth_token".to_string()));
+let client = HttpRPCClient::new("https://insert_tycho_url", options).unwrap();
+
+let params = AllTokensParams::new(Chain::Ethereum, 4) // chain and request concurrency
+    .with_min_quality(51)      // min token quality to filter for certain token types
+    .with_traded_n_days_ago(30) // number of days since last traded
+    .with_chunk_size(1000);     // pagination chunk size
 
 let tokens = client
-    .get_all_tokens(
-        Chain::Ethereum,
-        Some(51_i32), // min token quality to filter for certain token types
-        Some(30_u64), // number of days since last traded
-        1000,         // pagination chunk size
-    )
+    .get_all_tokens(params)
     .await
     .unwrap();
     
@@ -99,6 +100,6 @@ let tokens = client
 ///  - 75: Rebase token
 ///  - 50: Fee token
 ///  - 10: Token analysis failed at creation
-///  - 5: Token analysis failed on cronjob (after creation).
+///  - 9-5: Token analysis kept failing on re-analysis after creation; 5 is the floor.
 ///  - 0: Failed to extract decimals onchain
 ```

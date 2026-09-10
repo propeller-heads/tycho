@@ -32,7 +32,7 @@ tycho-simulation = "x.y.z"
 
 ## Main Interface
 
-All protocols implement the `ProtocolSim` trait (see definition <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/protocol/state.rs" target="_blank" rel="noopener noreferrer">here</a>). It has the main methods:
+All protocols implement the `ProtocolSim` trait (see definition <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-common/src/simulation/protocol_sim.rs" target="_blank" rel="noopener noreferrer">here</a>). It has the main methods:
 
 #### Spot price
 
@@ -93,24 +93,25 @@ If there are no hard limits to the swap (for example for Uniswap V2), the return
 ```rust
 fn get_limits(
         &self,
-        sell_token: Address,
-        buy_token: Address,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError>;
 ```
 
-#### Swap to price
+#### Query pool swap
 
-`swap_to_price` returns the amount of `token_in` required to move the pool's marginal price down to a target price, and the amount of `token_out` received.\
-The `target_price` is denoted as `token_out` (numerator) per `token_in` (denominator) net of all fees.
+`query_pool_swap` returns the swap volume that achieves a price goal on the pool, together with the pool's state after that swap.
 
 ```rust
-fn swap_to_price(
-        &self,
-        token_in: Address,
-        token_out: Address,
-        target_price: Price,
-    ) -> Result<Trade, SimulationError>
+fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError>;
 ```
+
+The `SwapConstraint` you pass in `QueryPoolSwapParams` sets the goal:
+
+* `SwapConstraint::TradeLimitPrice` — maximise the trade while keeping `amount_out / amount_in` at or above a limit price.
+* `SwapConstraint::PoolTargetPrice` — move the pool's marginal price down to a target price.
+
+Both variants take a `tolerance` fraction that loosens the search, and optional `min_amount_in` / `max_amount_in` bounds. Prices use `token_out` (numerator) per `token_in` (denominator), net of all fees.
 
 `Price` represents a price as a rational fraction (numerator / denominator).
 
@@ -121,29 +122,22 @@ pub struct Price {
 }
 ```
 
-`Trade` represents a trade between two tokens at a given price on a pool.
+`PoolSwap` holds the resulting trade, read through its accessors:
 
 ```rust
-pub struct Trade {
-    pub amount_in: BigUint,
-    pub amount_out: BigUint,
-}
+pool_swap.amount_in();     // &BigUint — token_in sold to the pool
+pool_swap.amount_out();    // &BigUint — token_out bought from the pool
+pool_swap.new_state();     // &dyn ProtocolSim — the pool after the swap
+pool_swap.price_points();  // &Option<Vec<PricePoint>>
 ```
 
-#### Query supply
+`price_points` are the points on the price curve the search passed through. Reuse them as bounds for subsequent searches on the same pool.
 
-`query_supply` returns the maximum amount of `token_out` a pool can supply, and corresponding `token_in` demand, while respecting a minimum trade price.\
-The `target_price` is denoted as `token_out` (numerator) per `token_in` (denominator) net of all fees.
+{% hint style="info" %}
+Not every protocol implements `query_pool_swap`. Those that don't return a `SimulationError`.
+{% endhint %}
 
-<pre class="language-rust"><code class="lang-rust">fn query_supply(
-        &#x26;self,
-        token_in: Address,
-        token_out: Address,
-        target_price: Price,
-<strong>    ) -> Result&#x3C;Trade, SimulationError>
-</strong></code></pre>
-
-Please refer to the [in-code documentation](../../tycho-common/src/simulation/protocol_sim.rs#L236) of the `ProtocolSim` trait and its methods for more in-depth information.
+Please refer to the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-common/src/simulation/protocol_sim.rs" target="_blank" rel="noopener noreferrer">in-code documentation</a> of the `ProtocolSim` trait and its methods for more in-depth information.
 
 ## Streaming Protocol States
 
@@ -155,12 +149,13 @@ Collect token metadata up front and pass it to the stream builder in step 2. Thi
 
 ```rust
 use tycho_simulation::utils::load_all_tokens;
-use tycho_core::models::Chain;
+use tycho_common::models::Chain;
 
 let all_tokens = load_all_tokens(
             "tycho-beta.propellerheads.xyz",  // tycho url
-            false,                            // use tsl (this flag disables tsl)
+            false,                            // no_tls (this flag disables tls)
             Some("your-api-token"),           // auth key
+            true,                             // compression
             Chain::Ethereum,                  // chain
             None,                             // min quality (defaults to 100: ERC20-like tokens only) 
             None,                             // days since last trade (has chain specific defaults)
@@ -177,7 +172,7 @@ use tycho_simulation::evm::{
     protocol::{uniswap_v2::state::UniswapV2State, vm::state::EVMPoolState},
     stream::ProtocolStreamBuilder,
 };
-use tycho_core::models::Chain;
+use tycho_common::models::Chain;
 use tycho_client::feed::component_tracker::ComponentFilter;
 
 let tvl_filter = ComponentFilter::with_tvl_range(9, 10); // filter buffer of 9-10ETH
@@ -246,8 +241,9 @@ In this example we choose 2 tokens: a buy and a sell token, and simulate only on
 
 <pre class="language-rust"><code class="lang-rust"> // SIMULATION PARAMS
  // Set sell and buy tokens to USDC and USDT respectively
- let sell_token = Token::new("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 6, "USDC", BigUint::from(10000u64));
- let buy_token = Token::new("0xdac17f958d2ee523a2206206994597c13d831ec7", 6, "USDT", BigUint::from(10000u64));
+ // Token::new(address, symbol, decimals, tax, gas, chain, quality)
+ let sell_token = Token::new(&#x26;Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(), "USDC", 6, 0, &#x26;[Some(10_000)], Chain::Ethereum, 100);
+ let buy_token = Token::new(&#x26;Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap(), "USDT", 6, 0, &#x26;[Some(10_000)], Chain::Ethereum, 100);
  let sell_amount = BigUint::from(1000000000u64); // 1000 USDC
 
 // PERSIST DATA BETWEEN BLOCKS

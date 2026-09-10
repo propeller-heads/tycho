@@ -21,8 +21,9 @@ for setup):
 slither .                        # run from contracts/
 ```
 
-After a task is done, run the `/run-ci` skill. It runs the Foundry CI checks matching what
-`.github/workflows/ci-rust.yaml` does.
+After a task is done, run `forge fmt` and the tests covering what you changed (e.g.
+`forge test --match-contract TychoRouterTest`). Save the `/run-ci` skill for when you open a PR or
+change something workspace-wide.
 
 ## Coding Style
 

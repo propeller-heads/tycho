@@ -11,21 +11,23 @@ Tycho supports streaming, simulating, and executing RFQ quotes as part of multi-
 
 Currently, Tycho supports the following RFQ protocols:
 
-| Protocol    | Simulation Time |
-| ----------- | --------------- |
-| `bebop`     | 0.5 µs          |
-| `hashflow`  | 0.4 µs          |
-| `liquorice` | 0.4 µs          |
+| Protocol    | Simulation Time | Credentials              |
+| ----------- | --------------- | ------------------------ |
+| `bebop`     | 0.5 µs          | Required                 |
+| `hashflow`  | 0.4 µs          | Required                 |
+| `liquorice` | 0.4 µs          | Required                 |
+| `metric`    | -               | None (public endpoint)   |
 
 ## Quickstart
 
 The RFQ quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a> and <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a> are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a> and Metric are the only supported providers.
 
 You need to set up the API credentials of the desired RFQs to access live pricing data and quoting, as well as your private key if you wish to execute against the Tycho Router:
 
 ```bash
+unset HISTFILE # to not save your credentials to your shell history
 export BEBOP_KEY=<your-bebop-api-key>
 export HASHFLOW_USER=<your-hashflow-api-username>
 export HASHFLOW_KEY=<your-hashflow-api-key>
@@ -33,6 +35,8 @@ export LIQUORICE_USER=<your-liquorice-api-username>
 export LIQUORICE_KEY=<your-liquorice-api-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
+
+Metric needs no credentials: the client defaults to Metric's public endpoint. Override it with `METRIC_API_URL`, and set `METRIC_SECRET_KEY` only if your endpoint requires one. The example registers Metric under the `--run-pamm-protocols` flag, which is on by default, so it runs even without any authenticated RFQ credentials.
 
 Then run the example:
 
@@ -215,10 +219,10 @@ This gives you full control over execution. And it protects you from MEV and sli
 
 ### Execution
 
-This step allows you to test or perform real transactions based on the best available swap options. For this step, you need to pass your wallet's private key in the run command. Handle it securely and never expose it publicly.
+This step allows you to test or perform real transactions based on the best available swap options. It needs the `PRIVATE_KEY` environment variable from [Quickstart](#quickstart). Handle that key securely and never expose it publicly.
 
 ```bash
-cargo run --release --example quickstart -- --swapper-pk $PK
+cargo run --release --example rfq_quickstart
 ```
 
 Once the best swap is found you can:
@@ -236,3 +240,23 @@ Market conditions can change rapidly. Delays in your decision-making can lead to
 {% hint style="info" %}
 Because the RFQ will only let you swap up to the amount of tokens specified in the quote, when the RFQ swap happens after another protocol in a sequential swap, if positive slippage occurs during the preceding swap, any additional input tokens beyond the permitted quote amount will remain in the Tycho Router and not be sent to the RFQ protocol.
 {% endhint %}
+
+## pAMM Price Level Stream
+
+Besides the RFQ clients above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of complete per-pair quote snapshots for a subset of the pAMMs Titan serves. It only serves Ethereum Mainnet.
+
+`PriceLevelStreamBuilder` turns those snapshots into the same `Update` messages the protocol stream emits, so you consume it like any other stream:
+
+```rust
+use tycho_simulation::price_level_stream::stream::PriceLevelStreamBuilder;
+
+let price_level_stream = PriceLevelStreamBuilder::new()
+    .with_known_pamms()       // serve the venues Tycho has measured
+    .auto_detect(true)        // also serve any other venue Titan streams
+    .with_tokens(all_tokens.clone())
+    .build();
+```
+
+Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. The stream never terminates — run it in its own task alongside your protocol stream.
+
+Components arrive as `pricelevelstream:{pamm}`, where `{pamm}` is the venue name for a known venue or its address for an auto-detected one. Venues on Titan's PropAMMRouter whitelist arrive as `propammfallback:{pamm}` instead: `tycho-execution` routes those swaps through the router, which falls back to a single-hop Uniswap V3 pool when the venue reverts on a stale quote. The builder reads the whitelist once, at `build()`, through the node at `RPC_URL`; without that variable it warns and keeps every venue on the direct path. `without_fallback_router()` skips the read altogether.

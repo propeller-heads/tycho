@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use ethabi::ethereum_types::Address;
+use serde::Deserialize;
 use substreams::scalar::BigInt;
 use substreams_ethereum::pb::eth::v2::{self as eth};
 
@@ -10,15 +11,21 @@ use crate::abi::factory::events::PoolCreated;
 
 use tycho_substreams::prelude::*;
 
+#[derive(Debug, Deserialize)]
+struct Params {
+    factory_address: String,
+    protocol_type_name: String,
+}
+
 #[substreams::handlers::map]
 pub fn map_pools_created(
     params: String,
     block: eth::Block,
 ) -> Result<BlockEntityChanges, substreams::errors::Error> {
     let mut new_pools: Vec<TransactionEntityChanges> = vec![];
-    let factory_address = params.as_str();
+    let params: Params = serde_qs::from_str(params.as_str()).expect("Unable to deserialize params");
 
-    get_new_pools(&block, &mut new_pools, factory_address);
+    get_new_pools(&block, &mut new_pools, &params);
 
     Ok(BlockEntityChanges { block: None, changes: new_pools })
 }
@@ -27,7 +34,7 @@ pub fn map_pools_created(
 fn get_new_pools(
     block: &eth::Block,
     new_pools: &mut Vec<TransactionEntityChanges>,
-    factory_address: &str,
+    params: &Params,
 ) {
     // Extract new pools from PoolCreated events
     let mut on_pool_created = |event: PoolCreated, _tx: &eth::TransactionTrace, _log: &eth::Log| {
@@ -78,7 +85,7 @@ fn get_new_pools(
                 ],
                 change: i32::from(ChangeType::Creation),
                 protocol_type: Option::from(ProtocolType {
-                    name: "uniswap_v3_pool".to_string(),
+                    name: params.protocol_type_name.clone(),
                     financial_type: FinancialType::Swap.into(),
                     attribute_schema: vec![],
                     implementation_type: ImplementationType::Custom.into(),
@@ -106,7 +113,9 @@ fn get_new_pools(
 
     let mut eh = EventHandler::new(block);
 
-    eh.filter_by_address(vec![Address::from_str(factory_address).unwrap()]);
+    eh.filter_by_address(vec![
+        Address::from_str(&params.factory_address).expect("Invalid factory address")
+    ]);
 
     eh.on::<PoolCreated, _>(&mut on_pool_created);
     eh.handle_events();

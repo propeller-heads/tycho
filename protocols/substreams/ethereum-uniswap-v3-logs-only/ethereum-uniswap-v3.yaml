@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_uniswap_v3_logs_only"
-  version: v0.1.2
+  version: v0.1.4
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v3-logs-only"
 
 protobuf:
@@ -123,4 +123,4 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_pools_created: "1F98431c8aD98523631AE4a59f267346ea31F984"
+  map_pools_created: "factory_address=1F98431c8aD98523631AE4a59f267346ea31F984&protocol_type_name=uniswap_v3_pool"

@@ -4,10 +4,12 @@
 //! including loading router and executor bytecode for various protocols.
 //! The actual execution logic is from the tycho-test library.
 
-use std::{collections::HashMap, sync::LazyLock};
+use std::{collections::HashMap, str::FromStr, sync::LazyLock};
 
+use alloy::primitives::Address;
 use miette::{miette, IntoDiagnostic, WrapErr};
-use tycho_test::execution::models::RouterOverwritesData;
+use tycho_simulation::tycho_common::models::Chain;
+use tycho_test::execution::{encoding::EXECUTOR_ADDRESS, models::RouterOverwritesData};
 pub const ROUTER_BYTECODE_JSON: &str = include_str!("../fixtures/TychoRouterV3.runtime.json");
 const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculator.runtime.json");
 
@@ -24,6 +26,8 @@ const CURVE_BYTECODE_JSON: &str = include_str!("../fixtures/Curve.runtime.json")
 const FERMISWAP_BYTECODE_JSON: &str = include_str!("../fixtures/FermiSwap.runtime.json");
 const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.runtime.json");
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
+const EKUBO_V3_ROBINHOOD_BYTECODE_JSON: &str =
+    include_str!("../fixtures/EkuboV3Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
@@ -53,17 +57,28 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
     map.insert("sky", SKY_BYTECODE_JSON);
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
+    map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
     map
 });
 
-/// Get executor bytecode JSON based on protocol system
-fn get_executor_bytecode_json(protocol_system: &str) -> miette::Result<&'static str> {
-    for (pattern, executor_json) in EXECUTOR_MAPPING.iter() {
-        if protocol_system == *pattern {
-            return Ok(executor_json);
-        }
+/// Executors that differ per chain, keyed by (chain, protocol system). Looked up before
+/// [`EXECUTOR_MAPPING`], which holds the executor used on every other chain.
+static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'static str>> =
+    LazyLock::new(|| {
+        HashMap::from([((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON)])
+    });
+
+/// Get executor bytecode JSON for a protocol system on `chain`.
+fn get_executor_bytecode_json(chain: Chain, protocol_system: &str) -> miette::Result<&'static str> {
+    if let Some(executor_json) = CHAIN_SPECIFIC_EXECUTORS.get(&(chain, protocol_system)) {
+        return Ok(executor_json);
     }
-    Err(miette!("Unknown protocol system '{}' - no matching executor found", protocol_system))
+    EXECUTOR_MAPPING
+        .get(protocol_system)
+        .copied()
+        .ok_or_else(|| {
+            miette!("Unknown protocol system '{}' - no matching executor found", protocol_system)
+        })
 }
 
 /// Decode the `runtimeBytecode` field from a `*.runtime.json` fixture string.
@@ -88,8 +103,8 @@ fn decode_runtime_bytecode(bytecode_json: &str, label: &str) -> miette::Result<V
 }
 
 /// Load executor bytecode from embedded constants based on the protocol system
-pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> {
-    let executor_json = get_executor_bytecode_json(protocol_system)?;
+pub fn load_executor_bytecode(chain: Chain, protocol_system: &str) -> miette::Result<Vec<u8>> {
+    let executor_json = get_executor_bytecode_json(chain, protocol_system)?;
     decode_runtime_bytecode(executor_json, "executor")
 }
 
@@ -101,23 +116,33 @@ pub fn load_executor_bytecode(protocol_system: &str) -> miette::Result<Vec<u8>> 
 /// deployment with zero fees, so it acts as a no-op during simulation.
 ///
 /// # Arguments
+/// * `chain` - The chain the swaps run on; selects the executor where it differs per chain
 /// * `protocol_system` - The protocol system identifier (e.g., "uniswap_v2", "balancer_v2")
 ///
 /// # Returns
 /// A `RouterOverwritesData` struct containing the router, executor, and fee calculator bytecode.
+/// The executor bytecode is planted at `EXECUTOR_ADDRESS`, which is the address the swaps are
+/// encoded against.
 ///
 /// # Errors
 /// Returns an error if:
 /// - Router or fee calculator bytecode JSON parsing fails
 /// - Executor bytecode loading fails for the protocol system
 /// - Bytecode hex decoding fails
+/// - The executor address cannot be parsed
 pub fn create_router_overwrites_data(
+    chain: Chain,
     protocol_system: &str,
 ) -> miette::Result<RouterOverwritesData> {
     let router_bytecode = decode_runtime_bytecode(ROUTER_BYTECODE_JSON, "router")?;
-    let executor_bytecode = load_executor_bytecode(protocol_system)?;
+    let executor_bytecode = load_executor_bytecode(chain, protocol_system)?;
     let fee_calculator_bytecode =
         decode_runtime_bytecode(FEE_CALCULATOR_BYTECODE_JSON, "fee calculator")?;
+    let executor_address = Address::from_str(EXECUTOR_ADDRESS).into_diagnostic()?;
 
-    Ok(RouterOverwritesData { router_bytecode, executor_bytecode, fee_calculator_bytecode })
+    Ok(RouterOverwritesData {
+        router_bytecode: Some(router_bytecode),
+        executors: HashMap::from([(executor_address, Some(executor_bytecode))]),
+        fee_calculator_bytecode: Some(fee_calculator_bytecode),
+    })
 }

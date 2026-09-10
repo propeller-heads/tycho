@@ -1,0 +1,23 @@
+substreams_yaml_path: ./robinhood-ekubo-v3.yaml
+protocol_system: "ekubo_v3"
+skip_balance_check: true # Ekubo follows a singleton design, pool balances are held in one contract
+protocol_type_names:
+  - "ekubo_v3_pool"
+tests:
+  # First Ve33 pool on Robinhood; requires the Ve33 address module params
+  # from robinhood-ekubo-v3.yaml to be detected as a component.
+  - name: ve33
+    start_block: 23649600
+    stop_block: 23649700
+    expected_components:
+      - id: "0x7d81de8460659a3b2ff21b28a4cb228eb6064e6e1fbea6a2b0362235a6dfcbc1"
+        tokens:
+          - "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+          - "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+        static_attributes:
+          token0: "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+          token1: "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+          extension: "0xd18685a514e59b06d59824e16db07e73345d9953"
+          fee: "0x0000000000000000"
+          pool_type_config: "0x80000400"
+        creation_tx: "0xf1c4bc28ec081e61c4e5579769f14fd6c1dbf71a964e1b02a2c9452e78f61b86"

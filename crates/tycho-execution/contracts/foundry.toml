@@ -24,6 +24,7 @@ via_ir = true
 [rpc_endpoints]
 mainnet = "${RPC_URL}"
 base = "${BASE_RPC_URL}"
+robinhood = "${ROBINHOOD_RPC_URL}"
 arbitrum = "${ARBITRUM_RPC_URL}"
 polygon = "${POLYGON_RPC_URL}"
 bsc = "${BSC_RPC_URL}"

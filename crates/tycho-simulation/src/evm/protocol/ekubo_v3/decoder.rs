@@ -20,18 +20,26 @@ use ekubo_sdk::{
 use itertools::Itertools;
 use revm::primitives::Address;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::{
+    models::{token::Token, Chain},
+    Bytes,
+};
 
 use super::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
+        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
     },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
     pool::{
-        boosted_fees::BoostedFeesPool, concentrated::ConcentratedPool, full_range::FullRangePool,
-        mev_capture::MevCapturePool, oracle::OraclePool, stableswap::StableswapPool,
+        boosted_fees::BoostedFeesPool,
+        concentrated::ConcentratedPool,
+        full_range::FullRangePool,
+        mev_capture::MevCapturePool,
+        oracle::OraclePool,
+        stableswap::StableswapPool,
         twamm::TwammPool,
+        ve33::{Ve33Pool, Ve33UnderlyingPool},
     },
     state::EkuboV3State,
 };
@@ -47,6 +55,7 @@ pub enum ExtensionType {
     MevCapture,
     BoostedFees,
     SignedExclusiveSwap,
+    Ve33,
 }
 
 fn has_no_swap_call_points(extension: Address) -> bool {
@@ -55,7 +64,7 @@ fn has_no_swap_call_points(extension: Address) -> bool {
     extension[0] & 0b0110_0000 == 0
 }
 
-pub fn extension_type(extension: Address) -> Option<ExtensionType> {
+pub fn extension_type(extension: Address, chain: Chain) -> Option<ExtensionType> {
     Some(if has_no_swap_call_points(extension) {
         ExtensionType::NoSwapCallPoints
     } else if extension == ORACLE_ADDRESS {
@@ -68,6 +77,8 @@ pub fn extension_type(extension: Address) -> Option<ExtensionType> {
         ExtensionType::BoostedFees
     } else if extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
         ExtensionType::SignedExclusiveSwap
+    } else if chain == Chain::Robinhood && extension == VE33_ROBINHOOD_ADDRESS {
+        ExtensionType::Ve33
     } else {
         return None;
     })
@@ -90,6 +101,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
         _all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let chain = snapshot.component.chain;
         let static_attrs = snapshot.component.static_attributes;
         let state_attrs = snapshot.state.attributes;
 
@@ -164,7 +176,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
             ))
         };
 
-        let ext_type = extension_type_from_attributes_or_address(&static_attrs, extension)?;
+        let ext_type = extension_type_from_attributes_or_address(&static_attrs, extension, chain)?;
 
         Ok(match ext_type {
             ExtensionType::NoSwapCallPoints => match pool_type_config {
@@ -286,6 +298,49 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     tick,
                 )?)
             }
+            ExtensionType::Ve33 => {
+                let underlying_pool = match pool_type_config {
+                    EvmPoolTypeConfig::FullRange(pool_type_config) => {
+                        Ve33UnderlyingPool::FullRange(FullRangePool::new(
+                            FullRangePoolKey {
+                                token0,
+                                token1,
+                                config: PoolConfig { extension, fee, pool_type_config },
+                            },
+                            FullRangePoolState { sqrt_ratio, liquidity },
+                        )?)
+                    }
+                    EvmPoolTypeConfig::Stableswap(pool_type_config) => {
+                        Ve33UnderlyingPool::Stableswap(StableswapPool::new(
+                            StableswapPoolKey {
+                                token0,
+                                token1,
+                                config: PoolConfig { extension, fee, pool_type_config },
+                            },
+                            StableswapPoolState { sqrt_ratio, liquidity },
+                        )?)
+                    }
+                    EvmPoolTypeConfig::Concentrated(pool_type_config) => {
+                        let (key, state, tick, ticks) =
+                            concentrated_pool(&state_attrs, pool_type_config)?;
+                        Ve33UnderlyingPool::Concentrated(ConcentratedPool::new(
+                            key, state, tick, ticks,
+                        )?)
+                    }
+                };
+                let swap_fee = u64::from_be_bytes(
+                    attribute(&state_attrs, "swap_fee")?
+                        .as_ref()
+                        .try_into()
+                        .map_err(|err| {
+                            InvalidSnapshotError::ValueError(format!(
+                                "swap_fee length mismatch: {err:?}"
+                            ))
+                        })?,
+                );
+
+                Self::Ve33(Ve33Pool::new(underlying_pool, swap_fee)?)
+            }
         })
     }
 }
@@ -295,6 +350,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 fn extension_type_from_attributes_or_address(
     static_attrs: &HashMap<String, Bytes>,
     extension: Address,
+    chain: Chain,
 ) -> Result<ExtensionType, InvalidSnapshotError> {
     // Backward compat: use extension_id attribute if present (legacy format).
     // A value of 0 means unset — fall through to address-based detection.
@@ -310,7 +366,7 @@ fn extension_type_from_attributes_or_address(
     }
 
     // New way: detect from extension address
-    extension_type(extension).ok_or_else(|| {
+    extension_type(extension, chain).ok_or_else(|| {
         InvalidSnapshotError::ValueError(format!("unsupported extension {extension:x}"))
     })
 }
@@ -415,7 +471,7 @@ mod tests {
             EkuboV3State::Twamm(_) => 3,
             EkuboV3State::MevCapture(_) => 4,
             // BoostedFees is new, no legacy format
-            EkuboV3State::BoostedFees(_) => return,
+            EkuboV3State::BoostedFees(_) | EkuboV3State::Ve33(_) => return,
         };
 
         let mut component = case.component;
@@ -494,5 +550,39 @@ mod tests {
             .await
             .unwrap_err();
         }
+    }
+
+    #[rstest]
+    #[case::concentrated(concentrated())]
+    #[case::full_range(full_range())]
+    #[case::stableswap(stableswap())]
+    #[tokio::test]
+    async fn test_decode_ve33_underlying_pool_types(#[case] mut case: TestCase) {
+        case.component.chain = Chain::Robinhood;
+        case.component.static_attributes.insert(
+            "extension".to_string(),
+            VE33_ROBINHOOD_ADDRESS
+                .into_array()
+                .into(),
+        );
+        case.state_attributes
+            .insert("swap_fee".to_string(), 1_u64.to_be_bytes().into());
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: String::new(),
+                attributes: case.state_attributes,
+                balances: HashMap::new(),
+            },
+            component: case.component,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<EkuboV3State>(snapshot)
+            .await
+            .expect("reconstructing Ve33 state");
+
+        assert!(matches!(result, EkuboV3State::Ve33(_)));
     }
 }

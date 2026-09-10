@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-uniswap-v3-logs-only"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [lib]
@@ -14,6 +14,8 @@ hex = "0.4.3"
 itertools = "0.13.0"
 num-bigint = "0.4.4"
 prost = "0.11"
+serde = { version = "1.0.204", features = ["derive"] }
+serde_qs = "0.13.0"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
 substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.4.0" }

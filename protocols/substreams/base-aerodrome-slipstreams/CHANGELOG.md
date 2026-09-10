@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.1.5
+
+### Added
+
+- Index UP V3 on Robinhood Chain via a second manifest, `robinhood-up-v3.yaml` (factory
+  `0x1ac9dB4a2608ba45D6127B1737949b51Bb54B7F3`, swap fee module
+  `0xa8Bdc945bE050E451C97f935d7c0D6B0087cF94c`, initial block 6,184,096). UP's factory and pool are
+  Aerodrome Slipstream `CLFactory`/`CLPool` verbatim: identical event signatures, identical pool
+  storage layout, `uniswapV3SwapCallback`. Its fee module's runtime bytecode differs from the Base
+  deployments only in the `factory` immutable and in one event name, handled below.
+- Decode `SetCustomFee(address,uint24)` as a base-fee update alongside `CustomFeeSet`. The two
+  events carry the same arguments and meaning; UP's fee module emits the former.
+
+### Changed
+
+- Read the emitted protocol type from the new `protocol_type_name` module parameter instead of
+  hardcoding `aerodrome_slipstreams_pool`, so each deployment this package indexes is registered
+  under its own protocol system. The Base manifest passes `aerodrome_slipstreams_pool`, so its
+  output is unchanged.
+- Take the block below which no configured fee module can have emitted an event from the new
+  optional `first_dynamic_fee_module_block` parameter, so each deployment declares its own floor
+  and blocks below it are skipped without walking their logs. The Base manifest passes 44,221,569
+  and the Robinhood one 49,409,694, each the deployment block of that chain's earliest configured
+  module. Omitting the parameter scans every block, which costs time but never changes the emitted
+  state.
+
+### Deployment notes
+
+- Base output is byte-identical, but the added parameter and the removed block floor change every
+  module hash. Do not redeploy on Base: it would back-process from initial block 13,843,704 for no
+  change in indexed state.
+- Robinhood back-processes from block 6,184,096.
+
 ## v0.1.4
 
 ### Added

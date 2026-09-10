@@ -27,6 +27,7 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "ekubo_v3",
     "aerodrome_slipstreams",
     "velodrome_slipstreams",
+    "up_v3",
     "vm:balancer_v3",
 ];
 

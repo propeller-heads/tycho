@@ -52,7 +52,8 @@ Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
-getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]).
+getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
+`IPropAMM` / `IPropAMMRouter` (the pAMM standard and Titan's fallback router) and `IUniversalRouter`.
 
 ### Vault (`Vault.sol`)
 
@@ -137,9 +138,11 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
-AerodromeV1, LiquidityParty, Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, WETH,
+AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ), Hashflow (RFQ),
+Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other native wrappers),
 PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
-address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol fallback").
+address travels in the swap data), PropAMMFallback (the same liquidity routed via Titan's PropAMMRouter), and
+Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol fallback").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
 
@@ -227,15 +230,15 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
-| **Output-lands-at-router** | Curve, WETH, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                                    | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
 
 **Direct-transfer** (UniswapV2, BalancerV2, Curve): Dispatcher staticcalls `getTransferData()` to get
 the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs the transfer, then delegatecalls `swap()`.
 
-**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo): Also implement `ICallback`. Flow:
+**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, Metric): Also implement `ICallback`. Flow:
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool
@@ -309,16 +312,19 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 | `SplitSwapStrategyEncoder`      | `splitSwap` / `Permit2` / `UsingVault`      | Builds token array [tokenIn, intermediaries, tokenOut], encodes token indices + split percentages (U24) + executor + protocol data |
 
 **Parallel encoding**: `encode_swap_groups` (`strategy_encoders.rs`) and `TychoRouterEncoder::encode_solutions`
-encode groups and solutions in parallel via `map_on_threads` (`evm/utils.rs`), preserving input order.
+spawn threads via `map_on_threads` (`evm/utils.rs`) **only when an encoder in the batch blocks on a quote** —
+`SwapEncoder::blocks_on_quote()` defaults to `false` and is `true` only for the RFQ encoders (Bebop, Hashflow,
+Liquorice, Metric). Otherwise encoding runs serially on the calling thread. Input order is preserved either way.
 
-**Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol (UniswapV4, BalancerV3,
-Ekubo) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
+**Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol
+(`GROUPABLE_PROTOCOLS` in `evm/constants.rs`: `uniswap_v4`, `uniswap_v4_hooks`, `vm:balancer_v3`,
+`ekubo_v2`, `ekubo_v3`) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
 encode an entire multi-pool route as a single swap if all hops are on the same groupable protocol.
 
 ### SwapEncoder
 
 **SwapEncoder trait** (`swap_encoder.rs` + `evm/swap_encoder/`): Each protocol
-implements `encode_swap(&Swap, &EncodingContext) -> Vec<u8>`, encoding pool-specific data (pool ID, fee tiers, direction
+implements `encode_swap(&Swap, &EncodingContext) -> Result<Vec<u8>, EncodingError>`, encoding pool-specific data (pool ID, fee tiers, direction
 flags) into packed bytes. Each encoder holds its executor address.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
@@ -364,6 +370,50 @@ swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, defaul
 estimate (zero if unknown). Encoders aggregate these into `EncodedSolution.estimated_gas`, exposing a single estimate
 for the whole solution.
 
+## Router Trades Substreams (`substreams/`)
+
+Standalone WASM workspace (excluded from the root workspace) indexing every trade routed through
+the deployed TychoRouter contracts. Trades are recovered from EVM call traces — the router emits
+no swap event — decoded per ABI generation (`v2`, `v3_0`, `v3_1`), enriched with hop/executor
+data, `FeesTaken` amounts and the router fee configuration replayed from FeeCalculator events,
+then emitted as `DatabaseChanges` for `substreams-sink-sql` (`schema.sql`). Per-chain manifests
+live in `substreams/tycho-router-trades/chains/`.
+
+Trades are valued in USD after ingestion, not in the substreams. Tycho prices tokens in each
+chain's native token, so pricing anchors through the stablecoins pinned in
+`substreams/pricing/preferred_tokens.sql` and values a trade from one trusted side, implying the
+other side's price from the trade. See `substreams/README.md`.
+
+**Adding a chain** touches six places, and the last three fail silently when missed — follow
+"Adding a chain" in `substreams/README.md`:
+
+1. `substreams/tycho-router-trades/chains/<chain>.yaml` — new manifest: `network`, the router and
+   fee-calculator `params`, and `initialBlock` on all four modules.
+2. `initialBlock` set from the deployment block of the earliest router on that chain (binary
+   search `eth_getCode`), never a round number: the whole module graph is built from there.
+3. The chain must serve Extended (Firehose) blocks; trades come from call traces, so a chain
+   without them yields nothing rather than an error.
+4. `substreams/pricing/preferred_tokens.sql` — the native sentinel row plus at least one pinned
+   stablecoin, or the chain has no USD anchor and every trade stays unpriced. Pin by address and
+   verify the implied price; symbols are duplicated by fake tokens.
+5. `substreams/executors.sql` — a row per executor on the new chain, so a hop carries a protocol
+   name and not only an address. Kept by hand; needs no release.
+6. `substreams/docker-compose.yaml`, a released `.spkg` for the chain, and in
+   `helm-configuration` the `$chains` list plus the `spkgs` pin and a `TYCHO_<CHAIN>_DATABASE_URL`
+   entry in `helmwave/dev/values/tycho/router-trades/router-trades.yml`.
+
+**The `.spkg` packages are released separately from the image** by `substreams/release.sh` to
+`s3://repo.propellerheads-propellerheads/substreams/tycho-router-trades/<chain>-<version>.spkg`,
+and each sink container fetches the key it is pinned to. So the image build carries no module hash
+and rebuilding it is safe, while changing what a chain indexes takes three steps: bump
+`tycho-router-trades/Cargo.toml`, run the **Release Router Trades Substreams** workflow, and pin
+the new key under `spkgs` in helm. Releases are immutable; a rollback is a pin back.
+
+**Changing a manifest or the Rust source changes the module hash**, which the sink cursors are
+keyed by; a chain pinned to the new package then exits until its `cursors_<chain>` row is cleared,
+and because the sink writes plain `INSERT`s, any chain that re-reads written blocks needs its rows
+deleted too. See "Releasing a package" and "Updating a deployed sink" in `substreams/README.md`.
+
 ## Build & Test
 
 ### Solidity (Foundry)
@@ -377,10 +427,15 @@ forge fmt                       # auto-format
 forge snapshot                  # gas snapshots
 ```
 
-Config: `contracts/foundry.toml` -- Cancun EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
+Config: `contracts/foundry.toml` -- Osaka EVM, optimizer 200 runs (default) / 1000 runs (production), via_ir enabled.
 Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
+
+Contract changes can alter the deployed runtime bytecode used by `protocol-testing`. From the
+repository root, run `./protocols/testing/scripts/update_runtime_bytecode.sh` and commit any changed
+`protocols/testing/fixtures/*.runtime.json`; CI runs the same script with `--check`. Foundry pins
+the compiler and omits the metadata hash to keep these fixtures reproducible.
 
 ### Rust
 
@@ -396,8 +451,9 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 
 ### CI
 
-- **evm-foundry-ci.yml**: Format check + forge test + gas snapshot on PRs and main pushes
-- **slither.yml**: Static analysis
+- **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
+  snapshot, a Slither static-analysis job, and a runtime-bytecode-fixtures freshness check
+- **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
 
@@ -419,6 +475,8 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
+9. Regenerate and commit runtime-bytecode fixtures with
+   `./protocols/testing/scripts/update_runtime_bytecode.sh`.
 
 ## Security
 

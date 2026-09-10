@@ -15,6 +15,7 @@ description: Tycho Indexer's hosted endpoints
 <tr><td>Arbitrum Mainnet</td><td>tycho-arbitrum-beta.propellerheads.xyz</td></tr>
 <tr><td>Polygon Mainnet</td><td>tycho-polygon-beta.propellerheads.xyz</td></tr>
 <tr><td>BSC Mainnet</td><td>tycho-bsc-beta.propellerheads.xyz</td></tr>
+<tr><td>Robinhood Chain Mainnet</td><td>tycho-robinhood-beta.propellerheads.xyz</td></tr>
 </tbody>
 </table>
 
@@ -64,7 +65,7 @@ All Fynd endpoints share the same filtering restrictions:
 
 The available protocol systems vary by chain:
 
-<table><thead><tr><th width="244">Chain</th><th>Protocol Systems</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>sushiswap_v2</code>, <code>pancakeswap_v2</code>, <code>pancakeswap_v3</code>, <code>ekubo_v2</code>, <code>ekubo_v3</code>, <code>fluid_v1</code></td></tr><tr><td>Base Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code>, <code>aerodrome_v1</code>, <code>aerodrome_slipstreams</code>, <code>lunarbase</code></td></tr><tr><td>Unichain Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>velodrome_slipstreams</code>, <code>uniswap_v4_hooks</code></td></tr><tr><td>Arbitrum Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code></td></tr><tr><td>Polygon Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>quickswap_v2</code></td></tr></tbody></table>
+<table><thead><tr><th width="244">Chain</th><th>Protocol Systems</th></tr></thead><tbody><tr><td>Ethereum (Mainnet)</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>sushiswap_v2</code>, <code>pancakeswap_v2</code>, <code>pancakeswap_v3</code>, <code>ekubo_v2</code>, <code>ekubo_v3</code>, <code>fluid_v1</code></td></tr><tr><td>Base Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code>, <code>aerodrome_v1</code>, <code>aerodrome_slipstreams</code>, <code>lunarbase</code></td></tr><tr><td>Unichain Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>velodrome_slipstreams</code></td></tr><tr><td>Arbitrum Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>pancakeswap_v3</code></td></tr><tr><td>Polygon Mainnet</td><td><code>uniswap_v2</code>, <code>uniswap_v3</code>, <code>uniswap_v4</code>, <code>quickswap_v2</code></td></tr></tbody></table>
 
 ## Metrics
 

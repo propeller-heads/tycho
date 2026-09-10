@@ -14,7 +14,7 @@ The quality rating system helps you quickly assess token's specific properties:
 * **75**: Rebasing token
 * **50**: Fee-on-transfer token
 * **10**: Token analysis failed at first detection
-* **5**: Token analysis failed multiple times (after creation)
+* **9-5**: Token analysis kept failing on re-analysis after creation; 5 is the floor
 * **0**: Failed to extract attributes, like Decimal or Symbol
 
 {% hint style="info" %}

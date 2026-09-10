@@ -6,13 +6,14 @@ results. Exits after `--max-blocks` blocks, or runs indefinitely.
 
 ## Running
 
-Requires three env vars (can be set in `.claude/settings.local.json`):
+Env vars (can be set in `.claude/settings.local.json`):
 
 | Variable | Purpose |
 |---|---|
-| `TYCHO_URL` | WebSocket endpoint of the Tycho server |
-| `TYCHO_API_KEY` | Auth key (`sampletoken` works against local dev instances) |
-| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation |
+| `TYCHO_URL` | WebSocket endpoint of the Tycho server (required) |
+| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation (required) |
+| `TYCHO_API_KEY` | Auth key; defaults to `sampletoken`, which works against local dev instances |
+| `TYCHO_NO_TLS` | Set to `true` to talk plain HTTP/WS (same as `--no-tls`) |
 
 Both the token loader and the protocol stream default to TLS (`https`/`wss`). Pass `--no-tls`
 (or set `TYCHO_NO_TLS=true`) when pointing at a local dev instance served over plain HTTP.
@@ -29,14 +30,24 @@ Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
 `--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
-`--test-every-n-blocks 10`.
+`--test-every-n-updates 10`, `--bypass-executor-timelock`.
+
+`--bypass-executor-timelock` writes `executorsActivationTimestamp = 1` for every executor of the
+chain into the execution simulation's state overrides, so an executor that is unapproved or still
+inside its activation timelock (`Dispatcher.DELAY_EXECUTOR_ACTIVATION`, 1 day) does not make
+`Dispatcher._validateExecutor` revert. The
+router keeps its deployed bytecode, and only the read-only simulation call is affected. It cannot
+help an executor that has no bytecode deployed. Off by default so that a missing activation still
+shows up as a failure.
 
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
-  dispatches blocks to stream processors, calls `poll_rpc_for_block` (every-block mode) or
-  `await_target_block` (`--test-every-n-blocks` > 1, fetches the sampled block by number) for
-  on-chain comparison
+  dispatches blocks to stream processors, tests every Nth protocol update
+  (`--test-every-n-updates`, alias `--test-every-n-blocks`), calls `poll_rpc_for_block`
+  (every-update mode, and sampled mode under `--partial-blocks`) or `await_target_block`
+  (sampled mode without `--partial-blocks`, fetches the sampled block by number) for on-chain
+  comparison
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
@@ -65,6 +76,9 @@ Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
 - **`statistics.rs`**: `TestStatistics` + `ProtocolStatistics` — per-protocol counters for
   simulation success/failure, execution reverts, slippage, `get_limits` / `get_amount_out` calls
 - **`metrics.rs`**: Prometheus metrics (served on `--metrics-port`, default 9898)
+- **`fee_fetcher.rs`**: One-shot start-up read of the router fee on output from the deployed
+  FeeCalculator, so the test backs the current fee out of the simulated amount instead of
+  hard-coding it
 
 ## What it validates
 

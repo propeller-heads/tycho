@@ -1,8 +1,8 @@
 use std::{any::Any, collections::HashMap};
 
 use alloy::primitives::{Sign, I256, U256};
-use num_bigint::{BigInt, BigUint};
-use num_traits::{ToPrimitive, Zero};
+use num_bigint::BigUint;
+use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tracing::{error, trace};
 use tycho_common::{
@@ -10,32 +10,35 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{Balances, BlockContext, GetAmountOutResult, ProtocolSim},
     },
     Bytes,
 };
 
-use crate::evm::protocol::{
-    safe_math::{safe_add_u256, safe_sub_u256},
-    u256_num::u256_to_biguint,
-    utils::{
-        add_fee_markup,
-        slipstreams::{
-            dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig},
-            observations::{Observation, Observations},
-        },
-        uniswap::{
-            i24_be_bytes_to_i32, liquidity_math,
-            sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-            swap_math,
-            tick_list::{TickInfo, TickList, TickListErrorKind},
-            tick_math::{
-                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                MIN_SQRT_RATIO, MIN_TICK,
+use crate::{
+    evm::protocol::{
+        safe_math::{safe_add_u256, safe_sub_u256},
+        u256_num::u256_to_biguint,
+        utils::{
+            add_fee_markup,
+            slipstreams::{
+                dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
+                observations::{Observation, Observations},
             },
-            StepComputation, SwapResults, SwapState,
+            uniswap::{
+                i24_be_bytes_to_i32, liquidity_math,
+                sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
+                swap_math,
+                tick_list::{TickInfo, TickList, TickListErrorKind},
+                tick_math::{
+                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+                    MIN_SQRT_RATIO, MIN_TICK,
+                },
+                StepComputation, SwapResults, SwapState,
+            },
         },
     },
+    protocol::models::BlockPositionAssumption,
 };
 
 // Cold-storage warmup on the first loop iteration:
@@ -64,7 +67,13 @@ const MAX_TICKS_CROSSED: u64 =
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AerodromeSlipstreamsState {
     id: String,
-    block_timestamp: u64,
+    /// Timestamp of the block a quote against this state is expected to execute in.
+    ///
+    /// Maintained by the stream decoder via [`ProtocolSim::apply_block`], not decoded from
+    /// the pool: the fee module's initial-vs-dynamic branch keys on the *execution* block, which
+    /// is the next block for a confirmed update and the still-open block for a flashblock
+    /// update.
+    execution_block_timestamp: u64,
     liquidity: u128,
     sqrt_price: U256,
     observation_index: u16,
@@ -75,6 +84,9 @@ pub struct AerodromeSlipstreamsState {
     ticks: TickList,
     observations: Observations,
     dfc: DynamicFeeConfig,
+    /// What quotes may assume about the swap's position within its execution block; see
+    /// [`BlockPositionAssumption`].
+    position_assumption: BlockPositionAssumption,
 }
 
 impl AerodromeSlipstreamsState {
@@ -82,7 +94,7 @@ impl AerodromeSlipstreamsState {
     ///
     /// # Arguments
     /// - `id`: The id of the protocol component.
-    /// - `block_timestamp`: The timestamp of the block.
+    /// - `execution_block_timestamp`: Timestamp of the block a quote is expected to execute in.
     /// - `liquidity`: The initial liquidity of the pool.
     /// - `sqrt_price`: The square root of the current price.
     /// - `observation_index`: The index of the current observation.
@@ -97,7 +109,7 @@ impl AerodromeSlipstreamsState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
-        block_timestamp: u64,
+        execution_block_timestamp: u64,
         liquidity: u128,
         sqrt_price: U256,
         observation_index: u16,
@@ -112,7 +124,7 @@ impl AerodromeSlipstreamsState {
         let tick_list = TickList::from(tick_spacing as u16, ticks)?;
         Ok(AerodromeSlipstreamsState {
             id,
-            block_timestamp,
+            execution_block_timestamp,
             liquidity,
             sqrt_price,
             observation_index,
@@ -123,10 +135,19 @@ impl AerodromeSlipstreamsState {
             ticks: tick_list,
             observations: Observations::new(observations),
             dfc,
+            position_assumption: BlockPositionAssumption::default(),
         })
     }
 
-    fn get_fee(&self) -> Result<u32, SimulationError> {
+    /// Sets what quotes assume about the swap's position within its execution block.
+    ///
+    /// A consumer-side preference, independent of the pool's on-chain state.
+    pub fn with_position_assumption(mut self, assumption: BlockPositionAssumption) -> Self {
+        self.position_assumption = assumption;
+        self
+    }
+
+    fn get_fee(&self) -> Result<ResolvedFee, SimulationError> {
         get_dynamic_fee(
             &self.dfc,
             self.default_fee,
@@ -135,8 +156,29 @@ impl AerodromeSlipstreamsState {
             self.observation_index,
             self.observation_cardinality,
             &self.observations,
-            self.block_timestamp as u32,
+            self.execution_block_timestamp as u32,
+            self.position_assumption == BlockPositionAssumption::First,
         )
+    }
+
+    /// Records the observation the pool would write for a swap that moved the tick from
+    /// `self.tick` to `post_swap_tick`, so that a second swap chained onto this state in the same
+    /// block resolves the dynamic fee instead of the initial fee.
+    ///
+    /// Mirrors `CLPool.swap`, which writes only when the tick moved and passes the pre-swap tick
+    /// and liquidity. Must be called before the caller overwrites `tick`/`liquidity`.
+    fn record_observation(&mut self, post_swap_tick: i32) -> Result<(), SimulationError> {
+        if post_swap_tick == self.tick {
+            return Ok(());
+        }
+        self.observation_index = self.observations.write(
+            self.observation_index,
+            self.execution_block_timestamp as u32,
+            self.tick,
+            self.liquidity,
+            self.observation_cardinality,
+        )?;
+        Ok(())
     }
 
     fn swap(
@@ -174,11 +216,12 @@ impl AerodromeSlipstreamsState {
             tick: self.tick,
             liquidity: self.liquidity,
         };
-        let twap_overhead = if self.dfc.scaling_factor() != 0 { TWAP_FEE_OVERHEAD } else { 0 };
+        let resolved_fee = self.get_fee()?;
+        let twap_overhead = if resolved_fee.observed_twap { TWAP_FEE_OVERHEAD } else { 0 };
         let mut gas_used = U256::from((SWAP_BASE_GAS + twap_overhead) as u64);
         let mut n_loops = 0;
 
-        let fee = self.get_fee()?;
+        let fee = resolved_fee.fee;
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
@@ -190,6 +233,12 @@ impl AerodromeSlipstreamsState {
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
+                        // Best effort in an error path: a failed write only degrades the fee of
+                        // a chained simulation on this partial result, and must not mask the
+                        // more informative TicksExceeded error below.
+                        if let Err(record_err) = new_state.record_observation(state.tick) {
+                            trace!(%record_err, "skipping observation write on partial result");
+                        }
                         new_state.liquidity = state.liquidity;
                         new_state.tick = state.tick;
                         new_state.sqrt_price = state.sqrt_price;
@@ -305,11 +354,11 @@ impl AerodromeSlipstreamsState {
 impl ProtocolSim for AerodromeSlipstreamsState {
     fn fee(&self) -> f64 {
         match self.get_fee() {
-            Ok(fee) => fee as f64 / 1_000_000.0,
+            Ok(resolved) => resolved.fee as f64 / 1_000_000.0,
             Err(err) => {
                 error!(
                     pool = %self.id,
-                    block_timestamp = self.block_timestamp,
+                    execution_block_timestamp = self.execution_block_timestamp,
                     %err,
                     "Error while calculating dynamic fee"
                 );
@@ -324,7 +373,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         } else {
             1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)?
         };
-        Ok(add_fee_markup(price, self.get_fee()? as f64 / 1_000_000.0))
+        Ok(add_fee_markup(price, self.get_fee()?.fee as f64 / 1_000_000.0))
     }
 
     fn get_amount_out(
@@ -346,6 +395,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
         trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
         let mut new_state = self.clone();
+        new_state.record_observation(result.tick)?;
         new_state.liquidity = result.liquidity;
         new_state.tick = result.tick;
         new_state.sqrt_price = result.sqrt_price;
@@ -461,14 +511,6 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        if let Some(block_timestamp) = delta
-            .updated_attributes
-            .get("block_timestamp")
-        {
-            self.block_timestamp = BigInt::from_signed_bytes_be(block_timestamp)
-                .to_u64()
-                .unwrap();
-        }
         // apply attribute changes
         if let Some(liquidity) = delta
             .updated_attributes
@@ -593,6 +635,19 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         Ok(())
     }
 
+    /// Re-emits only when the resolved fee actually changed: idle pools whose initial-vs-dynamic
+    /// branch stays put return `false` indefinitely, and same-block flashblocks short-circuit on
+    /// the unchanged timestamp.
+    fn apply_block(&mut self, block: &BlockContext) -> bool {
+        let timestamp = block.timestamp();
+        if timestamp == self.execution_block_timestamp {
+            return false;
+        }
+        let fee_before = self.get_fee().ok();
+        self.execution_block_timestamp = timestamp;
+        fee_before != self.get_fee().ok()
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
@@ -639,8 +694,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use alloy::primitives::{Sign, I256, U256};
-    use tycho_common::simulation::errors::SimulationError;
+    use tycho_common::{models::Chain, simulation::errors::SimulationError};
 
     use super::*;
     use crate::evm::protocol::utils::{
@@ -689,6 +746,297 @@ mod tests {
         }
     }
 
+    /// Pool whose last swap wrote an observation at `last_observation_ts`, with the initial fee
+    /// enabled (750 pips) and a dynamic component on top of a 2700 pip base.
+    ///
+    /// Built with the first-in-block assumption on: most tests here exercise the optimistic
+    /// path. The worst-case-default tests switch it back to `BlockPositionAssumption::WorstCase`.
+    fn initial_fee_pool(last_observation_ts: u32) -> AerodromeSlipstreamsState {
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(2700, 30_000, 0, true, 750);
+        pool.position_assumption = BlockPositionAssumption::First;
+        pool.observations = Observations::new(vec![Observation {
+            block_timestamp: last_observation_ts,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+        pool
+    }
+
+    /// Replays Base block 50166683 on pool 0xdFe5F275020def30993f042174Fc2D335678b626
+    /// (AERO/cbBTC), the pair of swaps from the original report:
+    ///
+    /// - tx 0x3b0a96e9bb376d74b4b99d651336c790b2b2b65a660491c28cae3df1a5d69def (index 67), the
+    ///   block's first tick-moving swap, paid the 750 pip initial fee;
+    /// - tx 0xe934500efe7f9ef56370daf4859c21c3a439d998a80b5bd2e5a117e3045021e1 (index 154) paid the
+    ///   2700 pip dynamic fee.
+    ///
+    /// Pool state is reconstructed from archive RPC at the parent block 50166682 (slot0,
+    /// liquidity, observations[213], DynamicSwapFeeModule config); swap amounts come from the
+    /// on-chain Swap events. Both outputs must match wei-exact, and the end-of-block oracle
+    /// index must match the chain (213 -> 214: exactly one observation written).
+    #[test]
+    fn replays_base_block_50166683_swap_pair_wei_exact() {
+        let mut observations: Vec<Observation> = (0..213)
+            .map(|index| Observation { index, ..Default::default() })
+            .collect();
+        observations.push(Observation {
+            block_timestamp: 1_787_122_711, // == parent block ts: the pool traded in that block
+            tick_cumulative: -18_995_710_863_218,
+            seconds_per_liquidity_cumulative_x128: U256::from_str(
+                "42501948193164408449462610706599523891176959",
+            )
+            .unwrap(),
+            initialized: true,
+            index: 213,
+        });
+
+        let mut pool = AerodromeSlipstreamsState::new(
+            "0xdFe5F275020def30993f042174Fc2D335678b626".to_string(),
+            1_787_122_711, // seed: decoded at the parent block
+            1_128_781_556_759_264_064u128,
+            U256::from_str("1979649713595747421731").unwrap(),
+            213,
+            360,
+            2700, // tickSpacingToFee(200)
+            200,
+            -350_116,
+            // No initialized tick is crossed (liquidity is unchanged across both swaps);
+            // zero-net bounds outside the traversed range stand in for the full tick map.
+            vec![TickInfo::new(-351_000, 0).unwrap(), TickInfo::new(-349_000, 0).unwrap()],
+            observations,
+            DynamicFeeConfig::new(2700, 0, 0, true, 750),
+        )
+        .expect("state should build")
+        // The replayed swap was in fact the block's first: the optimistic mode reproduces it.
+        .with_position_assumption(BlockPositionAssumption::First);
+
+        // The quotes execute in block 50166683 (ts 1_787_122_713).
+        assert!(pool.apply_block(&BlockContext::new(50_166_683, 1_787_122_713)));
+
+        let aero = Token::new(
+            &Bytes::from_str("0x940181a94A35A4569E4529A3CDfB74e38FD98631").unwrap(),
+            "AERO",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Base,
+            100,
+        );
+        let cbbtc = Token::new(
+            &Bytes::from_str("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf").unwrap(),
+            "cbBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Base,
+            100,
+        );
+
+        assert_eq!(pool.fee(), 750.0 / 1_000_000.0);
+        let first = pool
+            .get_amount_out(BigUint::from(1_688_626u32), &cbbtc, &aero)
+            .expect("first swap should succeed");
+        assert_eq!(first.amount, BigUint::from(2_702_489_253_591_513_843_346u128));
+
+        assert_eq!(first.new_state.fee(), 2700.0 / 1_000_000.0);
+        let second = first
+            .new_state
+            .get_amount_out(BigUint::from(450_733u32), &cbbtc, &aero)
+            .expect("second swap should succeed");
+        assert_eq!(second.amount, BigUint::from(719_894_300_964_297_656_776u128));
+
+        let replayed = first
+            .new_state
+            .as_any()
+            .downcast_ref::<AerodromeSlipstreamsState>()
+            .expect("state type");
+        assert_eq!(replayed.observation_index, 214, "chain slot0 shows 214 after the block");
+        assert_eq!(
+            replayed
+                .observations
+                .timestamp_at(214, 360)
+                .unwrap(),
+            1_787_122_713
+        );
+    }
+
+    #[test]
+    fn ticks_exceeded_partial_result_still_records_the_observation() {
+        // The partial result carried inside the TicksExceeded error must price a chained swap
+        // with the dynamic fee, exactly like a successful swap's new_state.
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(101, 1_002));
+        let token_a =
+            Token::new(&Bytes::from([0x11; 20]), "A", 18, 0, &[Some(10_000)], Chain::Base, 100);
+        let token_b =
+            Token::new(&Bytes::from([0x22; 20]), "B", 18, 0, &[Some(10_000)], Chain::Base, 100);
+
+        let err = pool
+            .get_amount_out(
+                BigUint::from(1_000_000_000_000_000_000_000_000u128),
+                &token_a,
+                &token_b,
+            )
+            .expect_err("swap must exhaust the tick list");
+        let SimulationError::InvalidInput(_, Some(partial)) = err else {
+            panic!("expected a partial result, got {err:?}");
+        };
+
+        assert_eq!(partial.new_state.fee(), 2700.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn default_quotes_the_worse_fee_when_position_is_unknown() {
+        // Without the first-in-block assumption the quote must never over-state the output:
+        // before the pool is touched in the execution block, the worse of the two branches
+        // (here the 2700 dynamic fee) applies — which is also the pre-fix behavior.
+        let mut pool = initial_fee_pool(1_000);
+        pool.position_assumption = BlockPositionAssumption::WorstCase;
+        pool.apply_block(&BlockContext::new(101, 1_002));
+
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable")
+                .fee,
+            2700
+        );
+    }
+
+    #[test]
+    fn worst_case_picks_the_initial_fee_when_it_is_the_higher_one() {
+        // Nothing stops a pool from configuring initialFee above its dynamic fee, so the worst
+        // case is max(initial, dynamic).
+        let mut pool = initial_fee_pool(1_000);
+        pool.dfc = DynamicFeeConfig::new(500, 30_000, 0, true, 4_000);
+        pool.position_assumption = BlockPositionAssumption::WorstCase;
+        pool.apply_block(&BlockContext::new(101, 1_002));
+
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable")
+                .fee,
+            4_000
+        );
+    }
+
+    #[test]
+    fn worst_case_keeps_a_flat_fee_pool_quiet_across_blocks() {
+        // With scaling 0 the worst-case fee is constant, so apply_block must never request a
+        // re-emission: the default mode adds no per-block load for such pools.
+        let mut pool = initial_fee_pool(1_000);
+        pool.position_assumption = BlockPositionAssumption::WorstCase;
+        pool.apply_block(&BlockContext::new(100, 1_000));
+
+        assert!(!pool.apply_block(&BlockContext::new(101, 1_002)));
+        assert!(!pool.apply_block(&BlockContext::new(102, 1_004)));
+    }
+
+    #[test]
+    fn apply_block_reports_a_fee_flip_and_is_idempotent() {
+        // Pool traded in block 100 (ts 1_000): decoded with execution block == that block, so the
+        // dynamic fee applies. Crossing to the next block flips the branch to the initial fee.
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(100, 1_000));
+
+        assert!(pool.apply_block(&BlockContext::new(101, 1_002)), "branch flip must re-emit");
+        assert!(!pool.apply_block(&BlockContext::new(101, 1_002)), "repeat block is a no-op");
+    }
+
+    #[test]
+    fn apply_block_stays_quiet_while_the_fee_does_not_move() {
+        // Idle pool: the initial fee already applies and keeps applying as blocks pass, so
+        // consumers must not be told anything changed.
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(101, 1_002));
+
+        assert!(!pool.apply_block(&BlockContext::new(102, 1_004)));
+        assert!(!pool.apply_block(&BlockContext::new(103, 1_006)));
+    }
+
+    #[test]
+    fn quotes_initial_fee_for_the_next_block_after_the_pool_traded() {
+        // The pool wrote its observation in the block we decoded. A quote lands in the *next*
+        // block, where no observation exists yet — under the first-in-block assumption it pays
+        // the initial fee.
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(101, 1_002));
+
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable")
+                .fee,
+            750
+        );
+    }
+
+    #[test]
+    fn quotes_dynamic_fee_when_targeting_a_block_the_pool_already_traded_in() {
+        // Flashblock consumer: the block is still open and the pool traded in an earlier
+        // flashblock, so a quote landing later in the same block pays the dynamic fee.
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(100, 1_000));
+
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable")
+                .fee,
+            2700
+        );
+    }
+
+    #[test]
+    fn chained_swap_in_the_same_block_pays_the_dynamic_fee() {
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(101, 1_002));
+        let token_a =
+            Token::new(&Bytes::from([0x11; 20]), "A", 18, 0, &[Some(10_000)], Chain::Base, 100);
+        let token_b =
+            Token::new(&Bytes::from([0x22; 20]), "B", 18, 0, &[Some(10_000)], Chain::Base, 100);
+
+        assert_eq!(pool.fee(), 750.0 / 1_000_000.0);
+
+        let result = pool
+            .get_amount_out(BigUint::from(100_000_000_000_000_000u128), &token_a, &token_b)
+            .expect("first swap should succeed");
+
+        // The first swap moved the tick, so it wrote an observation at the execution timestamp;
+        // the pool state it hands back prices the next swap in that block as a follow-up.
+        assert_eq!(result.new_state.fee(), 2700.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn swap_that_does_not_move_the_tick_leaves_the_initial_fee_available() {
+        // `CLPool.swap` only writes an observation when the tick changed, so a swap that stays
+        // inside the tick leaves the next swap in the block on the initial fee.
+        let mut pool = initial_fee_pool(1_000);
+        pool.apply_block(&BlockContext::new(101, 1_002));
+
+        pool.record_observation(pool.tick)
+            .expect("no-op write should succeed");
+
+        assert_eq!(
+            pool.get_fee()
+                .expect("fee should be computable")
+                .fee,
+            750
+        );
+    }
+
+    #[test]
+    fn initial_fee_branch_does_not_charge_the_twap_gas_overhead() {
+        let mut pool = initial_fee_pool(1_000);
+        pool.dfc = DynamicFeeConfig::new(2700, 30_000, 6_000_000, true, 750);
+        pool.apply_block(&BlockContext::new(101, 1_002));
+
+        let resolved = pool
+            .get_fee()
+            .expect("fee should be computable");
+
+        assert_eq!(resolved, ResolvedFee { fee: 750, observed_twap: false });
+    }
+
     #[test]
     fn dynamic_fee_update_applies_for_supported_module() {
         let mut pool = create_basic_test_pool();
@@ -701,7 +1049,8 @@ mod tests {
 
         assert_eq!(
             pool.get_fee()
-                .expect("fee should be computable"),
+                .expect("fee should be computable")
+                .fee,
             500
         );
     }
@@ -721,7 +1070,8 @@ mod tests {
         assert_eq!(pool.dfc, DynamicFeeConfig::default());
         assert_eq!(
             pool.get_fee()
-                .expect("fee should be computable"),
+                .expect("fee should be computable")
+                .fee,
             3000
         );
     }

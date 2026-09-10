@@ -258,6 +258,7 @@ jobs:
       UNICHAIN_RPC_URL: ${{ secrets.UNICHAIN_RPC_URL_ARCHIVE }}
       BSC_RPC_URL: ${{ secrets.BSC_RPC_URL_ARCHIVE }}
       POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL_ARCHIVE }}
+      ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL_ARCHIVE }}
       SUBSTREAMS_API_TOKEN: ${{ secrets.SUBSTREAMS_API_TOKEN }}
       AUTH_API_KEY: ${{ secrets.AUTH_API_KEY }}
     strategy:

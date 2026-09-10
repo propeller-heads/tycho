@@ -253,10 +253,10 @@ This gives you full control over execution. And it protects you from MEV and sli
 
 ### 6. Simulate or execute the best swap
 
-This step allows you to test or perform real transactions based on the best available swap options. For this step, you need to pass your wallet's private key in the run command. Handle it securely and never expose it publicly.
+This step allows you to test or perform real transactions based on the best available swap options. It needs the `PRIVATE_KEY` environment variable from [Run the Quickstart](./#run-the-quickstart) — the quickstart skips simulation and execution without it. Handle that key securely and never expose it publicly.
 
 ```bash
-cargo run --release --example quickstart -- --swapper-pk $PK
+cargo run --release --example quickstart
 ```
 
 When you provide your private key, the quickstart will check your token balances and display them before showing you options:
