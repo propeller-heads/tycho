@@ -1,7 +1,7 @@
 use num_bigint::BigUint;
 
 use super::{
-    constants::{PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX},
+    constants::{FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX},
     group_swaps::group_swaps,
 };
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
@@ -43,9 +43,11 @@ pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
 /// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
 /// `fundsExpectedAddress` is the venue itself, so the whole `pricelevelstream:` family qualifies.
+/// The `fallback:` family is push-payment too, with the TychoFallbackRouter as the funded address.
 pub fn optimizable_transfer_in(protocol_system: &str) -> bool {
     PROTOCOLS_OPTIMIZABLE_TRANSFER_IN.contains(&protocol_system) ||
-        protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+        protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) ||
+        protocol_system.starts_with(FALLBACK_PREFIX)
 }
 
 /// Exact-name protocols where the router must `approve(protocol)` before swapping
@@ -87,6 +89,10 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// 25682938). A leg that actually falls back therefore costs about 180k more than estimated here.
 /// The estimate prices the venue path because that is the path a fresh quote takes.
 pub const PROPAMM_FALLBACK_OVERHEAD_GAS: u64 = 70_000;
+
+/// This prices the pAMM path because that is the path a fresh
+/// quote takes. A swap that actually falls back pays for the fallback venue on top.
+pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 70_000;
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
@@ -238,6 +244,13 @@ fn estimate_transfer_overhead(
         overhead += BigUint::from(PROPAMM_FALLBACK_OVERHEAD_GAS);
     }
 
+    // Same reasoning for the TychoFallbackRouter: the pAMM gas from `get_amount_out` prices a
+    // direct call, and the wrapper's own work — including the transfer that funds the pAMM from
+    // the fallback router — comes on top.
+    if protocol_system.starts_with(FALLBACK_PREFIX) {
+        overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
+    }
+
     // Output transfer: router -> receiver/next pool (only when outputToRouter).
     if PROTOCOLS_OUTPUT_TO_ROUTER.contains(&protocol_system) {
         overhead += transfer_token_gas(token_out);
@@ -356,6 +369,41 @@ mod tests {
         // leg1 approval + router overhead      95_000
         // leg1 pool gas                       100_000
         // leg2 approval + router overhead      95_000
+        // leg2 pool gas                       100_000
+        // extra output transfer (→ router)     60_000  ← TOKEN_GAS
+        assert_eq!(gas, BigUint::from(490_000u64));
+    }
+
+    #[test]
+    fn test_single_fallback_router() {
+        // Routing a pAMM through the TychoFallbackRouter keeps the leg push-payment (the funded
+        // address is the fallback router), so no input transfer; the wrapper overhead is extra.
+        let solution = make_solution(vec![make_swap("fallback:fermiswap")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← push-payment, funds sent directly
+        // fallback router overhead             70_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(270_000u64));
+    }
+
+    #[test]
+    fn test_split_fallback_router() {
+        // Split funds always route through the router first, so the router→fallback-router
+        // transfer is back on top of the wrapper overhead.
+        let solution = make_solution(vec![
+            make_swap("fallback:fermiswap").with_split(0.5),
+            make_swap("uniswap_v2").with_split(0.5),
+        ]);
+        let gas = estimate_gas_usage(&solution, Strategy::Split);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // leg1 input transfer                  60_000  ← Split reintroduces the router hop
+        // leg1 fallback router overhead        70_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // leg1 pool gas                       100_000
+        // leg2 input transfer                  60_000  ← Split reintroduces the router hop
         // leg2 pool gas                       100_000
         // extra output transfer (→ router)     60_000  ← TOKEN_GAS
         assert_eq!(gas, BigUint::from(490_000u64));
