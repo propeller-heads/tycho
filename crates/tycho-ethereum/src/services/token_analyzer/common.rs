@@ -1,5 +1,3 @@
-use std::cmp;
-
 use alloy::{
     primitives::{keccak256, Address, U256},
     rpc::types::{BlockNumberOrTag, TransactionInput, TransactionRequest},
@@ -14,39 +12,51 @@ pub(crate) fn arbitrary_recipient() -> Address {
     Address::from_slice(&hash[..20])
 }
 
-/// Computes the transfer fee in basis points (0–10_000) from observed balance deltas.
-///
-/// Returns the higher of the inbound and outbound fee rates. A transfer that credits the
-/// receiver with at least the amount sent has no fee. Errors only if a balance plus the amount
-/// sent overflows U256.
-pub(crate) fn calculate_fee(
-    amount: U256,
-    middle_amount: U256,
-    balance_before_in: U256,
-    balance_after_in: U256,
-    balance_recipient_before: U256,
-    balance_recipient_after: U256,
-) -> Result<U256, String> {
-    let fee_in = transfer_fee_bps(amount, balance_before_in, balance_after_in)?;
-    let fee_out =
-        transfer_fee_bps(middle_amount, balance_recipient_before, balance_recipient_after)?;
-    Ok(cmp::max(fee_in, fee_out))
+/// One simulated token transfer, seen through the receiver's balance.
+pub(crate) struct ObservedTransfer {
+    /// Amount the sender transferred.
+    pub(crate) sent: U256,
+    /// Receiver balance before the transfer.
+    pub(crate) balance_before: U256,
+    /// Receiver balance after the transfer.
+    pub(crate) balance_after: U256,
 }
 
-/// Fee in basis points that one transfer of `sent` took, from the receiver's balance before
-/// and after. Zero when nothing was sent or the receiver got at least `sent`.
-fn transfer_fee_bps(sent: U256, before: U256, after: U256) -> Result<U256, String> {
-    let expected = before
-        .checked_add(sent)
-        .ok_or_else(|| format!("balance {before} + {sent} overflows"))?;
-    if sent.is_zero() || after >= expected {
-        return Ok(U256::ZERO);
+impl ObservedTransfer {
+    /// Computes the fee in basis points this transfer took from the receiver's balance change.
+    /// Zero when nothing was sent or the receiver got at least `sent`. Above 10_000 when the
+    /// receiver ends with less than it started. Errors if `balance_before + sent` or
+    /// `shortfall * 10_000` overflows U256.
+    fn fee_bps(&self) -> Result<U256, String> {
+        let expected_after = self
+            .balance_before
+            .checked_add(self.sent)
+            .ok_or_else(|| format!("balance {} + {} overflows", self.balance_before, self.sent))?;
+        if self.sent.is_zero() || self.balance_after >= expected_after {
+            return Ok(U256::ZERO);
+        }
+        let shortfall = expected_after - self.balance_after;
+        Ok(shortfall
+            .checked_mul(U256::from(10_000))
+            .ok_or_else(|| format!("shortfall {shortfall} * 10_000 overflows"))? /
+            self.sent)
     }
-    let shortfall = expected - after;
-    let scaled = shortfall
-        .checked_mul(U256::from(10_000))
-        .ok_or_else(|| format!("shortfall {shortfall} * 10_000 overflows"))?;
-    Ok(scaled / sent)
+}
+
+/// Computes the transfer fee in basis points from the two simulated transfers: `inbound` moves
+/// `amount` from a holder into the settlement contract, `outbound` moves what arrived on to the
+/// recipient.
+///
+/// Returns the higher of the two fee rates. A transfer that credits the receiver with at least
+/// the amount sent has no fee. The result exceeds 10_000 when a receiver ends with less than it
+/// started. Errors if `balance_before + sent` or `shortfall * 10_000` overflows U256.
+pub(crate) fn calculate_fee_bps(
+    inbound: ObservedTransfer,
+    outbound: ObservedTransfer,
+) -> Result<U256, String> {
+    Ok(inbound
+        .fee_bps()?
+        .max(outbound.fee_bps()?))
 }
 
 /// Converts a tycho BlockTag to an alloy BlockNumberOrTag.
@@ -83,8 +93,10 @@ mod tests {
     use alloy::{primitives::U256, rpc::types::BlockNumberOrTag};
     use tycho_common::models::blockchain::BlockTag;
 
-    use super::{calculate_fee, map_block_tag};
+    use super::{calculate_fee_bps, map_block_tag, ObservedTransfer};
 
+    // Builds the two transfers the way the detectors do: everything the settlement received
+    // (`after_in - before_in`) is sent on to the recipient.
     fn fee(
         amount: u64,
         before_in: u64,
@@ -92,15 +104,19 @@ mod tests {
         recipient_before: u64,
         recipient_after: u64,
     ) -> Result<U256, String> {
-        let after_in = U256::from(after_in);
         let before_in = U256::from(before_in);
-        calculate_fee(
-            U256::from(amount),
-            after_in - before_in,
-            before_in,
-            after_in,
-            U256::from(recipient_before),
-            U256::from(recipient_after),
+        let after_in = U256::from(after_in);
+        calculate_fee_bps(
+            ObservedTransfer {
+                sent: U256::from(amount),
+                balance_before: before_in,
+                balance_after: after_in,
+            },
+            ObservedTransfer {
+                sent: after_in - before_in,
+                balance_before: U256::from(recipient_before),
+                balance_after: U256::from(recipient_after),
+            },
         )
     }
 
@@ -141,13 +157,17 @@ mod tests {
 
     #[test]
     fn calculate_fee_balance_near_max_errors() {
-        let result = calculate_fee(
-            U256::from(1_000_000),
-            U256::ZERO,
-            U256::MAX,
-            U256::MAX,
-            U256::ZERO,
-            U256::ZERO,
+        let result = calculate_fee_bps(
+            ObservedTransfer {
+                sent: U256::from(1_000_000),
+                balance_before: U256::MAX,
+                balance_after: U256::MAX,
+            },
+            ObservedTransfer {
+                sent: U256::ZERO,
+                balance_before: U256::ZERO,
+                balance_after: U256::ZERO,
+            },
         );
         assert!(result.is_err());
     }

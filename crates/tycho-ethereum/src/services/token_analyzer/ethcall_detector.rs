@@ -20,7 +20,7 @@ use tycho_common::{
 use super::{
     arbitrary_recipient,
     bytecode::{analyzeCall, ANALYZER_BYTECODE, FORWARDER_BYTECODE},
-    calculate_fee, map_block_tag,
+    calculate_fee_bps, map_block_tag, ObservedTransfer,
 };
 use crate::{rpc::EthereumRpcClient, BytesCodec};
 
@@ -208,13 +208,17 @@ impl EthCallDetector {
 
         // A balance that overflows U256 when the amount sent is added to it is token behaviour,
         // not an RPC fault. Both transfers ran, so gas is known and the tax is not.
-        let fees = match calculate_fee(
-            amount,
-            middle_amount,
-            r.balanceBeforeIn,
-            r.balanceAfterIn,
-            r.recipientBefore,
-            r.recipientAfter,
+        let fees = match calculate_fee_bps(
+            ObservedTransfer {
+                sent: amount,
+                balance_before: r.balanceBeforeIn,
+                balance_after: r.balanceAfterIn,
+            },
+            ObservedTransfer {
+                sent: middle_amount,
+                balance_before: r.recipientBefore,
+                balance_after: r.recipientAfter,
+            },
         ) {
             Ok(fees) => fees,
             Err(e) => {
