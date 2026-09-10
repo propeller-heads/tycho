@@ -230,7 +230,7 @@ impl EthCallDetector {
             }
         };
 
-        // calculate_fee_bps already rejected both sums if they overflow.
+        // Safe: calculate_fee_bps already checked this sum for overflow.
         let computed_balance_after_in = r.balanceBeforeIn + amount;
         if r.balanceAfterIn != computed_balance_after_in {
             return Ok((
@@ -257,6 +257,7 @@ impl EthCallDetector {
             ));
         }
 
+        // Safe: calculate_fee_bps already checked this sum for overflow.
         let computed_recipient_after = r.recipientBefore + middle_amount;
         if r.recipientAfter != computed_recipient_after {
             return Ok((

@@ -35,6 +35,7 @@ impl ObservedTransfer {
         if self.sent.is_zero() || self.balance_after >= expected_after {
             return Ok(U256::ZERO);
         }
+        // Safe: the guard above returned unless balance_after < expected_after.
         let shortfall = expected_after - self.balance_after;
         Ok(shortfall
             .checked_mul(U256::from(10_000))
