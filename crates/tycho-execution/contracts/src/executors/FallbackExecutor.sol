@@ -79,9 +79,8 @@ contract FallbackExecutor is IExecutor {
         outputToRouter = false;
     }
 
-    /// @dev Data layout: `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback: rest]`, where the
-    /// fallback is `[protocol: uint8][protocol data]`. The pAMM is a bare address, so no length
-    /// prefix is needed to find where the fallback starts.
+    /// @dev The pAMM is a bare address, so no length prefix is needed to find where the fallback
+    /// starts.
     function _decodeData(bytes calldata data)
         internal
         pure

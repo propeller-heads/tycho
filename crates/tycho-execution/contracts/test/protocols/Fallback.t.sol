@@ -980,8 +980,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         vm.stopPrank();
     }
 
-    /// A pAMM with no price, then a Uniswap V3 retry. Executor swap data is
-    /// `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`.
+    /// A pAMM with no price, then a Uniswap V3 retry.
     function _swapData() internal view returns (bytes memory) {
         return abi.encodePacked(
             USDC_ADDR,
