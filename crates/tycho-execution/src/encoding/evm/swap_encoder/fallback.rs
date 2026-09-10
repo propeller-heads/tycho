@@ -27,11 +27,11 @@ const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
 ///
 /// | Venue        | JSON                                                       | Venue data |
 /// |--------------|------------------------------------------------------------|------------|
-/// | `uniswap_v2` | `{"venue":"uniswap_v2","pair":"0x…","fee_bps":30}`         | `pair(20) ++ fee_bps(1)` |
-/// | `uniswap_v3` | `{"venue":"uniswap_v3","pool":"0x…"}`                      | `pool(20)` |
-/// | `uniswap_v4` | `{"venue":"uniswap_v4","fee":3000,"tick_spacing":60,"hook":"0x…","hook_data":"0x…"}` | `fee(3) ++ tick_spacing(3) ++ hook(20) ++ hook_data` |
-/// | `curve`      | `{"venue":"curve","pool":"0x…","pool_type":1,"i":0,"j":1}` | `pool(20) ++ pool_type(1) ++ i(1) ++ j(1)` |
-/// | `fluid_v1`   | `{"venue":"fluid_v1","dex":"0x…","zero2one":true}`         | `dex(20) ++ zero2one(1)` |
+/// | `uniswap_v2` | `{"protocol":"uniswap_v2","pair":"0x…","fee_bps":30}`         | `pair(20) ++ fee_bps(1)` |
+/// | `uniswap_v3` | `{"protocol":"uniswap_v3","pool":"0x…"}`                      | `pool(20)` |
+/// | `uniswap_v4` | `{"protocol":"uniswap_v4","fee":3000,"tick_spacing":60,"hook":"0x…","hook_data":"0x…"}` | `fee(3) ++ tick_spacing(3) ++ hook(20) ++ hook_data` |
+/// | `curve`      | `{"protocol":"curve","pool":"0x…","pool_type":1,"i":0,"j":1}` | `pool(20) ++ pool_type(1) ++ i(1) ++ j(1)` |
+/// | `fluid_v1`   | `{"protocol":"fluid_v1","dex":"0x…","zero2one":true}`         | `dex(20) ++ zero2one(1)` |
 ///
 /// Swap direction on Uniswap V2/V3/V4 comes from the sort order of the swap's tokens, so it is
 /// not part of the JSON. Fluid's `zero2one` is the dex's own token order, which cannot be
@@ -73,7 +73,7 @@ impl FallbackProtocol {
             }),
             _ => Err(EncodingError::FatalError(
                 "Fallback swaps require user_data naming the fallback venue \
-                 (e.g. {\"venue\":\"uniswap_v3\",\"pool\":\"0x…\"})"
+                 (e.g. {\"protocol\":\"uniswap_v3\",\"pool\":\"0x…\"})"
                     .to_string(),
             )),
         }
@@ -214,10 +214,6 @@ mod tests {
     use super::*;
     use crate::encoding::models::default_token;
 
-    // TODO: no cross-language integration test yet. A follow-up should add a `fallback` entry to
-    // `config/test_executor_addresses.json` (the FallbackExecutor's deterministic address from the
-    // `TychoRouterTestSetup` deploy order), a strategy-level Rust test writing calldata.txt, and a
-    // consumer in `contracts/test/protocols/Fallback.t.sol` — mirroring the PropAMM tests.
     // The addresses below match the Fallback.t.sol fixtures so that test can reuse them.
     const PAMM: &str = "1111111111111111111111111111111111111111";
     const USDC: &str = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
@@ -267,7 +263,7 @@ mod tests {
     #[test]
     fn test_encode_uniswap_v3_fallback() {
         let hex_swap = encode_usdc_weth(Some(&format!(
-            r#"{{"venue":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#
+            r#"{{"protocol":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#
         )))
         .unwrap();
 
@@ -278,7 +274,7 @@ mod tests {
     fn test_encode_uniswap_v2_fallback() {
         let pair = "b4e16d0168e52d35cacd2c6185b44281ec28c9dc";
         let hex_swap = encode_usdc_weth(Some(&format!(
-            r#"{{"venue":"uniswap_v2","pair":"0x{pair}","fee_bps":30}}"#
+            r#"{{"protocol":"uniswap_v2","pair":"0x{pair}","fee_bps":30}}"#
         )))
         .unwrap();
 
@@ -288,7 +284,7 @@ mod tests {
     #[test]
     fn test_encode_uniswap_v4_fallback() {
         let hex_swap = encode_usdc_weth(Some(
-            r#"{"venue":"uniswap_v4","fee":3000,"tick_spacing":-60,
+            r#"{"protocol":"uniswap_v4","fee":3000,"tick_spacing":-60,
                 "hook":"0x2222222222222222222222222222222222222222","hook_data":"0xdeadbeef"}"#,
         ))
         .unwrap();
@@ -305,7 +301,7 @@ mod tests {
     #[test]
     fn test_encode_uniswap_v4_fallback_without_hook_data() {
         let hex_swap = encode_usdc_weth(Some(
-            r#"{"venue":"uniswap_v4","fee":500,"tick_spacing":10,
+            r#"{"protocol":"uniswap_v4","fee":500,"tick_spacing":10,
                 "hook":"0x0000000000000000000000000000000000000000"}"#,
         ))
         .unwrap();
@@ -320,7 +316,7 @@ mod tests {
     fn test_encode_curve_fallback() {
         let pool = "3333333333333333333333333333333333333333";
         let hex_swap = encode_usdc_weth(Some(&format!(
-            r#"{{"venue":"curve","pool":"0x{pool}","pool_type":1,"i":0,"j":2}}"#
+            r#"{{"protocol":"curve","pool":"0x{pool}","pool_type":1,"i":0,"j":2}}"#
         )))
         .unwrap();
 
@@ -331,7 +327,7 @@ mod tests {
     fn test_encode_fluid_v1_fallback() {
         let dex = "4444444444444444444444444444444444444444";
         let hex_swap = encode_usdc_weth(Some(&format!(
-            r#"{{"venue":"fluid_v1","dex":"0x{dex}","zero2one":true}}"#
+            r#"{{"protocol":"fluid_v1","dex":"0x{dex}","zero2one":true}}"#
         )))
         .unwrap();
 
@@ -346,7 +342,8 @@ mod tests {
 
     #[test]
     fn test_rejects_unknown_venue() {
-        let err = encode_usdc_weth(Some(r#"{"venue":"balancer_v2","pool":"0x11"}"#)).unwrap_err();
+        let err =
+            encode_usdc_weth(Some(r#"{"protocol":"balancer_v2","pool":"0x11"}"#)).unwrap_err();
         assert!(matches!(err, EncodingError::FatalError(msg) if msg.contains("JSON")));
     }
 
@@ -354,7 +351,7 @@ mod tests {
     fn test_rejects_uniswap_v2_fee_above_cap() {
         let pair = "b4e16d0168e52d35cacd2c6185b44281ec28c9dc";
         let err = encode_usdc_weth(Some(&format!(
-            r#"{{"venue":"uniswap_v2","pair":"0x{pair}","fee_bps":31}}"#
+            r#"{{"protocol":"uniswap_v2","pair":"0x{pair}","fee_bps":31}}"#
         )))
         .unwrap_err();
         assert!(matches!(err, EncodingError::InvalidInput(msg) if msg.contains("31")));
@@ -363,7 +360,7 @@ mod tests {
     #[test]
     fn test_rejects_uniswap_v4_fee_overflowing_uint24() {
         let err = encode_usdc_weth(Some(
-            r#"{"venue":"uniswap_v4","fee":16777216,"tick_spacing":60,
+            r#"{"protocol":"uniswap_v4","fee":16777216,"tick_spacing":60,
                 "hook":"0x0000000000000000000000000000000000000000"}"#,
         ))
         .unwrap_err();
@@ -373,7 +370,7 @@ mod tests {
     #[test]
     fn test_rejects_uniswap_v4_tick_spacing_overflowing_int24() {
         let err = encode_usdc_weth(Some(
-            r#"{"venue":"uniswap_v4","fee":500,"tick_spacing":8388608,
+            r#"{"protocol":"uniswap_v4","fee":500,"tick_spacing":8388608,
                 "hook":"0x0000000000000000000000000000000000000000"}"#,
         ))
         .unwrap_err();
@@ -391,7 +388,7 @@ mod tests {
             BigUint::ZERO,
         )
         .with_user_data(Bytes::from(
-            format!(r#"{{"venue":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#).into_bytes(),
+            format!(r#"{{"protocol":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#).into_bytes(),
         ));
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
