@@ -1325,7 +1325,9 @@ mod test_serial_db {
     use tycho_common::models::ChangeType;
 
     use super::*;
-    use crate::postgres::{db_fixtures, db_fixtures::yesterday_one_am, testing::run_against_db};
+    use crate::postgres::{
+        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+    };
 
     #[tokio::test]
     async fn test_write_and_flush() {
@@ -1419,6 +1421,12 @@ mod test_serial_db {
                 Chain::Ethereum,
                 100,
             );
+            let next_block_id = sql_query("SELECT nextval('block_id_seq') AS value")
+                .get_result::<BigIntRow>(&mut connection)
+                .await
+                .expect("Failed to read the block id sequence")
+                .value;
+
             let os_rx = send_write_message(
                 &tx,
                 block.clone(),
@@ -1443,16 +1451,19 @@ mod test_serial_db {
 
             handle.abort();
 
-            let block_id = BlockIdentifier::Number((Chain::Ethereum, 1));
-            let fetched_block = gateway
-                .get_block(&block_id, &mut connection)
+            // The sequence does not roll back: the aborted first attempt consumed one value and
+            // the successful re-run the next one.
+            let stored_block = orm::Block::by_hash(&block.hash, &mut connection)
                 .await
-                .expect("Failed to fetch block");
-            assert_eq!(fetched_block, block);
+                .expect("Failed to fetch the block");
+            assert_eq!(stored_block.id, next_block_id + 2, "the batch must run exactly twice");
 
             let stored_token =
                 db_fixtures::get_token_by_symbol(&mut connection, "ETH".to_string()).await;
-            assert_eq!(stored_token.quality, 50);
+            assert_eq!(
+                stored_token.quality, 50,
+                "the re-run must not overwrite the concurrent update"
+            );
         })
         .await;
     }
