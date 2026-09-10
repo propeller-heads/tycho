@@ -1383,30 +1383,6 @@ mod test_serial_db {
         .await;
     }
 
-    #[derive(QueryableByName)]
-    struct LockWaiters {
-        #[diesel(sql_type = diesel::sql_types::BigInt)]
-        count: i64,
-    }
-
-    /// Waits until a backend of this database blocks on a lock, up to 10 seconds.
-    async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
-        for _ in 0..200 {
-            let waiters = sql_query(
-                "SELECT count(*) AS count FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock' AND datname = current_database()",
-            )
-            .get_result::<LockWaiters>(conn)
-            .await
-            .expect("Failed to query lock waiters");
-            if waiters.count >= 1 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("No backend blocked on a lock within 10 seconds");
-    }
-
     #[tokio::test]
     async fn test_write_retries_serialization_failure() {
         run_against_db(|connection_pool| async move {
@@ -1431,37 +1407,7 @@ mod test_serial_db {
 
             let handle = write_executor.run();
 
-            // Open a transaction that updates the token row and holds the lock until released.
-            let (ready_tx, ready_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            let blocker_pool = connection_pool.clone();
-            let blocker = tokio::spawn(async move {
-                let mut conn = blocker_pool
-                    .get()
-                    .await
-                    .expect("Failed to get a connection from the pool");
-                conn.transaction(|conn| {
-                    async move {
-                        sql_query("UPDATE token SET quality = 50")
-                            .execute(conn)
-                            .await
-                            .expect("Failed to update the token quality");
-                        ready_tx
-                            .send(())
-                            .expect("Failed to signal the open update");
-                        release_rx
-                            .await
-                            .expect("Failed to await the release signal");
-                        Ok::<(), diesel::result::Error>(())
-                    }
-                    .scope_boxed()
-                })
-                .await
-                .expect("Blocking transaction failed");
-            });
-            ready_rx
-                .await
-                .expect("Blocking transaction never opened its update");
+            let mut blocker = start_blocking_token_update().await;
 
             let block = get_sample_block(1);
             let token = models::token::Token::new(
@@ -1480,14 +1426,15 @@ mod test_serial_db {
             )
             .await;
 
-            // The block upsert takes the batch snapshot, the token insert waits on the row lock.
+            // The block upsert takes the REPEATABLE READ snapshot, then the token insert waits on
+            // the row the blocker updated. After the commit below that row is newer than the
+            // snapshot, so Postgres raises 40001 and the executor re-runs the batch; the re-run
+            // sees the committed row and the insert is a no-op.
             await_lock_waiter(&mut connection).await;
-            release_tx
-                .send(())
-                .expect("Failed to release the blocking transaction");
-            blocker
+            sql_query("COMMIT")
+                .execute(&mut blocker)
                 .await
-                .expect("Blocking task panicked");
+                .expect("Failed to commit the blocking transaction");
 
             os_rx
                 .await
@@ -1961,6 +1908,57 @@ mod test_serial_db {
             .await
             .expect("Failed to send write message through mpsc channel");
         os_rx
+    }
+
+    #[derive(QueryableByName)]
+    struct BigIntRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
+
+    /// Waits until a backend of this database blocks on another transaction's row lock.
+    async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            let waiters = sql_query(
+                "SELECT count(*) AS value FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid'
+                 AND datname = current_database()",
+            )
+            .get_result::<BigIntRow>(conn)
+            .await
+            .expect("Failed to query lock waiters");
+            if waiters.value >= 1 {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "No backend blocked on a row lock within {TIMEOUT:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Opens a transaction that updates the ETH token row and leaves it uncommitted. The caller
+    /// releases the row lock with `COMMIT` on the returned connection.
+    async fn start_blocking_token_update() -> AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set for testing");
+        // A dedicated connection: when the test panics before the commit, dropping it closes the
+        // socket and Postgres rolls the transaction back. A pooled connection would return to the
+        // pool with the transaction open and block the teardown on the row lock.
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .expect("Failed to connect to the database");
+        sql_query("BEGIN")
+            .execute(&mut conn)
+            .await
+            .expect("Failed to begin the blocking transaction");
+        sql_query("UPDATE token SET quality = 50 WHERE symbol = 'ETH'")
+            .execute(&mut conn)
+            .await
+            .expect("Failed to update the token quality");
+        conn
     }
 
     //noinspection SpellCheckingInspection
