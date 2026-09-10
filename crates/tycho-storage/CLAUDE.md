@@ -28,10 +28,9 @@ All public DB operations go through one of two gateway structs:
 - **`CachedGateway`** (normal path): sends `WriteOp` messages over an async channel to
   `DBCacheWriteExecutor`, which batches by block and flushes in a fixed order when the next
   block arrives. Most reads hit the DB directly; the exceptions are `get_tokens` (served from
-  `token_cache` when enabled) and `get_delta` (small LRU). The executor retries a batch up to
-  three times when Postgres reports a transaction conflict (deadlock or serialization failure,
-  surfaced as `StorageError::TransactionConflict`); the batch re-runs from scratch with a fresh
-  snapshot.
+  `token_cache` when enabled) and `get_delta` (small LRU). The executor runs a batch up to
+  three times when Postgres reports a transaction conflict (deadlock or serialization
+  failure); each attempt re-runs from scratch with a fresh snapshot.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is

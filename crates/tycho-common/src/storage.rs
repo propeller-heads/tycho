@@ -68,8 +68,6 @@ pub enum StorageError {
     DecodeError(String),
     #[error("Unexpected storage error: {0}")]
     Unexpected(String),
-    #[error("Transaction aborted by a concurrent transaction: {0}")]
-    TransactionConflict(String),
     #[error("Currently unsupported operation: {0}")]
     Unsupported(String),
     #[error("Write cache unexpectedly dropped notification channel!")]

@@ -43,7 +43,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{PostgresError, PostgresGateway};
+use super::{is_transaction_conflict, PostgresError, PostgresGateway};
 
 /// Represents different types of database write operations.
 #[derive(PartialEq, Clone, Debug)]
@@ -405,7 +405,9 @@ impl DBCacheWriteExecutor {
 
             match res {
                 Ok(_) => break,
-                Err(PostgresError(StorageError::TransactionConflict(ref reason))) => {
+                Err(PostgresError(StorageError::Unexpected(ref e)))
+                    if is_transaction_conflict(e) =>
+                {
                     retry_count += 1;
                     if retry_count < max_retries {
                         let delay = std::time::Duration::from_secs(retry_count);
@@ -414,7 +416,7 @@ impl DBCacheWriteExecutor {
                             delay,
                             retry_count + 1,
                             max_retries,
-                            reason
+                            e
                         );
                         tokio::time::sleep(delay).await;
                         continue;
