@@ -206,8 +206,8 @@ impl EthCallDetector {
             .checked_sub(r.balanceBeforeIn)
             .ok_or("settlement balance underflow after successful transfer in")?;
 
-        // A balance that overflows U256 when the amount sent is added to it is token behaviour,
-        // not an RPC fault. Both transfers ran, so gas is known and the tax is not.
+        // A U256 overflow in the fee maths is token state (a balance near U256::MAX), not an RPC
+        // fault. Both transfers ran, so gas is known; the fee is not.
         let fees = match calculate_fee_bps(
             ObservedTransfer {
                 sent: amount,
@@ -230,10 +230,8 @@ impl EthCallDetector {
             }
         };
 
-        let computed_balance_after_in = r
-            .balanceBeforeIn
-            .checked_add(amount)
-            .ok_or("settlement balance overflow when checking transfer in")?;
+        // calculate_fee_bps already rejected both sums if they overflow.
+        let computed_balance_after_in = r.balanceBeforeIn + amount;
         if r.balanceAfterIn != computed_balance_after_in {
             return Ok((
                 TokenQuality::bad(format!(
@@ -259,10 +257,7 @@ impl EthCallDetector {
             ));
         }
 
-        let computed_recipient_after = r
-            .recipientBefore
-            .checked_add(middle_amount)
-            .ok_or("recipient balance overflow when checking transfer out")?;
+        let computed_recipient_after = r.recipientBefore + middle_amount;
         if r.recipientAfter != computed_recipient_after {
             return Ok((
                 TokenQuality::bad(format!(
