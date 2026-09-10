@@ -117,12 +117,12 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    created and deleted is malformed module output, so it goes through the lookup like a
    pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
    emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
-   `component_found` label says whether the component is known anywhere: a
-   `protocol_components` entry in buffer history or a `protocol_component` row in the DB.
-   `false` means an upstream module emitted state for a component Tycho never saw
-   created. The extractor registers both label sets at zero at startup so the first
-   miss is visible to `increase()`. Any hit means an upstream module emitted an Update
-   or Deletion for an attribute that never had a Creation.
+   `component_known` label says whether the component is known anywhere: a
+   `TxWithChanges.protocol_components` entry in buffer history or a row in the
+   `protocol_component` table. `false` means an upstream module emitted state for a
+   component Tycho never saw created. The extractor registers both label sets at zero at
+   startup so the first miss is visible to `increase()`. Any hit means an upstream module
+   emitted an Update or Deletion for an attribute that never had a Creation.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted

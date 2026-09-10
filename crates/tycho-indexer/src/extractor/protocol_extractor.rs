@@ -118,12 +118,12 @@ where
 
         // Register both label sets at zero so the first miss registers as a rise for
         // increase(); a series born at a nonzero value looks flat and no alert fires.
-        for component_found in ["true", "false"] {
+        for component_known in ["true", "false"] {
             counter!(
                 "extractor_revert_attr_miss",
                 "extractor" => name.to_string(),
                 "chain" => chain.to_string(),
-                "component_found" => component_found,
+                "component_known" => component_known,
             )
             .increment(0);
         }
@@ -1597,14 +1597,14 @@ where
                  reverting them as deletions"
             );
         }
-        for (misses, component_found) in [(attribute_misses, "true"), (component_misses, "false")] {
+        for (misses, component_known) in [(attribute_misses, "true"), (component_misses, "false")] {
             let count: usize = misses.iter().map(|(_, n)| n).sum();
             if count > 0 {
                 counter!(
                     "extractor_revert_attr_miss",
                     "extractor" => self.name.clone(),
                     "chain" => self.chain.to_string(),
-                    "component_found" => component_found,
+                    "component_known" => component_known,
                 )
                 .increment(count as u64);
             }
@@ -4930,7 +4930,7 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_found", "false")
+                    ("component_known", "false")
                 ],
             ),
             1,
@@ -4943,7 +4943,7 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_found", "true")
+                    ("component_known", "true")
                 ],
             ),
             3,
@@ -4954,7 +4954,7 @@ mod test {
     // `metrics::with_local_recorder` takes a sync closure, so this test cannot use
     // #[tokio::test]; it drives its own current-thread runtime instead.
     #[test]
-    fn test_revert_attr_miss_on_retained_creation_is_component_found() {
+    fn test_revert_attr_miss_on_retained_creation_is_component_known() {
         use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
@@ -5035,7 +5035,7 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_found", "true")
+                    ("component_known", "true")
                 ],
             ),
             1,
@@ -5048,11 +5048,11 @@ mod test {
                 &[
                     ("extractor", EXTRACTOR_NAME),
                     ("chain", "ethereum"),
-                    ("component_found", "false")
+                    ("component_known", "false")
                 ],
             ),
             0,
-            "the production shape must not alert"
+            "a creation in the committing section is not a component miss"
         );
     }
 
@@ -5087,11 +5087,11 @@ mod test {
         });
 
         let map = snapshot_to_map(snapshotter.snapshot());
-        for component_found in ["true", "false"] {
+        for component_known in ["true", "false"] {
             let labels = std::collections::BTreeMap::from([
                 ("extractor".to_string(), EXTRACTOR_NAME.to_string()),
                 ("chain".to_string(), "ethereum".to_string()),
-                ("component_found".to_string(), component_found.to_string()),
+                ("component_known".to_string(), component_known.to_string()),
             ]);
             assert!(
                 map.contains_key(&(
@@ -5099,7 +5099,7 @@ mod test {
                     "extractor_revert_attr_miss".to_string(),
                     labels,
                 )),
-                "series with component_found={component_found} must exist at startup; \
+                "series with component_known={component_known} must exist at startup; \
                  a series born on the first miss looks flat to increase() and no alert fires"
             );
         }
