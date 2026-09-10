@@ -357,6 +357,14 @@ impl From<StorageError> for PostgresError {
     }
 }
 
+/// True if `message` is the Postgres error of a transaction that aborted because it conflicted
+/// with a concurrent one: a serialization failure (SQLSTATE 40001) or a deadlock (40P01). Every
+/// 40001 message starts with "could not serialize access"; the check is a `contains` because one
+/// conversion path prefixes the message with `DieselError: `.
+fn is_transaction_conflict(message: &str) -> bool {
+    message.contains("deadlock detected") || message.contains("could not serialize access")
+}
+
 fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     let mut result = String::new();
     let mut byte_count = 0;
@@ -1475,6 +1483,27 @@ pub mod db_fixtures {
         .execute(conn)
         .await
         .expect("calculating fixture component tvl failed");
+    }
+}
+
+#[cfg(test)]
+mod tests_transaction_conflict {
+    use super::is_transaction_conflict;
+
+    #[test]
+    fn test_is_transaction_conflict() {
+        let cases = [
+            ("deadlock detected", true),
+            ("DieselError: deadlock detected", true),
+            ("could not serialize access due to concurrent update", true),
+            ("DieselError: could not serialize access due to concurrent update", true),
+            ("could not serialize access due to read/write dependencies among transactions", true),
+            ("duplicate key value violates unique constraint \"token_pkey\"", false),
+            ("Failed to update tokens: connection reset", false),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(is_transaction_conflict(message), expected, "{message}");
+        }
     }
 }
 

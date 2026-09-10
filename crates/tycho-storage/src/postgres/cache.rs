@@ -43,7 +43,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{PostgresError, PostgresGateway};
+use super::{is_transaction_conflict, PostgresError, PostgresGateway};
 
 /// Represents different types of database write operations.
 #[derive(PartialEq, Clone, Debug)]
@@ -315,6 +315,7 @@ pub(crate) struct DBCacheWriteExecutor {
     state_gateway: PostgresGateway,
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
+    max_retries: u64,
 }
 
 impl DBCacheWriteExecutor {
@@ -337,7 +338,7 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver }
+        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -370,7 +371,7 @@ impl DBCacheWriteExecutor {
             .expect("pool should be connected");
 
         let mut retry_count = 0;
-        let max_retries = 3;
+        let max_retries = self.max_retries;
         let mut res =
             Err(PostgresError(StorageError::Unexpected("default response error".to_string())));
 
@@ -406,16 +407,17 @@ impl DBCacheWriteExecutor {
             match res {
                 Ok(_) => break,
                 Err(PostgresError(StorageError::Unexpected(ref e)))
-                    if e.contains("deadlock detected") =>
+                    if is_transaction_conflict(e) =>
                 {
                     retry_count += 1;
                     if retry_count < max_retries {
                         let delay = std::time::Duration::from_secs(retry_count);
                         warn!(
-                            "Deadlock detected, retrying in {:?} (attempt {}/{})",
+                            "Transaction conflict, retrying in {:?} (attempt {}/{}): {}",
                             delay,
                             retry_count + 1,
-                            max_retries
+                            max_retries,
+                            e
                         );
                         tokio::time::sleep(delay).await;
                         continue;
@@ -1319,10 +1321,14 @@ impl Gateway for CachedGateway {}
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
+    use diesel::{sql_query, QueryableByName};
+    use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
-    use crate::postgres::{db_fixtures, db_fixtures::yesterday_one_am, testing::run_against_db};
+    use crate::postgres::{
+        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+    };
 
     #[tokio::test]
     async fn test_write_and_flush() {
@@ -1376,6 +1382,165 @@ mod test_serial_db {
                 .expect("Failed to fetch extraction state");
 
             assert_eq!(fetched_block, block);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_retries_serialization_failure() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let eth_address = "0000000000000000000000000000000000000000";
+            db_fixtures::insert_token(&mut connection, chain_id, eth_address, "ETH", 18, Some(100))
+                .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+
+            let handle = write_executor.run();
+
+            let mut blocker = start_blocking_token_update().await;
+
+            let block = get_sample_block(1);
+            let token = models::token::Token::new(
+                &Bytes::from_str(eth_address).expect("Invalid address"),
+                "ETH",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+            let next_block_id = sql_query("SELECT nextval('block_id_seq') AS value")
+                .get_result::<BigIntRow>(&mut connection)
+                .await
+                .expect("Failed to read the block id sequence")
+                .value;
+
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+
+            // The block upsert takes the REPEATABLE READ snapshot, then the token insert waits on
+            // the row the blocker updated. After the commit below that row is newer than the
+            // snapshot, so Postgres raises 40001 and the executor re-runs the batch; the re-run
+            // sees the committed row and the insert is a no-op.
+            await_lock_waiter(&mut connection).await;
+            sql_query("COMMIT")
+                .execute(&mut blocker)
+                .await
+                .expect("Failed to commit the blocking transaction");
+
+            os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect("Transaction cached");
+
+            handle.abort();
+
+            // The sequence does not roll back: the aborted first attempt consumed one value and
+            // the successful re-run the next one.
+            let stored_block = orm::Block::by_hash(&block.hash, &mut connection)
+                .await
+                .expect("Failed to fetch the block");
+            assert_eq!(stored_block.id, next_block_id + 2, "the batch must run exactly twice");
+
+            let stored_token =
+                db_fixtures::get_token_by_symbol(&mut connection, "ETH".to_string()).await;
+            assert_eq!(
+                stored_token.quality, 50,
+                "the re-run must not overwrite the concurrent update"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_fails_after_exhausted_conflict_retries() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let eth_address = "0000000000000000000000000000000000000000";
+            db_fixtures::insert_token(&mut connection, chain_id, eth_address, "ETH", 18, Some(100))
+                .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let mut write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            write_executor.max_retries = 1;
+
+            let handle = write_executor.run();
+
+            let mut blocker = start_blocking_token_update().await;
+
+            let block = get_sample_block(1);
+            let token = models::token::Token::new(
+                &Bytes::from_str(eth_address).expect("Invalid address"),
+                "ETH",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+
+            await_lock_waiter(&mut connection).await;
+            sql_query("COMMIT")
+                .execute(&mut blocker)
+                .await
+                .expect("Failed to commit the blocking transaction");
+
+            let err = os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect_err("The single attempt must fail on the conflict");
+
+            handle.abort();
+
+            let StorageError::Unexpected(message) = err else {
+                panic!("Expected the conflict as Unexpected, got {err:?}");
+            };
+            assert!(is_transaction_conflict(&message), "{message}");
+
+            let block_id = BlockIdentifier::Number((Chain::Ethereum, 1));
+            assert!(
+                matches!(
+                    gateway
+                        .get_block(&block_id, &mut connection)
+                        .await,
+                    Err(StorageError::NotFound(_, _))
+                ),
+                "the failed batch must not persist the block"
+            );
         })
         .await;
     }
@@ -1831,6 +1996,57 @@ mod test_serial_db {
             .await
             .expect("Failed to send write message through mpsc channel");
         os_rx
+    }
+
+    #[derive(QueryableByName)]
+    struct BigIntRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
+
+    /// Waits until a backend of this database blocks on another transaction's row lock.
+    async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            let waiters = sql_query(
+                "SELECT count(*) AS value FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid'
+                 AND datname = current_database()",
+            )
+            .get_result::<BigIntRow>(conn)
+            .await
+            .expect("Failed to query lock waiters");
+            if waiters.value >= 1 {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "No backend blocked on a row lock within {TIMEOUT:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Opens a transaction that updates the ETH token row and leaves it uncommitted. The caller
+    /// releases the row lock with `COMMIT` on the returned connection.
+    async fn start_blocking_token_update() -> AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set for testing");
+        // A dedicated connection: when the test panics before the commit, dropping it closes the
+        // socket and Postgres rolls the transaction back. A pooled connection would return to the
+        // pool with the transaction open and block the teardown on the row lock.
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .expect("Failed to connect to the database");
+        sql_query("BEGIN")
+            .execute(&mut conn)
+            .await
+            .expect("Failed to begin the blocking transaction");
+        sql_query("UPDATE token SET quality = 50 WHERE symbol = 'ETH'")
+            .execute(&mut conn)
+            .await
+            .expect("Failed to update the token quality");
+        conn
     }
 
     //noinspection SpellCheckingInspection
