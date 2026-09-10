@@ -315,6 +315,7 @@ pub(crate) struct DBCacheWriteExecutor {
     state_gateway: PostgresGateway,
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
+    max_retries: u64,
 }
 
 impl DBCacheWriteExecutor {
@@ -337,7 +338,7 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver }
+        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -370,7 +371,7 @@ impl DBCacheWriteExecutor {
             .expect("pool should be connected");
 
         let mut retry_count = 0;
-        let max_retries = 3;
+        let max_retries = self.max_retries;
         let mut res =
             Err(PostgresError(StorageError::Unexpected("default response error".to_string())));
 
@@ -1463,6 +1464,82 @@ mod test_serial_db {
             assert_eq!(
                 stored_token.quality, 50,
                 "the re-run must not overwrite the concurrent update"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_fails_after_exhausted_conflict_retries() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            let eth_address = "0000000000000000000000000000000000000000";
+            db_fixtures::insert_token(&mut connection, chain_id, eth_address, "ETH", 18, Some(100))
+                .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let mut write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            write_executor.max_retries = 1;
+
+            let handle = write_executor.run();
+
+            let mut blocker = start_blocking_token_update().await;
+
+            let block = get_sample_block(1);
+            let token = models::token::Token::new(
+                &Bytes::from_str(eth_address).expect("Invalid address"),
+                "ETH",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+            let os_rx = send_write_message(
+                &tx,
+                block.clone(),
+                vec![WriteOp::UpsertBlock(vec![block.clone()]), WriteOp::InsertTokens(vec![token])],
+            )
+            .await;
+
+            await_lock_waiter(&mut connection).await;
+            sql_query("COMMIT")
+                .execute(&mut blocker)
+                .await
+                .expect("Failed to commit the blocking transaction");
+
+            let err = os_rx
+                .await
+                .expect("Response from channel ok")
+                .expect_err("The single attempt must fail on the conflict");
+
+            handle.abort();
+
+            let StorageError::Unexpected(message) = err else {
+                panic!("Expected the conflict as Unexpected, got {err:?}");
+            };
+            assert!(is_transaction_conflict(&message), "{message}");
+
+            let block_id = BlockIdentifier::Number((Chain::Ethereum, 1));
+            assert!(
+                matches!(
+                    gateway
+                        .get_block(&block_id, &mut connection)
+                        .await,
+                    Err(StorageError::NotFound(_, _))
+                ),
+                "the failed batch must not persist the block"
             );
         })
         .await;
