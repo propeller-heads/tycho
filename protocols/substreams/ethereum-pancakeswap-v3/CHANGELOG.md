@@ -8,4 +8,4 @@
   so the previous positional zip could swap the value and `ChangeType` between the lower and upper
   tick of a single event. The store key is now built in one place, `tick_store_key`, which both
   the writer and the consumer call.
-
+- Remove a redundant reference in a `format!` argument, which current Clippy rejects.
