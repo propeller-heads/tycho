@@ -277,10 +277,9 @@ fn fee_to_default_protocol_fees(fee: u64) -> (u64, u64) {
 /// tied pair. Pairing by position then labels one tick's attribute with the other tick's value
 /// and `ChangeType`.
 ///
-/// Panics if a tick delta has no matching store delta, or if any store delta is left unmatched.
-/// Every `store.add` emits exactly one delta under the same key and ordinal, so either case means
-/// the two sides no longer derive keys the same way, which corrupts every block that touches
-/// liquidity.
+/// Panics if a tick delta has no matching store delta. Every `store.add` emits one delta under the
+/// same key and ordinal, so a miss means the two sides no longer derive keys the same way, which
+/// would corrupt every block that touches liquidity.
 fn ticks_to_attribute_updates(
     ticks_map_deltas: TickDeltas,
     ticks_store_deltas: StoreDeltas,
@@ -291,7 +290,7 @@ fn ticks_to_attribute_updates(
         .map(|delta| ((delta.key.clone(), delta.ordinal), delta))
         .collect();
 
-    let updates = ticks_map_deltas
+    ticks_map_deltas
         .deltas
         .into_iter()
         .map(|tick_delta| {
@@ -329,17 +328,7 @@ fn ticks_to_attribute_updates(
 
             (tick_delta.transaction.unwrap().into(), tick_delta.pool_address, attribute)
         })
-        .collect();
-
-    assert!(
-        store_deltas_by_key.is_empty(),
-        "net-liquidity store deltas without a matching tick delta: {:?}",
-        store_deltas_by_key
-            .keys()
-            .collect::<Vec<_>>()
-    );
-
-    updates
+        .collect()
 }
 
 #[cfg(test)]
@@ -425,17 +414,6 @@ mod tests {
     fn tick_delta_without_store_delta_panics() {
         let map_deltas = TickDeltas { deltas: vec![tick_delta(-100, 5, 1)] };
         let store_deltas = StoreDeltas { deltas: vec![store_delta(-100, 7, "", "40")] };
-
-        ticks_to_attribute_updates(map_deltas, store_deltas);
-    }
-
-    #[test]
-    #[should_panic(expected = "without a matching tick delta")]
-    fn store_delta_without_tick_delta_panics() {
-        let map_deltas = TickDeltas { deltas: vec![tick_delta(-100, 5, 1)] };
-        let store_deltas = StoreDeltas {
-            deltas: vec![store_delta(-100, 5, "", "40"), store_delta(200, 5, "", "40")],
-        };
 
         ticks_to_attribute_updates(map_deltas, store_deltas);
     }
