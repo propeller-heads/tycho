@@ -304,7 +304,82 @@ async function proposeTransaction(safeAddress, txData, signer, methodName) {
     return safeTxHash;
 }
 
+// Deterministic Deployment Proxy
+// More info: https://getfoundry.sh/guides/deterministic-deployments-using-create2/
+const CREATE2_FACTORY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
+
+/**
+ * Deploys `contractName` through the CREATE2 factory, then verifies it on
+ * Tenderly and on the network's block explorer.
+ *
+ * The address is derived from the bytecode and the constructor arguments, so an
+ * existing contract there is this exact build. The deployment is then skipped,
+ * which makes the script re-runnable when verification has to be retried.
+ *
+ * @returns the contract's address.
+ */
+async function deployCreate2({contractName, contractFqn, args, network}) {
+    const [deployer] = await ethers.getSigners();
+    console.log(`Deploying with account: ${deployer.address}`);
+    console.log(
+        `Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`
+    );
+    console.log(`Using CREATE2 factory at: ${CREATE2_FACTORY}`);
+
+    const factory = await ethers.getContractFactory(contractName);
+    const bytecode = factory.getDeployTransaction(...args).data;
+    const salt = ethers.utils.id(`${contractName}-${network}`);
+    const address = ethers.utils.getCreate2Address(
+        CREATE2_FACTORY,
+        salt,
+        ethers.utils.keccak256(bytecode)
+    );
+    console.log(`${contractName} will be deployed to: ${address}`);
+
+    const deployed = (await ethers.provider.getCode(address)) !== "0x";
+    if (deployed) {
+        console.log(`${contractName} already deployed, skipping deployment`);
+    } else {
+        const tx = await deployer.sendTransaction({
+            to: CREATE2_FACTORY,
+            data: ethers.utils.concat([salt, bytecode]),
+            gasLimit: 3_000_000,
+        });
+        await tx.wait();
+        console.log(`${contractName} deployed to: ${address}`);
+    }
+
+    try {
+        await hre.tenderly.verify({name: contractName, address});
+        console.log("Contract verified successfully on Tenderly");
+    } catch (error) {
+        console.error("Error during contract verification:", error);
+    }
+
+    if (!deployed) {
+        console.log("Waiting for 1 minute before verifying the contract...");
+        await new Promise((resolve) => setTimeout(resolve, 60000));
+    }
+
+    try {
+        await verifyOnExplorer({
+            network,
+            address,
+            contractFqn,
+            constructorArgs: args,
+        });
+        console.log(
+            `${contractName} verified successfully on blockchain explorer!`
+        );
+    } catch (error) {
+        console.error(`Error during blockchain explorer verification:`, error);
+    }
+
+    return address;
+}
+
 module.exports = {
+    deployCreate2,
     proposeOrSendTransaction,
     resolveRolesNetwork,
     verifyOnExplorer,

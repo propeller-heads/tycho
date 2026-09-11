@@ -10,6 +10,8 @@ error PropAMMFallbackExecutor__InvalidDataLength();
 /// @title PropAMMFallbackExecutor
 /// @notice Swaps against a pAMM through Titan's PropAMMRouter, which falls back to a single-hop
 /// Uniswap V3 pool when the venue reverts.
+/// @custom:deprecated Use `FallbackExecutor`, which picks the fallback venue itself, from five
+/// kinds, for any pAMM. Encode no new routes against this one; it is removed in a follow-up PR.
 /// @dev Same calldata as `PropAMMExecutor`, different call target. Calling the venue directly lets
 /// a stale maker quote revert the whole route, which is why integrator simulations fail on routes
 /// that execute fine in a Titan block.
