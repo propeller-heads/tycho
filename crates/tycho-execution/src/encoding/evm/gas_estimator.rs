@@ -90,9 +90,17 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// The estimate prices the venue path because that is the path a fresh quote takes.
 pub const PROPAMM_FALLBACK_OVERHEAD_GAS: u64 = 70_000;
 
-/// This prices the pAMM path because that is the path a fresh
-/// quote takes. A swap that actually falls back pays for the fallback venue on top.
-pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 70_000;
+/// Extra gas the `TychoFallbackRouter` adds around a pAMM fill: the `executePropAMM` try/catch
+/// self-call, the router->pAMM transfer, the `nonReentrant` guard and the no-output balance
+/// check. This differs from `PROPAMM_FALLBACK_OVERHEAD_GAS` in the funding model: the PropAMMRouter
+/// pulls `tokenIn` via `transferFrom`, a cost folded into that figure so
+/// `estimate_transfer_overhead` charges no separate input transfer for the family; the
+/// `TychoFallbackRouter` is push-funded, so the input transfer is charged separately and this sits
+/// on top of it.
+///
+/// Like the PropAMM estimate, this prices the pAMM path because that is the path a fresh quote
+/// takes. A swap that actually falls back pays for the fallback protocol on top.
+pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
@@ -383,10 +391,10 @@ mod tests {
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // input transfer                            0  ← push-payment, funds sent directly
-        // fallback router overhead             70_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
-        assert_eq!(gas, BigUint::from(270_000u64));
+        assert_eq!(gas, BigUint::from(240_000u64));
     }
 
     #[test]
@@ -401,12 +409,12 @@ mod tests {
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // leg1 input transfer                  60_000  ← Split reintroduces the router hop
-        // leg1 fallback router overhead        70_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // leg1 fallback router overhead        40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // leg1 pool gas                       100_000
         // leg2 input transfer                  60_000  ← Split reintroduces the router hop
         // leg2 pool gas                       100_000
         // extra output transfer (→ router)     60_000  ← TOKEN_GAS
-        assert_eq!(gas, BigUint::from(490_000u64));
+        assert_eq!(gas, BigUint::from(460_000u64));
     }
 
     #[test]
