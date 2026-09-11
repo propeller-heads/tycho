@@ -441,8 +441,7 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
         keys: Vec<(&Address, &Address)>,
     ) -> HashMap<(Address, Address), AccountBalance>;
 
-    /// Returns the ids among `ids` that have a protocol component entry in this block,
-    /// whatever the change type.
+    /// Returns the ids among `ids` whose component creation this block holds.
     fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId>;
 }
 
@@ -488,7 +487,7 @@ where
         (res, remaining_keys.into_iter().collect())
     }
 
-    /// Returns the ids among `ids` with no protocol component entry in the buffered blocks,
+    /// Returns the ids among `ids` with no component creation in the buffered blocks,
     /// live and committing sections included.
     pub fn missing_components(
         &self,

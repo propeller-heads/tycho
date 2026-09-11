@@ -231,7 +231,7 @@ where
         Ok(())
     }
 
-    /// Returns the ids among `ids` with no protocol component entry in the reorg buffer history
+    /// Returns the ids among `ids` with no component creation in the reorg buffer history
     /// and no component row in the DB.
     ///
     /// The protocol cache is not consulted: it keeps creations that a revert undid, so it would
