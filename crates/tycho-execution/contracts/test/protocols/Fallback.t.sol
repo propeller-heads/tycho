@@ -115,10 +115,14 @@ contract EmptyReservePair {
 /// and the route-level `minAmountOut` must be what catches it.
 contract SilentPool {
     function swap(
-        address, /* recipient */
-        bool, /* zeroForOne */
-        int256, /* amountSpecified */
-        uint160, /* sqrtPriceLimitX96 */
+        address,
+        /* recipient */
+        bool,
+        /* zeroForOne */
+        int256,
+        /* amountSpecified */
+        uint160,
+        /* sqrtPriceLimitX96 */
         bytes calldata /* data */
     )
         external
@@ -140,11 +144,16 @@ contract RevertingPool {
 /// @notice Accepts `tokenIn` and reports success without paying anything.
 contract SilentPropAMM {
     function swap(
-        address, /* tokenIn */
-        address, /* tokenOut */
-        uint256, /* amountIn */
-        uint256, /* minAmountOut */
-        address, /* recipient */
+        address,
+        /* tokenIn */
+        address,
+        /* tokenOut */
+        uint256,
+        /* amountIn */
+        uint256,
+        /* minAmountOut */
+        address,
+        /* recipient */
         uint256 /* deadline */
     )
         external
@@ -707,6 +716,24 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
     function setUp() public override {
         super.setUp();
         pamm = new MockPropAMM();
+    }
+
+    function testSingleSwapFromRustCalldata() public {
+        uint256 amountIn = 10_000e6;
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_fallback_usdc_weth"
+        );
+
+        deal(USDC_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SINGLE_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
     }
 
     function testGetTransferData() public view {

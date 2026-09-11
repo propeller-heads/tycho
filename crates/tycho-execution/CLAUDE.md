@@ -331,17 +331,26 @@ flags) into packed bytes. Each encoder holds its executor address.
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
-with the venue name or, for auto-detected pAMMs, the venue address). Price-level-stream protocols
+with the protocol name or, for auto-detected pAMMs, the protocol address). Price-level-stream protocols
 resolve generically: a single `pricelevelstream` config entry serves the whole family via a
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
-`pricelevelstream:{venue}` entries overriding per venue.
+`pricelevelstream:{protocol}` entries overriding per protocol.
 
-`propammfallback:{venue}` is the same liquidity executed through Titan's PropAMMRouter
-(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the venue
+`propammfallback:{protocol}` is the same liquidity executed through Titan's PropAMMRouter
+(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the protocol
 directly, so a stale maker quote falls back to a single-hop Uniswap V3 pool rather than reverting
 the route. It resolves the same
-way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only venues
+way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only protocols
 whitelisted on the PropAMMRouter may use the prefix.
+
+`fallback:{protocol}` is the same liquidity executed through `TychoFallbackRouter` (see "protocol
+fallback" above), which replaces the PropAMMRouter path: any pAMM qualifies, and the solver picks
+the fallback protocol per swap instead of the router owning one Uniswap V3 mapping. It resolves the
+same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
+one of Uniswap V2/V3/V4, Curve, or Fluid V1 with its pool parameters — travels as JSON in the
+swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
+static attribute. No `fallback` entry ships in the executor configs until the FallbackExecutor is
+deployed.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 

@@ -141,11 +141,25 @@ pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 /// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
 /// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct
 /// path, so both prefixes share `PropAMMSwapEncoder` and differ only in the executor.
+///
+/// Deprecated with `PropAMMFallbackExecutor`: encode no new routes against this family, use
+/// [`FALLBACK_PREFIX`]. Removed in a follow-up PR together with the executor.
 pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 
 /// The executor-config key serving the whole PropAMMRouter protocol family, mirroring
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
+
+/// Protocol system prefix for pAMM components executed through `TychoFallbackRouter`, which
+/// retries a failing pAMM on the fallback venue named in the swap's `user_data`. Venue suffixes
+/// follow `PRICE_LEVEL_STREAM_PREFIX`. Replaces `PROPAMM_FALLBACK_PREFIX` (Titan's PropAMMRouter,
+/// deprecated): any pAMM qualifies, and the solver picks the fallback venue per swap instead of
+/// the router owning one Uniswap V3 mapping.
+pub const FALLBACK_PREFIX: &str = "fallback:";
+
+/// The executor-config key serving the whole fallback protocol family, mirroring
+/// `PRICE_LEVEL_STREAM_KEY`.
+pub const FALLBACK_KEY: &str = "fallback";
 
 #[cfg(test)]
 mod tests {
@@ -157,6 +171,7 @@ mod tests {
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
         assert_eq!(format!("{PROPAMM_FALLBACK_KEY}:"), PROPAMM_FALLBACK_PREFIX);
+        assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

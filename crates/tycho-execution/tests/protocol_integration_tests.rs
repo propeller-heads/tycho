@@ -1851,6 +1851,66 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
 }
 
 #[test]
+fn test_single_encoding_strategy_fallback_usdc_weth() {
+    let token_in = usdc();
+    let token_out = weth();
+    let pamm = "1111111111111111111111111111111111111111";
+    let pool = "88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: format!(
+                "0x{pamm}a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            ),
+            protocol_system: String::from("fallback:kipseli"),
+            static_attributes: HashMap::from([(
+                "pamm_address".to_string(),
+                Bytes::from_str(pamm).unwrap(),
+            )]),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_user_data(Bytes::from(
+        format!(r#"{{"protocol":"uniswap_v3","pool":"0x{pool}"}}"#).as_bytes(),
+    ));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from(10_000_000_000_u64),
+        BigUint::from(1_000_000_000_000_000_000_u64),
+        BigUint::from(1_000_000_000_000_000_000_u64),
+        vec![swap],
+    );
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file(
+        "test_single_encoding_strategy_fallback_usdc_weth",
+        encode(&calldata).as_str(),
+    );
+}
+
+#[test]
 fn test_single_encoding_strategy_slipstreams() {
     // WETH -> (Slipstreams) -> USDC
     let static_attributes = HashMap::from([(
