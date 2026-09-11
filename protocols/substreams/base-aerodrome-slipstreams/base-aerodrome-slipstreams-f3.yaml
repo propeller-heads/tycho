@@ -1,0 +1,112 @@
+specVersion: v0.1.0
+package:
+  name: "base_aerodrome_slipstreams_f3"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/base-aerodrome-slipstreams"
+
+# Indexes only the third Slipstream factory, from its deployment block. The main manifest
+# covers all three factories but emits a component only on its PoolCreated block, so an
+# extractor already past block 44,394,724 never sees the pools this factory created before
+# its cursor. This manifest backfills them under a separate protocol system, which is then
+# merged into aerodrome_slipstreams.
+#
+# Starting at the factory's own deployment block keeps the run self-contained: the factory
+# enables a tick spacing before it can create a pool on it, so store_tick_spacing_fee always
+# holds the fee by the time map_pools_created needs it.
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/utils.proto
+    - slipstreams.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_aerodrome_slipstreams.wasm
+
+modules:
+  - name: map_tick_spacing_fee
+    kind: map
+    initialBlock: &initial_block 44394724
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.aerodrome.TickSpacingFees
+
+  - name: store_tick_spacing_fee
+    kind: store
+    updatePolicy: set
+    valueType: proto:slipstreams.TickSpacingFees
+    inputs:
+      - map: map_tick_spacing_fee
+
+  - name: map_pools_created
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_tick_spacing_fee
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: proto:slipstreams.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: store_dynamic_fee_config
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+      - store: store_dynamic_fee_config
+        mode: deltas
+      - store: store_dynamic_fee_config
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_balance_changes
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_tick_spacing_fee: &slipstreams_params "factories[]=f8f2eB4940CFE7d13603DDDD87f123820Fc061Ef&dynamic_fee_modules[]=87D8f999BBa9343E8099552426775B51C338E8CB"
+  map_pools_created: *slipstreams_params
+  store_dynamic_fee_config: *slipstreams_params
+  map_protocol_changes: *slipstreams_params
