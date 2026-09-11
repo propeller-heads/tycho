@@ -228,6 +228,17 @@ impl HashflowQuote {
                 params.receiver, self.quote_data.trader
             )));
         }
+        let effective_trader = self
+            .quote_data
+            .effective_trader
+            .clone()
+            .unwrap_or_else(|| self.quote_data.trader.clone());
+        if effective_trader != params.sender {
+            return Err(RFQError::FatalError(format!(
+                "Effective trader mismatch: expected {}, got {effective_trader}",
+                params.sender
+            )));
+        }
         if self.quote_data.base_token_amount != params.amount_in.to_string() {
             return Err(RFQError::FatalError(format!(
                 "Base token amount mismatch: expected {}, got {}",
@@ -352,7 +363,7 @@ mod tests {
                 base_token_amount: "1000".to_string(),
                 quote_token_amount: "2000".to_string(),
                 trader: hex_to_bytes("0x3333333333333333333333333333333333333333"),
-                effective_trader: None,
+                effective_trader: Some(hex_to_bytes("0x6666666666666666666666666666666666666666")),
                 tx_id: hex_to_bytes("0x4444444444444444444444444444444444444444"),
                 pool: hex_to_bytes("0x5555555555555555555555555555555555555555"),
                 quote_expiry: 123456,
@@ -414,6 +425,27 @@ mod tests {
             let params = params();
             let err = quote.validate(&params).unwrap_err();
             assert!(format!("{err:?}").contains("Trader address mismatch"));
+        }
+
+        #[test]
+        fn test_validate_effective_trader_mismatch() {
+            let mut quote = quote();
+            quote.quote_data.effective_trader =
+                Some(hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"));
+            let params = params();
+            let err = quote.validate(&params).unwrap_err();
+            assert!(format!("{err:?}").contains("Effective trader mismatch"));
+        }
+
+        #[test]
+        fn test_validate_effective_trader_absent() {
+            // Without an effective trader the quote defaults to the trader's scope, which only
+            // passes when that is what was requested.
+            let mut quote = quote();
+            quote.quote_data.effective_trader = None;
+            let params = params();
+            let err = quote.validate(&params).unwrap_err();
+            assert!(format!("{err:?}").contains("Effective trader mismatch"));
         }
 
         #[test]

@@ -1250,6 +1250,12 @@ fn test_single_encoding_strategy_hashflow() {
                 Bytes::from_str("0x6bc529dc7b81a031828ddce2bc419d01ff268c66").unwrap(),
             ),
             (
+                // The market maker signed this quote with the effective trader equal to the
+                // trader.
+                "effective_trader".to_string(),
+                Bytes::from_str("0x6bc529dc7b81a031828ddce2bc419d01ff268c66").unwrap(),
+            ),
+            (
                 "base_token".to_string(),
                 Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             ),

@@ -17,6 +17,7 @@ contract HashflowUtils is Test {
             quote.pool, // pool (20 bytes)
             quote.externalAccount, // externalAccount (20 bytes)
             quote.trader, // trader (20 bytes)
+            quote.effectiveTrader, // effectiveTrader (20 bytes)
             quote.baseToken, // baseToken (20 bytes)
             quote.quoteToken, // quoteToken (20 bytes)
             quote.baseTokenAmount, // baseTokenAmount (32 bytes)
@@ -53,7 +54,29 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
     }
 
     function testDecodeParams() public view {
-        IHashflowRouter.RFQTQuote memory expected_quote = rfqtQuote();
+        // Every field is distinct so a decoding offset mixup — like reading the
+        // trader slice as the effectiveTrader — fails the assertions. Decoding
+        // needs no valid signature.
+        IHashflowRouter.RFQTQuote memory expected_quote =
+            IHashflowRouter.RFQTQuote({
+                pool: address(0x1111111111111111111111111111111111111111),
+                externalAccount: address(
+                    0x2222222222222222222222222222222222222222
+                ),
+                trader: address(0x3333333333333333333333333333333333333333),
+                effectiveTrader: address(
+                    0x4444444444444444444444444444444444444444
+                ),
+                baseToken: address(0x5555555555555555555555555555555555555555),
+                quoteToken: address(0x6666666666666666666666666666666666666666),
+                effectiveBaseTokenAmount: 0,
+                baseTokenAmount: 7777,
+                quoteTokenAmount: 8888,
+                quoteExpiry: 9999,
+                nonce: 101010,
+                txid: bytes32(uint256(0xabcdef)),
+                signature: hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"
+            });
         bytes memory encodedQuote = encodeRfqtQuoteWithDefaults(expected_quote);
         (IHashflowRouter.RFQTQuote memory quote) =
             executor.decodeData(encodedQuote);
@@ -104,9 +127,10 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
     }
 
     function testDecodeParamsInvalidDataLength() public {
-        bytes memory invalidData = new bytes(10);
+        // The previous layout, without effectiveTrader, must not decode
+        bytes memory oldFormatData = new bytes(325);
         vm.expectRevert(HashflowExecutor__InvalidDataLength.selector);
-        executor.decodeData(invalidData);
+        executor.decodeData(oldFormatData);
     }
 
     function testGetTransferData() public {

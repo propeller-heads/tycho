@@ -374,8 +374,11 @@ impl RFQClient for HashflowClient {
                 quote_token: params.token_out.to_string(),
                 base_token_amount: Some(params.amount_in.to_string()),
                 quote_token_amount: None,
+                // The receiver (the router) executes the trade on-chain, so it is Hashflow's
+                // trader; the sender becomes the effectiveTrader, the address Hashflow scopes
+                // its strictly increasing quote nonces to.
                 trader: params.receiver.to_string(),
-                effective_trader: None,
+                effective_trader: Some(params.sender.to_string()),
             }],
             calldata: false,
         };
@@ -524,7 +527,13 @@ impl RFQClient for HashflowClient {
                                 })?,
                             );
                         }
+                        let effective_trader = quote
+                            .quote_data
+                            .effective_trader
+                            .clone()
+                            .unwrap_or_else(|| quote.quote_data.trader.clone());
                         quote_attributes.insert("trader".to_string(), quote.quote_data.trader);
+                        quote_attributes.insert("effective_trader".to_string(), effective_trader);
                         quote_attributes
                             .insert("base_token".to_string(), quote.quote_data.base_token);
                         quote_attributes
@@ -847,11 +856,12 @@ mod tests {
         // // Assuming the BTC - WETH price doesn't change too much at the time of running this
         assert!(quote.amount_out > BigUint::from(3000000u64));
 
-        assert_eq!(quote.quote_attributes.len(), 11);
+        assert_eq!(quote.quote_attributes.len(), 12);
         let expected_attributes = [
             "pool",
             "external_account",
             "trader",
+            "effective_trader",
             "base_token",
             "quote_token",
             "base_token_amount",
@@ -878,16 +888,21 @@ mod tests {
         );
     }
 
-    /// Helper function to create a mock server that responds after a delay
-    async fn create_delayed_response_server(delay_ms: u64) -> std::net::SocketAddr {
+    const QUOTE_RESPONSE: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
+
+    const QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
+
+    /// Helper function to create a mock server that responds with `json_response` after a delay
+    async fn create_delayed_response_server(
+        delay_ms: u64,
+        json_response: &'static str,
+    ) -> std::net::SocketAddr {
         use tokio::{io::AsyncWriteExt, net::TcpListener};
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
-
-        let json_response = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
 
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
@@ -950,8 +965,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_binding_quote_without_effective_trader() {
+        let addr = create_delayed_response_server(0, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
+        let client = create_test_hashflow_client(
+            format!("http://127.0.0.1:{}/rfq", addr.port()),
+            Duration::from_secs(1),
+        );
+        let params = create_test_quote_params();
+
+        let quote = client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+
+        let trader = quote
+            .quote_attributes
+            .get("trader")
+            .unwrap();
+        assert_eq!(
+            quote
+                .quote_attributes
+                .get("effective_trader")
+                .unwrap(),
+            trader,
+            "a response without effectiveTrader falls back to the trader"
+        );
+    }
+
+    #[tokio::test]
     async fn test_hashflow_quote_timeout() {
-        let addr = create_delayed_response_server(500).await;
+        let addr = create_delayed_response_server(500, QUOTE_RESPONSE).await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
         let client_short_timeout = create_test_hashflow_client(

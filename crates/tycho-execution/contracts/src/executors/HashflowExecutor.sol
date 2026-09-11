@@ -84,25 +84,24 @@ contract HashflowExecutor is IExecutor {
         pure
         returns (IHashflowRouter.RFQTQuote memory quote)
     {
-        if (data.length != 325) {
+        if (data.length != 345) {
             revert HashflowExecutor__InvalidDataLength();
         }
 
         quote.pool = address(bytes20(data[0:20]));
         quote.externalAccount = address(bytes20(data[20:40]));
         quote.trader = address(bytes20(data[40:60]));
-        // Assumes we never set the effectiveTrader when requesting a quote.
-        quote.effectiveTrader = quote.trader;
-        quote.baseToken = address(bytes20(data[60:80]));
-        quote.quoteToken = address(bytes20(data[80:100]));
+        quote.effectiveTrader = address(bytes20(data[60:80]));
+        quote.baseToken = address(bytes20(data[80:100]));
+        quote.quoteToken = address(bytes20(data[100:120]));
         // Not included in the calldata. Will be set in the swap function.
         quote.effectiveBaseTokenAmount = 0;
-        quote.baseTokenAmount = uint256(bytes32(data[100:132]));
-        quote.quoteTokenAmount = uint256(bytes32(data[132:164]));
-        quote.quoteExpiry = uint256(bytes32(data[164:196]));
-        quote.nonce = uint256(bytes32(data[196:228]));
-        quote.txid = bytes32(data[228:260]);
-        quote.signature = data[260:325];
+        quote.baseTokenAmount = uint256(bytes32(data[120:152]));
+        quote.quoteTokenAmount = uint256(bytes32(data[152:184]));
+        quote.quoteExpiry = uint256(bytes32(data[184:216]));
+        quote.nonce = uint256(bytes32(data[216:248]));
+        quote.txid = bytes32(data[248:280]);
+        quote.signature = data[280:345];
     }
 
     function getTransferData(bytes calldata data)
@@ -116,13 +115,13 @@ contract HashflowExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        if (data.length != 325) {
+        if (data.length != 345) {
             revert HashflowExecutor__InvalidDataLength();
         }
 
         transferType = TransferManager.TransferType.ProtocolWillDebit;
-        tokenIn = address(bytes20(data[60:80]));
-        tokenOut = address(bytes20(data[80:100]));
+        tokenIn = address(bytes20(data[80:100]));
+        tokenOut = address(bytes20(data[100:120]));
         receiver = hashflowRouter;
         outputToRouter = true;
     }

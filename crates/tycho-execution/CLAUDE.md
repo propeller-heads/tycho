@@ -243,7 +243,11 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 **Parallel encoding**: `encode_swap_groups` (`strategy_encoders.rs`) and `TychoRouterEncoder::encode_solutions`
 spawn threads via `map_on_threads` (`evm/utils.rs`) **only when an encoder in the batch blocks on a quote** —
 `SwapEncoder::blocks_on_quote()` defaults to `false` and is `true` only for the RFQ encoders (Bebop, Hashflow,
-Liquorice, Metric). Otherwise encoding runs serially on the calling thread. Input order is preserved either way.
+Liquorice, Metric). Otherwise encoding runs serially on the calling thread. Input order is preserved
+either way. Hashflow quotes stay independent under this parallelism because the encoder sends a fresh random
+effectiveTrader with every quote request: Hashflow scopes its strictly increasing quote nonces per effective
+trader, so quotes with unique addresses never invalidate each other. The cost is a cold nonce storage slot on
+Hashflow's router (~15k extra gas per swap).
 
 **Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol
 (`GROUPABLE_PROTOCOLS` in `evm/constants.rs`: `uniswap_v4`, `uniswap_v4_hooks`, `vm:balancer_v3`,
