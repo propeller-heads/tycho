@@ -7,6 +7,10 @@
       "eeth_address": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
       "weeth_address": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
     },
+    "lido_v3": {
+      "steth_address": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+      "wsteth_address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+    },
     "rfq:liquorice": {
       "balance_manager_address": "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
     },

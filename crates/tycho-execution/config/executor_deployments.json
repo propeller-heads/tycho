@@ -92,6 +92,13 @@
         "0xA188EEC8F81263234dA3622A406892F3D630f98c",
         "0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A"
       ]
+    },
+    "lido_v3": {
+      "contract": "LidoV3Executor",
+      "args": [
+        "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+        "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+      ]
     }
   },
   "base": {

@@ -21,6 +21,7 @@ members = [
     "ethereum-ekubo-v3",
     "ethereum-maverick-v2",
     "ethereum-lido",
+    "ethereum-lido-v3",
     "ethereum-balancer-v3",
     "ethereum-fluid",
     "base-aerodrome-v1",

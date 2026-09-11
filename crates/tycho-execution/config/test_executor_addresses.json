@@ -26,7 +26,8 @@
     "pricelevelstream": "0x92a6649Fdcc044DA968d94202465578a9371C7b1",
     "propammfallback": "0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d",
     "sky": "0x886D6d1eB8D415b00052828CD6d5B321f072073d",
-    "rfq:native": "0x3C4293F66941ECa00f4950C10d4255d5c271bAeF"
+    "rfq:native": "0x3C4293F66941ECa00f4950C10d4255d5c271bAeF",
+    "lido_v3": "0x89CA9F4f77B267778EB2eA0Ba1bEAdEe8523af36"
   },
   "base": {
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",

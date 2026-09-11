@@ -1,0 +1,65 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_lido_v3"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_lido_v3.wasm
+
+network: mainnet
+
+params:
+  # Recompute these raw slot values with:
+  #   RPC_URL=<your-archive-rpc> ./scripts/compute_initial_state.sh <block_number>
+  store_balance_slots: &initial_state |
+    {
+      "start_block": 24083113,
+      "total_and_external_shares": "0x00000000000000000000000000000000000000000005f18d02edc955cbcfc9b0",
+      "buffered_ether_and_deposited_validators": "0x00000000000000000000000000065004000000000000002303b296dd9f3631db",
+      "cl_balance_and_cl_validators": "0x00000000000000000000000000064d490000000000073f77f7680e9a096c4600",
+      "staking_state": "0x00001fc3842bd1f071c000000000190000001fc37ee5c9f3db1a0000016f7a9f",
+      "wsteth_shares": "0x00000000000000000000000000000000000000000002a0ab5c33b9a953fed49e"
+    }
+  map_protocol_components: *initial_state
+  map_protocol_changes: *initial_state
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: &start_block 24083113
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_balance_slots
+    kind: store
+    updatePolicy: set
+    valueType: bigint
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_balance_slots
+        mode: deltas
+      - store: store_balance_slots
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

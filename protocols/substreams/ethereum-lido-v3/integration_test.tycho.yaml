@@ -1,0 +1,35 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "lido_v3"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "lido_v3_pool"
+# The stETH component reports getTotalPooledEther() as its ETH balance, which is protocol
+# accounting rather than the stETH contract's own ETH balance (that only holds buffered ether).
+skip_balance_check: true
+
+tests:
+  - name: test_lido_v3_component_creation
+    start_block: 24083113
+    stop_block: 24083220
+    expected_components:
+      - id: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+        tokens:
+          - "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+          - "0x0000000000000000000000000000000000000000"
+        static_attributes:
+          token_to_track_total_pooled_eth: "0x0000000000000000000000000000000000000000"
+        creation_tx: "0xd377156654a0d6f646c9eea54e893352f98c26e8ff14911c4df8127578ff3b97"
+        # Staking is one-directional: ETH -> stETH is a mint, and unstaking goes through the
+        # asynchronous withdrawal queue, so stETH -> ETH reports a zero limit and the harness
+        # skips that direction.
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+        tokens:
+          - "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+          - "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+        static_attributes:
+          token_to_track_total_pooled_eth: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+        creation_tx: "0xd377156654a0d6f646c9eea54e893352f98c26e8ff14911c4df8127578ff3b97"
+        skip_simulation: false
+        skip_execution: false

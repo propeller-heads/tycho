@@ -1099,6 +1099,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-lido-v3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "itertools 0.10.5",
+ "serde",
+ "serde_json",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-liquidityparty"
 version = "0.1.2"
 dependencies = [

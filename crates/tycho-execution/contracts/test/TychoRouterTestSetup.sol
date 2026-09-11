@@ -30,6 +30,7 @@ import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
 import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
 import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
+import {LidoV3Executor} from "../src/executors/LidoV3Executor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
@@ -126,6 +127,7 @@ contract TychoRouterTestSetup is
     RocketpoolExecutor public rocketpoolExecutor;
     ERC4626Executor public erc4626Executor;
     NativeWrapExecutor public nativeWrapExecutor;
+    LidoV3Executor public lidoV3Executor;
     EkuboV3Executor public ekuboV3Executor;
     EtherfiExecutor public etherfiExecutor;
     LiquidityPartyExecutor public liquidityPartyExecutor;
@@ -286,8 +288,13 @@ contract TychoRouterTestSetup is
             nativeExecutor = new NativeExecutor(nativeRouterV6);
         }
 
+        // Deployed after the conditional executors so that adding it does not
+        // shift their deterministic addresses. Lido V3 is only configured on
+        // mainnet, where both Sky and Native always deploy.
+        lidoV3Executor = new LidoV3Executor(STETH_ADDR, WSTETH_ADDR);
+
         address[] memory executors = new address[](
-            27 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            28 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -316,7 +323,8 @@ contract TychoRouterTestSetup is
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
         executors[26] = address(propAMMFallbackExecutor);
-        uint256 nextExecutorIndex = 27;
+        executors[27] = address(lidoV3Executor);
+        uint256 nextExecutorIndex = 28;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;
@@ -324,6 +332,7 @@ contract TychoRouterTestSetup is
         if (supportsNative) {
             executors[nextExecutorIndex] = address(nativeExecutor);
         }
+
         return executors;
     }
 

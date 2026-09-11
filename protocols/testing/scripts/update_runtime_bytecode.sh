@@ -95,6 +95,7 @@ EXECUTOR_FIXTURES=(
     "LunarBase|base|lunarbase"
     "RingSwapV2|ethereum|ring_swap_v2"
     "Sky|ethereum|sky"
+    "LidoV3|ethereum|lido_v3"
 )
 
 if [[ -z "${RPC_URL:-}" ]]; then
