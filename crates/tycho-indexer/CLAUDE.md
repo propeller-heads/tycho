@@ -104,8 +104,10 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    purges from that height inclusive (stale copy). A hash miss is fatal when the
    target is below the buffer, at the buffer's oldest block (no predecessor left to
    anchor the revert), or above the buffer without a pending partial at exactly that height
-   (the flashblocks case — the only legitimate target-ahead shape). Nonfatal hash-miss
-   fallbacks log a warning and increment `extractor_revert_hash_miss`.
+   (the flashblocks case — the only legitimate target-ahead shape). The one unanchorable
+   target that is not fatal is the buffer's own last applied revert target, replayed by an
+   endpoint that resumed from a pre-reorg cursor: that purge already happened. Nonfatal
+   hash-miss fallbacks log a warning and increment `extractor_revert_hash_miss`.
 2. Pending partials are dropped only when above the target height; partials at the target
    height are the still-valid prefix of the last valid block and are kept.
 3. Previous attribute values are restored from the buffer, then the DB. The buffer keeps

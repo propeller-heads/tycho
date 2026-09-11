@@ -70,6 +70,9 @@ where
     block_messages: VecDeque<B>,
     committing_blocks: VecDeque<Arc<B>>,
     strict: bool,
+    /// Target of the last revert this buffer applied, kept after the target itself has been
+    /// drained so a replay of that same revert can be told apart from a reorg past finality.
+    last_revert_target: Option<Bytes>,
 }
 
 /// Result of a height-aware purge. Hash match is authoritative; height is a fallback.
@@ -83,6 +86,9 @@ pub(crate) enum PurgeOutcome<B> {
     /// Hash not found and the target height is above the newest buffered block (or the
     /// buffer is empty). Nothing sealed is invalid; nothing purged.
     TargetAhead,
+    /// Hash not found because this buffer already purged to that target and has since moved
+    /// past it. The invalidated blocks are long gone; nothing purged.
+    AlreadyApplied,
 }
 
 /// The commitment status of a block or block-scoped data with the DB.
@@ -101,7 +107,12 @@ where
     B: BlockScoped + std::fmt::Debug + DeepSizeOf,
 {
     pub(crate) fn new() -> Self {
-        Self { block_messages: VecDeque::new(), committing_blocks: VecDeque::new(), strict: false }
+        Self {
+            block_messages: VecDeque::new(),
+            committing_blocks: VecDeque::new(),
+            strict: false,
+            last_revert_target: None,
+        }
     }
 
     /// Inserts a new block into the buffer. Ensures the new block is the expected next block,
@@ -264,6 +275,7 @@ where
                 .split_off(idx + 1)
                 .into();
             trace!(?purged, "ReorgBuffer purged blocks");
+            self.last_revert_target = Some(target_hash.clone());
             return Ok(PurgeOutcome::HashMatch(purged));
         }
 
@@ -282,9 +294,18 @@ where
 
         // A height match needs an in-buffer predecessor (idx >= 1) to anchor the revert
         // message. Otherwise the target is at or below the oldest buffered block — a reorg
-        // past the revertable window, which is fatal.
+        // past the revertable window, which is fatal unless we already applied this very
+        // revert.
         let idx = self.find_index(|b| b.block().number == target_number);
         let Some(idx) = idx.filter(|&i| i > 0) else {
+            // An endpoint that replays history after a reconnect re-sends the undo signal it
+            // already sent, and by then the target has aged out of the buffer. The purge it
+            // asks for happened, so repeating it is a no-op rather than a data loss: the
+            // blocks that followed the target were re-delivered and re-buffered after the
+            // first purge.
+            if self.last_revert_target.as_ref() == Some(target_hash) {
+                return Ok(PurgeOutcome::AlreadyApplied);
+            }
             error!(
                 ?target_hash,
                 target_number,
@@ -298,6 +319,7 @@ where
             .split_off(idx)
             .into();
         trace!(?purged, "ReorgBuffer purged blocks from stale height");
+        self.last_revert_target = Some(target_hash.clone());
         Ok(PurgeOutcome::HeightMatch(purged))
     }
 
@@ -1256,6 +1278,53 @@ mod test {
 
         assert!(matches!(result, Err(StorageError::NotFound(_, _))));
         assert_eq!(reorg_buffer.block_messages.len(), 3, "a fatal miss must not mutate");
+    }
+
+    /// Purges to block 2, then moves the buffer past it: block 2 is the last applied revert
+    /// target and is no longer buffered.
+    fn buffer_past_applied_revert() -> (ReorgBuffer<BlockChanges>, Bytes) {
+        let mut reorg_buffer = filled_buffer();
+        let target =
+            Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+
+        reorg_buffer
+            .purge_to(&target, 2)
+            .expect("the target is buffered, so the first revert applies");
+        reorg_buffer
+            .insert_block(get_block_changes(3))
+            .unwrap();
+        reorg_buffer
+            .drain_blocks_until(3)
+            .unwrap();
+
+        (reorg_buffer, target)
+    }
+
+    #[test]
+    fn test_purge_to_replayed_target_is_already_applied() {
+        // An endpoint that replays history after a reconnect re-sends an undo signal whose
+        // target has since aged out of the buffer.
+        let (mut reorg_buffer, target) = buffer_past_applied_revert();
+
+        let outcome = reorg_buffer
+            .purge_to(&target, 2)
+            .expect("a replay of an applied revert is a no-op, not a reorg past finality");
+
+        assert!(matches!(outcome, PurgeOutcome::AlreadyApplied));
+        assert_eq!(reorg_buffer.block_messages.len(), 1, "a replayed revert must not mutate");
+    }
+
+    #[test]
+    fn test_purge_to_stale_target_other_than_the_last_revert_errors() {
+        // Only the target we purged to is safe to skip; any other unanchorable target is
+        // still a reorg past the revertable window.
+        let (mut reorg_buffer, _) = buffer_past_applied_revert();
+
+        let result = reorg_buffer.purge_to(&unknown_hash(), 2);
+
+        assert!(matches!(result, Err(StorageError::NotFound(_, _))));
+        assert_eq!(reorg_buffer.block_messages.len(), 1, "a fatal miss must not mutate");
     }
 
     #[test]

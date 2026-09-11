@@ -1210,6 +1210,20 @@ where
                 .increment(1);
                 purged
             }
+            PurgeOutcome::AlreadyApplied => {
+                warn!(
+                    target_number = block_ref.number,
+                    "Revert target already purged by an earlier revert; nothing left to purge"
+                );
+                counter!(
+                    "extractor_revert_hash_miss",
+                    "extractor" => self.name.clone(),
+                    "chain" => self.chain.to_string(),
+                    "resolution" => "already_applied",
+                )
+                .increment(1);
+                Vec::new()
+            }
             PurgeOutcome::TargetAhead => {
                 // A target above the sealed buffer is only legitimate when it names the
                 // block currently streaming as partials (flashblocks). Anything else
