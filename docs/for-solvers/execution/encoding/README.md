@@ -28,7 +28,6 @@ The `Solution` struct defines your order and how it should be filled. This is th
 <tr><td align="center"><strong>min_amount_out</strong></td><td align="center"><code>BigUint</code></td><td>The smallest output you accept. The router receives it as <code>minAmountOut</code> and reverts below it. Compute it off-chain from your slippage tolerance, e.g. <code>expected_amount_out * 0.9975</code> for 0.25%</td></tr>
 <tr><td align="center"><strong>swaps</strong></td><td align="center"><code>Vec&#x3C;Swap></code></td><td>List of swaps to fulfil the solution</td></tr>
 <tr><td align="center"><strong>user_transfer_type</strong></td><td align="center"><code>UserTransferType</code></td><td>How the input token enters the router — see the <strong>UserTransferType</strong> tab</td></tr>
-<tr><td align="center"><strong>quote_request_id</strong></td><td align="center"><code>Option&#x3C;String></code></td><td>Identifier of the quote request the solution answers. The encoder attributes RFQ quotes (e.g. Hashflow) to an address derived from the sender and this id, so concurrent quote requests get independent nonce sequences. When unset, the encoder attributes quotes to the sender</td></tr>
 </tbody>
 </table>
 

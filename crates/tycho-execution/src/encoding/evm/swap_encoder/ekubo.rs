@@ -109,7 +109,6 @@ mod tests {
         );
 
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
             router_address: Some(Bytes::default()),
@@ -145,7 +144,6 @@ mod tests {
         let encoder = EkuboSwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
 
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             group_token_in: group_token_in.clone(),
             group_token_out: group_token_out.clone(),
             router_address: Some(Bytes::default()),

@@ -16,7 +16,6 @@ use crate::encoding::{
         utils::{get_token_position, map_on_threads, percentage_to_uint24, ple_encode},
     },
     models::{EncodedSolution, EncodingContext, Solution, Strategy, UserTransferType},
-    swap_encoder::QuoteBehavior,
 };
 
 /// The protocol data of one swap group and the executor that runs it.
@@ -30,7 +29,6 @@ fn encode_swap_group(
     swap_encoder_registry: &SwapEncoderRegistry,
     grouped_swap: &SwapGroup,
     router_address: &Bytes,
-    quote_attribution: &Bytes,
 ) -> Result<EncodedSwapGroup, EncodingError> {
     let protocol = &grouped_swap.protocol_system;
     let swap_encoder = swap_encoder_registry
@@ -41,7 +39,6 @@ fn encode_swap_group(
 
     let encoding_context = EncodingContext {
         router_address: Some(router_address.clone()),
-        quote_attribution: Some(quote_attribution.clone()),
         group_token_in: grouped_swap.token_in.clone(),
         group_token_out: grouped_swap.token_out.clone(),
     };
@@ -76,24 +73,16 @@ fn encode_swap_group(
 /// Encodes every swap group and keeps the input order.
 ///
 /// Groups run through [`map_on_threads`] only when one of their encoders blocks on a quote
-/// request; a route of pure on-chain protocols encodes on the calling thread. Groups whose
-/// encoder requires ordered quotes share one thread and encode in route order, so their
-/// quotes arrive with increasing nonces; the remaining groups encode in parallel alongside
-/// them.
+/// request; a route of pure on-chain protocols encodes on the calling thread.
 fn encode_swap_groups(
     swap_encoder_registry: &SwapEncoderRegistry,
     grouped_swaps: &[SwapGroup],
     router_address: &Bytes,
-    quote_attribution: &Bytes,
 ) -> Result<Vec<EncodedSwapGroup>, EncodingError> {
     let any_group_blocks = grouped_swaps.iter().any(|group| {
         swap_encoder_registry
             .get_encoder(&group.protocol_system)
-            .is_some_and(|encoder| {
-                encoder
-                    .quote_behavior()
-                    .blocks_on_quote()
-            })
+            .is_some_and(|encoder| encoder.blocks_on_quote())
     });
     if !any_group_blocks {
         let mut encoded_groups = Vec::with_capacity(grouped_swaps.len());
@@ -102,55 +91,13 @@ fn encode_swap_groups(
                 swap_encoder_registry,
                 grouped_swap,
                 router_address,
-                quote_attribution,
             )?);
         }
         return Ok(encoded_groups);
     }
-
-    // One task per group, except ordered-quote groups, which form a single task encoding
-    // them in route order.
-    let mut tasks: Vec<Vec<usize>> = Vec::new();
-    let mut ordered_task: Vec<usize> = Vec::new();
-    for (index, group) in grouped_swaps.iter().enumerate() {
-        let requires_ordered_quotes = swap_encoder_registry
-            .get_encoder(&group.protocol_system)
-            .is_some_and(|encoder| encoder.quote_behavior() == QuoteBehavior::BlockingOrdered);
-        if requires_ordered_quotes {
-            ordered_task.push(index);
-        } else {
-            tasks.push(vec![index]);
-        }
-    }
-    if !ordered_task.is_empty() {
-        tasks.push(ordered_task);
-    }
-
-    let encoded_tasks = map_on_threads(&tasks, |task| {
-        let mut encoded = Vec::with_capacity(task.len());
-        for &index in task {
-            encoded.push((
-                index,
-                encode_swap_group(
-                    swap_encoder_registry,
-                    &grouped_swaps[index],
-                    router_address,
-                    quote_attribution,
-                )?,
-            ));
-        }
-        Ok(encoded)
-    })?;
-
-    let mut encoded_groups: Vec<(usize, EncodedSwapGroup)> = encoded_tasks
-        .into_iter()
-        .flatten()
-        .collect();
-    encoded_groups.sort_by_key(|(index, _)| *index);
-    Ok(encoded_groups
-        .into_iter()
-        .map(|(_, encoded)| encoded)
-        .collect())
+    map_on_threads(grouped_swaps, |grouped_swap| {
+        encode_swap_group(swap_encoder_registry, grouped_swap, router_address)
+    })
 }
 
 /// Represents the encoder for a swap strategy which supports single swaps.
@@ -231,12 +178,8 @@ impl SingleSwapStrategyEncoder {
             ));
         }
 
-        let encoded_group = encode_swap_group(
-            &self.swap_encoder_registry,
-            grouped_swap,
-            &self.router_address,
-            &solution.quote_attribution(),
-        )?;
+        let encoded_group =
+            encode_swap_group(&self.swap_encoder_registry, grouped_swap, &self.router_address)?;
         let swap_data =
             self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
@@ -314,12 +257,8 @@ impl SequentialSwapStrategyEncoder {
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
-        let encoded_groups = encode_swap_groups(
-            &self.swap_encoder_registry,
-            &grouped_swaps,
-            &self.router_address,
-            &solution.quote_attribution(),
-        )?;
+        let encoded_groups =
+            encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
@@ -449,12 +388,8 @@ impl SplitSwapStrategyEncoder {
             ));
         }
 
-        let encoded_groups = encode_swap_groups(
-            &self.swap_encoder_registry,
-            &grouped_swaps,
-            &self.router_address,
-            &solution.quote_attribution(),
-        )?;
+        let encoded_groups =
+            encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
 
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {
@@ -492,7 +427,6 @@ mod tests {
         collections::HashMap,
         fs,
         str::FromStr,
-        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -529,47 +463,7 @@ mod tests {
 
     mod single {
         use super::*;
-        use crate::encoding::{
-            evm::testing_utils::delayed_hashflow_swap,
-            models::{default_token, Swap},
-        };
-
-        /// The single-swap strategy passes the solution's quote attribution to the quote
-        /// request, like the sequential and split strategies.
-        #[test]
-        fn test_single_swap_attributes_quotes() {
-            let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-            let weth = weth();
-            let sender = Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap();
-            let request_log: Arc<Mutex<Vec<(Bytes, Bytes)>>> = Arc::default();
-            let solution = Solution::new(
-                sender.clone(),
-                Bytes::default(),
-                usdc.clone(),
-                weth.clone(),
-                BigUint::from(1_000u64),
-                BigUint::from(1_000u64),
-                BigUint::from(900u64),
-                vec![delayed_hashflow_swap(usdc, weth, Duration::ZERO, request_log.clone())],
-            )
-            .with_quote_request_id("quote-1".to_string());
-            let encoder =
-                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
-
-            encoder
-                .encode_strategy(&solution)
-                .unwrap();
-
-            let requests = request_log.lock().unwrap();
-            assert_eq!(requests.len(), 1);
-            assert_eq!(
-                requests[0].1,
-                solution.quote_attribution(),
-                "single strategy passes the quote attribution"
-            );
-            assert_ne!(requests[0].1, sender, "attribution is derived, not the plain sender");
-        }
+        use crate::encoding::models::{default_token, Swap};
 
         #[test]
         fn test_single_swap_strategy_encoder() {
@@ -631,7 +525,7 @@ mod tests {
     mod sequential {
         use super::*;
         use crate::encoding::{
-            evm::testing_utils::{delayed_bebop_swap, delayed_hashflow_swap},
+            evm::testing_utils::delayed_bebop_swap,
             models::{default_token, Swap},
         };
 
@@ -750,147 +644,6 @@ mod tests {
                 .find(&encode(&dai)[..])
                 .unwrap();
             assert!(first_hop < second_hop, "hops are out of route order");
-        }
-
-        /// Hashflow quote nonces must increase in route order, so its two hops (300ms each)
-        /// encode one after the other (>= 600ms total) while the bebop hop (300ms) still
-        /// overlaps with them (< 900ms total).
-        #[test]
-        fn test_sequential_swap_serializes_hashflow_hops() {
-            let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-            let weth = weth();
-            let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
-            let wbtc = Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap();
-            let delay = Duration::from_millis(300);
-            let request_log: Arc<Mutex<Vec<(Bytes, Bytes)>>> = Arc::default();
-            let solution = Solution::new(
-                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-                Bytes::default(),
-                usdc.clone(),
-                wbtc.clone(),
-                BigUint::from(1_000u64),
-                BigUint::from(1_000u64),
-                BigUint::from(900u64),
-                vec![
-                    delayed_hashflow_swap(usdc.clone(), weth.clone(), delay, request_log.clone()),
-                    delayed_hashflow_swap(weth.clone(), dai.clone(), delay, request_log.clone()),
-                    delayed_bebop_swap(dai.clone(), wbtc.clone(), delay),
-                ],
-            );
-            let encoder =
-                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
-
-            let start = Instant::now();
-            let encoded_solution = encoder
-                .encode_strategy(&solution)
-                .unwrap();
-            let elapsed = start.elapsed();
-
-            assert!(elapsed >= Duration::from_millis(600), "hashflow hops overlapped: {elapsed:?}");
-            assert!(elapsed < Duration::from_millis(900), "bebop hop did not overlap: {elapsed:?}");
-            let requests = request_log.lock().unwrap();
-            let requested_tokens: Vec<Bytes> = requests
-                .iter()
-                .map(|(token_in, _)| token_in.clone())
-                .collect();
-            assert_eq!(requested_tokens, vec![usdc.clone(), weth], "quotes out of route order");
-            let hex_calldata = encode(encoded_solution.swaps());
-            let first_hop = hex_calldata
-                .find(&encode(&usdc)[..])
-                .unwrap();
-            let second_hop = hex_calldata
-                .find(&encode(&dai)[..])
-                .unwrap();
-            assert!(first_hop < second_hop, "hashflow hops are out of route order");
-        }
-
-        /// A route of only hashflow hops collapses to a single ordered task, which runs on the
-        /// calling thread; the hops still encode one after the other in route order.
-        #[test]
-        fn test_sequential_swap_serializes_hashflow_only_route() {
-            let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-            let weth = weth();
-            let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
-            let delay = Duration::from_millis(300);
-            let request_log: Arc<Mutex<Vec<(Bytes, Bytes)>>> = Arc::default();
-            let solution = Solution::new(
-                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-                Bytes::default(),
-                usdc.clone(),
-                dai.clone(),
-                BigUint::from(1_000u64),
-                BigUint::from(1_000u64),
-                BigUint::from(900u64),
-                vec![
-                    delayed_hashflow_swap(usdc.clone(), weth.clone(), delay, request_log.clone()),
-                    delayed_hashflow_swap(weth.clone(), dai.clone(), delay, request_log.clone()),
-                ],
-            );
-            let encoder =
-                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
-
-            let start = Instant::now();
-            encoder
-                .encode_strategy(&solution)
-                .unwrap();
-            let elapsed = start.elapsed();
-
-            assert!(elapsed >= Duration::from_millis(600), "hashflow hops overlapped: {elapsed:?}");
-            let requests = request_log.lock().unwrap();
-            let requested_tokens: Vec<Bytes> = requests
-                .iter()
-                .map(|(token_in, _)| token_in.clone())
-                .collect();
-            assert_eq!(requested_tokens, vec![usdc, weth], "quotes out of route order");
-        }
-
-        /// The sequential strategy passes the solution's quote attribution to every hop's
-        /// quote request. The derivation itself is covered by `models::tests`.
-        #[test]
-        fn test_sequential_swap_attributes_quotes() {
-            let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
-            let weth = weth();
-            let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
-            let request_log: Arc<Mutex<Vec<(Bytes, Bytes)>>> = Arc::default();
-            let solution = Solution::new(
-                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-                Bytes::default(),
-                usdc.clone(),
-                dai.clone(),
-                BigUint::from(1_000u64),
-                BigUint::from(1_000u64),
-                BigUint::from(900u64),
-                vec![
-                    delayed_hashflow_swap(
-                        usdc.clone(),
-                        weth.clone(),
-                        Duration::ZERO,
-                        request_log.clone(),
-                    ),
-                    delayed_hashflow_swap(weth, dai, Duration::ZERO, request_log.clone()),
-                ],
-            )
-            .with_quote_request_id("quote-1".to_string());
-            let encoder =
-                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
-
-            encoder
-                .encode_strategy(&solution)
-                .unwrap();
-
-            let requests = request_log.lock().unwrap();
-            let attributions: Vec<Bytes> = requests
-                .iter()
-                .map(|(_, attribution)| attribution.clone())
-                .collect();
-            assert_eq!(
-                attributions,
-                vec![solution.quote_attribution(), solution.quote_attribution()],
-                "every hop carries the solution's quote attribution"
-            );
         }
     }
 

@@ -134,7 +134,6 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: dai,
             group_token_out: weth,
@@ -170,7 +169,6 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: weth,
             group_token_out: dai,
@@ -206,7 +204,6 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: fw_dai,
             group_token_out: fw_weth,

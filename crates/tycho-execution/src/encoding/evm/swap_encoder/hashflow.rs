@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use alloy::sol_types::SolValue;
+use alloy::{primitives::Address, sol_types::SolValue};
 use tokio::runtime::Handle;
 use tycho_common::{
     models::{protocol::GetAmountOutParams, Chain},
@@ -11,7 +11,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::utils::{create_encoding_runtime, on_blocking_thread, SafeRuntime},
     models::{EncodingContext, Swap},
-    swap_encoder::{QuoteBehavior, SwapEncoder},
+    swap_encoder::SwapEncoder,
 };
 
 #[derive(Clone)]
@@ -57,14 +57,10 @@ impl SwapEncoder for HashflowSwapEncoder {
             .ok_or(EncodingError::FatalError(
                 "The router address is needed to perform a Hashflow swap".to_string(),
             ))?;
-        // The quote attribution becomes the quote's effective trader, giving each quote
-        // request an independent nonce sequence.
-        let quote_attribution = encoding_context
-            .quote_attribution
-            .clone()
-            .ok_or(EncodingError::FatalError(
-                "The quote attribution is needed to perform a Hashflow swap".to_string(),
-            ))?;
+        // A fresh random address becomes the quote's effective trader, so every quote has its
+        // own nonce sequence: quotes never invalidate each other and encode in any order. The
+        // cost is a cold nonce storage slot on Hashflow's router (~15k extra gas per swap).
+        let effective_trader = Bytes::from(Address::random().to_vec());
         let signed_quote = on_blocking_thread(|| {
             self.runtime_handle.block_on(async {
                 protocol_state
@@ -73,7 +69,7 @@ impl SwapEncoder for HashflowSwapEncoder {
                         amount_in,
                         token_in: swap.token_in().address.clone(),
                         token_out: swap.token_out().address.clone(),
-                        sender: quote_attribution,
+                        sender: effective_trader,
                         receiver: router_address,
                     })
                     .await
@@ -114,12 +110,8 @@ impl SwapEncoder for HashflowSwapEncoder {
         &self.executor_address
     }
 
-    /// Hashflow pools require each quote's nonce — a timestamp the market maker assigns when
-    /// answering — to be strictly increasing per effective trader. All quotes of a solution
-    /// share one effective trader (its quote attribution), so a quote fetched out of route
-    /// order carries a nonce that reverts the swap executed after it.
-    fn quote_behavior(&self) -> QuoteBehavior {
-        QuoteBehavior::BlockingOrdered
+    fn blocks_on_quote(&self) -> bool {
+        true
     }
 
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
@@ -129,7 +121,10 @@ impl SwapEncoder for HashflowSwapEncoder {
 
 #[cfg(test)]
 mod test {
-    use std::{str::FromStr, sync::Arc};
+    use std::{
+        str::FromStr,
+        sync::{Arc, Mutex},
+    };
 
     use alloy::hex::encode;
     use num_bigint::BigUint;
@@ -172,7 +167,6 @@ mod test {
         .with_estimated_amount_in(BigUint::from_str("3000000000").unwrap());
 
         let encoding_context = EncodingContext {
-            quote_attribution: Some(Bytes::zero(20)),
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
@@ -273,7 +267,6 @@ mod test {
         .with_protocol_state(Arc::new(hashflow_state));
 
         let encoding_context = EncodingContext {
-            quote_attribution: Some(Bytes::zero(20)),
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
@@ -293,5 +286,67 @@ mod test {
 
         let expected_swap = hashflow_calldata.to_string()[2..].to_string();
         assert_eq!(hex_swap, expected_swap);
+    }
+
+    /// Every quote request carries a fresh random effective trader, so quotes never share a
+    /// nonce sequence.
+    #[test]
+    fn test_encode_hashflow_randomizes_effective_trader() {
+        let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
+        let token_out = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"); // WETH
+        let request_log: Arc<Mutex<Vec<(Bytes, Bytes)>>> = Arc::default();
+        let quote_data = HashMap::from([
+            ("pool".to_string(), Bytes::zero(20)),
+            ("external_account".to_string(), Bytes::zero(20)),
+            ("trader".to_string(), Bytes::zero(20)),
+            ("effective_trader".to_string(), Bytes::zero(20)),
+            ("base_token".to_string(), token_in.clone()),
+            ("quote_token".to_string(), token_out.clone()),
+            ("base_token_amount".to_string(), Bytes::from(vec![0u8; 32])),
+            ("quote_token_amount".to_string(), Bytes::from(vec![0u8; 32])),
+            ("quote_expiry".to_string(), Bytes::from(vec![0u8; 32])),
+            ("nonce".to_string(), Bytes::from(vec![0u8; 32])),
+            ("tx_id".to_string(), Bytes::from(vec![0u8; 32])),
+            ("signature".to_string(), Bytes::from(vec![0u8; 65])),
+        ]);
+        let state =
+            MockRFQState { quote_data, request_log: request_log.clone(), ..Default::default() };
+        let swap = Swap::new(
+            ProtocolComponent {
+                id: String::from("hashflow-rfq"),
+                protocol_system: String::from("rfq:hashflow"),
+                ..Default::default()
+            },
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(BigUint::from(1_000u64))
+        .with_protocol_state(Arc::new(state));
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in,
+            group_token_out: token_out,
+        };
+        let encoder = HashflowSwapEncoder::new(
+            Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
+            Chain::Ethereum,
+            hashflow_config(),
+        )
+        .unwrap();
+
+        encoder
+            .encode_swap(&swap, &encoding_context)
+            .unwrap();
+        encoder
+            .encode_swap(&swap, &encoding_context)
+            .unwrap();
+
+        let requests = request_log.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let (_, first) = &requests[0];
+        let (_, second) = &requests[1];
+        assert_eq!(first.len(), 20, "effective trader is not an address");
+        assert_ne!(first, second, "effective traders are not unique per quote");
     }
 }

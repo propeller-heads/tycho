@@ -6,7 +6,6 @@ use clap::ValueEnum;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
-    keccak256,
     models::{protocol::ProtocolComponent, token::Token},
     simulation::protocol_sim::ProtocolSim,
     Bytes,
@@ -146,10 +145,6 @@ pub struct Solution {
     swaps: Vec<Swap>,
     /// The transfer type to be used in this swap for user's funds (token in)
     user_transfer_type: UserTransferType,
-    /// Identifier of the quote request this solution answers. Solutions with different quote
-    /// request ids get independent RFQ nonce sequences — see [`Solution::quote_attribution`].
-    #[serde(default)]
-    quote_request_id: Option<String>,
 }
 
 impl Solution {
@@ -174,7 +169,6 @@ impl Solution {
             min_amount_out,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
-            quote_request_id: None,
         }
     }
     pub fn sender(&self) -> &Bytes {
@@ -214,29 +208,6 @@ impl Solution {
 
     pub fn with_swaps(mut self, swaps: Vec<Swap>) -> Self {
         self.swaps = swaps;
-        self
-    }
-
-    pub fn quote_request_id(&self) -> Option<&str> {
-        self.quote_request_id.as_deref()
-    }
-
-    /// Returns the address the solution's RFQ quotes are attributed to: the last 20 bytes of
-    /// `keccak256(sender || quote_request_id)` — stable for one quote request and distinct
-    /// across quote requests, so their RFQ nonce sequences are independent — or the plain
-    /// sender when the solution has no quote request id.
-    pub fn quote_attribution(&self) -> Bytes {
-        match &self.quote_request_id {
-            Some(quote_request_id) => {
-                let hash = keccak256([self.sender.as_ref(), quote_request_id.as_bytes()].concat());
-                Bytes::from(hash[12..].to_vec())
-            }
-            None => self.sender.clone(),
-        }
-    }
-
-    pub fn with_quote_request_id(mut self, quote_request_id: String) -> Self {
-        self.quote_request_id = Some(quote_request_id);
         self
     }
 
@@ -523,14 +494,11 @@ impl PartialEq for PermitDetails {
 ///   solution does not require router address.
 /// * `group_token_in`: Token to be used as the input for the group swap.
 /// * `group_token_out`: Token to be used as the output for the group swap.
-/// * `quote_attribution`: Address RFQ quotes are attributed to — see
-///   [`Solution::quote_attribution`].
 #[derive(Clone, Debug)]
 pub struct EncodingContext {
     pub router_address: Option<Bytes>,
     pub group_token_in: Bytes,
     pub group_token_out: Bytes,
-    pub quote_attribution: Option<Bytes>,
 }
 
 #[derive(PartialEq)]
@@ -595,43 +563,5 @@ mod tests {
         assert_eq!(swap.component().id, "i-am-an-id");
         assert_eq!(swap.split(), 0.5);
         assert_eq!(swap.user_data(), &Some(user_data));
-    }
-
-    #[test]
-    fn test_quote_attribution() {
-        let sender = Bytes::from("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2");
-        let solution = Solution::new(
-            sender.clone(),
-            Bytes::default(),
-            Bytes::default(),
-            Bytes::default(),
-            BigUint::ZERO,
-            BigUint::from(1u64),
-            BigUint::from(1u64),
-            vec![],
-        );
-
-        assert_eq!(
-            solution.quote_attribution(),
-            sender,
-            "no quote request id falls back to the sender"
-        );
-
-        let quote_1 = solution
-            .clone()
-            .with_quote_request_id("quote-1".to_string())
-            .quote_attribution();
-        let quote_1_again = solution
-            .clone()
-            .with_quote_request_id("quote-1".to_string())
-            .quote_attribution();
-        let quote_2 = solution
-            .clone()
-            .with_quote_request_id("quote-2".to_string())
-            .quote_attribution();
-        assert_eq!(quote_1.len(), 20, "attribution is an address");
-        assert_eq!(quote_1_again, quote_1, "same quote request id derives the same attribution");
-        assert_ne!(quote_2, quote_1, "quote request ids get distinct attributions");
-        assert_ne!(quote_1, sender, "attribution is derived, not the plain sender");
     }
 }

@@ -61,11 +61,7 @@ impl TychoRouterEncoder {
         solution.swaps().iter().any(|swap| {
             self.swap_encoder_registry
                 .get_encoder(&swap.component().protocol_system)
-                .is_some_and(|encoder| {
-                    encoder
-                        .quote_behavior()
-                        .blocks_on_quote()
-                })
+                .is_some_and(|encoder| encoder.blocks_on_quote())
         })
     }
 

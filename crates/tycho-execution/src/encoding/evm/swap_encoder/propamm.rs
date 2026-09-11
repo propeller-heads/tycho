@@ -119,7 +119,6 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
@@ -150,7 +149,6 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(format!("0x{WETH}").as_str()),
             group_token_out: Bytes::from(format!("0x{USDC}").as_str()),

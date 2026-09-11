@@ -7,29 +7,6 @@ use crate::encoding::{
     models::{EncodingContext, Swap},
 };
 
-/// How a [`SwapEncoder`] obtains the data it encodes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuoteBehavior {
-    /// No network round trip.
-    None,
-    /// Blocks on a quote request; quotes are independent of each other.
-    Blocking,
-    /// Blocks on a quote request; quotes must be requested in route order — the protocol
-    /// rejects a quote executed after a quote that was issued later (e.g. a nonce that must be
-    /// strictly increasing per trader).
-    BlockingOrdered,
-}
-
-impl QuoteBehavior {
-    /// Whether `encode_swap` blocks on a quote request.
-    pub fn blocks_on_quote(&self) -> bool {
-        match self {
-            QuoteBehavior::None => false,
-            QuoteBehavior::Blocking | QuoteBehavior::BlockingOrdered => true,
-        }
-    }
-}
-
 /// A trait for protocol-specific swap encoding, where each implementation should handle the
 /// encoding logic for swaps on a specific protocol.
 pub trait SwapEncoder: Sync + Send {
@@ -66,12 +43,11 @@ pub trait SwapEncoder: Sync + Send {
     /// Returns the address of the protocol-specific executor contract.
     fn executor_address(&self) -> &Bytes;
 
-    /// How `encode_swap` obtains its swap data.
+    /// Whether `encode_swap` blocks on a network round trip, like an RFQ signed-quote request.
     ///
-    /// The returned variant tells whether `encode_swap` blocks on a network round trip and
-    /// whether its quote requests must run in route order.
-    fn quote_behavior(&self) -> QuoteBehavior {
-        QuoteBehavior::None
+    /// Callers use this to decide whether to encode swaps on separate OS threads.
+    fn blocks_on_quote(&self) -> bool {
+        false
     }
 
     /// Creates a cloned instance of the swap encoder.

@@ -10,7 +10,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::utils::{bytes_to_address, create_encoding_runtime, on_blocking_thread, SafeRuntime},
     models::{EncodingContext, Swap},
-    swap_encoder::{QuoteBehavior, SwapEncoder},
+    swap_encoder::SwapEncoder,
 };
 
 const ORACLE_UPDATE_POLICY_ATTR: &str = "oracle_update_policy";
@@ -144,8 +144,8 @@ impl SwapEncoder for MetricSwapEncoder {
         &self.executor_address
     }
 
-    fn quote_behavior(&self) -> QuoteBehavior {
-        QuoteBehavior::Blocking
+    fn blocks_on_quote(&self) -> bool {
+        true
     }
 
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
@@ -253,7 +253,6 @@ mod tests {
 
     fn context() -> EncodingContext {
         EncodingContext {
-            quote_attribution: None,
             router_address: Some(
                 Bytes::from_str("0x4444444444444444444444444444444444444444").unwrap(),
             ),

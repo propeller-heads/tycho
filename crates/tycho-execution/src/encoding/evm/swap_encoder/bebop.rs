@@ -13,7 +13,7 @@ use crate::encoding::{
         biguint_to_u256, bytes_to_address, create_encoding_runtime, on_blocking_thread, SafeRuntime,
     },
     models::{EncodingContext, Swap},
-    swap_encoder::{QuoteBehavior, SwapEncoder},
+    swap_encoder::SwapEncoder,
 };
 
 fn parse_partial_fill_offset(partial_fill_offset: &Bytes) -> Result<u8, EncodingError> {
@@ -152,8 +152,8 @@ impl SwapEncoder for BebopSwapEncoder {
         &self.executor_address
     }
 
-    fn quote_behavior(&self) -> QuoteBehavior {
-        QuoteBehavior::Blocking
+    fn blocks_on_quote(&self) -> bool {
+        true
     }
 
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
@@ -247,7 +247,6 @@ mod tests {
         .with_protocol_state(Arc::new(bebop_state));
 
         let encoding_context = EncodingContext {
-            quote_attribution: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),

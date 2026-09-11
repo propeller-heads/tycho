@@ -39,7 +39,7 @@ tokio      = { workspace = true }
 tracing    = { workspace = true }
 tycho-common = { workspace = true }
 typetag    = { workspace = true, optional = true }
-alloy      = { workspace = true, features = ["providers", "rpc-types-eth", "eip712", "signer-local", "node-bindings", "sol-types", "transport-http", "reqwest-rustls-tls"], optional = true }
+alloy      = { workspace = true, features = ["providers", "rpc-types-eth", "eip712", "signer-local", "node-bindings", "sol-types", "transport-http", "reqwest-rustls-tls", "rand"], optional = true }
 async-trait = { workspace = true, optional = true }
 
 [dev-dependencies]
