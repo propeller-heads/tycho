@@ -24,6 +24,13 @@ pub enum BlockNumberOrTimestamp {
 }
 
 impl BlockNumberOrTimestamp {
+    fn less_than(&self, other: &Block) -> bool {
+        match self {
+            BlockNumberOrTimestamp::Number(n) => n < &other.number,
+            BlockNumberOrTimestamp::Timestamp(ts) => ts < &other.ts,
+        }
+    }
+
     fn greater_than(&self, other: &Block) -> bool {
         match self {
             BlockNumberOrTimestamp::Number(n) => n > &other.number,
@@ -392,11 +399,11 @@ where
                 let first_block = first.block();
                 let last_block = last.block();
 
-                if !version.greater_than(&first_block) {
+                // The first block is still buffered and can be replaced by a reorg. Only versions
+                // strictly before it are known to be committed.
+                if version.less_than(&first_block) {
                     Some(CommitStatus::Committed)
-                } else if (version.greater_than(&first_block)) &
-                    (!version.greater_than(&last_block))
-                {
+                } else if !version.greater_than(&last_block) {
                     Some(CommitStatus::Uncommitted)
                 } else {
                     Some(CommitStatus::Unseen)
@@ -1347,6 +1354,11 @@ mod test {
     #[case::committed_ts(
         BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap()),
         CommitStatus::Committed
+    )]
+    #[case::first_uncommitted_no(BlockNumberOrTimestamp::Number(1), CommitStatus::Uncommitted)]
+    #[case::first_uncommitted_ts(
+        BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:12".parse().unwrap()),
+        CommitStatus::Uncommitted
     )]
     #[case::uncommitted_no(BlockNumberOrTimestamp::Number(2), CommitStatus::Uncommitted)]
     #[case::uncommitted_ts(

@@ -1118,6 +1118,11 @@ mod test {
             .collect();
 
         assert_eq!(block_numbers, vec![&exp3], "blocks <= commit height should be drained");
+        assert_eq!(
+            guard.get_commit_status(BlockNumberOrTimestamp::Number(3)),
+            Some(CommitStatus::Uncommitted),
+            "the first block after the committed height is still pending"
+        );
     }
 
     use rstest::rstest;
