@@ -239,7 +239,7 @@ where
     async fn find_unknown_components(
         &self,
         reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
-        ids: HashSet<ComponentId>,
+        ids: impl IntoIterator<Item = ComponentId>,
     ) -> Result<HashSet<ComponentId>, ExtractionError> {
         let mut unknown = reorg_buffer.missing_components(ids);
         if unknown.is_empty() {
@@ -1579,7 +1579,7 @@ where
         }
 
         let unknown_components = self
-            .find_unknown_components(&reorg_buffer, not_found.keys().cloned().collect())
+            .find_unknown_components(&reorg_buffer, not_found.keys().cloned())
             .await?;
 
         // Both count per attribute. An attribute miss belongs to a known component. A

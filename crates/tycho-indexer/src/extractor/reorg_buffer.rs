@@ -488,9 +488,14 @@ where
         (res, remaining_keys.into_iter().collect())
     }
 
-    /// Returns the ids among `missing` with no protocol component entry in the buffered blocks,
+    /// Returns the ids among `ids` with no protocol component entry in the buffered blocks,
     /// live and committing sections included.
-    pub fn missing_components(&self, mut missing: HashSet<ComponentId>) -> HashSet<ComponentId> {
+    pub fn missing_components(
+        &self,
+        ids: impl IntoIterator<Item = ComponentId>,
+    ) -> HashSet<ComponentId> {
+        let mut missing: HashSet<ComponentId> = ids.into_iter().collect();
+
         for block_message in self.history() {
             if missing.is_empty() {
                 break;
@@ -1131,9 +1136,9 @@ mod test {
         let c1 = "c1".to_string();
         let c3 = "c3".to_string();
         let ghost = "ghost".to_string();
-        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
+        let ids = [c1.clone(), c3.clone(), ghost.clone()];
 
-        let missing = reorg_buffer.missing_components(ids.clone());
+        let missing = reorg_buffer.missing_components(ids.iter().cloned());
         assert_eq!(missing, HashSet::from([ghost.clone()]));
 
         // Releasing block 1 drops its creation from the history.
