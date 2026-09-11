@@ -1,0 +1,2 @@
+# CREATE INDEX CONCURRENTLY cannot run inside a transaction.
+run_in_transaction = false
