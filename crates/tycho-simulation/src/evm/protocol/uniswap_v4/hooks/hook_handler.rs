@@ -65,6 +65,20 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         tokens: &HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError>;
+
+    /// Whether this handler can serve the block `delta` describes after
+    /// [`delta_transition`](Self::delta_transition), reading nothing beyond its arguments.
+    ///
+    /// Mirrors
+    /// [`ProtocolSim::transitions_from_delta_alone`](tycho_common::simulation::protocol_sim::ProtocolSim::transitions_from_delta_alone)
+    /// for the hook half of a pool: a
+    /// handler that simulates against the shared VM database returns `false`, because that
+    /// database only ever holds confirmed state.
+    #[allow(unused)]
+    fn transitions_from_delta_alone(&self, delta: &ProtocolStateDelta) -> bool {
+        false
+    }
+
     fn clone_box(&self) -> Box<dyn HookHandler>;
 
     fn as_any(&self) -> &dyn std::any::Any;

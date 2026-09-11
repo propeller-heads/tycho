@@ -452,6 +452,10 @@ impl ProtocolSim for EtherfiState {
         crate::evm::query_pool_swap::query_pool_swap(self, params)
     }
 
+    fn transitions_from_delta_alone(&self, _delta: &ProtocolStateDelta) -> bool {
+        true
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
