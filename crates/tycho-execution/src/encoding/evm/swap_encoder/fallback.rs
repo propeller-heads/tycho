@@ -11,22 +11,22 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-/// Static attribute under which fallback components carry their pAMM venue address — the same
+/// Static attribute under which fallback components carry their pAMM address — the same
 /// attribute the price-level-stream family uses.
 const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 
 /// The highest Uniswap V2 fee `TychoFallbackRouter` accepts (`feeBps <= 30`).
 const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
 
-/// The fallback venue that fills a pAMM swap when the pAMM fails, JSON-encoded into
+/// The fallback protocol that fills a pAMM swap when the pAMM fails, JSON-encoded into
 /// `Swap::user_data`. Required: `TychoFallbackRouter` rejects a swap without one, so the
-/// solver must pick the venue and its pool when it builds the solution.
+/// solver must pick the protocol and its pool when it builds the solution.
 ///
-/// The variants mirror `TychoFallbackRouter.Venue`; the wire format is the venue byte followed
-/// by the venue data the contract decodes:
+/// The variants mirror `TychoFallbackRouter.FallbackProtocol`; the wire format is the protocol
+/// byte followed by the protocol data the contract decodes:
 ///
-/// | Venue        | JSON                                                       | Venue data |
-/// |--------------|------------------------------------------------------------|------------|
+/// | Protocol     | JSON                                                       | Protocol data |
+/// |--------------|------------------------------------------------------------|---------------|
 /// | `uniswap_v2` | `{"protocol":"uniswap_v2","pair":"0x…","fee_bps":30}`         | `pair(20) ++ fee_bps(1)` |
 /// | `uniswap_v3` | `{"protocol":"uniswap_v3","pool":"0x…"}`                      | `pool(20)` |
 /// | `uniswap_v4` | `{"protocol":"uniswap_v4","fee":3000,"tick_spacing":60,"hook":"0x…","hook_data":"0x…"}` | `fee(3) ++ tick_spacing(3) ++ hook(20) ++ hook_data` |
@@ -69,18 +69,18 @@ impl FallbackProtocol {
     fn from_swap_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
         match user_data.as_ref() {
             Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
-                EncodingError::FatalError(format!("Invalid fallback venue user_data JSON: {e}"))
+                EncodingError::FatalError(format!("Invalid fallback protocol user_data JSON: {e}"))
             }),
             _ => Err(EncodingError::FatalError(
-                "Fallback swaps require user_data naming the fallback venue \
+                "Fallback swaps require user_data naming the fallback protocol \
                  (e.g. {\"protocol\":\"uniswap_v3\",\"pool\":\"0x…\"})"
                     .to_string(),
             )),
         }
     }
 
-    /// The ordinal of the matching `TychoFallbackRouter.Venue` variant — the wire format's
-    /// venue byte.
+    /// The ordinal of the matching `TychoFallbackRouter.FallbackProtocol` variant — the wire
+    /// format's protocol byte.
     fn protocol_byte(&self) -> u8 {
         match self {
             FallbackProtocol::UniswapV2 { .. } => 0,
@@ -91,8 +91,8 @@ impl FallbackProtocol {
         }
     }
 
-    /// Packs the venue byte of `TychoFallbackRouter.Venue` followed by the venue data its
-    /// `_executeFallback` decodes, validating what the contract would revert on.
+    /// Packs the protocol byte of `TychoFallbackRouter.FallbackProtocol` followed by the protocol
+    /// data its `_executeFallback` decodes, validating what the contract would revert on.
     fn encode(&self) -> Result<Vec<u8>, EncodingError> {
         let mut data = vec![self.protocol_byte()];
         match self {
@@ -139,11 +139,11 @@ impl FallbackProtocol {
 }
 
 /// Encodes a swap that runs a pAMM through `TychoFallbackRouter` so a failing pAMM retries on
-/// the fallback venue named in the swap's `user_data` instead of reverting the route.
+/// the fallback protocol named in the swap's `user_data` instead of reverting the route.
 ///
 /// The pAMM address comes from the component's `pamm_address` static attribute, which every
 /// fallback component carries. Swap data for `FallbackExecutor` is packed
-/// `token_in ++ token_out ++ pamm ++ protocol_byte ++ venue_data` (see [`FallbackProtocol`]).
+/// `token_in ++ token_out ++ pamm ++ protocol_byte ++ protocol_data` (see [`FallbackProtocol`]).
 #[derive(Clone)]
 pub struct FallbackSwapEncoder {
     executor_address: Bytes,
@@ -186,13 +186,13 @@ impl SwapEncoder for FallbackSwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let venue = FallbackProtocol::from_swap_user_data(swap.user_data())?;
+        let protocol = FallbackProtocol::from_swap_user_data(swap.user_data())?;
         let pamm = bytes_to_address(&Self::pamm_address(swap)?)?;
         let token_in = bytes_to_address(&swap.token_in().address)?;
         let token_out = bytes_to_address(&swap.token_out().address)?;
 
         let mut data = (token_in, token_out, pamm).abi_encode_packed();
-        data.extend(venue.encode()?);
+        data.extend(protocol.encode()?);
         Ok(data)
     }
 
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_unknown_venue() {
+    fn test_rejects_unknown_protocol() {
         let err =
             encode_usdc_weth(Some(r#"{"protocol":"balancer_v2","pool":"0x11"}"#)).unwrap_err();
         assert!(matches!(err, EncodingError::FatalError(msg) if msg.contains("JSON")));
