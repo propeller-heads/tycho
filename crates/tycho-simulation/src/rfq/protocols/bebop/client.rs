@@ -117,7 +117,8 @@ fn chain_to_bebop_url(chain: Chain) -> Result<String, RFQError> {
 /// left by a partition or a dropped NAT mapping reads as open forever.
 const FEED_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The `/quote` error codes Bebop documents, plus the two general ones any endpoint can return.
+/// The `/quote` error codes Bebop documents, plus the two general ones any endpoint can return,
+/// plus one observed in responses but absent from the documentation.
 ///
 /// The list is not in Bebop's live documentation - the page was dropped in a restructure, and
 /// `docs.bebop.xyz/specs/rfq-api.json` types `errorCode` as a bare integer. The published list is
@@ -130,6 +131,11 @@ mod error_code {
     pub const TOKEN_NOT_SUPPORTED: u32 = 105;
     pub const GAS_EXCEEDS_SIZE: u32 = 106;
     pub const UNEXPECTED_PERMITS: u32 = 107;
+    /// Not in the published list. Seen as `RequoteRequired: Maker prices changed while routing
+    /// ... Please request a new quote.` and as `MiddleTokenFail: Quote with middle-token failed`;
+    /// both mean the venue's own routing lost a race against its makers and the same request
+    /// may succeed immediately after.
+    pub const REQUOTE_REQUIRED: u32 = 110;
     pub const RATE_LIMITED: u32 = 111;
     pub const UNKNOWN: u32 = 500;
     pub const TIMED_OUT: u32 = 522;
@@ -278,6 +284,7 @@ impl BebopClient {
                 RFQError::QuoteNotFound(format!("{detail}: {request}"))
             }
             error_code::GAS_CALCULATION |
+            error_code::REQUOTE_REQUIRED |
             error_code::RATE_LIMITED |
             error_code::UNKNOWN |
             error_code::TIMED_OUT => RFQError::RecoverableError(detail),
@@ -894,12 +901,15 @@ mod tests {
     }
 
     /// A code's severity has to survive the hop into `SimulationError`, which is the type the
-    /// caller acts on.
+    /// caller acts on. 110 is the one code classified without documentation, so it is pinned
+    /// here against the default that treats unknown codes as fatal.
     #[test]
     fn test_severity_reaches_simulation_error() {
-        for (code, expected_recoverable) in
-            [(error_code::RATE_LIMITED, true), (error_code::TOKEN_NOT_SUPPORTED, false)]
-        {
+        for (code, expected_recoverable) in [
+            (error_code::RATE_LIMITED, true),
+            (error_code::REQUOTE_REQUIRED, true),
+            (error_code::TOKEN_NOT_SUPPORTED, false),
+        ] {
             let body =
                 format!(r#"{{"error":{{"errorCode":{code},"message":"m","requestId":"abc"}}}}"#);
             let response: BebopQuoteResponse = serde_json::from_str(&body).unwrap();
