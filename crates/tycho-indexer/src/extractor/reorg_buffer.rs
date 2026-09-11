@@ -489,11 +489,8 @@ where
 
     /// Returns the ids among `ids` with no component creation in the buffered blocks,
     /// live and committing sections included.
-    pub fn missing_components(
-        &self,
-        ids: impl IntoIterator<Item = ComponentId>,
-    ) -> HashSet<ComponentId> {
-        let mut missing: HashSet<ComponentId> = ids.into_iter().collect();
+    pub fn missing_components(&self, ids: HashSet<ComponentId>) -> HashSet<ComponentId> {
+        let mut missing = ids;
 
         for block_message in self.history() {
             if missing.is_empty() {
@@ -1135,9 +1132,9 @@ mod test {
         let c1 = "c1".to_string();
         let c3 = "c3".to_string();
         let ghost = "ghost".to_string();
-        let ids = [c1.clone(), c3.clone(), ghost.clone()];
+        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
 
-        let missing = reorg_buffer.missing_components(ids.iter().cloned());
+        let missing = reorg_buffer.missing_components(ids.clone());
         assert_eq!(missing, HashSet::from([ghost.clone()]));
 
         // Releasing block 1 drops its creation from the history.

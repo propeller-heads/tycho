@@ -241,7 +241,7 @@ where
         reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
         ids: impl IntoIterator<Item = ComponentId>,
     ) -> Result<HashSet<ComponentId>, ExtractionError> {
-        let mut unknown = reorg_buffer.missing_components(ids);
+        let mut unknown = reorg_buffer.missing_components(ids.into_iter().collect());
         if unknown.is_empty() {
             return Ok(unknown);
         }
