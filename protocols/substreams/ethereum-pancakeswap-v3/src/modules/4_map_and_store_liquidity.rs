@@ -36,7 +36,7 @@ pub fn map_liquidity_changes(
         .map(|e| {
             (
                 pools_current_tick_store
-                    .get_at(e.log_ordinal, format!("pool:{0}", &e.pool_address))
+                    .get_at(e.log_ordinal, format!("pool:{0}", e.pool_address))
                     .unwrap_or(0),
                 e,
             )

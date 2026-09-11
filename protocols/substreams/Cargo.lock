@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-pancakeswap-v3"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v3-logs-only"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
