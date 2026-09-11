@@ -341,7 +341,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
     main_runtime.spawn(async move {
         let (res, _, _) = select_all(other_tasks).await;
 
-        if services_ctrl_tx.send(res.unwrap_or_else(|join_err| Err(ExtractionError::Unknown(format!("Task panicked: {join_err}"))))).is_err() {
+        if services_ctrl_tx.send(service_task_result(res)).is_err() {
             error!("Fatal service task exited and failed trying to communicate with main thread. Exiting the process...");
             process::exit(1);
         }
@@ -420,8 +420,20 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     all_tasks.append(&mut other_tasks);
 
     let (res, _, _) = select_all(all_tasks).await;
-    res.expect("Tasks should not panic")?;
-    Ok(())
+    service_task_result(res)
+}
+
+/// Shutdown aborts the token-metadata recovery worker, and that abort can be observed by the
+/// task supervisor before the shutdown handler itself returns. A cancelled join is part of a
+/// clean shutdown, not a failure; only a panic is.
+fn service_task_result(
+    res: Result<Result<(), ExtractionError>, tokio::task::JoinError>,
+) -> Result<(), ExtractionError> {
+    match res {
+        Ok(result) => result,
+        Err(join_err) if join_err.is_cancelled() => Ok(()),
+        Err(join_err) => Err(ExtractionError::Unknown(format!("Task panicked: {join_err}"))),
+    }
 }
 
 #[tokio::main]
@@ -494,7 +506,7 @@ async fn create_indexing_tasks(
         .enable_token_cache()
         .build()
         .await?;
-    let token_processor = EthereumTokenPreProcessor::new(
+    let mut token_processor = EthereumTokenPreProcessor::new(
         &rpc_client,
         *chains
             .first()
@@ -502,21 +514,28 @@ async fn create_indexing_tasks(
         settlement_contract,
     );
 
-    let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
-        &extractors_config,
-        chains,
-        &global_args.endpoint_url,
-        global_args.s3_bucket.as_deref(),
-        &substreams_args.substreams_api_token,
-        &cached_gw,
-        global_args.database_insert_batch_size,
-        &token_processor,
-        &rpc_client,
-        extraction_runtime,
-        substreams_args.enable_partial_blocks,
-    )
-    .await
-    .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
+    if global_args.token_enrichment_budget_ms > 0 {
+        token_processor = token_processor.with_enrichment_budget(std::time::Duration::from_millis(
+            global_args.token_enrichment_budget_ms,
+        ));
+    }
+
+    let (supervisors, extractor_handles, pending_deltas_rxs, protocol_cache) =
+        build_all_extractors(
+            &extractors_config,
+            chains,
+            &global_args.endpoint_url,
+            global_args.s3_bucket.as_deref(),
+            &substreams_args.substreams_api_token,
+            &cached_gw,
+            global_args.database_insert_batch_size,
+            &token_processor,
+            &rpc_client,
+            extraction_runtime,
+            substreams_args.enable_partial_blocks,
+        )
+        .await
+        .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
 
     let server_url = format!("http://{}:{}", global_args.server_ip, global_args.server_port);
     let api_key = env::var("AUTH_API_KEY").map_err(|_| {
@@ -537,8 +556,21 @@ async fn create_indexing_tasks(
             .run()?;
     info!(server_url, "Http and Ws server started");
 
-    let shutdown_task =
-        tokio::spawn(shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)));
+    // Disabling deferral must not strand tokens persisted while it was enabled. One worker per
+    // process, on the first configured chain, mirrors the single `token_processor` above.
+    let recovery_task = tokio::spawn(tycho_indexer::extractor::token_metadata_recovery::run(
+        chains[0],
+        cached_gw.clone(),
+        protocol_cache,
+        token_processor,
+    ));
+    let recovery_abort = recovery_task.abort_handle();
+    let shutdown_task = tokio::spawn(async move {
+        let result =
+            shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)).await;
+        recovery_abort.abort();
+        result
+    });
 
     let runtime = extraction_runtime
         .cloned()
@@ -549,7 +581,8 @@ async fn create_indexing_tasks(
         .map(|supervisor| runtime.spawn(supervisor.run()))
         .collect::<Vec<_>>();
 
-    Ok((supervisor_tasks, vec![server_task, shutdown_task]))
+    let other_tasks = vec![server_task, shutdown_task, recovery_task];
+    Ok((supervisor_tasks, other_tasks))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -570,6 +603,7 @@ async fn build_all_extractors(
         Vec<ExtractorSupervisor>,
         Vec<ExtractorHandle>,
         Vec<tokio::sync::mpsc::Receiver<tycho_indexer::extractor::DeltaCommand>>,
+        ProtocolMemoryCache,
     ),
     ExtractionError,
 > {
@@ -636,7 +670,7 @@ async fn build_all_extractors(
         pending_deltas_rxs.push(pd_rx);
     }
 
-    Ok((supervisors, extractor_handles, pending_deltas_rxs))
+    Ok((supervisors, extractor_handles, pending_deltas_rxs, protocol_cache))
 }
 
 async fn with_transaction<F, Fut, R>(gw: &CachedGateway, block: &Block, f: F) -> R
@@ -809,6 +843,35 @@ async fn run_analyze_tokens(
 #[cfg(test)]
 mod tests {
     use tycho_common::models::chain_config::ChainTokenConfig;
+
+    use super::{service_task_result, ExtractionError};
+
+    #[tokio::test]
+    async fn aborted_service_task_is_a_clean_shutdown() {
+        let handle: tokio::task::JoinHandle<Result<(), ExtractionError>> =
+            tokio::spawn(std::future::pending());
+        handle.abort();
+
+        assert_eq!(service_task_result(handle.await), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn panicked_service_task_is_an_error() {
+        let handle: tokio::task::JoinHandle<Result<(), ExtractionError>> =
+            tokio::spawn(async { panic!("boom") });
+
+        match service_task_result(handle.await) {
+            Err(ExtractionError::Unknown(message)) => assert!(message.contains("Task panicked")),
+            other => panic!("expected a panic to be reported, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn service_task_error_passes_through() {
+        let result = service_task_result(Ok(Err(ExtractionError::Unknown("x".into()))));
+
+        assert_eq!(result, Err(ExtractionError::Unknown("x".into())));
+    }
 
     #[test]
     fn test_chain_token_invalid_hex() {

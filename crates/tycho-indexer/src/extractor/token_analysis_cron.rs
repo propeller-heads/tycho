@@ -1,5 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 
+use anyhow::Context;
 use chrono::NaiveDateTime;
 use futures03::{future::try_join_all, FutureExt};
 use tokio::sync::Semaphore;
@@ -97,7 +98,16 @@ async fn run_analysis_pass(
             break;
         }
     }
-    info!(matched = tokens.len(), ?pass, "Starting analysis pass");
+    // Pending metadata is completed by the recovery worker, and `update_tokens` rejects it.
+    // The quality ranges used today already exclude pending rows; keep the guard explicit so
+    // a wider range cannot abort a whole pass.
+    let matched = tokens.len();
+    tokens.retain(|t| t.metadata_status.is_ready());
+    let skipped_pending = matched - tokens.len();
+    if skipped_pending > 0 {
+        warn!(skipped_pending, ?pass, "Skipping tokens with pending metadata");
+    }
+    info!(matched, skipped_pending, ?pass, "Starting analysis pass");
 
     let start = Instant::now();
     let sem = Arc::new(Semaphore::new(analyze_args.concurrency));
@@ -151,7 +161,7 @@ struct PassOutcome {
 async fn analyze_batch(
     chain: Chain,
     rpc: &EthereumRpcClient,
-    mut tokens: Vec<Token>,
+    tokens: Vec<Token>,
     sem: Arc<Semaphore>,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
     settlement_contract: alloy::primitives::Address,
@@ -162,8 +172,56 @@ async fn analyze_batch(
         .iter()
         .map(|t| t.address.clone())
         .collect::<Vec<_>>();
+    let owners = find_token_owners(chain, &addresses, gw.as_ref())
+        .await
+        .context("failed to resolve token owners for analysis batch")?;
+    let analyzer = EthCallDetector::new(rpc, Arc::new(owners), settlement_contract);
+    let mut outcome = PassOutcome::default();
+    let mut analyzed = Vec::with_capacity(tokens.len());
+    for mut t in tokens {
+        debug!(?t.address, "Analyzing token");
+        let (token_quality, gas, tax) = match analyzer
+            .analyze(t.address.clone(), BlockTag::Latest)
+            .await
+        {
+            Ok(res) => res,
+            Err(error) => {
+                warn!(address = ?t.address, ?error, "Token quality detection failed");
+                outcome.failed += 1;
+                continue;
+            }
+        };
+
+        let quality_before = t.quality;
+        apply_analysis(&mut t, token_quality, gas, tax, pass);
+        if t.quality > quality_before {
+            outcome.promoted += 1;
+        } else if t.quality < quality_before {
+            outcome.demoted += 1;
+        } else {
+            outcome.unchanged += 1;
+        }
+        analyzed.push(t);
+    }
+
+    // A token without a verdict keeps its stored values. Writing it again would only churn
+    // the database row and the token cache.
+    if !analyzed.is_empty() {
+        gw.update_tokens(&analyzed)
+            .await
+            .context("failed to persist token analysis results")?;
+    }
+    Ok(outcome)
+}
+
+/// Resolves the protocol-specific balance owner instead of assuming every pool holds its tokens.
+pub(crate) async fn find_token_owners(
+    chain: Chain,
+    addresses: &[Bytes],
+    gw: &(dyn ProtocolGateway + Send + Sync),
+) -> anyhow::Result<TokenOwnerStore> {
     let token_owner = gw
-        .get_token_owners(&chain, &addresses, Some(100_000f64))
+        .get_token_owners(&chain, addresses, Some(100_000f64))
         .await?;
     let component_ids = token_owner
         .values()
@@ -215,41 +273,7 @@ async fn analyze_batch(
             }
         })
         .collect::<HashMap<_, _>>();
-    let analyzer = EthCallDetector::new(
-        rpc,
-        Arc::new(TokenOwnerStore::new(liquidity_token_owners)),
-        settlement_contract,
-    );
-    let mut outcome = PassOutcome::default();
-    for t in tokens.iter_mut() {
-        debug!(?t.address, "Analyzing token");
-        let (token_quality, gas, tax) = match analyzer
-            .analyze(t.address.clone(), BlockTag::Latest)
-            .await
-        {
-            Ok(res) => res,
-            Err(error) => {
-                warn!(?error, "Token quality detection failed");
-                outcome.failed += 1;
-                continue;
-            }
-        };
-
-        let quality_before = t.quality;
-        apply_analysis(t, token_quality, gas, tax, pass);
-        if t.quality > quality_before {
-            outcome.promoted += 1;
-        } else if t.quality < quality_before {
-            outcome.demoted += 1;
-        } else {
-            outcome.unchanged += 1;
-        }
-    }
-
-    if !tokens.is_empty() {
-        gw.update_tokens(&tokens).await?;
-    }
-    Ok(outcome)
+    Ok(TokenOwnerStore::new(liquidity_token_owners))
 }
 
 /// Applies an analysis verdict to the token's quality, gas and tax fields.
@@ -526,6 +550,176 @@ mod test {
     async fn test_recovery_pass_counts_unchanged() {
         let outcome = run_outcome_batch(AnalysisPass::Recovery, 5).await;
         assert_eq!(outcome, PassOutcome { unchanged: 2, ..Default::default() });
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_failed_analysis_is_not_written_back() {
+        // Token 1 has no owner: the analyzer returns Bad without an RPC call and the retry
+        // pass demotes it. Token 2 has an owner, so the analyzer simulates a transfer; the
+        // mock RPC answers with a non-retryable, non-revert error, which is a failure.
+        let mut server = mockito::Server::new_async().await;
+        let rpc_error = server
+            .mock("POST", "/")
+            .expect_at_least(1)
+            .with_body_from_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let error_for = |call: &serde_json::Value| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": call["id"],
+                        "error": {"code": -32601, "message": "method not found"}
+                    })
+                };
+                let response = match body.as_array() {
+                    Some(calls) => serde_json::Value::Array(calls.iter().map(error_for).collect()),
+                    None => error_for(&body),
+                };
+                serde_json::to_vec(&response).unwrap()
+            })
+            .create_async()
+            .await;
+        let rpc = EthereumRpcClient::new(&server.url()).expect("url parses");
+
+        let owned = "0x0000000000000000000000000000000000000002";
+        let pool = "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea";
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_token_owners()
+            .returning(move |_, _, _| {
+                Box::pin(async move {
+                    Ok(HashMap::from([(
+                        Bytes::from(owned),
+                        (pool.to_string(), Bytes::from("0x0186a0")),
+                    )]))
+                })
+            });
+        gw.expect_get_protocol_components()
+            .returning(move |_, _, _, _, _| {
+                Box::pin(async move {
+                    Ok(WithTotal {
+                        entity: vec![ProtocolComponent::new(
+                            pool,
+                            "uniswap_v2",
+                            "pool",
+                            Chain::Ethereum,
+                            vec![Bytes::from(owned)],
+                            vec![],
+                            HashMap::new(),
+                            ChangeType::Creation,
+                            Bytes::from("0x00"),
+                            NaiveDateTime::default(),
+                        )],
+                        total: Some(1),
+                    })
+                })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .times(1)
+            .withf(|updated| {
+                updated.len() == 1 &&
+                    updated[0].address ==
+                        Bytes::from("0x0000000000000000000000000000000000000001") &&
+                    updated[0].quality == 7
+            })
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let outcome = analyze_batch(
+            Chain::Ethereum,
+            &rpc,
+            vec![
+                test_token_at("0x0000000000000000000000000000000000000001", 8),
+                test_token_at(owned, 8),
+            ],
+            Arc::new(Semaphore::new(1)),
+            Arc::new(gw),
+            "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            AnalysisPass::Retry,
+        )
+        .await
+        .expect("analyze batch failed");
+        assert_eq!(outcome, PassOutcome { demoted: 1, failed: 1, ..Default::default() });
+        rpc_error.assert_async().await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_pending_tokens_are_skipped_before_analysis() {
+        // The pending token has an owner, so analyzing it would simulate a transfer over RPC.
+        // The ready token has none and is demoted without any RPC call, so any request that
+        // reaches the server can only come from the pending token.
+        let mut server = mockito::Server::new_async().await;
+        let rpc_calls = server
+            .mock("POST", "/")
+            .expect(0)
+            .create_async()
+            .await;
+        let rpc = EthereumRpcClient::new(&server.url()).expect("url parses");
+        let args = wiring_args(0);
+        let pending = "0x0000000000000000000000000000000000000002";
+        let pool = "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea";
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_tokens()
+            .returning(move |_, _, _, _, _| {
+                Box::pin(async move {
+                    Ok(WithTotal {
+                        entity: vec![
+                            test_token_at("0x0000000000000000000000000000000000000001", 8),
+                            Token::pending(&Bytes::from(pending), Chain::Ethereum),
+                        ],
+                        total: Some(2),
+                    })
+                })
+            });
+        gw.expect_get_token_owners()
+            .returning(move |_, _, _| {
+                Box::pin(async move {
+                    Ok(HashMap::from([(
+                        Bytes::from(pending),
+                        (pool.to_string(), Bytes::from("0x0186a0")),
+                    )]))
+                })
+            });
+        gw.expect_get_protocol_components()
+            .returning(move |_, _, _, _, _| {
+                Box::pin(async move {
+                    Ok(WithTotal {
+                        entity: vec![ProtocolComponent::new(
+                            pool,
+                            "uniswap_v2",
+                            "pool",
+                            Chain::Ethereum,
+                            vec![Bytes::from(pending)],
+                            vec![],
+                            HashMap::new(),
+                            ChangeType::Creation,
+                            Bytes::from("0x00"),
+                            NaiveDateTime::default(),
+                        )],
+                        total: Some(1),
+                    })
+                })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .times(1)
+            .withf(|updated| {
+                updated.len() == 1 &&
+                    updated[0].address ==
+                        Bytes::from("0x0000000000000000000000000000000000000001")
+            })
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        analyze_tokens(args, &rpc, Arc::new(gw))
+            .await
+            .expect("analyze tokens failed");
+        rpc_calls.assert_async().await;
     }
 
     // requires a running ethereum node

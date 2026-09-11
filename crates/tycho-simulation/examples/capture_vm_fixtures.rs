@@ -213,10 +213,28 @@ fn capture_target(
     );
 
     let filtered_states = HashMap::from([(component_id, component_with_state.clone())]);
+    // Keep only the metadata the server attached for this component's tokens; the fixture
+    // must decode standalone, so the tokens travel with the snapshot as they would live.
+    let filtered_tokens: HashMap<Bytes, _> = state_msg
+        .snapshots
+        .tokens
+        .iter()
+        .filter(|(addr, _)| {
+            component_with_state
+                .component
+                .tokens
+                .contains(*addr)
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     let filtered_state_msg = dto::StateSyncMessage {
         header: state_msg.header.clone(),
-        snapshots: dto::Snapshot { states: filtered_states, vm_storage: filtered_vm_storage },
+        snapshots: dto::Snapshot {
+            tokens: filtered_tokens,
+            states: filtered_states,
+            vm_storage: filtered_vm_storage,
+        },
         deltas: None,
         removed_components: HashMap::new(),
     };

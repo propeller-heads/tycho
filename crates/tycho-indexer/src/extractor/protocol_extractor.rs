@@ -412,8 +412,8 @@ where
             balances
         };
 
-        // collect token decimals and prices to calculate tvl in the next step
-        // most of this data should be in the cache.
+        // Prices are denominated in raw token units. This calculation does not use token
+        // decimals, including the placeholders carried by pending metadata.
         let addresses = balances
             .values()
             .flat_map(|b| b.clone().into_keys())
@@ -626,6 +626,15 @@ where
             .flat_map(|pc| pc.tokens.clone().into_iter())
             .collect::<Vec<_>>();
 
+        // The pre-processor deduplicates again; this pass exists so the cache lookup, the
+        // `new_tokens_count` span field and `token_enrichment_unknown_tokens` count unique
+        // addresses rather than pool memberships.
+        let mut seen = HashSet::new();
+        let new_token_addresses: Vec<_> = new_token_addresses
+            .into_iter()
+            .filter(|address| seen.insert(address.clone()))
+            .collect();
+
         // Separate between known and unkown tokens
         let is_token_known = self
             .protocol_cache
@@ -701,19 +710,26 @@ where
             .map(|t| (t.address.clone(), t));
 
         tracing::Span::current().record("new_tokens_count", unknown_tokens.len());
+        histogram!("token_enrichment_unknown_tokens", "chain" => self.chain.to_string(), "extractor" => self.name.clone())
+            .record(unknown_tokens.len() as f64);
         if !unknown_tokens.is_empty() {
             debug!(?unknown_tokens, block_number = msg.block.number, "NewTokens");
         }
 
-        let new_tokens: HashMap<Address, Token> = self
+        let enrichment_started = std::time::Instant::now();
+        let fetched = self
             .token_pre_processor
             .get_tokens(unknown_tokens, Arc::new(tf), BlockTag::Number(msg.block.number))
-            .await
+            .await;
+        histogram!("token_enrichment_seconds", "chain" => self.chain.to_string(), "extractor" => self.name.clone())
+            .record(enrichment_started.elapsed().as_secs_f64());
+        counter!("token_metadata_deferred", "chain" => self.chain.to_string(), "extractor" => self.name.clone())
+            .increment(fetched.iter().filter(|token| !token.metadata_status.is_ready()).count() as u64);
+        Ok(fetched
             .into_iter()
             .map(|t| (t.address.clone(), t))
             .chain(existing_tokens)
-            .collect();
-        Ok(new_tokens)
+            .collect())
     }
 
     /// Process a full block

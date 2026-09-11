@@ -605,6 +605,88 @@ impl Clone for CachedGateway {
 }
 
 impl CachedGateway {
+    /// Reconciles local pending entries with committed metadata, including repairs made by
+    /// another process or a write whose commit acknowledgement was lost.
+    pub async fn ready_token_metadata(
+        &self,
+        chain: Chain,
+        addresses: &[Address],
+    ) -> Result<Vec<Token>, StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let ready = self
+            .state_gateway
+            .ready_token_metadata(chain, addresses, &mut conn)
+            .await?;
+        if let Some(cache) = &self.state_gateway.token_cache {
+            cache.upsert_tokens(&ready);
+        }
+        Ok(ready)
+    }
+
+    /// Reads the durable recovery queue, bypassing caches and any uncommitted block writes.
+    /// The id cursor avoids skipping rows when earlier tokens leave the pending set.
+    pub async fn pending_token_metadata(
+        &self,
+        chain: Chain,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, Token, NaiveDateTime)>, StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        self.state_gateway
+            .pending_token_metadata(chain, after_id, limit, &mut conn)
+            .await
+    }
+
+    pub async fn pending_token_metadata_stats(
+        &self,
+        chain: Chain,
+    ) -> Result<(i64, Option<NaiveDateTime>), StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        self.state_gateway
+            .pending_token_metadata_stats(chain, &mut conn)
+            .await
+    }
+
+    /// Repairs finalized pending rows and publishes to the token cache only after commit.
+    /// Old block inserts use ON CONFLICT DO NOTHING, so they cannot undo this transition.
+    pub async fn complete_token_metadata(
+        &self,
+        tokens: &[Token],
+    ) -> Result<Vec<Token>, StorageError> {
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
+            })?;
+        let completed = conn
+            .transaction(|conn| {
+                async {
+                    self.state_gateway
+                        .complete_token_metadata(tokens, conn)
+                        .await
+                        .map_err(PostgresError)
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(cache) = &self.state_gateway.token_cache {
+            cache.upsert_tokens(&completed);
+        }
+        Ok(completed)
+    }
+
     // Accumulating transactions does not drop previous data nor are transactions nested.
     pub async fn start_transaction(&self, block: &models::blockchain::Block, owner: Option<&str>) {
         let mut open_tx = self.open_tx.lock().await;

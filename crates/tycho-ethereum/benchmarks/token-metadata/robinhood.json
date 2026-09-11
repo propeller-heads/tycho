@@ -1,0 +1,17 @@
+{
+  "settlement_contract": "0x09215a470bD585E59EB3F4B612fBD2678131fF9e",
+  "tokens": [
+    {
+      "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+      "owner": "0x216a13f93031ae9e15305b038d5c9dc5f46cf418",
+      "symbol": "WETH",
+      "decimals": 18
+    },
+    {
+      "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "owner": "0x216a13f93031ae9e15305b038d5c9dc5f46cf418",
+      "symbol": "USDG",
+      "decimals": 6
+    }
+  ]
+}

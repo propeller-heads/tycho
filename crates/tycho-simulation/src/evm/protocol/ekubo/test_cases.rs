@@ -45,6 +45,7 @@ pub struct TestCase {
 impl TestCase {
     pub fn token0(&self) -> Token {
         Token {
+            metadata_status: Default::default(),
             address: self
                 .state_after_transition
                 .key()
@@ -62,6 +63,7 @@ impl TestCase {
 
     pub fn token1(&self) -> Token {
         Token {
+            metadata_status: Default::default(),
             address: self
                 .state_after_transition
                 .key()

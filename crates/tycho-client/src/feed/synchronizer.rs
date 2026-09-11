@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -22,6 +23,7 @@ use tycho_common::{
         },
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
+        token::Token,
         Chain, ExtractorIdentity,
     },
     Bytes,
@@ -34,11 +36,18 @@ use crate::{
         BlockHeader, HeaderLike,
     },
     rpc::{
-        RPCClient, RPCError, SnapshotParameters, TracedEntryPointsPaginatedParams,
+        RPCClient, RPCError, SnapshotParameters, TokensParams, TracedEntryPointsPaginatedParams,
         RPC_CLIENT_CONCURRENCY,
     },
     DeltasError,
 };
+
+/// First wait before re-checking a pool parked on pending token metadata. Doubles on every
+/// further miss up to `TOKEN_METADATA_MAX_RETRY_DELAY`, mirroring the indexer's recovery
+/// worker, so a pool the server never repairs costs a bounded number of requests.
+const TOKEN_METADATA_RETRY_DELAY: Duration = Duration::from_secs(5);
+const TOKEN_METADATA_MAX_RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
+const SNAPSHOT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -141,6 +150,9 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     /// from the moment it's queued until its snapshot is successfully applied (at which point it
     /// moves into `component_tracker.components`).
     snapshot_queue: HashMap<String, SnapshotStatus>,
+    /// How often each parked pool has been re-checked; drives the retry backoff.
+    token_retry_attempts: HashMap<String, u32>,
+    tokens: Arc<RwLock<HashMap<Bytes, Token>>>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -153,12 +165,15 @@ pub struct ComponentWithState {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
+    /// Metadata resolved with this snapshot, including tokens recovered after their creation.
+    pub tokens: HashMap<Bytes, Token>,
     pub states: HashMap<String, ComponentWithState>,
     pub vm_storage: HashMap<Bytes, Account>,
 }
 
 impl Snapshot {
     fn extend(&mut self, other: Snapshot) {
+        self.tokens.extend(other.tokens);
         self.states.extend(other.states);
         self.vm_storage.extend(other.vm_storage);
     }
@@ -228,11 +243,15 @@ enum SnapshotStatus {
     InFlight,
     /// The last fetch attempt failed transiently; will be re-queued on the next delta.
     RetryNext,
+    /// A token of this pool is still pending on the server. The instant is the earliest retry
+    /// time; polling the token endpoint on every block during finality would be wasted work.
+    WaitingForTokens(tokio::time::Instant),
     /// The fetch failed permanently; component is excluded until the synchronizer restarts.
     Blacklisted,
 }
 
 struct SnapshotFetchResult {
+    pending_components: Vec<String>,
     components: HashMap<String, ProtocolComponent>,
     contract_ids: HashSet<Bytes>,
     dci_update: DCIUpdate,
@@ -289,6 +308,7 @@ pub trait StateSynchronizer: Send + Sync + 'static {
 }
 
 struct FetchSnapshotParams {
+    tokens: Arc<RwLock<HashMap<Bytes, Token>>>,
     chain: Chain,
     protocol_system: String,
     block_number: u64,
@@ -300,16 +320,78 @@ struct FetchSnapshotParams {
 /// Fetches a snapshot for given components. If DCI is enabled, also traces entry
 /// points and extends `contract_ids` with any contracts they access.
 ///
-/// Returns the snapshot, the DCI update, and the complete set of contract IDs (original +
-/// DCI-discovered).
+/// Returns the ready snapshot, its DCI update and contract IDs, and component IDs waiting
+/// for metadata. Deferred pools must be retried even if their TVL does not change again.
 async fn fetch_snapshot<R: RPCClient>(
     rpc_client: &R,
-    components: HashMap<String, ProtocolComponent>,
+    mut components: HashMap<String, ProtocolComponent>,
     mut contract_ids: HashSet<Bytes>,
     params: &FetchSnapshotParams,
-) -> Result<(Snapshot, DCIUpdate, HashSet<Bytes>), SynchronizerError> {
+) -> Result<(Snapshot, DCIUpdate, HashSet<Bytes>, Vec<String>), SynchronizerError> {
     if components.is_empty() {
-        return Ok((Snapshot::default(), DCIUpdate::default(), contract_ids));
+        return Ok((Snapshot::default(), DCIUpdate::default(), contract_ids, Vec::new()));
+    }
+
+    let addresses: HashSet<_> = components
+        .values()
+        .flat_map(|c| c.tokens.iter().cloned())
+        .collect();
+    let mut tokens: HashMap<_, _> = {
+        let known = params
+            .tokens
+            .read()
+            .expect("token metadata lock poisoned");
+        addresses
+            .iter()
+            .filter_map(|address| {
+                known
+                    .get(address)
+                    .filter(|token| token.metadata_status.is_ready())
+                    .map(|token| (address.clone(), token.clone()))
+            })
+            .collect()
+    };
+    let missing: Vec<_> = addresses
+        .into_iter()
+        .filter(|a| !tokens.contains_key(a))
+        .collect();
+    for chunk in missing.chunks(1000) {
+        let response = rpc_client
+            .get_tokens(
+                TokensParams::new(params.chain)
+                    .with_addresses(chunk.to_vec())
+                    .with_pagination(0, 1000),
+            )
+            .await?;
+        for token in response.into_data() {
+            if token.metadata_status.is_ready() {
+                tokens.insert(token.address.clone(), token);
+            }
+        }
+    }
+    let mut pending = Vec::new();
+    components.retain(|id, component| {
+        let ready = component
+            .tokens
+            .iter()
+            .all(|address| tokens.contains_key(address));
+        if !ready {
+            pending.push(id.clone());
+        }
+        ready
+    });
+    // Snapshot only admitted pools. A pending pool must not install token contracts as ordinary
+    // accounts before the decoder has the metadata needed to create their proxies. Recomputed
+    // only when something was parked: otherwise the caller-supplied set, which may include
+    // entrypoint contracts, is exactly right.
+    if !pending.is_empty() {
+        contract_ids = components
+            .values()
+            .flat_map(|c| c.contract_addresses.iter().cloned())
+            .collect();
+    }
+    if components.is_empty() {
+        return Ok((Snapshot::default(), DCIUpdate::default(), contract_ids, pending));
     }
 
     let component_ids: Vec<String> = components.keys().cloned().collect();
@@ -351,11 +433,12 @@ async fn fetch_snapshot<R: RPCClient>(
     .include_balances(params.retrieve_balances)
     .include_tvl(params.include_tvl);
 
-    let snapshot = rpc_client
+    let mut snapshot = rpc_client
         .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
         .await?;
 
-    Ok((snapshot, dci_update, contract_ids))
+    snapshot.tokens = tokens;
+    Ok((snapshot, dci_update, contract_ids, pending))
 }
 
 /// Fetches a snapshot for new components not yet in the tracker. Calls `get_protocol_components`
@@ -367,6 +450,7 @@ async fn fetch_snapshot_background<R: RPCClient>(
 ) -> Result<SnapshotFetchResult, SynchronizerError> {
     if component_ids.is_empty() {
         return Ok(SnapshotFetchResult {
+            pending_components: Vec::new(),
             components: HashMap::new(),
             contract_ids: HashSet::new(),
             dci_update: DCIUpdate::default(),
@@ -376,8 +460,8 @@ async fn fetch_snapshot_background<R: RPCClient>(
     }
 
     let request = crate::rpc::ProtocolComponentsParams::new(params.chain, &params.protocol_system)
-        .with_component_ids(component_ids);
-    let components: HashMap<String, ProtocolComponent> = rpc_client
+        .with_component_ids(component_ids.clone());
+    let mut components: HashMap<String, ProtocolComponent> = rpc_client
         .get_protocol_components(request)
         .await?
         .into_data()
@@ -391,10 +475,26 @@ async fn fetch_snapshot_background<R: RPCClient>(
         .collect();
 
     let snapshot_block = params.block_number;
-    let (snapshot, dci_update, contract_ids) =
+    let (snapshot, dci_update, contract_ids, mut pending_components) =
         fetch_snapshot(&rpc_client, components.clone(), contract_ids, &params).await?;
 
-    Ok(SnapshotFetchResult { components, contract_ids, dci_update, snapshot, snapshot_block })
+    // Creation can arrive on the stream before its finalized component is visible over RPC.
+    // Keep the request staged so database visibility alone can eventually admit the pool.
+    pending_components.extend(
+        component_ids
+            .into_iter()
+            .filter(|id| !components.contains_key(id)),
+    );
+
+    components.retain(|id, _| !pending_components.contains(id));
+    Ok(SnapshotFetchResult {
+        pending_components,
+        components,
+        contract_ids,
+        dci_update,
+        snapshot,
+        snapshot_block,
+    })
 }
 
 impl<R, D> ProtocolStateSynchronizer<R, D>
@@ -442,6 +542,8 @@ where
             snapshot_tasks: Vec::new(),
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
+            token_retry_attempts: HashMap::new(),
+            tokens: Default::default(),
         }
     }
 
@@ -578,12 +680,13 @@ where
                     break msg;
                 };
 
+                self.remember_tokens(&first_msg.new_tokens);
                 self.filter_deltas(&mut first_msg);
 
                 // initial snapshot
                 info!(height = first_msg.get_block().number, "First deltas received");
                 let header: BlockHeader = (&first_msg).into();
-                let deltas_msg = StateSyncMessage {
+                let mut deltas_msg = StateSyncMessage {
                     header: header.clone(),
                     snapshots: Default::default(),
                     deltas: Some(first_msg),
@@ -625,6 +728,7 @@ where
                             .into_iter()
                             .collect();
                         let fetch_params = FetchSnapshotParams {
+                            tokens: self.tokens.clone(),
                             chain: self.extractor_id.chain,
                             protocol_system: self.extractor_id.name.clone(),
                             block_number: snapshot_header.number,
@@ -640,9 +744,21 @@ where
                         )
                         .await
                         {
-                            Ok((snap, dci_update, _)) => {
+                            Ok((snap, dci_update, _, pending)) => {
+                                self.remember_tokens(&snap.tokens);
+                                for id in pending {
+                                    self.component_tracker.components.remove(&id);
+                                    self.park_for_tokens(id);
+                                }
+                                self.component_tracker.reinitialize_contracts();
                                 self.component_tracker
                                     .process_entrypoints(&dci_update);
+                                // The first message was filtered before any pool was parked;
+                                // drop the deltas of parked pools so consumers never see state
+                                // for a component that has no snapshot.
+                                if let Some(deltas) = deltas_msg.deltas.as_mut() {
+                                    self.filter_deltas(deltas);
+                                }
                                 snap
                             }
                             Err(SynchronizerError::RPCError(
@@ -695,6 +811,8 @@ where
                 select! {
                     deltas_opt = msg_rx.recv() => {
                         if let Some(mut deltas) = deltas_opt {
+                            self.remember_tokens(&deltas.new_tokens);
+                            self.invalidate_pending_snapshots(&deltas);
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
@@ -720,23 +838,28 @@ where
                             }
 
                             let (snapshots, removed_components) = {
-                                let (to_add, to_remove) =
+                                let (mut to_add, mut to_remove) =
                                     self.component_tracker.filter_updated_components(&deltas);
+                                // Explicit deletions come as `Deletion` changes; a reverted
+                                // creation comes in `deleted_protocol_components`. Both must
+                                // cancel a pending add and drop a parked or in-flight pool.
+                                let deleted = deltas
+                                    .new_protocol_components
+                                    .iter()
+                                    .filter(|(_, component)| component.change == tycho_common::models::ChangeType::Deletion)
+                                    .map(|(id, _)| id)
+                                    .chain(deltas.deleted_protocol_components.keys());
+                                for id in deleted {
+                                    to_add.retain(|candidate| candidate != id);
+                                    if !to_remove.contains(id) { to_remove.push(id.clone()); }
+                                }
 
                                 // Harvest transient retries now so they feed into truly_new.
                                 // TVL changes are not re-emitted, so without explicit re-queuing
                                 // a transiently failed component would never be retried.
                                 // Remove from the map first so the truly_new filter below treats
                                 // them the same as brand-new components.
-                                let retry_ids: Vec<String> = self
-                                    .snapshot_queue
-                                    .iter()
-                                    .filter(|(_, s)| matches!(s, SnapshotStatus::RetryNext))
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-                                for id in &retry_ids {
-                                    self.snapshot_queue.remove(id);
-                                }
+                                let retry_ids = self.take_snapshot_retries(tokio::time::Instant::now());
 
                                 // Components not yet tracked and not in the staged state machine
                                 // (not in-flight, not deferred, not blacklisted). Merges
@@ -958,9 +1081,10 @@ where
                 .push(current_delta.clone());
         }
 
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         let rpc = self.rpc_client.clone();
         let bg_params = FetchSnapshotParams {
+            tokens: self.tokens.clone(),
             chain: self.extractor_id.chain,
             protocol_system: self.extractor_id.name.clone(),
             block_number: snapshot_block,
@@ -970,7 +1094,15 @@ where
         };
         let ids = component_ids.clone();
         tokio::spawn(async move {
-            let _ = tx.send(fetch_snapshot_background(rpc, ids, bg_params).await);
+            tokio::select! {
+                result = timeout(SNAPSHOT_FETCH_TIMEOUT, fetch_snapshot_background(rpc, ids, bg_params)) => {
+                    let result = result.unwrap_or_else(|_| Err(SynchronizerError::Timeout(
+                        format!("Background snapshot exceeded {} seconds", SNAPSHOT_FETCH_TIMEOUT.as_secs()))));
+                    let _ = tx.send(result);
+                }
+                // Dropping an invalidated task must also cancel its RPC work.
+                _ = tx.closed() => {}
+            }
         });
         for id in &component_ids {
             self.snapshot_queue
@@ -997,6 +1129,13 @@ where
                     for id in &p.component_ids {
                         self.snapshot_queue.remove(id);
                     }
+                    for id in fetch_result.pending_components {
+                        self.park_for_tokens(id);
+                    }
+                    for id in fetch_result.components.keys() {
+                        self.token_retry_attempts.remove(id);
+                    }
+                    self.remember_tokens(&fetch_result.snapshot.tokens);
                     let new_component_ids: Vec<String> = fetch_result
                         .components
                         .keys()
@@ -1060,6 +1199,102 @@ where
         }
 
         result
+    }
+
+    fn take_snapshot_retries(&mut self, now: tokio::time::Instant) -> Vec<String> {
+        let ids: Vec<_> = self
+            .snapshot_queue
+            .iter()
+            .filter(|(_, status)| {
+                matches!(status, SnapshotStatus::RetryNext) ||
+                    matches!(status, SnapshotStatus::WaitingForTokens(at) if *at <= now)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            self.snapshot_queue.remove(id);
+        }
+        ids
+    }
+
+    fn invalidate_pending_snapshots(&mut self, deltas: &BlockAggregatedChanges) {
+        let (_, removed) = self
+            .component_tracker
+            .filter_updated_components(deltas);
+        let mut removed: HashSet<_> = removed.into_iter().collect();
+        removed.extend(
+            deltas
+                .new_protocol_components
+                .iter()
+                .filter(|(_, component)| {
+                    component.change == tycho_common::models::ChangeType::Deletion
+                })
+                .map(|(id, _)| id.clone()),
+        );
+        // A reverted creation is reported here rather than as a `Deletion` change.
+        removed.extend(
+            deltas
+                .deleted_protocol_components
+                .keys()
+                .cloned(),
+        );
+        let tasks = std::mem::take(&mut self.snapshot_tasks);
+        // Any revert cancels every in-flight snapshot, even one taken below the revert target:
+        // the block a snapshot was requested at is not known to be on the surviving fork, and
+        // a fresh request is cheaper than proving it.
+        for task in tasks {
+            if deltas.revert ||
+                task.component_ids
+                    .iter()
+                    .any(|id| removed.contains(id))
+            {
+                for id in &task.component_ids {
+                    if !removed.contains(id) {
+                        self.snapshot_queue
+                            .insert(id.clone(), SnapshotStatus::RetryNext);
+                    }
+                }
+                // Receiver drop cancels the old-fork RPC future. Survivors get a fresh snapshot.
+            } else {
+                self.snapshot_tasks.push(task);
+            }
+        }
+        for id in removed {
+            self.snapshot_queue.remove(&id);
+            self.token_retry_attempts.remove(&id);
+        }
+        if deltas.revert {
+            self.buffered_deltas.clear();
+        }
+    }
+
+    /// Parks a pool whose tokens are pending on the server, doubling the wait on each miss.
+    fn park_for_tokens(&mut self, id: String) {
+        let attempts = self
+            .token_retry_attempts
+            .entry(id.clone())
+            .or_insert(0);
+        let delay = TOKEN_METADATA_RETRY_DELAY
+            .saturating_mul(1u32 << (*attempts).min(16))
+            .min(TOKEN_METADATA_MAX_RETRY_DELAY);
+        *attempts = attempts.saturating_add(1);
+        self.snapshot_queue
+            .insert(id, SnapshotStatus::WaitingForTokens(tokio::time::Instant::now() + delay));
+    }
+
+    /// Ready tokens are cached so a retry or a later snapshot can skip the token endpoint.
+    /// Deltas carry every token created on the chain, tracked or not, so this grows with chain
+    /// history rather than with the tracked set; entries are small and never rewritten.
+    fn remember_tokens(&self, tokens: &HashMap<Bytes, Token>) {
+        let mut known = self
+            .tokens
+            .write()
+            .expect("token metadata lock poisoned");
+        for (address, token) in tokens {
+            if token.metadata_status.is_ready() {
+                known.insert(address.clone(), token.clone());
+            }
+        }
     }
 
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
@@ -1218,7 +1453,7 @@ mod test {
         },
         protocol::{ProtocolComponent, ProtocolComponentState},
         token::Token,
-        Chain,
+        Chain, ChangeType,
     };
     use uuid::Uuid;
 
@@ -1365,7 +1600,20 @@ mod test {
         deltas_client: Option<MockDeltasClient>,
     ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, ArcDeltasClient<MockDeltasClient>>
     {
-        let rpc_client = ArcRPCClient(Arc::new(rpc_client.unwrap_or_default()));
+        let mut rpc_client = rpc_client.unwrap_or_default();
+        rpc_client
+            .expect_get_tokens()
+            .returning(|params| {
+                let tokens: Vec<_> = params
+                    .addresses()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|address| Token::new(address, "TEST", 18, 0, &[], Chain::Ethereum, 100))
+                    .collect();
+                let count = tokens.len() as i64;
+                Ok(Page::new(tokens, count, 0, 1000))
+            });
+        let rpc_client = ArcRPCClient(Arc::new(rpc_client));
         let deltas_client = ArcDeltasClient(Arc::new(deltas_client.unwrap_or_default()));
 
         ProtocolStateSynchronizer::new(
@@ -1408,6 +1656,7 @@ mod test {
         rpc.expect_get_snapshots()
             .returning(move |_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: state_snapshot_native()
                         .into_iter()
                         .map(|state| {
@@ -1435,6 +1684,7 @@ mod test {
         let exp = StateSyncMessage {
             header: header.clone(),
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: state_snapshot_native()
                     .into_iter()
                     .map(|state| {
@@ -1469,6 +1719,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -1476,7 +1727,7 @@ mod test {
             retrieve_balances: true,
             include_tvl: false,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -1500,6 +1751,7 @@ mod test {
         rpc.expect_get_snapshots()
             .returning(move |_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: state_snapshot_native()
                         .into_iter()
                         .map(|state| {
@@ -1527,6 +1779,7 @@ mod test {
         let exp = StateSyncMessage {
             header: header.clone(),
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: state_snapshot_native()
                     .into_iter()
                     .map(|state| {
@@ -1561,6 +1814,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -1568,7 +1822,7 @@ mod test {
             retrieve_balances: true,
             include_tvl: true,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -1655,6 +1909,7 @@ mod test {
             .returning(move |_request, _chunk_size, _concurrency| {
                 let vm_storage_accounts = state_snapshot_vm();
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component1".to_string(),
                         ComponentWithState {
@@ -1701,6 +1956,7 @@ mod test {
         let exp = StateSyncMessage {
             header: header.clone(),
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: [(
                     component.id.clone(),
                     ComponentWithState {
@@ -1741,6 +1997,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -1748,7 +2005,7 @@ mod test {
             retrieve_balances: false,
             include_tvl: false,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -1777,6 +2034,7 @@ mod test {
             .returning(move |_request, _chunk_size, _concurrency| {
                 let vm_storage_accounts = state_snapshot_vm();
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component1".to_string(),
                         ComponentWithState {
@@ -1808,6 +2066,7 @@ mod test {
         let exp = StateSyncMessage {
             header: header.clone(),
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: [(
                     component.id.clone(),
                     ComponentWithState {
@@ -1846,6 +2105,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -1853,7 +2113,7 @@ mod test {
             retrieve_balances: false,
             include_tvl: true,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -1898,6 +2158,7 @@ mod test {
             .times(1)
             .returning(move |_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component2".to_string(),
                         ComponentWithState {
@@ -1949,6 +2210,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -1956,7 +2218,7 @@ mod test {
             retrieve_balances: true,
             include_tvl: false,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -2013,6 +2275,7 @@ mod test {
             )
             .returning(move |_request, _chunk_size, _concurrency| {
                 let snap = Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component3".to_string(),
                         ComponentWithState {
@@ -2062,6 +2325,7 @@ mod test {
             .expect_get_snapshots()
             .returning(|_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [
                         (
                             "Component1".to_string(),
@@ -2267,6 +2531,7 @@ mod test {
                 ..Default::default()
             },
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: [
                     (
                         "Component1".to_string(),
@@ -2358,6 +2623,7 @@ mod test {
                 ..Default::default()
             },
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: [(
                     "Component3".to_string(),
                     ComponentWithState {
@@ -2425,6 +2691,7 @@ mod test {
             )
             .returning(move |_request, _chunk_size, _concurrency| {
                 let snap = Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component3".to_string(),
                         ComponentWithState {
@@ -2469,6 +2736,7 @@ mod test {
             .expect_get_snapshots()
             .returning(|_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [
                         (
                             "Component1".to_string(),
@@ -2682,6 +2950,7 @@ mod test {
                 ..Default::default()
             },
             snapshots: Snapshot {
+                tokens: Default::default(),
                 states: [(
                     "Component3".to_string(),
                     ComponentWithState {
@@ -3567,6 +3836,445 @@ mod test {
         }
     }
 
+    #[tokio::test]
+    async fn pending_pool_gets_fresh_metadata_and_snapshot_on_retry() {
+        let mut rpc = make_mock_client();
+        let first = Bytes::from("0x01");
+        let second = Bytes::from("0x02");
+        let pending = Token::pending(&second, Chain::Ethereum);
+        let ready = Token::new(&second, "RECOVERED", 6, 0, &[Some(30_000)], Chain::Ethereum, 100);
+        let mut sequence = mockall::Sequence::new();
+        rpc.expect_get_tokens()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .return_once(move |_| Ok(Page::new(vec![pending], 1, 0, 1000)));
+        rpc.expect_get_tokens()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .return_once(move |_| Ok(Page::new(vec![ready], 1, 0, 1000)));
+        rpc.expect_get_snapshots()
+            .times(2)
+            .returning(|request, _, _| {
+                assert!(!request.components.is_empty());
+                Ok(Snapshot {
+                    states: request
+                        .components
+                        .iter()
+                        .map(|(id, component)| {
+                            (
+                                id.clone(),
+                                ComponentWithState {
+                                    component: component.clone(),
+                                    state: ProtocolComponentState::new(
+                                        id,
+                                        HashMap::new(),
+                                        HashMap::new(),
+                                    ),
+                                    entrypoints: vec![],
+                                    component_tvl: None,
+                                },
+                            )
+                        })
+                        .collect(),
+                    ..Default::default()
+                })
+            });
+        let pool_contract = Bytes::from("0xaa");
+        let entrypoint_contract = Bytes::from("0xee");
+        let components: HashMap<_, _> = [
+            ("existing", first.clone(), vec![]),
+            ("new", second.clone(), vec![pool_contract.clone()]),
+        ]
+        .into_iter()
+        .map(|(id, token, contract_addresses)| {
+            (
+                id.to_string(),
+                ProtocolComponent {
+                    id: id.into(),
+                    tokens: vec![token],
+                    contract_addresses,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+        let params = FetchSnapshotParams {
+            tokens: Arc::new(RwLock::new(HashMap::from([(
+                first.clone(),
+                Token::new(&first, "KNOWN", 18, 0, &[], Chain::Ethereum, 100),
+            )]))),
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".into(),
+            block_number: 10,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+        let (initial, _, contract_ids, pending) = fetch_snapshot(
+            &rpc,
+            components.clone(),
+            HashSet::from([entrypoint_contract.clone()]),
+            &params,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending, vec!["new"]);
+        assert!(initial.states.contains_key("existing"));
+        assert!(!initial.states.contains_key("new"));
+        // A parked pool must not install its contracts or leak its pending token.
+        assert!(!contract_ids.contains(&pool_contract));
+        assert!(!initial.tokens.contains_key(&second));
+        let (recovered, _, contract_ids, pending) = fetch_snapshot(
+            &rpc,
+            components,
+            HashSet::from([entrypoint_contract.clone()]),
+            &FetchSnapshotParams { block_number: 12, ..params },
+        )
+        .await
+        .unwrap();
+        assert!(pending.is_empty());
+        assert!(recovered.states.contains_key("new"));
+        assert_eq!(recovered.tokens[&second].decimals, 6);
+        // With nothing parked the caller's contract set is used as-is.
+        assert!(contract_ids.contains(&entrypoint_contract));
+    }
+
+    #[tokio::test]
+    async fn metadata_retry_needs_no_new_tvl_event_and_catches_up_buffered_deltas() {
+        let mut sync = with_mocked_clients(true, false, None, None);
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["pool".into()],
+            snapshot_block: 10,
+            receiver,
+        });
+        tx.send(Ok(SnapshotFetchResult {
+            pending_components: vec!["pool".into()],
+            components: HashMap::new(),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot::default(),
+            snapshot_block: 10,
+        }))
+        .ok()
+        .unwrap();
+        assert!(sync
+            .drain_completed_snapshots()
+            .states
+            .is_empty());
+        assert!(!sync
+            .component_tracker
+            .components
+            .contains_key("pool"));
+        assert!(sync
+            .take_snapshot_retries(tokio::time::Instant::now())
+            .is_empty());
+        assert_eq!(
+            sync.take_snapshot_retries(
+                tokio::time::Instant::now() + TOKEN_METADATA_RETRY_DELAY + Duration::from_secs(1)
+            ),
+            vec!["pool"]
+        );
+
+        let component = ProtocolComponent { id: "pool".into(), ..Default::default() };
+        // The delta at the snapshot block is already reflected in the snapshot and must be
+        // skipped; only the one after it may be applied.
+        for (block, attribute, value) in [(11, "reserve0", 500u64), (12, "reserve1", 900u64)] {
+            let mut delta = make_block_changes(block, None);
+            delta.state_deltas.insert(
+                "pool".into(),
+                tycho_common::models::protocol::ProtocolComponentStateDelta {
+                    component_id: "pool".into(),
+                    updated_attributes: HashMap::from([(attribute.into(), Bytes::from(value))]),
+                    ..Default::default()
+                },
+            );
+            sync.buffered_deltas.push(delta);
+        }
+        let snapshot = Snapshot {
+            states: HashMap::from([(
+                "pool".into(),
+                ComponentWithState {
+                    component: component.clone(),
+                    state: ProtocolComponentState::new(
+                        "pool",
+                        HashMap::from([("reserve0".into(), Bytes::from(100u64))]),
+                        HashMap::new(),
+                    ),
+                    entrypoints: vec![],
+                    component_tvl: None,
+                },
+            )]),
+            ..Default::default()
+        };
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["pool".into()],
+            snapshot_block: 11,
+            receiver,
+        });
+        tx.send(Ok(SnapshotFetchResult {
+            pending_components: vec![],
+            components: HashMap::from([("pool".into(), component)]),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot,
+            snapshot_block: 11,
+        }))
+        .ok()
+        .unwrap();
+        let recovered = sync.drain_completed_snapshots();
+        let attributes = &recovered.states["pool"]
+            .state
+            .attributes;
+        assert_eq!(attributes["reserve0"], Bytes::from(100u64));
+        assert_eq!(attributes["reserve1"], Bytes::from(900u64));
+        assert!(sync
+            .component_tracker
+            .components
+            .contains_key("pool"));
+    }
+
+    #[tokio::test]
+    async fn reorg_cancels_old_snapshot_and_removal_clears_pending_retry() {
+        let mut sync = with_mocked_clients(true, false, None, None);
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["survivor".into(), "removed".into()],
+            snapshot_block: 10,
+            receiver,
+        });
+        sync.snapshot_queue.insert(
+            "removed".into(),
+            SnapshotStatus::WaitingForTokens(tokio::time::Instant::now()),
+        );
+        let mut delta = make_block_changes(11, None);
+        delta.revert = true;
+        delta
+            .component_tvl
+            .insert("removed".into(), 0.0);
+        sync.buffered_deltas.push(delta.clone());
+        sync.invalidate_pending_snapshots(&delta);
+        assert!(tx.is_closed());
+        assert!(sync.snapshot_tasks.is_empty());
+        assert!(sync.buffered_deltas.is_empty());
+        assert!(!sync
+            .snapshot_queue
+            .contains_key("removed"));
+        assert_eq!(sync.snapshot_queue["survivor"], SnapshotStatus::RetryNext);
+    }
+
+    #[tokio::test]
+    async fn reverted_creation_clears_parked_pool_and_in_flight_task() {
+        // The server reports a reverted creation in `deleted_protocol_components`, not as a
+        // `Deletion` change and not through TVL. Without handling it here a parked pool would
+        // be re-checked forever.
+        let mut sync = with_mocked_clients(true, false, None, None);
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["reverted".into()],
+            snapshot_block: 10,
+            receiver,
+        });
+        sync.park_for_tokens("parked".into());
+        let mut delta = make_block_changes(11, None);
+        delta.revert = false;
+        delta
+            .deleted_protocol_components
+            .insert("parked".into(), ProtocolComponent::default());
+        delta
+            .deleted_protocol_components
+            .insert("reverted".into(), ProtocolComponent::default());
+        sync.invalidate_pending_snapshots(&delta);
+        assert!(tx.is_closed());
+        assert!(sync.snapshot_tasks.is_empty());
+        assert!(sync.snapshot_queue.is_empty());
+        assert!(sync.token_retry_attempts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_deletion_clears_parked_pool_and_in_flight_task() {
+        let mut sync = with_mocked_clients(true, false, None, None);
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["deleted".into()],
+            snapshot_block: 10,
+            receiver,
+        });
+        sync.park_for_tokens("parked".into());
+        let mut delta = make_block_changes(11, None);
+        delta.revert = false;
+        for id in ["parked", "deleted"] {
+            delta.new_protocol_components.insert(
+                id.into(),
+                ProtocolComponent {
+                    id: id.into(),
+                    change: ChangeType::Deletion,
+                    ..Default::default()
+                },
+            );
+        }
+        sync.invalidate_pending_snapshots(&delta);
+        assert!(tx.is_closed());
+        assert!(sync.snapshot_tasks.is_empty());
+        assert!(sync.snapshot_queue.is_empty());
+        assert!(sync.token_retry_attempts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parked_pool_backoff_doubles_and_resets_on_admission() {
+        let mut sync = with_mocked_clients(true, false, None, None);
+        let retry_at = |queue: &HashMap<String, SnapshotStatus>| match queue["pool"] {
+            SnapshotStatus::WaitingForTokens(at) => at,
+            ref other => panic!("unexpected status {other:?}"),
+        };
+        // Pausing tokio's clock needs its `test-util` feature, which this crate does not
+        // enable. Every delay is a whole number of seconds and parking takes microseconds, so
+        // comparing whole seconds is exact.
+        let mut expected = TOKEN_METADATA_RETRY_DELAY;
+        let mut last_wait = Duration::ZERO;
+        for _ in 0..12 {
+            let now = tokio::time::Instant::now();
+            sync.park_for_tokens("pool".into());
+            last_wait = retry_at(&sync.snapshot_queue) - now;
+            assert_eq!(last_wait.as_secs(), expected.as_secs());
+            expected = (expected * 2).min(TOKEN_METADATA_MAX_RETRY_DELAY);
+        }
+        assert_eq!(last_wait.as_secs(), TOKEN_METADATA_MAX_RETRY_DELAY.as_secs());
+
+        // Admission through a completed snapshot resets the backoff.
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["pool".into()],
+            snapshot_block: 10,
+            receiver,
+        });
+        tx.send(Ok(SnapshotFetchResult {
+            pending_components: vec![],
+            components: HashMap::from([(
+                "pool".into(),
+                ProtocolComponent { id: "pool".into(), ..Default::default() },
+            )]),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot::default(),
+            snapshot_block: 10,
+        }))
+        .ok()
+        .unwrap();
+        sync.drain_completed_snapshots();
+        assert!(!sync
+            .token_retry_attempts
+            .contains_key("pool"));
+
+        let now = tokio::time::Instant::now();
+        sync.park_for_tokens("pool".into());
+        assert_eq!(
+            (retry_at(&sync.snapshot_queue) - now).as_secs(),
+            TOKEN_METADATA_RETRY_DELAY.as_secs()
+        );
+    }
+
+    #[tokio::test]
+    async fn late_component_ids_stay_pending_in_background_fetch() {
+        let mut rpc = make_mock_client();
+        rpc.expect_get_protocol_components()
+            .times(1)
+            .returning(|_| Ok(Page::new(vec![], 0, 0, 100)));
+        rpc.expect_get_snapshots().times(0);
+        let params = FetchSnapshotParams {
+            tokens: Default::default(),
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".into(),
+            block_number: 10,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+        let result = fetch_snapshot_background(rpc, vec!["late".into()], params)
+            .await
+            .unwrap();
+        assert_eq!(result.pending_components, vec!["late"]);
+        assert!(result.components.is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_message_drops_deltas_of_pools_parked_for_tokens() {
+        let token = Bytes::from("0x02");
+        let mut rpc_client = make_mock_client();
+        let pending = token.clone();
+        rpc_client
+            .expect_get_tokens()
+            .returning(move |_| {
+                Ok(Page::new(vec![Token::pending(&pending, Chain::Ethereum)], 1, 0, 1000))
+            });
+        let component_token = token.clone();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(move |_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        tokens: vec![component_token.clone()],
+                        ..Default::default()
+                    }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .times(0);
+        let mut deltas_client = MockDeltasClient::new();
+        let (tx, rx) = channel(1);
+        deltas_client
+            .expect_subscribe()
+            .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        deltas_client
+            .expect_unsubscribe()
+            .return_once(|_| Ok(()));
+        let mut sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        sync.initialize()
+            .await
+            .expect("Init failed");
+
+        let mut delta = make_block_changes(1, None);
+        delta.state_deltas.insert(
+            "Component1".into(),
+            tycho_common::models::protocol::ProtocolComponentStateDelta {
+                component_id: "Component1".into(),
+                updated_attributes: HashMap::from([("reserve0".into(), Bytes::from(1u64))]),
+                ..Default::default()
+            },
+        );
+        let (mut block_tx, mut block_rx) = channel::<SyncResult<StateSyncMessage<BlockHeader>>>(15);
+        let (end_tx, end_rx) = oneshot::channel();
+        let driver = async {
+            tx.send(delta)
+                .await
+                .expect("deltas channel closed");
+            let first = timeout(Duration::from_millis(200), block_rx.recv())
+                .await
+                .expect("waiting for first state msg timed out")
+                .expect("state sync block sender closed")
+                .expect("state sync errored");
+            end_tx
+                .send(())
+                .expect("close signal not received");
+            first
+        };
+        let (result, first) = tokio::join!(sync.state_sync(&mut block_tx, end_rx), driver);
+        assert!(result.is_ok());
+        assert!(first.snapshots.states.is_empty());
+        assert!(!first
+            .deltas
+            .expect("first message carries deltas")
+            .state_deltas
+            .contains_key("Component1"));
+        assert!(matches!(sync.snapshot_queue["Component1"], SnapshotStatus::WaitingForTokens(_)));
+    }
+
     /// Test that full block as first message in partial mode is accepted
     #[test_log::test(tokio::test)]
     async fn test_partial_mode_accepts_full_block_as_first_message() {
@@ -3720,6 +4428,7 @@ mod test {
         rpc.expect_get_snapshots()
             .returning(move |_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component1".to_string(),
                         ComponentWithState {
@@ -3765,6 +4474,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -3772,7 +4482,7 @@ mod test {
             retrieve_balances: true,
             include_tvl: false,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -3792,6 +4502,7 @@ mod test {
         rpc.expect_get_snapshots()
             .returning(move |_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [(
                         "Component1".to_string(),
                         ComponentWithState {
@@ -3837,6 +4548,7 @@ mod test {
             .into_iter()
             .collect();
         let params = FetchSnapshotParams {
+            tokens: Default::default(),
             chain: Chain::Ethereum,
             protocol_system: "uniswap-v2".to_string(),
             block_number: header.number,
@@ -3844,7 +4556,7 @@ mod test {
             retrieve_balances: true,
             include_tvl: false,
         };
-        let (snapshot, _, _) =
+        let (snapshot, _, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
                 .await
                 .expect("Retrieving snapshot failed");
@@ -3924,6 +4636,7 @@ mod test {
             )
             .returning(move |_request, _chunk_size, _concurrency| {
                 let snap = Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [
                         (
                             "BrandNew".to_string(),
@@ -3970,6 +4683,7 @@ mod test {
             .expect_get_snapshots()
             .returning(|_request, _chunk_size, _concurrency| {
                 Ok(Snapshot {
+                    tokens: Default::default(),
                     states: [
                         (
                             "Component1".to_string(),
@@ -4162,6 +4876,7 @@ mod test {
         // Build the snapshot at block 5: one component with attributes and balances,
         // one VM contract with slots and native balance.
         let mut snapshot = Snapshot {
+            tokens: Default::default(),
             states: [(
                 "comp1".to_string(),
                 ComponentWithState {

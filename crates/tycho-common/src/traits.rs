@@ -186,8 +186,9 @@ pub trait TokenPreProcessor: Send + Sync {
     /// * `block` - The block tag at which the information should be retrieved.
     ///
     /// # Returns
-    /// A vector of `CurrencyToken` objects, each containing the processed information for the
-    /// token.
+    /// Tokens in first-occurrence input order. Implementations may deduplicate addresses and
+    /// return pending identities when enrichment cannot complete. Callers must persist pending
+    /// identities for recovery and must not use their numeric fields for pricing or admission.
     async fn get_tokens(
         &self,
         addresses: Vec<Bytes>,

@@ -56,10 +56,11 @@
 //!    insert/update methods), it applies the same change to the cache. New tokens indexed by the
 //!    extractor are queryable immediately.
 //! 3. **Delta refresh** — a background task polls every minute for token rows whose `modified_ts`
-//!    changed (see [`TokenCache::refresh`]). This picks up writers in *other* processes — in
-//!    practice the `analyze-tokens` cronjob updating quality — which write-through cannot see. This
-//!    is why the `token(modified_ts)` index migration exists: without it every poll would scan the
-//!    whole token table.
+//!    changed (see [`TokenCache::refresh`]). This picks up writers in *other* processes — the
+//!    `analyze-tokens` cronjob updating quality, and the indexer's token-metadata recovery worker
+//!    completing `Pending` rows — which write-through cannot see. This is why the
+//!    `token(modified_ts)` index migration exists: without it every poll would scan the whole token
+//!    table.
 //!
 //! Known limit: the delta refresh covers the token table only, so `last_traded`
 //! converges through write-through alone. A process that serves queries without
@@ -155,6 +156,10 @@ impl ChainTokenStore {
                     return;
                 }
                 let old = &self.tokens[idx as usize];
+                // A refresh may have read Pending just before recovery committed.
+                if old.metadata_status.is_ready() && !token.metadata_status.is_ready() {
+                    return;
+                }
                 if old.quality != token.quality {
                     if let Some(bitmap) = self
                         .quality_index
@@ -465,7 +470,9 @@ impl TokenCache {
     }
 
     /// Inserts tokens that are not yet cached; existing entries are left untouched,
-    /// mirroring the `ON CONFLICT DO NOTHING` insert semantics.
+    /// mirroring the `ON CONFLICT DO NOTHING` insert semantics. Every later block re-inserts
+    /// the tokens it references, so this is also what keeps a stale `Pending` identity from
+    /// overwriting a repaired entry.
     pub(crate) fn add_tokens(&self, tokens: &[Token]) {
         self.write_tokens(tokens, false);
     }
@@ -619,21 +626,28 @@ impl TokenCache {
     }
 }
 
-fn to_model_token(orm_token: &orm::Token, address: &Address, chain: Chain) -> Token {
+pub(super) fn to_model_token(orm_token: &orm::Token, address: &Address, chain: Chain) -> Token {
     let gas_usage: Vec<_> = orm_token
         .gas
         .iter()
         .map(|gas| gas.map(|value| value as u64))
         .collect();
-    Token::new(
-        address,
-        orm_token.symbol.as_str(),
-        orm_token.decimals as u32,
-        orm_token.tax as u64,
-        gas_usage.as_slice(),
-        chain,
-        orm_token.quality as u32,
-    )
+    Token {
+        metadata_status: if orm_token.metadata_pending {
+            tycho_common::models::token::TokenMetadataStatus::Pending
+        } else {
+            Default::default()
+        },
+        ..Token::new(
+            address,
+            orm_token.symbol.as_str(),
+            orm_token.decimals as u32,
+            orm_token.tax as u64,
+            gas_usage.as_slice(),
+            chain,
+            orm_token.quality as u32,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -699,6 +713,33 @@ mod test {
 
         assert_eq!(result.total, Some(3));
         assert_eq!(result_symbols(&result), ["TOK0", "TOK1", "TOK2"]);
+    }
+
+    #[test]
+    fn repaired_metadata_survives_stale_refresh_and_block_insert() {
+        let cache = TokenCache::new_for_tests(&[Chain::Ethereum]);
+        let mut ready = make_token(0, 100);
+        ready.decimals = 6;
+        let pending = Token::pending(&ready.address, ready.chain);
+        cache.add_tokens(std::slice::from_ref(&pending));
+        cache.upsert_tokens(&[ready]);
+        cache.add_tokens(std::slice::from_ref(&pending));
+        cache.upsert_tokens(&[pending]);
+        let result = cache
+            .query_tokens(&base_query())
+            .unwrap();
+        assert!(result.entity[0]
+            .metadata_status
+            .is_ready());
+        assert_eq!(result.entity[0].decimals, 6);
+        assert_eq!(result.entity[0].quality, 100);
+        let high = cache
+            .query_tokens(&TokenQuery {
+                quality_range: QualityRange::min_only(100),
+                ..base_query()
+            })
+            .unwrap();
+        assert_eq!(high.entity.len(), 1);
     }
 
     #[test]

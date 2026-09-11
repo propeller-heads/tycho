@@ -165,7 +165,13 @@ class ProtocolComponent(BaseModel):
     created_at: datetime
 
 
+class TokenMetadataStatus(str, Enum):
+    ready = "ready"
+    pending = "pending"
+
+
 class ResponseToken(BaseModel):
+    metadata_status: TokenMetadataStatus = TokenMetadataStatus.ready
     chain: Union[Chain, CustomChain]
     address: HexBytes = Field(..., example="0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")
     symbol: str = Field(..., example="WETH")
@@ -230,6 +236,7 @@ class ResponseAccount(BaseModel):
 
 
 class Snapshot(BaseModel):
+    tokens: Dict[HexBytes, ResponseToken] = Field(default_factory=dict)
     states: Dict[str, ComponentWithState] = Field(default_factory=dict)
     vm_storage: Dict[HexBytes, ResponseAccount] = Field(default_factory=dict)
 

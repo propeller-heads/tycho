@@ -660,6 +660,88 @@ impl EthereumRpcClient {
             })
     }
 
+    /// Batches two independent calls when the configured batch size permits it.
+    /// Each item retains its own result: one reverting call must not discard the other.
+    #[instrument(level = "debug", skip(self, requests))]
+    pub(crate) async fn eth_call_pair(
+        &self,
+        requests: [TransactionRequest; 2],
+        block: BlockNumberOrTag,
+    ) -> Result<[Result<Bytes, RPCError>; 2], RPCError> {
+        if self
+            .batching
+            .max_batch_size()
+            .unwrap_or(0) <
+            2
+        {
+            // Without a batch there is no shared transport attempt to account for, so each
+            // call keeps its own full retry budget instead of the shared accounting below.
+            let (first, second) = tokio::join!(
+                self.eth_call(requests[0].clone(), block),
+                self.eth_call(requests[1].clone(), block),
+            );
+            return Ok([first, second]);
+        }
+
+        let mut batch_attempts = 0;
+        let (first, second) = self
+            .retry_policy
+            .call_with_retry(|| {
+                batch_attempts += 1;
+                async {
+                    let mut batch = self.inner.new_batch();
+                    let first = batch.add_call::<_, Bytes>("eth_call", &(&requests[0], block))?;
+                    let second = batch.add_call::<_, Bytes>("eth_call", &(&requests[1], block))?;
+                    batch.send().await?;
+                    Ok((first.await, second.await))
+                }
+            })
+            .await
+            .map_err(|e| RPCError::from_alloy("Failed to send eth_call batch", e))?;
+
+        // Retry only a failed item, using the same classification/backoff as eth_call.
+        // Transport retries already consumed part of each item's retry budget.
+        let remaining_retries = self
+            .get_retry_config()
+            .max_retries
+            .saturating_sub(batch_attempts - 1);
+        let (first, second) = tokio::join!(
+            self.retry_batched_eth_call(&requests[0], block, first, remaining_retries),
+            self.retry_batched_eth_call(&requests[1], block, second, remaining_retries),
+        );
+        Ok([first, second])
+    }
+
+    async fn retry_batched_eth_call(
+        &self,
+        request: &TransactionRequest,
+        block: BlockNumberOrTag,
+        initial: TransportResult<Bytes>,
+        remaining_retries: usize,
+    ) -> Result<Bytes, RPCError> {
+        let mut initial = Some(initial);
+        let policy: RetryPolicy =
+            RPCRetryConfig { max_retries: remaining_retries, ..self.get_retry_config() }.into();
+        policy
+            .call_with_retry(|| {
+                let initial = initial.take();
+                async move {
+                    match initial {
+                        Some(result) => result,
+                        None => {
+                            self.inner
+                                .request("eth_call", &(request, block))
+                                .await
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(format!("Failed eth_call batch item for block {block}"), e)
+            })
+    }
+
     /// Executes `eth_call` with EVM state overrides.
     ///
     /// Injects arbitrary bytecode or storage at specified addresses before the call executes.
@@ -1155,6 +1237,218 @@ mod tests {
 
     fn parse_address(address_str: &str) -> Address {
         Address::from_str(address_str).expect("failed to parse address")
+    }
+
+    fn paired_calls() -> [TransactionRequest; 2] {
+        [
+            TransactionRequest::default().to(Address::repeat_byte(1)),
+            TransactionRequest::default().to(Address::repeat_byte(2)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_eth_call_pair_restores_response_order() {
+        let mut server = mockito::Server::new_async().await;
+        let batch = server
+            .mock("POST", "/")
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|request| {
+                let requests: Vec<Value> = serde_json::from_slice(request.body().unwrap()).unwrap();
+                assert_eq!(requests.len(), 2);
+                for request in &requests {
+                    assert_eq!(request["method"], "eth_call");
+                    assert_eq!(request["params"][1], "0x64");
+                }
+                json!([
+                    {"jsonrpc": "2.0", "id": requests[1]["id"], "result": "0x02"},
+                    {"jsonrpc": "2.0", "id": requests[0]["id"], "result": "0x01"},
+                ])
+                .to_string()
+                .into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let client = EthereumRpcClient::new(&server.url()).unwrap();
+        let [first, second] = client
+            .eth_call_pair(paired_calls(), BlockNumberOrTag::Number(100))
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap(), Bytes::from(vec![1]));
+        assert_eq!(second.unwrap(), Bytes::from(vec![2]));
+        batch.assert_async().await;
+    }
+
+    #[rstest]
+    #[case::disabled(RPCBatchingConfig::Disabled)]
+    #[case::size_one(RPCBatchingConfig::Enabled {
+        max_batch_size: 1, storage_slot_max_batch_size_override: None,
+    })]
+    #[tokio::test]
+    async fn test_eth_call_pair_respects_batch_configuration(#[case] config: RPCBatchingConfig) {
+        let mut server = mockito::Server::new_async().await;
+        let calls = server
+            .mock("POST", "/")
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|request| {
+                let request: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                assert!(request.is_object(), "batching is disabled for this request");
+                json!({"jsonrpc": "2.0", "id": request["id"], "result": "0x01"})
+                    .to_string()
+                    .into_bytes()
+            })
+            .expect(2)
+            .create_async()
+            .await;
+        let client = EthereumRpcClient::new(&server.url())
+            .unwrap()
+            .with_batching(config);
+        let results = client
+            .eth_call_pair(paired_calls(), BlockNumberOrTag::Latest)
+            .await
+            .unwrap();
+        for result in results {
+            assert_eq!(result.unwrap(), Bytes::from(vec![1]));
+        }
+        calls.assert_async().await;
+    }
+
+    #[rstest]
+    #[case::retryable(Some(-32005), true)]
+    #[case::missing_response(None, true)]
+    #[case::permanent(Some(3), false)]
+    #[tokio::test]
+    async fn test_eth_call_pair_preserves_success_and_retries_only_transient_failure(
+        #[case] code: Option<i64>,
+        #[case] retryable: bool,
+    ) {
+        let mut server = mockito::Server::new_async().await;
+        let batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[".into()))
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let requests: Vec<Value> = serde_json::from_slice(request.body().unwrap()).unwrap();
+                let mut responses =
+                    vec![json!({"jsonrpc": "2.0", "id": requests[0]["id"], "result": "0x01"})];
+                if let Some(code) = code {
+                    responses.push(json!({"jsonrpc": "2.0", "id": requests[1]["id"],
+                        "error": {"code": code, "message": "failed call"}}));
+                }
+                serde_json::to_vec(&responses).unwrap()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let retry = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "eth_call", "params": [{"to": Address::repeat_byte(2)}, "latest"],
+            })))
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|request| {
+                let request: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                json!({"jsonrpc": "2.0", "id": request["id"], "result": "0x02"})
+                    .to_string()
+                    .into_bytes()
+            })
+            .expect(usize::from(retryable))
+            .create_async()
+            .await;
+        let client = EthereumRpcClient::new(&server.url())
+            .unwrap()
+            .with_retry(RPCRetryConfig::new(1, 1, 1));
+        let [first, second] = client
+            .eth_call_pair(paired_calls(), BlockNumberOrTag::Latest)
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap(), Bytes::from(vec![1]));
+        if retryable {
+            assert_eq!(second.unwrap(), Bytes::from(vec![2]));
+        } else {
+            assert!(second
+                .unwrap_err()
+                .is_execution_reverted());
+        }
+        batch.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_eth_call_pair_bounds_transport_retries() {
+        let mut server = mockito::Server::new_async().await;
+        let failure = server
+            .mock("POST", "/")
+            .with_status(503)
+            .expect(3)
+            .create_async()
+            .await;
+        let client = EthereumRpcClient::new(&server.url())
+            .unwrap()
+            .with_retry(RPCRetryConfig::new(2, 1, 1));
+        assert!(client
+            .eth_call_pair(paired_calls(), BlockNumberOrTag::Latest)
+            .await
+            .is_err());
+        failure.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_eth_call_pair_shares_retry_budget_between_transport_and_items() {
+        let mut server = mockito::Server::new_async().await;
+        // Matching mocks are consumed in insertion order until their expected hits.
+        let transport_failure = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[".into()))
+            .with_status(503)
+            .expect(1)
+            .create_async()
+            .await;
+        let partial = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[".into()))
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|request| {
+                let requests: Vec<Value> = serde_json::from_slice(request.body().unwrap()).unwrap();
+                json!([
+                    {"jsonrpc": "2.0", "id": requests[0]["id"], "result": "0x01"},
+                    {"jsonrpc": "2.0", "id": requests[1]["id"],
+                     "error": {"code": -32005, "message": "rate limited"}},
+                ])
+                .to_string()
+                .into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let item_failure = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "eth_call", "params": [{"to": Address::repeat_byte(2)}, "latest"],
+            })))
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|request| {
+                let request: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                json!({"jsonrpc": "2.0", "id": request["id"],
+                    "error": {"code": -32005, "message": "rate limited"}})
+                .to_string()
+                .into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let client = EthereumRpcClient::new(&server.url())
+            .unwrap()
+            .with_retry(RPCRetryConfig::new(2, 1, 1));
+        let [first, second] = client
+            .eth_call_pair(paired_calls(), BlockNumberOrTag::Latest)
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap(), Bytes::from(vec![1]));
+        assert!(second.is_err());
+        transport_failure.assert_async().await;
+        partial.assert_async().await;
+        item_failure.assert_async().await;
     }
 
     #[tokio::test]

@@ -202,7 +202,10 @@ where
     /// own token metadata for decoding.
     pub async fn set_tokens(&self, tokens: HashMap<Bytes, Token>) {
         let mut guard = self.state.write().await;
-        guard.tokens = tokens;
+        guard.tokens = tokens
+            .into_iter()
+            .filter(|(_, token)| token.metadata_status.is_ready())
+            .collect();
     }
 
     pub fn skip_state_decode_failures(&mut self, skip: bool) {
@@ -355,23 +358,22 @@ where
             .unwrap_or(false);
 
         for (protocol, protocol_msg) in msg.state_msgs.iter() {
-            // Add any new tokens
-            if let Some(deltas) = protocol_msg.deltas.as_ref() {
-                let mut state_guard = self.state.write().await;
-
-                let new_tokens = deltas
-                    .new_tokens
-                    .iter()
-                    .filter(|(addr, t)| {
-                        t.quality >= self.min_token_quality &&
-                            !state_guard.tokens.contains_key(*addr)
-                    })
-                    .map(|(addr, t)| (addr.clone(), t.clone()))
-                    .collect::<HashMap<Bytes, Token>>();
-
-                if !new_tokens.is_empty() {
-                    debug!(n = new_tokens.len(), "NewTokens");
-                    state_guard.tokens.extend(new_tokens);
+            // Snapshot metadata can arrive long after the creation delta, when deferred
+            // enrichment completes. Readiness is mandatory even with min_token_quality = 0.
+            {
+                let mut state = self.state.write().await;
+                let delta_tokens = protocol_msg
+                    .deltas
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|deltas| deltas.new_tokens.iter());
+                for (address, token) in delta_tokens.chain(protocol_msg.snapshots.tokens.iter()) {
+                    if token.metadata_status.is_ready() && token.quality >= self.min_token_quality {
+                        state
+                            .tokens
+                            .entry(address.clone())
+                            .or_insert_with(|| token.clone());
+                    }
                 }
             }
 
@@ -618,7 +620,6 @@ where
                             }
                             None => {
                                 count_token_skips += 1;
-                                msg_failed_components.insert(id.clone());
                                 debug!("Token not found {}, ignoring pool {:x?}", token, id);
                                 continue 'snapshot_loop;
                             }
@@ -1575,6 +1576,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_metadata_defers_pool_even_at_zero_quality_and_snapshot_repairs_it() {
+        let mut decoder = setup_decoder(false).await;
+        decoder.min_token_quality(0);
+        let mut msg = load_test_msg("uniswap_v2_snapshot");
+        let addresses: Vec<_> = msg
+            .state_msgs
+            .values()
+            .flat_map(|m| {
+                m.snapshots
+                    .states
+                    .values()
+                    .flat_map(|s| s.component.tokens.clone())
+            })
+            .collect();
+        let pending: HashMap<_, _> = addresses
+            .iter()
+            .map(|address| (address.clone(), Token::pending(address, Chain::Ethereum)))
+            .collect();
+        decoder
+            .set_tokens(pending.clone())
+            .await;
+        for state_msg in msg.state_msgs.values_mut() {
+            state_msg.snapshots.tokens = pending.clone();
+        }
+        assert!(decoder
+            .decode(&msg)
+            .await
+            .unwrap()
+            .states
+            .is_empty());
+        assert!(decoder
+            .state
+            .read()
+            .await
+            .tokens
+            .is_empty());
+        assert!(decoder
+            .state
+            .read()
+            .await
+            .failed_components
+            .is_empty());
+
+        for state_msg in msg.state_msgs.values_mut() {
+            state_msg.snapshots.tokens = addresses
+                .iter()
+                .map(|address| {
+                    (
+                        address.clone(),
+                        Token::new(
+                            address,
+                            "RECOVERED",
+                            18,
+                            0,
+                            &[Some(30_000)],
+                            Chain::Ethereum,
+                            100,
+                        ),
+                    )
+                })
+                .collect();
+        }
+        let recovered = decoder.decode(&msg).await.unwrap();
+        assert_eq!(recovered.states.len(), 1);
+        assert!(decoder
+            .state
+            .read()
+            .await
+            .failed_components
+            .is_empty());
+        // A pending token announced by a delta is deferred the same way, even at zero quality.
+        let mut delta = load_test_msg("uniswap_v2_delta");
+        let late_token = Bytes::from("0x0a").lpad(20, 0);
+        for state_msg in delta.state_msgs.values_mut() {
+            state_msg
+                .deltas
+                .as_mut()
+                .expect("delta message")
+                .new_tokens
+                .insert(late_token.clone(), Token::pending(&late_token, Chain::Ethereum));
+        }
+        assert_eq!(
+            decoder
+                .decode(&delta)
+                .await
+                .unwrap()
+                .states
+                .len(),
+            1
+        );
+        assert!(!decoder
+            .state
+            .read()
+            .await
+            .tokens
+            .contains_key(&late_token));
+    }
+
+    #[tokio::test]
     async fn test_decode_token_creation_delta_with_existing_proxy() {
         let decoder = setup_decoder(true).await;
         let msg = load_test_msg("uniswap_v2_delta_token_creation");
@@ -1617,6 +1717,13 @@ mod tests {
             .expect("decode failure");
 
         assert_eq!(res1.states.len(), 0);
+        // A missing token is temporary: the pool must stay eligible for a later snapshot.
+        assert!(decoder
+            .state
+            .read()
+            .await
+            .failed_components
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1656,6 +1763,12 @@ mod tests {
                     panic!("Expected failures to be raised")
                 } else {
                     assert_eq!(res.states.len(), 0);
+                    assert!(decoder
+                        .state
+                        .read()
+                        .await
+                        .failed_components
+                        .contains("0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852"));
                 }
             }
         }

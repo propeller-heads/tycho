@@ -206,7 +206,7 @@ where
     }
 
     /// Initialise the tracked contracts list from tracked components and their entrypoints
-    fn reinitialize_contracts(&mut self) {
+    pub(crate) fn reinitialize_contracts(&mut self) {
         // Add contracts from all tracked components
         self.contracts = self
             .components

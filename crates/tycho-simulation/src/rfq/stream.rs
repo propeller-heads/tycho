@@ -247,6 +247,7 @@ mod tests {
                         ProtocolComponent { protocol_system: name.clone(), ..Default::default() };
 
                     let snapshot = Snapshot {
+                        tokens: Default::default(),
                         states: HashMap::from([(
                             name.clone(),
                             ComponentWithState {

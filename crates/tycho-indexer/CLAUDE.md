@@ -22,6 +22,7 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
+  token_metadata_recovery.rs Background worker: retries enrichment for tokens left Pending by the hot-path budget
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -72,6 +73,9 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 2. Run post-processor if configured.
 3. Call `E::process_block_update()` (DCI — see below).
 4. Fetch metadata for any new token addresses via `T` (ERC-20 symbol / decimals over RPC).
+   With `TOKEN_ENRICHMENT_BUDGET_MS > 0` the whole batch shares one deadline; tokens that miss
+   it are stored as `Pending` and repaired later by `token_metadata_recovery` (see
+   `docs/token-metadata-recovery.md`). Budget `0` (default) keeps the legacy blocking fetch.
 5. Insert `BlockChanges` into `ReorgBuffer`.
 6. When `ReorgBuffer` has `>= commit_batch_size` blocks before `finalized_block_height`, drain them
    and schedule a DB write (see Persistence).

@@ -260,7 +260,14 @@ impl ExtractorRunner {
                                     })?;
                                     for msg in msgs {
                                         trace!("Propagating block data message.");
+                                        let block_ts = msg.block.ts.and_utc().timestamp() as f64;
                                         Self::propagate_msg(&self.subscriptions, msg).await;
+                                        // A heartbeat or an incoming block is not evidence that the
+                                        // extractor produced fresh state. Set after fan-out completes;
+                                        // individual subscriber send failures are only logged.
+                                        gauge!("extractor_last_published_block_timestamp_seconds",
+                                            "chain" => id.chain.to_string(), "extractor" => id.name.to_string())
+                                            .set(block_ts);
                                     }
 
                                     let duration_ms = start_time.elapsed().as_millis() as f64;
