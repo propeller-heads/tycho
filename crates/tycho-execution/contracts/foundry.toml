@@ -10,7 +10,7 @@ via_ir = true
 # (protocols/testing/fixtures) are reproducible across Foundry versions.
 solc = '0.8.33'
 bytecode_hash = 'none'
-fs_permissions = [{ access = "read", path = "./test/assets" }, { access = "write", path = "./test" }]
+fs_permissions = [{ access = "read", path = "../../tycho-simulation/tests/assets" }, { access = "read", path = "./test/assets" }, { access = "write", path = "./test" }]
 
 [profile.production]
 src = 'src'

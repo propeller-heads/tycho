@@ -567,11 +567,15 @@ impl TestRunner {
                     build_spkg(substreams_yaml_path, Some(test.start_block), self.prebuilt_wasm)
                         .wrap_err("Failed to build spkg")?;
 
+                let stop_block = self.runtime.block_on(
+                    self.rpc_provider
+                        .get_block_header(test.stop_block),
+                )?;
                 tycho_runner
                     .run_tycho(
                         &spkg_path,
                         test.start_block,
-                        test.stop_block,
+                        &stop_block,
                         &config.protocol_type_names,
                         &config.protocol_system,
                         config.module_name.clone(),
