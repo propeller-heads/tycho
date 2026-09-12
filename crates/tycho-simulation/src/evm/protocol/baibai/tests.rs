@@ -256,3 +256,85 @@ async fn snapshot_decodes_roles_independently_of_token_order_and_requires_full_s
     .await
     .is_err());
 }
+
+#[test]
+fn bid_limits_stop_before_decreasing_proceeds_and_respect_custody() {
+    let fixture = fixture();
+    let mut state = state(&fixture, &fixture.scenarios[0]);
+    let wad = U256::from(10u64.pow(18));
+    state.words[2] =
+        U256::from(100_000_000u64) | (U256::from(10_000) << 128usize) | (U256::from(2) << 152usize);
+    state.words[3] = wad;
+    state.words[5] = U256::ZERO;
+    state.words[18] = (U256::from(1) << 214usize) |
+        (((U256::from(2) << 42usize) | U256::from(250_000_000)) << 88usize);
+    let tokens = tokens(&state);
+    for (filled, depth, custody, expected_output) in [
+        (0, 10_000, 1_000_000_000, 100_000_000),
+        (0, 10_000, 50_000_000, 50_000_000),
+        (1, 10_000, 1_000_000_000, 50_000_000),
+        (0, 2_500, 1_000_000_000, 50_000_000),
+        (2, 10_000, 1_000_000_000, 0),
+    ] {
+        state.words[5] = wad * U256::from(filled) / U256::from(2);
+        state.words[2] =
+            (state.words[2] & !(U256::from(65_535) << 128usize)) | (U256::from(depth) << 128usize);
+        state.words[31] = state.balances[1] - U256::from(custody);
+        let (limit, output) = state
+            .get_limits(state.tokens[0].clone(), state.tokens[1].clone())
+            .unwrap();
+        assert_eq!(output, BigUint::from(expected_output as u64));
+        if output != BigUint::ZERO {
+            assert!(limit <= big(wad - state.words[5]));
+            assert_eq!(
+                state
+                    .get_amount_out(limit, &tokens[0], &tokens[1])
+                    .unwrap()
+                    .amount,
+                output
+            );
+        } else {
+            assert_eq!(limit, BigUint::ZERO);
+        }
+    }
+}
+
+#[test]
+fn bid_limits_bound_rounded_proceeds_within_each_segment() {
+    let fixture = fixture();
+    let mut state = state(&fixture, &fixture.scenarios[0]);
+    // floor(0.6 * input) - ceil(0.5 * input) can decrease by one atom,
+    // even though the underlying marginal price is positive.
+    for knots in [vec![(100u64, 50u64)], vec![(37, 18), (100, 50)]] {
+        state.words[2] = U256::from(600_000_000_000_000_000u64) |
+            (U256::from(10_000) << 128usize) |
+            (U256::from(knots.len()) << 152usize);
+        state.words[3] = U256::from(1);
+        state.words[18] = knots
+            .iter()
+            .enumerate()
+            .fold(U256::ZERO, |packed, (i, &(q, c))| {
+                packed | (((U256::from(q) << 42usize) | U256::from(c)) << (172 - 84 * i))
+            });
+        for filled in 0..40 {
+            state.words[5] = U256::from(filled);
+            for custody in 1..10 {
+                state.words[31] = state.balances[1] - U256::from(custody);
+                let (limit, output) = state
+                    .get_limits(state.tokens[0].clone(), state.tokens[1].clone())
+                    .unwrap();
+                let side = state.side(false).unwrap();
+                let limit = super::math::uint(&limit)
+                    .unwrap()
+                    .to::<u64>();
+                for input in 0..=limit {
+                    assert!(
+                        side.quote(U256::from(input)).unwrap().0 <= U256::from(custody),
+                        "knots={knots:?}, filled={filled}, custody={custody}, limit={limit}, input={input}"
+                    );
+                }
+                assert_eq!(output, big(side.quote(U256::from(limit)).unwrap().0));
+            }
+        }
+    }
+}

@@ -1,5 +1,5 @@
 //! Integer arithmetic for CurveBook v3. Quantities and costs are token atomic units.
-use alloy::primitives::U256;
+use alloy::primitives::{U256, U512};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tycho_common::simulation::errors::SimulationError;
@@ -78,16 +78,25 @@ impl Side {
         if self.filled >= self.max {
             return Ok(U256::ZERO);
         }
-        if !self.asks {
-            return Ok(self.max - self.filled);
-        }
         let mut total = U256::ZERO;
         let mut q = self.filled;
         let mut prev = (U256::ZERO, U256::ZERO);
         for &end in &self.knots {
             if end.0 > q {
+                // Advertise only the initial interval with positive marginal proceeds.
+                // Later decreasing segments spend more input for less output.
+                if !self.asks &&
+                    U512::from(self.price) * U512::from(end.0 - prev.0) <=
+                        U512::from(end.1 - prev.1) * U512::from(10u64.pow(18))
+                {
+                    break;
+                }
                 let stop = end.0.min(self.max);
-                total = add(total, self.cost(prev, end, q, stop)?)?;
+                total = if self.asks {
+                    add(total, self.cost(prev, end, q, stop)?)?
+                } else {
+                    stop - self.filled
+                };
                 q = stop;
                 if q == self.max {
                     break;
@@ -96,6 +105,32 @@ impl Side {
             prev = end;
         }
         Ok(total)
+    }
+
+    /// Monotonic custody bound on the interval returned by capacity(). Bid proceeds
+    /// floor the mid term and ceil the extra term separately, so their exact output
+    /// can dip by one atom. Flooring their unrounded difference bounds every prefix.
+    pub fn output_bound(&self, input: U256) -> Result<U256, SimulationError> {
+        if self.asks {
+            return Ok(self.quote(input)?.0);
+        }
+        let q = add(self.filled, input)?;
+        let mid = mul(self.price, input)?;
+        let wad = U256::from(10u64.pow(18));
+        let mut prev = (U256::ZERO, U256::ZERO);
+        for &end in &self.knots {
+            if q <= end.0 {
+                let span = end.0 - prev.0;
+                let remainder = mul(end.1 - prev.1, q - prev.0)? % span;
+                let carry = remainder != U256::ZERO &&
+                    U512::from(mid % wad) * U512::from(span) >=
+                        U512::from(remainder) * U512::from(wad);
+                let extra = Self::extra(prev, end, q)? - self.extra_at(self.filled)?;
+                return Ok((mid / wad + U256::from(carry)).saturating_sub(extra));
+            }
+            prev = end;
+        }
+        Err(invalid("beyond bid depth"))
     }
 
     /// Returns (output, new base cursor). Zero output denotes an input below atomic precision.

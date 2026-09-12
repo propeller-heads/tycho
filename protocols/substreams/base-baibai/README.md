@@ -26,6 +26,12 @@ write to a slot is selected by execution ordinal, not nested call order.
 Transfer logs track WETH/USDC holdings, including direct donations and withdrawals.
 The simulator applies execution-block time even when there is no pool update.
 
+Bid routing limits stop before the first remaining segment with nonpositive
+marginal proceeds. Later segments beyond a flat or decreasing interval are not
+advertised. Custody sizing uses a monotonic upper bound on rounded proceeds,
+at most one quote-token atomic unit above the exact output, so every smaller
+input stays within available custody. Individual quotes retain contract rounding.
+
 ## Building and running
 
 From `protocols/substreams`:

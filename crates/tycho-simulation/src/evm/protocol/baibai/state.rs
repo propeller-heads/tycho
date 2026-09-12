@@ -165,13 +165,13 @@ impl ProtocolSim for BaibaiState {
         if full_output == U256::ZERO {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
-        if full_output <= available {
+        if side.output_bound(high)? <= available {
             return Ok((big(high), big(full_output)));
         }
         // Capacity is bounded by curve depth and the custodian's unreserved output balance.
         while low < high {
             let mid = low + (high - low) / U256::from(2) + (high - low) % U256::from(2);
-            if side.quote(mid)?.0 <= available {
+            if side.output_bound(mid)? <= available {
                 low = mid;
             } else {
                 high = mid - U256::from(1);
