@@ -211,6 +211,8 @@ done
 # fixtures are captured; its immutables do not depend on the deployer or nonce.
 base_fork="$(node -e 'process.stdout.write(JSON.stringify({forking:{jsonRpcUrl:process.env.BASE_RPC_URL,blockNumber:51191196}}))')"
 cast rpc --rpc-url "$LOCAL_RPC" anvil_reset "$base_fork" >/dev/null
+# Historical Base fees can exceed the local deployer's estimate after a reset.
+cast rpc --rpc-url "$LOCAL_RPC" anvil_setNextBlockBaseFeePerGas 0x0 >/dev/null
 deployment="$(resolve_deployment base baibai)"
 read -r contract args <<<"$deployment"
 # shellcheck disable=SC2086 # constructor arguments are intentionally word-split
