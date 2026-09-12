@@ -1,0 +1,57 @@
+specVersion: v0.1.0
+package:
+  name: base_baibai
+  version: v0.1.0
+  url: https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-baibai
+  description: BaiBai CurveBook v3 on Base
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto/
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_baibai.wasm
+modules:
+  - name: map_components
+    kind: map
+    initialBlock: 50895895
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+  - name: map_balances
+    kind: map
+    initialBlock: 50895895
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+  - name: store_balances
+    kind: store
+    initialBlock: 50895895
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balances
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 50895895
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - store: store_balances
+        mode: deltas
+      - map: map_balances
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+params:
+  map_components: "entrypoint=0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa&curve_book=0x604d9b9eB1e1571C78661a6C1088427EC9c8c6E5&custodian=0xAaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3&base=0x4200000000000000000000000000000000000006&quote=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&start_block=50895895"
+  map_balances: "entrypoint=0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa&curve_book=0x604d9b9eB1e1571C78661a6C1088427EC9c8c6E5&custodian=0xAaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3&base=0x4200000000000000000000000000000000000006&quote=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&start_block=50895895"
+  map_protocol_changes: "entrypoint=0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa&curve_book=0x604d9b9eB1e1571C78661a6C1088427EC9c8c6E5&custodian=0xAaC48FEB93c5C97E0fb3c7C57E1633922A4ACDa3&base=0x4200000000000000000000000000000000000006&quote=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&start_block=50895895"
+network: base

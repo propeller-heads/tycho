@@ -1,6 +1,7 @@
 pragma solidity ^0.8.26;
 
 // Executors
+import {BaibaiExecutor} from "../src/executors/BaibaiExecutor.sol";
 import {BalancerV2Executor} from "../src/executors/BalancerV2Executor.sol";
 import {BalancerV3Executor} from "../src/executors/BalancerV3Executor.sol";
 import {BebopExecutor} from "../src/executors/BebopExecutor.sol";
@@ -139,6 +140,9 @@ contract TychoRouterTestSetup is
     PropAMMExecutor public propAMMExecutor;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
     SkyExecutor public skyExecutor;
+    BaibaiExecutor public baibaiExecutor;
+    address internal constant BAIBAI_ENTRYPOINT =
+        0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -286,8 +290,14 @@ contract TychoRouterTestSetup is
             nativeExecutor = new NativeExecutor(nativeRouterV6);
         }
 
+        bool baibaiDeployable =
+            block.chainid == 8453 && BAIBAI_ENTRYPOINT.code.length != 0;
+        if (baibaiDeployable) {
+            baibaiExecutor = new BaibaiExecutor(BAIBAI_ENTRYPOINT);
+        }
         address[] memory executors = new address[](
             27 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+                + (baibaiDeployable ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -322,7 +332,10 @@ contract TychoRouterTestSetup is
             nextExecutorIndex++;
         }
         if (supportsNative) {
-            executors[nextExecutorIndex] = address(nativeExecutor);
+            executors[nextExecutorIndex++] = address(nativeExecutor);
+        }
+        if (baibaiDeployable) {
+            executors[nextExecutorIndex] = address(baibaiExecutor);
         }
         return executors;
     }

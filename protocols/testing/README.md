@@ -84,6 +84,7 @@ time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated
 
 ```bash
 export RPC_URL=..   # Ethereum mainnet RPC (the router constructor requires a fork)
+export BASE_RPC_URL=..  # Base RPC (BaiBai constructor reads the deployed entrypoint)
 
 # Regenerate every fixture from the current contracts
 ./scripts/update_runtime_bytecode.sh

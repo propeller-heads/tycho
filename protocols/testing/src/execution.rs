@@ -30,6 +30,7 @@ const EKUBO_V3_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/EkuboV3Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const BAIBAI_BYTECODE_JSON: &str = include_str!("../fixtures/Baibai.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
 
@@ -65,7 +66,10 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
 /// [`EXECUTOR_MAPPING`], which holds the executor used on every other chain.
 static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'static str>> =
     LazyLock::new(|| {
-        HashMap::from([((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON)])
+        HashMap::from([
+            ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
+            ((Chain::Base, "baibai"), BAIBAI_BYTECODE_JSON),
+        ])
     });
 
 /// Get executor bytecode JSON for a protocol system on `chain`.

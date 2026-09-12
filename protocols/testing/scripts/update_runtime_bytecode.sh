@@ -25,6 +25,7 @@ Options:
 Requires:
   RPC_URL    Ethereum mainnet RPC (the router constructor checks that permit2
              and the fee calculator have deployed code, so a fork is needed).
+  BASE_RPC_URL  Base RPC for the BaiBai executor constructor.
   forge, anvil, cast, node (with contracts/ npm deps installed).
 EOF
     exit 1
@@ -96,6 +97,11 @@ EXECUTOR_FIXTURES=(
     "RingSwapV2|ethereum|ring_swap_v2"
     "Sky|ethereum|sky"
 )
+
+if [[ -z "${BASE_RPC_URL:-}" ]]; then
+    echo "Error: BASE_RPC_URL must be set for the BaiBai fixture." >&2
+    exit 1
+fi
 
 if [[ -z "${RPC_URL:-}" ]]; then
     echo "Error: RPC_URL must be set (Ethereum mainnet RPC)." >&2
@@ -200,6 +206,15 @@ for entry in "${EXECUTOR_FIXTURES[@]}"; do
     # shellcheck disable=SC2086 # args is an intentionally word-split arg list
     process_fixture "$fixture" "$contract" $args
 done
+
+# BaiBai's constructor reads token wiring on Base. Reset only after the mainnet
+# fixtures are captured; its immutables do not depend on the deployer or nonce.
+base_fork="$(node -e 'process.stdout.write(JSON.stringify({forking:{jsonRpcUrl:process.env.BASE_RPC_URL,blockNumber:51191196}}))')"
+cast rpc --rpc-url "$LOCAL_RPC" anvil_reset "$base_fork" >/dev/null
+deployment="$(resolve_deployment base baibai)"
+read -r contract args <<<"$deployment"
+# shellcheck disable=SC2086 # constructor arguments are intentionally word-split
+process_fixture Baibai "$contract" $args
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
     if [[ "$DRIFT" -eq 1 ]]; then
