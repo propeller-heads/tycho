@@ -4,6 +4,8 @@ use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tycho_common::simulation::errors::SimulationError;
 
+use crate::evm::protocol::utils::solidity_math::mul_div;
+
 pub(super) fn invalid(reason: &str) -> SimulationError {
     SimulationError::InvalidInput(format!("BaiBai: {reason}"), None)
 }
@@ -122,7 +124,7 @@ impl Side {
                 let cost = self.cost(prev, end, q, stop)?;
                 if remaining < cost {
                     // Solidity Math.mulDiv uses a full-width intermediate here only.
-                    let dq = uint(&(big(remaining) * big(stop - q) / big(cost)))?;
+                    let dq = mul_div(remaining, stop - q, cost)?;
                     if dq == U256::ZERO {
                         return Ok((U256::ZERO, self.filled));
                     }
