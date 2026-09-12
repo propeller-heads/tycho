@@ -30,7 +30,7 @@ impl Config {
     }
 
     pub fn id(&self) -> String {
-        format!("{:#x}-{:#x}", self.entrypoint, self.base)
+        format!("0x{:x}{:x}", self.entrypoint, self.base)
     }
 
     pub fn creation<'a>(&self, block: &'a Block) -> Result<&'a TransactionTrace> {
@@ -125,7 +125,8 @@ mod tests {
         );
         assert_eq!(slots[30].0, config.custodian);
         assert_ne!(slots[30].1, slots[31].1);
-        // The SDK uses ':' to separate component IDs and token addresses in store keys.
-        assert!(!config.id().contains(':'));
+        // IDs must round-trip through Tycho's byte representation and the SDK's ':' keys.
+        let id = alloy_primitives::hex::decode(config.id()).unwrap();
+        assert_eq!(id, [config.entrypoint.as_slice(), config.base.as_slice()].concat());
     }
 }

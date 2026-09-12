@@ -4,7 +4,8 @@ Indexes the WETH/USDC pair of BaiBai CurveBook v3. The native simulator supports
 exact-input swaps in both directions for zero-fee takers. The executor checks
 that assumption for its router at execution time. Router-level fees are separate.
 
-The component ID is `entrypoint-base` (lowercase hex). Static `base` and `quote`
+The component ID is `0x` followed by the concatenated 20-byte entrypoint and base token
+addresses (lowercase hex). Static `base` and `quote`
 attributes identify token roles independently of token ordering.
 
 ## State
