@@ -92,6 +92,16 @@
         "0xA188EEC8F81263234dA3622A406892F3D630f98c",
         "0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A"
       ]
+    },
+    "etherfi": {
+      "contract": "EtherfiExecutor",
+      "args": [
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
+        "0x308861A430be4cce5502d0A12724771Fc6DaF216",
+        "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+        "0xDadEf1fFBFeaAB4f68A9fD181395F68b4e4E7Ae0"
+      ]
     }
   },
   "base": {

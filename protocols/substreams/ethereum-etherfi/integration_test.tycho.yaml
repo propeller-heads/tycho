@@ -1,0 +1,32 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "etherfi"
+protocol_type_names:
+  - "ethereum_etherfi_pool"
+module_name: "map_protocol_changes"
+# Balances come from the protocol's own share accounting, not from the components' own token
+# balances.
+skip_balance_check: true
+initialized_accounts:
+tests:
+  - name: test_etherfi
+    start_block: 25940000
+    stop_block: 25940200
+    expected_components:
+      - id: "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
+        tokens:
+          - "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee" # weeth
+          - "0x35fA164735182de50811E8e2E824cFb9B6118ac2" # eeth
+        creation_tx: "0xdc387d47c733ca16693792c12f81b3a038930489b2b89dfcae14b6c4f293fe56"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x35fA164735182de50811E8e2E824cFb9B6118ac2"
+        tokens:
+          - "0x35fA164735182de50811E8e2E824cFb9B6118ac2" # eeth
+          - "0x0000000000000000000000000000000000000000" # eth (native)
+        creation_tx: "0xdc387d47c733ca16693792c12f81b3a038930489b2b89dfcae14b6c4f293fe56"
+        skip_simulation: false
+        # Depositing ETH is uncapped by the protocol, so the limit is a sentinel rather than a
+        # size anything can settle - a swap at that size cannot be replayed on a fork. eETH
+        # redemption is the other direction here, and it reports no capacity while the pool sits
+        # below its reserve floor.
+        skip_execution: true

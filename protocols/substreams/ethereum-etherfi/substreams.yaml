@@ -1,0 +1,88 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_etherfi"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_etherfi.wasm
+
+network: mainnet
+
+params:
+  # Raw chain state at start_block. Recompute with:
+  #   RPC_URL=<your-archive-rpc> ./scripts/compute_initial_state.sh <block_number>
+  map_protocol_components: &initial_state |
+    {
+      "start_block": 25940000,
+      "liquidity_pool_value_slot": "0x00000000000000390066975346099296000000000001d354d821f08629f66d6a",
+      "liquidity_pool_locked_slot": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "eeth_total_shares_slot": "0x00000000000000000000000000000000000000000001a7c7a0870fdc1d9275d1",
+      "eth_bucket_limiter_slot": "0x0000000000005a6c000000006a8413270000000077307d560000000077359400",
+      "eth_redemption_info_slot": "0x00000000000000000000000000000000000000000000000000000064001e03e8",
+      "liquidity_pool_native_balance": "1051493289032982041238",
+      "weeth_eeth_balance": "2134355669936453442791966"
+    }
+  map_relative_balances: *initial_state
+
+networks:
+  mainnet:
+    initialBlock:
+      map_protocol_components: 25940000
+      store_components: 25940000
+      map_relative_balances: 25940000
+      store_component_balances: 25940000
+      map_protocol_changes: 25940000
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_components
+    kind: store
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_relative_balances
+    kind: map
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_components
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_component_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_components
+      - map: map_relative_balances
+      - store: store_component_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
