@@ -60,8 +60,8 @@ impl PriceLevelStreamConfig {
 /// [`auto_detected_gas_cost`](super::stream::PriceLevelStreamBuilder::auto_detected_gas_cost).
 pub const DEFAULT_AUTO_DETECTED_GAS_COST: u64 = 335_000;
 
-/// The pAMMs known to be served by the Titan price level stream (as of 2026-08-13): FermiSwap,
-/// Kipseli, Metric, Bebop, and TaurusFi.
+/// The pAMMs known to be served by the Titan price level stream (as of 2026-09-11): FermiSwap,
+/// Kipseli, Metric, Bebop, TaurusFi, and Tempest.
 ///
 /// Registered on a builder via
 /// [`with_known_pamms`](super::stream::PriceLevelStreamBuilder::with_known_pamms), so their
@@ -93,6 +93,9 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
         ("bebop", "0xb09aaa5614916d7aeb59c295c52c92ca82addd76", 140_000u64),
         // The TaurusFi router, per Titan's venue docs. Measured ~105k (2026-08-18).
         ("taurusfi", "0x217d58931a8549ca539426aa8152e33dafc3d95a", 110_000u64),
+        // The Tempest router (unverified), per Titan's venue docs. Measured ~120k-155k
+        // (2026-09-11).
+        ("tempest", "0x00000003f1ec2379e79f58e12ec6c4f51ee92149", 160_000u64),
     ];
     pamms
         .into_iter()
@@ -113,12 +116,8 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
 /// [`add_pamm`](super::stream::PriceLevelStreamBuilder::add_pamm) entry for one of these
 /// addresses overrides the denial.
 pub fn default_denied_pamms() -> Vec<Bytes> {
-    // Tempest, per Titan's venue docs (unverified contract). Its `swap` enforces a taker
-    // allowlist: replays of real fills (2026-08-11) revert with `TakerNotAllowed()` (0xf774ea08)
-    // for arbitrary callers regardless of recipient and succeed only from allowlisted takers, so
-    // swaps sent by the executor would revert.
-    ["0x00000003f1ec2379e79f58e12ec6c4f51ee92149"]
-        .into_iter()
-        .map(|address| Bytes::from_str(address).expect("hardcoded pAMM address must parse"))
-        .collect()
+    // No streamed venue is currently known to reject the executor's swap. This is where one
+    // goes that gates settlement — on a taker allowlist, say — or otherwise reverts a swap sent
+    // by an arbitrary caller.
+    Vec::new()
 }

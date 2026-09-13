@@ -795,8 +795,9 @@ mod tests {
             assert!(!builder.registry.is_empty());
         }
 
-        // Registering a venue from the default deny set works in either call order.
-        let denied_venue = default_denied_pamms().remove(0);
+        // Registering a venue from the default deny set works in either call order. Any one of
+        // them exercises that; the set is empty while every streamed venue is executable.
+        let Some(denied_venue) = default_denied_pamms().pop() else { return };
         let custom = || PriceLevelStreamConfig::new("custom", denied_venue.clone(), 1u64.into());
         for builder in [
             PriceLevelStreamBuilder::new()
@@ -873,7 +874,12 @@ mod tests {
         let builder = builder.with_known_pamms();
         assert_eq!(builder.registry[&fermiswap_router].protocol, "fermiswap");
         // The known-bad venues get denied alongside, and never overlap the served defaults.
-        assert!(!builder.denied.is_empty());
+        assert_eq!(
+            builder.denied,
+            default_denied_pamms()
+                .into_iter()
+                .collect()
+        );
         assert!(builder.denied.is_disjoint(
             &builder
                 .registry
