@@ -103,7 +103,6 @@ Full end-to-end protocol tests. Triggered on PRs touching `protocols/substreams/
 
 **Custom actions used:**
 - `.github/actions/substreams-check` — Maps changed file paths to substreams package names.
-- `.github/actions/substreams-docker-single` — Runs a single protocol test with an isolated Postgres container.
 
 ---
 

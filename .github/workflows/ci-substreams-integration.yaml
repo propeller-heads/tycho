@@ -283,9 +283,14 @@ jobs:
           docker load -i /tmp/test-runner-image.tar
 
       - name: Run protocol test
-        uses: ./.github/actions/substreams-docker-single
-        with:
-          protocol: ${{ matrix.protocol }}
+        env:
+          PROTOCOLS: ${{ matrix.protocol }}
+        # Both images arrive preloaded from build-images, so --no-build turns a missing one into
+        # an immediate error rather than a silent 30-minute rebuild.
+        run: |
+          docker compose -f protocols/testing/docker-compose.yaml up \
+            --no-build \
+            --exit-code-from test-runner
 
   skip-tests:
     runs-on: ubuntu-latest
