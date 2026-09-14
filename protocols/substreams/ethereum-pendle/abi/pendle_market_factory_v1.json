@@ -1,0 +1,50 @@
+[
+  {
+    "type": "event",
+    "name": "CreateNewMarket",
+    "anonymous": false,
+    "inputs": [
+      { "name": "market", "type": "address", "indexed": true },
+      { "name": "PT", "type": "address", "indexed": true },
+      { "name": "scalarRoot", "type": "int256", "indexed": false },
+      { "name": "initialAnchor", "type": "int256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "NewMarketConfig",
+    "anonymous": false,
+    "inputs": [
+      { "name": "treasury", "type": "address", "indexed": true },
+      { "name": "lnFeeRateRoot", "type": "uint80", "indexed": false },
+      { "name": "reserveFeePercent", "type": "uint8", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "SetOverriddenFee",
+    "anonymous": false,
+    "inputs": [
+      { "name": "router", "type": "address", "indexed": true },
+      { "name": "lnFeeRateRoot", "type": "uint80", "indexed": false },
+      { "name": "reserveFeePercent", "type": "uint8", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "UnsetOverriddenFee",
+    "anonymous": false,
+    "inputs": [{ "name": "router", "type": "address", "indexed": true }]
+  },
+  {
+    "type": "function",
+    "name": "getMarketConfig",
+    "stateMutability": "view",
+    "inputs": [{ "name": "router", "type": "address" }],
+    "outputs": [
+      { "name": "treasury", "type": "address" },
+      { "name": "lnFeeRateRoot", "type": "uint80" },
+      { "name": "reserveFeePercent", "type": "uint8" }
+    ]
+  }
+]
