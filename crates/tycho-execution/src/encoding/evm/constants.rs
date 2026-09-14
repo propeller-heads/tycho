@@ -151,10 +151,10 @@ pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
 
 /// Protocol system prefix for pAMM components executed through `TychoFallbackRouter`, which
-/// retries a failing pAMM on the fallback venue named in the swap's `user_data`. Venue suffixes
-/// follow `PRICE_LEVEL_STREAM_PREFIX`. Replaces `PROPAMM_FALLBACK_PREFIX` (Titan's PropAMMRouter,
-/// deprecated): any pAMM qualifies, and the solver picks the fallback venue per swap instead of
-/// the router owning one Uniswap V3 mapping.
+/// retries a failing pAMM on the fallback protocol named in the swap's `user_data`. Venue
+/// suffixes follow `PRICE_LEVEL_STREAM_PREFIX`. Replaces `PROPAMM_FALLBACK_PREFIX` (Titan's
+/// PropAMMRouter, deprecated): any pAMM qualifies, and the solver picks the fallback protocol per
+/// swap instead of the router owning one Uniswap V3 mapping.
 pub const FALLBACK_PREFIX: &str = "fallback:";
 
 /// The executor-config key serving the whole fallback protocol family, mirroring
