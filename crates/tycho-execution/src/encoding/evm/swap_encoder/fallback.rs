@@ -69,9 +69,11 @@ impl FallbackProtocol {
     fn from_swap_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
         match user_data.as_ref() {
             Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
-                EncodingError::FatalError(format!("Invalid fallback protocol user_data JSON: {e}"))
+                EncodingError::InvalidInput(format!(
+                    "Invalid fallback protocol user_data JSON: {e}"
+                ))
             }),
-            _ => Err(EncodingError::FatalError(
+            _ => Err(EncodingError::InvalidInput(
                 "Fallback swaps require user_data naming the fallback protocol \
                  (e.g. {\"protocol\":\"uniswap_v3\",\"pool\":\"0x…\"})"
                     .to_string(),
@@ -384,14 +386,14 @@ mod tests {
     #[test]
     fn test_rejects_missing_user_data() {
         let err = encode_usdc_weth(None).unwrap_err();
-        assert!(matches!(err, EncodingError::FatalError(msg) if msg.contains("user_data")));
+        assert!(matches!(err, EncodingError::InvalidInput(msg) if msg.contains("user_data")));
     }
 
     #[test]
     fn test_rejects_unknown_protocol() {
         let err =
             encode_usdc_weth(Some(r#"{"protocol":"balancer_v2","pool":"0x11"}"#)).unwrap_err();
-        assert!(matches!(err, EncodingError::FatalError(msg) if msg.contains("JSON")));
+        assert!(matches!(err, EncodingError::InvalidInput(msg) if msg.contains("JSON")));
     }
 
     #[test]
