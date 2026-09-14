@@ -212,7 +212,7 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
-    pub block_number_or_timestamp: u64,
+    pub block_number: u64,
     /// True when this update is for a partial (pre-confirmation) block, false for full blocks.
     #[serde(default)]
     pub is_partial: bool,
@@ -236,7 +236,7 @@ impl Update {
         new_pairs: HashMap<String, ProtocolComponent>,
     ) -> Self {
         Update {
-            block_number_or_timestamp: block_number,
+            block_number,
             is_partial: false,
             sync_states: HashMap::new(),
             states,

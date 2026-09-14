@@ -1,10 +1,9 @@
 use std::{collections::HashMap, str::FromStr};
 
-use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
 
-use crate::rfq::errors::RFQError;
+use crate::{book::levels::Levels, rfq::errors::RFQError, serde_helpers::checksummed_address};
 
 /// Response from GET /price-levels?chainId=<id>
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,152 +14,52 @@ pub struct LiquoricePriceLevelsResponse {
 /// A market maker's pricing for a token pair with price levels
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiquoriceTokenPairPrice {
-    #[serde(rename = "baseToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]
+    #[serde(rename = "baseToken", deserialize_with = "checksummed_address::deserialize")]
     pub base_token: Bytes,
-    #[serde(rename = "quoteToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]
+    #[serde(rename = "quoteToken", deserialize_with = "checksummed_address::deserialize")]
     pub quote_token: Bytes,
-    /// Levels as [price, quantity] string pairs from the API, deserialized into
-    /// LiquoricePriceLevel
-    #[serde(
-        deserialize_with = "deserialize_string_pair_to_price_levels",
-        serialize_with = "serialize_price_levels_to_string_pairs"
-    )]
-    pub levels: Vec<LiquoricePriceLevel>,
+    #[serde(with = "liquorice_levels")]
+    pub levels: Levels,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<u64>,
 }
 
-fn deserialize_string_to_checksummed_bytes<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    let address = Address::from_str(&s).map_err(serde::de::Error::custom)?;
-    let checksum = address.to_checksum(None);
-    let checksum_bytes = Bytes::from_str(&checksum).map_err(serde::de::Error::custom)?;
-    Ok(checksum_bytes)
-}
+/// Liquorice's wire form of a ladder: `["<price>", "<quantity>"]` decimal-string pairs.
+mod liquorice_levels {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_with::{serde_as, DisplayFromStr};
 
-fn deserialize_string_pair_to_price_levels<'de, D>(
-    deserializer: D,
-) -> Result<Vec<LiquoricePriceLevel>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let pairs: Vec<Vec<String>> = Vec::deserialize(deserializer)?;
-    pairs
-        .into_iter()
-        .filter_map(|pair| {
-            if pair.len() == 2 {
-                let price = pair[0].parse::<f64>().ok()?;
-                let quantity = pair[1].parse::<f64>().ok()?;
-                Some(Ok(LiquoricePriceLevel { price, quantity }))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
+    use crate::book::levels::{Levels, PriceLevel};
 
-fn serialize_price_levels_to_string_pairs<S>(
-    levels: &[LiquoricePriceLevel],
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeSeq;
-    let mut seq = serializer.serialize_seq(Some(levels.len()))?;
-    for level in levels {
-        seq.serialize_element(&[level.price.to_string(), level.quantity.to_string()])?;
+    #[serde_as]
+    #[derive(Serialize, Deserialize)]
+    struct WireLevels(#[serde_as(as = "Vec<(DisplayFromStr, DisplayFromStr)>")] Vec<(f64, f64)>);
+
+    pub fn serialize<S: Serializer>(levels: &Levels, serializer: S) -> Result<S::Ok, S::Error> {
+        WireLevels(
+            levels
+                .iter()
+                .map(|level| (level.price, level.quantity))
+                .collect(),
+        )
+        .serialize(serializer)
     }
-    seq.end()
-}
 
-/// Price level with price and quantity
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LiquoricePriceLevel {
-    #[serde(
-        rename = "q",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    pub quantity: f64,
-    #[serde(
-        rename = "p",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    pub price: f64,
-}
-
-fn deserialize_string_to_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    s.parse()
-        .map_err(serde::de::Error::custom)
-}
-
-fn serialize_f64_to_string<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Levels, D::Error> {
+        let levels = WireLevels::deserialize(deserializer)?
+            .0
+            .into_iter()
+            .map(|(price, quantity)| PriceLevel { price, quantity })
+            .collect();
+        Levels::new(levels).map_err(serde::de::Error::custom)
+    }
 }
 
 impl LiquoriceTokenPairPrice {
-    pub fn calculate_tvl(&self) -> f64 {
-        self.levels
-            .iter()
-            .map(|level| level.quantity * level.price)
-            .sum()
-    }
-
-    pub fn get_price(&self) -> Option<f64> {
-        if self.levels.is_empty() {
-            return None;
-        }
-        let total_quantity: f64 = self
-            .levels
-            .iter()
-            .map(|l| l.quantity)
-            .sum();
-        let total_value: f64 = self
-            .levels
-            .iter()
-            .map(|l| l.quantity * l.price)
-            .sum();
-        Some(total_value / total_quantity)
-    }
-
-    pub fn get_price_for_amount(&self, base_token_amount: f64) -> Option<f64> {
-        if self.levels.is_empty() {
-            return None;
-        }
-
-        let (total_quote_token, remaining_base_token) =
-            self.get_amount_out_from_levels(base_token_amount);
-
-        Some(total_quote_token / (base_token_amount - remaining_base_token))
-    }
-
-    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        let mut remaining_amount_in = amount_in;
-        let mut total_amount_out = 0.0;
-
-        for level in &self.levels {
-            if remaining_amount_in <= 0.0 {
-                break;
-            }
-
-            let amount_to_fill = remaining_amount_in.min(level.quantity);
-            total_amount_out += amount_to_fill * level.price;
-            remaining_amount_in -= amount_to_fill;
-        }
-
-        (total_amount_out, remaining_amount_in)
+    /// The quantity-weighted average price over the whole ladder; `None` without any level.
+    pub fn average_price(&self) -> Option<f64> {
+        let (total_quantity, total_value) = self.levels.totals();
+        (total_quantity > 0.0).then(|| total_value / total_quantity)
     }
 }
 
@@ -261,70 +160,6 @@ impl LiquoriceQuoteLevel {
 mod tests {
     use super::*;
 
-    fn liquorice_mm_levels() -> LiquoriceTokenPairPrice {
-        LiquoriceTokenPairPrice {
-            base_token: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-            quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            levels: vec![
-                LiquoricePriceLevel { quantity: 1.0, price: 3000.0 },
-                LiquoricePriceLevel { quantity: 2.0, price: 2999.0 },
-            ],
-            updated_at: Some(1234567890),
-        }
-    }
-
-    #[test]
-    fn test_get_price() {
-        let levels = liquorice_mm_levels();
-
-        let price = levels.get_price();
-        assert!((price.unwrap() - 8998.0 / 3.0).abs() < 1e-10);
-
-        let empty_levels = LiquoriceTokenPairPrice {
-            base_token: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-            quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            levels: vec![],
-            updated_at: None,
-        };
-        assert_eq!(empty_levels.get_price(), None);
-    }
-
-    #[test]
-    fn test_get_price_for_amount() {
-        let levels = liquorice_mm_levels();
-
-        let price = levels.get_price_for_amount(1.0);
-        assert_eq!(price, Some(3000.0));
-
-        let multi_level_price = levels.get_price_for_amount(2.0);
-        assert_eq!(multi_level_price, Some(2999.5));
-
-        let empty_levels = LiquoriceTokenPairPrice {
-            base_token: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-            quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            levels: vec![],
-            updated_at: None,
-        };
-        assert_eq!(empty_levels.get_price_for_amount(1.0), None);
-    }
-
-    #[test]
-    fn test_get_amount_out_from_levels() {
-        let levels = liquorice_mm_levels();
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(1.0);
-        assert_eq!(amount_out, 3000.0);
-        assert_eq!(remaining, 0.0);
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(2.0);
-        assert_eq!(amount_out, 5999.0);
-        assert_eq!(remaining, 0.0);
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(5.0);
-        assert_eq!(amount_out, 8998.0);
-        assert_eq!(remaining, 2.0);
-    }
-
     #[test]
     fn test_deserialize_price_levels_response() {
         let json = r#"{"prices":{"maker_0":[{"baseToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","quoteToken":"0xdac17f958d2ee523a2206206994597c13d831ec7","levels":[["1.00115000","100.000000000000000000"],["1.00125000","500.000000000000000000"]],"updatedAt":1769707860675}]}}"#;
@@ -336,6 +171,22 @@ mod tests {
         assert_eq!(mm_levels[0].levels[0].quantity, 100.0);
         assert_eq!(mm_levels[0].levels[1].price, 1.00125);
         assert_eq!(mm_levels[0].levels[1].quantity, 500.0);
+
+        let json = serde_json::to_string(&mm_levels[0]).unwrap();
+        assert!(json.contains(r#"[["1.00115","100"],["1.00125","500"]]"#), "{json}");
+    }
+
+    #[test]
+    fn rejects_malformed_wire_levels() {
+        for levels in [r#"[["1.0"]]"#, r#"[["abc","1"]]"#, r#"[["0","1"]]"#] {
+            let json = format!(
+                r#"{{"baseToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","quoteToken":"0xdac17f958d2ee523a2206206994597c13d831ec7","levels":{levels}}}"#
+            );
+            assert!(
+                serde_json::from_str::<LiquoriceTokenPairPrice>(&json).is_err(),
+                "{levels} should be rejected"
+            );
+        }
     }
 
     #[cfg(test)]

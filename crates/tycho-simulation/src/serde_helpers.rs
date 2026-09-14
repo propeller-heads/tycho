@@ -68,6 +68,21 @@ pub mod hex_bytes_option {
     }
 }
 
+/// Deserializes an EVM address string of any letter case into the bytes of its checksummed form.
+pub(crate) mod checksummed_address {
+    use std::str::FromStr;
+
+    use alloy::primitives::Address;
+    use serde::{Deserialize, Deserializer};
+    use tycho_common::Bytes;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let address =
+            Address::from_str(&String::deserialize(d)?).map_err(serde::de::Error::custom)?;
+        Bytes::from_str(&address.to_checksum(None)).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Serde helpers for `HashMap<String, Box<dyn ProtocolSim>>`.
 ///
 /// Some `ProtocolSim` implementations (VM-backed states) return errors from
@@ -218,7 +233,7 @@ mod tests {
         assert!(json.contains("pool_a"));
 
         let roundtripped: Update = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.block_number_or_timestamp, 12345);
+        assert_eq!(roundtripped.block_number, 12345);
         assert_eq!(roundtripped.states.len(), 1);
         assert!(roundtripped
             .states
@@ -296,7 +311,7 @@ mod tests {
         let update = Update::new(99999, HashMap::new(), HashMap::new());
         let json = serde_json::to_string(&update).unwrap();
         let roundtripped: Update = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.block_number_or_timestamp, 99999);
+        assert_eq!(roundtripped.block_number, 99999);
         assert!(roundtripped.states.is_empty());
         assert!(roundtripped.new_pairs.is_empty());
     }
