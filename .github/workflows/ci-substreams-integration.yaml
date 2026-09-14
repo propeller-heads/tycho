@@ -3,7 +3,9 @@ name: Substreams Integration Tests
 env:
   # Secrets are intentionally NOT defined here to keep them out of detect-changes scope.
   # They are set at job level in test-protocols, the only job that needs them.
-  EXCLUDED_SUBSTREAMS: target|crates|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid
+  # ethereum-ambient ships no integration test config, and ethereum-uniswap-v4 keeps its under
+  # with-hooks/, where the runner does not look for it.
+  EXCLUDED_SUBSTREAMS: target|crates|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid|ethereum-ambient|ethereum-uniswap-v4
 
 on:
   workflow_dispatch:
