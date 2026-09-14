@@ -338,8 +338,12 @@ mod tests {
         let executor_address =
             Bytes::from_str("0x5c2f5a71f67c01775180adc06909288b4c329308").unwrap();
         let registry = SwapEncoderRegistry::new(Chain::Ethereum);
+        let config = HashMap::from([(
+            "angstrom_hook_address".to_string(),
+            "0x0000000aa232009084Bd71A5797d089AA4Edfad4".to_string(),
+        )]);
         let encoder = registry
-            .create_encoder(FALLBACK_KEY, executor_address.clone(), None)
+            .create_encoder(FALLBACK_KEY, executor_address.clone(), Some(config))
             .unwrap();
         let registry = registry.register_encoder(FALLBACK_KEY, encoder);
 

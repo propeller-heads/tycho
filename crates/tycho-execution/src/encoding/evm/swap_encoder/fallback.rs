@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use alloy::sol_types::SolValue;
 use serde::Deserialize;
@@ -144,9 +144,16 @@ impl FallbackProtocol {
 /// The pAMM address comes from the component's `pamm_address` static attribute, which every
 /// fallback component carries. Swap data for `FallbackExecutor` is packed
 /// `token_in ++ token_out ++ pamm ++ protocol_byte ++ protocol_data` (see [`FallbackProtocol`]).
+///
+/// # Fields
+/// * `executor_address` - The address of the executor contract that will perform the swap.
+/// * `angstrom_hook_address` - The chain's Angstrom hook, from the `fallback` section of
+///   `protocol_specific_addresses.json`. Uniswap V4 fallbacks naming this hook are rejected.
+///   Required, so a missing config fails construction instead of silently disabling that check.
 #[derive(Clone)]
 pub struct FallbackSwapEncoder {
     executor_address: Bytes,
+    angstrom_hook_address: Bytes,
 }
 
 impl FallbackSwapEncoder {
@@ -164,13 +171,27 @@ impl FallbackSwapEncoder {
                 ))
             })
     }
+
+    /// Rejects a Uniswap V4 fallback whose hook is the chain's Angstrom hook.
+    fn reject_angstrom_hook(&self, protocol: &FallbackProtocol) -> Result<(), EncodingError> {
+        if let FallbackProtocol::UniswapV4 { hook, .. } = protocol {
+            if hook == &self.angstrom_hook_address {
+                return Err(EncodingError::InvalidInput(
+                    "Angstrom pools are unsupported as a fallback protocol: they are locked every \
+                     block and need a live unlock attestation the fallback path cannot supply"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SwapEncoder for FallbackSwapEncoder {
     fn new(
         executor_address: Bytes,
         chain: Chain,
-        _config: Option<HashMap<String, String>>,
+        config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         if chain != Chain::Ethereum {
             return Err(EncodingError::FatalError(
@@ -178,7 +199,20 @@ impl SwapEncoder for FallbackSwapEncoder {
             ));
         }
 
-        Ok(Self { executor_address })
+        let angstrom_hook_address = config
+            .as_ref()
+            .and_then(|config| config.get("angstrom_hook_address"))
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Fallback encoder config is missing angstrom_hook_address; add it to the \
+                     chain's `fallback` section in protocol_specific_addresses.json"
+                        .to_string(),
+                )
+            })?;
+        let angstrom_hook_address = Bytes::from_str(angstrom_hook_address)
+            .map_err(|_| EncodingError::FatalError("Invalid Angstrom hook address".to_string()))?;
+
+        Ok(Self { executor_address, angstrom_hook_address })
     }
 
     fn encode_swap(
@@ -187,6 +221,7 @@ impl SwapEncoder for FallbackSwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let protocol = FallbackProtocol::from_swap_user_data(swap.user_data())?;
+        self.reject_angstrom_hook(&protocol)?;
         let pamm = bytes_to_address(&Self::pamm_address(swap)?)?;
         let token_in = bytes_to_address(&swap.token_in().address)?;
         let token_out = bytes_to_address(&swap.token_out().address)?;
@@ -233,8 +268,20 @@ mod tests {
         }
     }
 
+    // The mainnet address from the `fallback` section of
+    // `config/protocol_specific_addresses.json`.
+    const ANGSTROM_HOOK: &str = "0000000aa232009084Bd71A5797d089AA4Edfad4";
+
     fn encoder() -> FallbackSwapEncoder {
-        FallbackSwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap()
+        FallbackSwapEncoder::new(
+            Bytes::default(),
+            Chain::Ethereum,
+            Some(HashMap::from([(
+                "angstrom_hook_address".to_string(),
+                format!("0x{ANGSTROM_HOOK}"),
+            )])),
+        )
+        .unwrap()
     }
 
     fn encode_usdc_weth(user_data: Option<&str>) -> Result<String, EncodingError> {
@@ -406,5 +453,55 @@ mod tests {
     fn test_encoder_rejects_non_ethereum_chain() {
         let result = FallbackSwapEncoder::new(Bytes::zero(20), Chain::Base, None);
         assert!(matches!(result, Err(EncodingError::FatalError(msg)) if msg.contains("Ethereum")));
+    }
+
+    fn encode_v4_with_hook(
+        encoder: &FallbackSwapEncoder,
+        hook: &str,
+    ) -> Result<String, EncodingError> {
+        let token_in = Bytes::from(format!("0x{USDC}").as_str());
+        let token_out = Bytes::from(format!("0x{WETH}").as_str());
+        let swap = Swap::new(
+            usdc_weth_component(),
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_user_data(Bytes::from(
+            format!(
+                r#"{{"protocol":"uniswap_v4","fee":3000,"tick_spacing":60,"hook":"0x{hook}"}}"#
+            )
+            .into_bytes(),
+        ));
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in,
+            group_token_out: token_out,
+        };
+        encoder
+            .encode_swap(&swap, &encoding_context)
+            .map(|encoded| encode(&encoded))
+    }
+
+    #[test]
+    fn test_angstrom_hook() {
+        let err = encode_v4_with_hook(&encoder(), ANGSTROM_HOOK).unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidInput(msg) if msg.contains("Angstrom")));
+    }
+
+    #[test]
+    fn test_non_angstrom_hook() {
+        let hook = "2222222222222222222222222222222222222222";
+        let hex_swap = encode_v4_with_hook(&encoder(), hook).unwrap();
+        // fee 3000 = 0x000bb8; tick spacing 60 = 0x00003c.
+        assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}02000bb800003c{hook}"));
+    }
+
+    #[test]
+    fn test_encoder_without_angstrom_hook_config() {
+        let result = FallbackSwapEncoder::new(Bytes::default(), Chain::Ethereum, None);
+        assert!(
+            matches!(result, Err(EncodingError::FatalError(msg)) if msg.contains("angstrom_hook_address"))
+        );
     }
 }
