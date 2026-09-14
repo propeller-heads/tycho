@@ -36,7 +36,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      RUST_LOG: "${RUST_LOG:-protocol_testing=info}"
+      RUST_LOG: "${RUST_LOG:-protocol_testing=info,error}"
       # Test mode: "range" (default) or "full" (continuous sync to chain tip, runs indefinitely).
       MODE: "${MODE:-range}"
       DATABASE_URL: postgres://postgres:mypassword@db:5432/tycho_indexer_0
