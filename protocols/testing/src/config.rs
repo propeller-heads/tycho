@@ -13,6 +13,8 @@ pub struct ProtocolComponentExpectation {
     #[serde(default)]
     pub static_attributes: HashMap<String, Bytes>,
     pub creation_tx: Bytes,
+    #[serde(default)]
+    pub protocol_type_name: Option<String>,
 }
 
 /// Represents a ProtocolComponent with test configuration
@@ -74,6 +76,22 @@ impl ProtocolComponentExpectation {
                 }
             }
         }
+        // Compare protocol_type_name, when the test declares one
+        if let Some(expected_type) = &self.protocol_type_name {
+            if expected_type != &other.protocol_type_name {
+                let diff = self.format_diff(
+                    "protocol_type_name",
+                    expected_type,
+                    &other.protocol_type_name,
+                    colorize_output,
+                );
+                diffs.push(format!(
+                    "Field 'protocol_type_name' mismatch for {}:\n{}",
+                    self.id, diff
+                ));
+            }
+        }
+
         // Compare creation_tx
         if self.creation_tx != other.creation_tx {
             let self_tx = format!("{}", self.creation_tx.clone());
