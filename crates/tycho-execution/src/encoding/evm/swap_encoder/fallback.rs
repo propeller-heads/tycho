@@ -397,6 +397,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_pool_shorter_than_an_address() {
+        // `Bytes` deserializes any length, so a short pool passes serde and must fail at the
+        // address conversion instead.
+        let err = encode_usdc_weth(Some(r#"{"protocol":"uniswap_v3","pool":"0x11"}"#)).unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidInput(msg) if msg.contains("Invalid address")));
+    }
+
+    #[test]
     fn test_rejects_uniswap_v2_fee_above_cap() {
         let pair = "b4e16d0168e52d35cacd2c6185b44281ec28c9dc";
         let err = encode_usdc_weth(Some(&format!(
