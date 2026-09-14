@@ -1,4 +1,8 @@
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
@@ -12,6 +16,13 @@ use tycho_common::{
     },
     Bytes,
 };
+
+/// How long the ladders of one frame stay quotable: one block time. Titan quotes the pending
+/// block, so a ladder older than that is not fillable directly (the venue reverts
+/// `StaleUpdate`) and must not be priced. Anchored on the frame's wire `timestamp` at
+/// acceptance and enforced on the monotonic clock; never derived from whether the ladder's
+/// content changed, since quiet venues legitimately repeat a ladder for minutes.
+pub const QUOTE_TTL: Duration = Duration::from_secs(12);
 
 /// A single price level: the total `amount_out` a swap of exactly `amount_in` would deliver.
 ///
@@ -42,6 +53,11 @@ pub struct PriceLevelStreamState {
     pub quotes_0_to_1: Vec<PriceLevelStreamQuote>,
     pub quotes_1_to_0: Vec<PriceLevelStreamQuote>,
     pub gas_cost: BigUint,
+    /// Monotonic instant from which every query on this state is refused. A live, in-process
+    /// property: never serialized, and `None` (never expires) after deserialization, so
+    /// recordings replay as they always did.
+    #[serde(skip)]
+    pub quotable_until: Option<Instant>,
 }
 
 impl PriceLevelStreamState {
@@ -60,7 +76,24 @@ impl PriceLevelStreamState {
             quotes.sort_by(|a, b| a.amount_in.cmp(&b.amount_in));
             quotes.dedup_by(|a, b| a.amount_in == b.amount_in);
         }
-        Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost }
+        Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost, quotable_until: None }
+    }
+
+    /// Sets the monotonic instant from which every query on this state is refused.
+    pub fn with_quotable_until(mut self, until: Instant) -> Self {
+        self.quotable_until = Some(until);
+        self
+    }
+
+    /// Errors once `now` has reached `quotable_until`.
+    fn ensure_quotable(&self, now: Instant) -> Result<(), SimulationError> {
+        match self.quotable_until {
+            Some(until) if now >= until => Err(SimulationError::RecoverableError(
+                "price levels expired: the frame that carried them is older than one block"
+                    .to_string(),
+            )),
+            Some(_) | None => Ok(()),
+        }
     }
 
     /// Returns the quote ladder selling `token_in` for `token_out`, or an error if the pair does
@@ -133,6 +166,7 @@ impl PriceLevelStreamState {
             quotes_0_to_1: Vec::new(),
             quotes_1_to_0: Vec::new(),
             gas_cost: self.gas_cost.clone(),
+            quotable_until: self.quotable_until,
         })
     }
 }
@@ -144,6 +178,7 @@ impl ProtocolSim for PriceLevelStreamState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.ensure_quotable(Instant::now())?;
         let quotes = self.quotes(&base.address, &quote.address)?;
         let best = quotes
             .iter()
@@ -170,6 +205,7 @@ impl ProtocolSim for PriceLevelStreamState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        self.ensure_quotable(Instant::now())?;
         let quotes = self.quotes(&token_in.address, &token_out.address)?;
         let (Some(first), Some(last)) = (quotes.first(), quotes.last()) else {
             return Err(SimulationError::RecoverableError("No liquidity available".to_string()));
@@ -224,6 +260,7 @@ impl ProtocolSim for PriceLevelStreamState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.ensure_quotable(Instant::now())?;
         let quotes = self.quotes(&sell_token, &buy_token)?;
         match quotes.last() {
             Some(largest) => Ok((largest.amount_in.clone(), largest.amount_out.clone())),
@@ -257,19 +294,24 @@ impl ProtocolSim for PriceLevelStreamState {
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
             .is_some_and(|other| {
-                let Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost } = other;
+                let Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost, quotable_until } =
+                    other;
                 &self.token0 == token0 &&
                     &self.token1 == token1 &&
                     &self.quotes_0_to_1 == quotes_0_to_1 &&
                     &self.quotes_1_to_0 == quotes_1_to_0 &&
-                    &self.gas_cost == gas_cost
+                    &self.gas_cost == gas_cost &&
+                    &self.quotable_until == quotable_until
             })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{
+        str::FromStr,
+        time::{Duration, Instant},
+    };
 
     use tycho_common::models::Chain;
 
@@ -503,5 +545,90 @@ mod tests {
         assert!(a.eq(&b as &dyn ProtocolSim));
         b.quotes_0_to_1[0].amount_out += 1u32;
         assert!(!a.eq(&b as &dyn ProtocolSim));
+    }
+
+    #[test]
+    fn ensure_quotable_is_strict_at_the_boundary() {
+        let until = Instant::now() + Duration::from_secs(60);
+        let state = state().with_quotable_until(until);
+        assert!(state
+            .ensure_quotable(until - Duration::from_nanos(1))
+            .is_ok());
+        assert!(state.ensure_quotable(until).is_err());
+        assert!(state
+            .ensure_quotable(until + Duration::from_secs(1))
+            .is_err());
+    }
+
+    #[test]
+    fn state_without_a_guard_never_expires() {
+        let far = Instant::now() + Duration::from_secs(1_000_000);
+        assert!(state().ensure_quotable(far).is_ok());
+    }
+
+    #[test]
+    fn expired_state_refuses_every_query() {
+        // A guard set at construction time is already in the past by the time we query.
+        let state = state().with_quotable_until(Instant::now());
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc()),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        assert!(matches!(
+            state.spot_price(&wbtc(), &usdc()),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        assert!(matches!(
+            state.get_limits(wbtc().address, usdc().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+    }
+
+    #[test]
+    fn fresh_state_quotes_and_its_successor_keeps_the_guard() {
+        let until = Instant::now() + Duration::from_secs(60);
+        let state = state().with_quotable_until(until);
+        assert!(state
+            .spot_price(&wbtc(), &usdc())
+            .is_ok());
+        assert!(state
+            .get_limits(wbtc().address, usdc().address)
+            .is_ok());
+        let result = state
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
+            .expect("fresh state quotes");
+        let successor = result
+            .new_state
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert_eq!(successor.quotable_until, Some(until));
+    }
+
+    #[test]
+    fn guard_is_never_serialized_and_deserializes_as_none() {
+        let live = state().with_quotable_until(Instant::now());
+        let json = serde_json::to_value(&live).unwrap();
+        assert!(json
+            .as_object()
+            .unwrap()
+            .get("quotable_until")
+            .is_none());
+        // A recording made after this feature therefore replays without a guard.
+        let replayed: PriceLevelStreamState = serde_json::from_value(json).unwrap();
+        assert_eq!(replayed.quotable_until, None);
+        assert!(replayed
+            .spot_price(&wbtc(), &usdc())
+            .is_ok());
+    }
+
+    #[test]
+    fn eq_includes_the_guard() {
+        let until = Instant::now() + Duration::from_secs(60);
+        assert!(state().eq(&state()));
+        assert!(!state().eq(&state().with_quotable_until(until)));
+        assert!(state()
+            .with_quotable_until(until)
+            .eq(&state().with_quotable_until(until)));
     }
 }

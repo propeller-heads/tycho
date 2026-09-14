@@ -33,21 +33,27 @@ for any protocol indexed by Tycho.
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
   `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
-  Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
-  round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are
-  identified as `pricelevelstream:{pamm}`. A new builder serves nothing: `with_known_pamms`
-  registers the known-good venues and denies known-unexecutable ones, `add_pamm` registers
-  individual ones, `deny_pamm` excludes one (dropping any registration and blocking
-  auto-detection), and opt-in auto-detection additionally serves unknown venues under their
-  address (`pricelevelstream:{0xaddress}`). Precedence: between `add_pamm` and `deny_pamm` for
-  the same address the later call wins; `with_known_pamms` defaults never override either,
-  regardless of call order. `build` emits venues on Titan's PropAMMRouter whitelist under
-  `propammfallback:{pamm}` instead, so tycho-execution routes their swaps through the router
-  (Uniswap V3 fallback on venue revert); it reads that whitelist once on the first poll via
-  `RPC_URL`, and warns and stays on the direct path without it. `without_fallback_router` skips
-  the read and keeps every venue on the direct path. Venues may overlap with other integration
-  paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by venue where
-  double-counting matters
+  Titan WebSocket's per-pair quote-ladder frames directly into `Update`s (no indexer feed
+  round-trip); `PriceLevelStreamState` quotes by interpolating the ladder and refuses to quote
+  once its frame is one block time old (`quotable_until`, monotonic, never serialized). Frames
+  are best-effort, not complete snapshots: `tracker.rs` keys freshness per component, never
+  removes on frame diff, and emits `removed_pairs` only when a component's data is `stale_after`
+  (default 24 s) old or its PropAMMRouter family changes; the next accepted frame carrying it
+  re-adds it. Frames are accepted only if their wire `timestamp` is younger than `stale_after`,
+  not more than one slot in the future, not older than the newest accepted one (equal allowed),
+  and their block neither regresses nor jumps implausibly; the block frontier resets whenever
+  nothing is served.
+  `build()` is an `async_stream` loop selecting over frames, an earliest-deadline timer, and the
+  whitelist reader (`fallback_router.rs`, each read bounded by 15 s, retried with backoff,
+  refreshed every 10 min); nothing is served until the whitelist is known, and without
+  `fallback_router_rpc_url` or `RPC_URL` nothing is ever served. `titan.rs` counts only parsed
+  frames as liveness (idle timeout 10 s). `telemetry.rs` emits `price_level_stream_*` metrics via
+  the `metrics` facade, per-venue series pre-initialised to zero, no wire values as labels except
+  the address of an auto-detected venue. Components are identified as `pricelevelstream:{pamm}` or
+  `propammfallback:{pamm}` for
+  whitelisted venues; a stale expiry and a retired venue look the same downstream. Registration
+  precedence (`with_known_pamms`, `add_pamm`, `deny_pamm`, auto-detection) is unchanged: later
+  explicit calls win, defaults never override them.
 
 ## Simulation Approaches
 

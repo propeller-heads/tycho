@@ -2,14 +2,15 @@
 //!
 //! Connects to the Titan `pamm_price_levels` WebSocket (see
 //! <https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level>) and yields parsed frames.
-//! Each frame is a complete snapshot of quote ladders per pair per pAMM, targeting the block
-//! Titan is currently building; consumers keep the newest frame and treat older ones as
-//! superseded.
+//! Each frame carries the quote ladders Titan simulated in one build round, targeting the block
+//! it is currently building. Frames are best effort, not complete snapshots: a venue or pair can
+//! be absent from one frame and present in the next, so absence must never be read as
+//! retirement. Consumers key freshness on the frame `timestamp`, not on what a frame omits.
 //!
 //! All Titan specifics (endpoint, JSON shape, reconnect policy) live in this module; the rest of
 //! the price level stream machinery is venue-agnostic.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
@@ -19,6 +20,8 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 use tycho_common::Bytes;
+
+use super::telemetry;
 
 /// Default Titan pAMM price level WebSocket endpoint. Titan serves the same stream from other
 /// regions as well; see <https://docs.titanbuilder.xyz/propamms/takers>.
@@ -31,10 +34,10 @@ pub(super) struct ConnectionSettings {
     /// Longest a single connection attempt may take before it is aborted and retried, so a hung
     /// TCP/TLS handshake cannot block the stream forever.
     pub connect_timeout: Duration,
-    /// Longest gap between Titan messages tolerated before the socket is treated as dead and
-    /// re-established. Titan pushes several updates per second, so a multi-second silence means
-    /// a stalled or half-open connection that [`StreamExt::next`] would otherwise wait on
-    /// forever.
+    /// Longest gap between *parsed* Titan frames tolerated before the socket is treated as dead
+    /// and re-established. Titan pushes one frame per second and sends no keepalives, so a
+    /// half-open socket is indistinguishable from silence; ten seconds catches it well before
+    /// any served component expires. Pings, binary frames, and unparsable text do not count.
     pub read_idle_timeout: Duration,
     /// Cap on the exponential reconnect backoff (`2^attempt` seconds, at most this).
     pub max_backoff: Duration,
@@ -44,7 +47,7 @@ impl Default for ConnectionSettings {
     fn default() -> Self {
         Self {
             connect_timeout: Duration::from_secs(10),
-            read_idle_timeout: Duration::from_secs(30),
+            read_idle_timeout: Duration::from_secs(10),
             max_backoff: Duration::from_secs(32),
         }
     }
@@ -52,7 +55,7 @@ impl Default for ConnectionSettings {
 
 /// The reconnect backoff after `attempt` consecutive failures: `2^attempt` seconds, capped at
 /// `max_backoff`.
-fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
+pub(super) fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
     let exponential = 2u64
         .checked_pow(attempt)
         .map(Duration::from_secs)
@@ -60,18 +63,26 @@ fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
     exponential.min(max_backoff)
 }
 
-/// A parsed price level stream frame: a complete snapshot of all streamed pAMMs' quote ladders
-/// for the block currently being built.
+/// A parsed price level stream frame: the quote ladders of every pAMM Titan simulated in one
+/// build round, targeting the block currently being built.
+///
+/// Frames are best effort, not complete snapshots: a venue or pair can be absent from one frame
+/// and present in the next (observed on 7.7% of frames in a 15 minute capture), so absence must
+/// never be read as retirement.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TitanPriceLevelMessage {
     /// The L1 block number the quotes target (the block currently being built).
     pub block_number: u64,
+    /// When Titan built this frame, in nanoseconds since the Unix epoch. Frames re-emitted
+    /// within one build round share a timestamp, so it is a freshness marker, not an identity.
+    pub timestamp: u64,
     /// Per-pAMM quote snapshots.
     pub pamms: Vec<TitanPammLevels>,
 }
 
-/// One pAMM's complete pair snapshot within a frame.
+/// The quote ladders one pAMM was simulated for within a frame. Not every pair the venue trades
+/// is necessarily present.
 #[derive(Debug, Deserialize)]
 pub(super) struct TitanPammLevels {
     /// The pAMM venue address.
@@ -116,7 +127,7 @@ where
 ///
 /// Maintains the connection in the background of the stream itself: any disconnect, read error,
 /// server-side close, or idle timeout is retried forever with capped exponential backoff (reset
-/// only once a frame is actually received, so a socket that connects and immediately drops still
+/// only once a frame is actually parsed, so a socket that connects and immediately drops still
 /// backs off instead of busy-looping). Malformed frames are logged and skipped; this stream never
 /// terminates.
 pub(super) fn messages(
@@ -129,39 +140,55 @@ pub(super) fn messages(
             match timeout(settings.connect_timeout, connect_async(url.as_str())).await {
                 Ok(Ok((mut ws_stream, _))) => {
                     info!(%url, "Connected to Titan pAMM price level stream");
+                    let mut last_parsed = Instant::now();
                     loop {
-                        // Bound the wait so a half-open connection (no data and no close frame)
-                        // is detected and retried instead of blocking on `next()` indefinitely.
-                        let message = match timeout(settings.read_idle_timeout, ws_stream.next())
-                            .await
-                        {
+                        // Liveness is measured from the last parsed frame, so control frames and
+                        // garbage cannot keep a data-silent socket alive.
+                        let remaining = settings
+                            .read_idle_timeout
+                            .saturating_sub(last_parsed.elapsed());
+                        if remaining.is_zero() {
+                            warn!(
+                                idle_secs = settings.read_idle_timeout.as_secs(),
+                                "No parsed Titan frame within idle timeout; reconnecting"
+                            );
+                            telemetry::reconnect("idle_timeout");
+                            break;
+                        }
+                        let message = match timeout(remaining, ws_stream.next()).await {
                             Ok(Some(message)) => message,
                             // Stream ended: the server hung up without sending a close frame.
                             Ok(None) => {
                                 warn!("Titan price level stream ended; reconnecting");
+                                telemetry::reconnect("ended");
                                 break;
                             }
                             // No traffic within the idle window: assume a stalled socket.
                             Err(_elapsed) => {
                                 warn!(
                                     idle_secs = settings.read_idle_timeout.as_secs(),
-                                    "No Titan message within idle timeout; reconnecting"
+                                    "No parsed Titan frame within idle timeout; reconnecting"
                                 );
+                                telemetry::reconnect("idle_timeout");
                                 break;
                             }
                         };
 
                         match message {
-                            // Expected case: a JSON snapshot frame. Receiving one proves the
-                            // connection is healthy, so reset the reconnect backoff.
                             Ok(Message::Text(text)) => {
-                                attempt = 0;
                                 match serde_json::from_str::<TitanPriceLevelMessage>(text.as_str())
                                 {
-                                    Ok(message) => yield message,
+                                    // A parsed frame proves the connection is healthy: reset
+                                    // both the reconnect backoff and the idle watchdog.
+                                    Ok(message) => {
+                                        attempt = 0;
+                                        last_parsed = Instant::now();
+                                        yield message;
+                                    }
                                     // Unparseable frame: log and keep the connection.
                                     Err(e) => {
-                                        warn!(error = %e, "Failed to parse Titan price level message")
+                                        warn!(error = %e, "Failed to parse Titan price level message");
+                                        telemetry::frame_rejected("parse_error");
                                     }
                                 }
                             }
@@ -181,12 +208,14 @@ pub(super) fn messages(
                             // Server initiated a graceful close — reconnect.
                             Ok(Message::Close(frame)) => {
                                 warn!(?frame, "Titan price level stream closed by server; reconnecting");
+                                telemetry::reconnect("closed");
                                 break;
                             }
                             // Transport/protocol error (broken pipe, invalid frame, ...) —
                             // reconnect.
                             Err(e) => {
                                 warn!(error = %e, "Titan price level stream read error; reconnecting");
+                                telemetry::reconnect("read_error");
                                 break;
                             }
                         }
@@ -195,6 +224,7 @@ pub(super) fn messages(
                 // Connection refused / TLS error — fall through to backoff and retry.
                 Ok(Err(e)) => {
                     warn!(error = %e, "Failed to connect to Titan price level stream; retrying");
+                    telemetry::reconnect("connect_failed");
                 }
                 // Handshake did not complete within the timeout — retry after backoff.
                 Err(_elapsed) => {
@@ -202,6 +232,7 @@ pub(super) fn messages(
                         timeout_secs = settings.connect_timeout.as_secs(),
                         "Titan price level connect timed out; retrying"
                     );
+                    telemetry::reconnect("connect_timeout");
                 }
             }
 
@@ -254,6 +285,7 @@ mod tests {
     fn parses_documented_sample_message() {
         let message: TitanPriceLevelMessage = serde_json::from_str(SAMPLE_MESSAGE).unwrap();
         assert_eq!(message.block_number, 25345763);
+        assert_eq!(message.timestamp, 1781801564588230787);
         assert_eq!(message.pamms.len(), 1);
 
         let pamm = &message.pamms[0];
@@ -271,6 +303,14 @@ mod tests {
         assert_eq!(pair.order_book.len(), 2);
         assert_eq!(pair.order_book[0].amount_in, BigUint::from(0x989680u64));
         assert_eq!(pair.order_book[0].amount_out, BigUint::from(0x174b67393u64));
+    }
+
+    /// The wire `timestamp` is the only per-frame freshness signal, so a frame without it is
+    /// unusable and must not parse.
+    #[test]
+    fn rejects_frame_without_timestamp() {
+        let json = r#"{"slot": 1, "blockNumber": 2, "pamms": []}"#;
+        assert!(serde_json::from_str::<TitanPriceLevelMessage>(json).is_err());
     }
 
     #[test]
@@ -333,6 +373,28 @@ mod tests {
         }
     }
 
+    /// A frame captured verbatim from the live stream (2026-09-05). It carries `timestamp`,
+    /// `slot`, and an undocumented per-venue `maker` field the parser must ignore.
+    const CAPTURED_MESSAGE_2026_09_05: &str =
+        include_str!("test_responses/pamm_price_levels_1788624558231060482.json");
+
+    #[test]
+    fn parses_captured_live_message_with_timestamp_and_extra_fields() {
+        let message: TitanPriceLevelMessage =
+            serde_json::from_str(CAPTURED_MESSAGE_2026_09_05).expect("valid JSON");
+        assert_eq!(message.timestamp, 1788624558231060482);
+        assert_eq!(message.block_number, 25912232);
+        assert_eq!(message.pamms.len(), 7);
+        let fermiswap = message
+            .pamms
+            .iter()
+            .find(|pamm| {
+                pamm.pamm == Bytes::from_str("0x5979458912f80b96d30d4220af8e2e4925a33320").unwrap()
+            })
+            .expect("fermiswap present");
+        assert_eq!(fermiswap.pairs.len(), 12);
+    }
+
     #[test]
     fn backoff_grows_exponentially_up_to_the_cap() {
         let max_backoff = ConnectionSettings::default().max_backoff;
@@ -342,5 +404,188 @@ mod tests {
         assert_eq!(backoff(100, max_backoff), max_backoff);
         // Exponent overflow must saturate to the cap rather than panic.
         assert_eq!(backoff(u32::MAX, max_backoff), max_backoff);
+    }
+
+    #[tokio::test]
+    async fn ping_only_traffic_does_not_count_as_liveness() {
+        use std::{sync::atomic::Ordering, time::Duration};
+
+        use futures::SinkExt;
+
+        use super::super::test_support::{frame_text, wall_nanos_now, FakeTitan};
+
+        let fake = FakeTitan::spawn(|_, mut socket| async move {
+            let _ = socket
+                .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
+                .await;
+            loop {
+                if socket
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let settings = ConnectionSettings {
+            connect_timeout: Duration::from_secs(1),
+            read_idle_timeout: Duration::from_millis(100),
+            max_backoff: Duration::from_millis(10),
+        };
+        let stream = messages(fake.url(), settings);
+        tokio::pin!(stream);
+        assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("first frame")
+            .is_some());
+        // Keep polling so the idle watchdog runs; pings must not feed it.
+        let _ = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
+        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on ping-only traffic");
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure, so this test drives its own
+    // current-thread runtime instead of using `#[tokio::test]`.
+    #[test]
+    fn ping_only_traffic_counts_an_idle_timeout_reconnect() {
+        use std::time::Duration;
+
+        use futures::SinkExt;
+        use metrics_util::debugging::DebuggingRecorder;
+
+        use super::super::{
+            telemetry::{
+                test_support::{counter_value, snapshot_map},
+                RECONNECTS,
+            },
+            test_support::{frame_text, wall_nanos_now, FakeTitan},
+        };
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let fake = FakeTitan::spawn(|_, mut socket| async move {
+                    let _ = socket
+                        .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
+                        .await;
+                    loop {
+                        if socket
+                            .send(Message::Ping(Vec::new().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                let settings = ConnectionSettings {
+                    connect_timeout: Duration::from_secs(1),
+                    read_idle_timeout: Duration::from_millis(100),
+                    max_backoff: Duration::from_millis(10),
+                };
+                let stream = messages(fake.url(), settings);
+                tokio::pin!(stream);
+                assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
+                    .await
+                    .expect("first frame")
+                    .is_some());
+                // Keep polling so the idle watchdog runs and reconnects.
+                let _ = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
+            });
+        });
+        let snapshot = snapshot_map(snapshotter.snapshot());
+        assert!(counter_value(&snapshot, RECONNECTS, &[("reason", "idle_timeout")]) >= 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_text_does_not_count_as_liveness() {
+        use std::{sync::atomic::Ordering, time::Duration};
+
+        use futures::SinkExt;
+
+        use super::super::test_support::{frame_text, wall_nanos_now, FakeTitan};
+
+        let fake = FakeTitan::spawn(|_, mut socket| async move {
+            let _ = socket
+                .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
+                .await;
+            loop {
+                if socket
+                    .send(Message::Text("nonsense".into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let settings = ConnectionSettings {
+            connect_timeout: Duration::from_secs(1),
+            read_idle_timeout: Duration::from_millis(100),
+            max_backoff: Duration::from_millis(10),
+        };
+        let stream = messages(fake.url(), settings);
+        tokio::pin!(stream);
+        assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("first frame")
+            .is_some());
+        let _ = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
+        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on malformed text");
+    }
+
+    #[tokio::test]
+    async fn parsed_frames_keep_the_connection_alive() {
+        use std::{sync::atomic::Ordering, time::Duration};
+
+        use futures::SinkExt;
+
+        use super::super::test_support::{frame_text, wall_nanos_now, FakeTitan};
+
+        let fake = FakeTitan::spawn(|_, mut socket| async move {
+            loop {
+                if socket
+                    .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        let settings = ConnectionSettings {
+            connect_timeout: Duration::from_secs(1),
+            read_idle_timeout: Duration::from_millis(150),
+            max_backoff: Duration::from_millis(10),
+        };
+        let stream = messages(fake.url(), settings);
+        tokio::pin!(stream);
+        let mut received = 0;
+        while received < 10 {
+            assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("frame")
+                .is_some());
+            received += 1;
+        }
+        assert_eq!(fake.connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn default_idle_timeout_is_ten_seconds() {
+        assert_eq!(ConnectionSettings::default().read_idle_timeout, Duration::from_secs(10));
     }
 }
