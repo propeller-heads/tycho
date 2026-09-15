@@ -170,18 +170,44 @@ impl DeltaWindow {
     ///   db_committed)` — the database then holds rows from the abandoned branch, and persisted
     ///   state is never rolled back.
     /// - `StorageError::NotFound` when a revert targets a hash that is not buffered.
-    #[allow(unused_variables)]
     pub(crate) fn insert(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        // Revert message (`message.revert == true`): error if the purge target would remove any
-        // block at or below `min(self.finalized, self.db_committed)` (see Errors), otherwise
-        // `self.buffer.purge(message.block.hash)`. Purged blocks are unfolded by construction
-        // (folding is gated on the same watermarks) and are discarded. Reverts carry
-        // `db_committed_block_height: None`; watermarks stay as they are.
-        //
-        // Regular message: `self.buffer.insert_block(message.clone())` (parent-hash chain
-        // enforced there), then raise `self.finalized` / `self.db_committed` monotonically from
-        // the message.
-        todo!("insert or purge")
+        if message.revert {
+            return self.revert_to(message);
+        }
+        self.buffer
+            .insert_block(message.clone())?;
+        self.finalized = Some(
+            self.finalized
+                .map_or(message.finalized_block_height, |f| f.max(message.finalized_block_height)),
+        );
+        if let Some(committed) = message.db_committed_block_height {
+            self.db_committed = Some(
+                self.db_committed
+                    .map_or(committed, |c| c.max(committed)),
+            );
+        }
+        Ok(())
+    }
+
+    /// Purges every block after the revert target. Errors when the purge would remove a block at
+    /// or below `min(finalized, db_committed)`: the database may hold rows from the abandoned
+    /// branch, and persisted state is never rolled back. Watermarks stay as they are.
+    fn revert_to(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
+        let target = message.block.number;
+        let irreversible = match (self.finalized, self.db_committed) {
+            (Some(finalized), Some(committed)) => Some(finalized.min(committed)),
+            (Some(finalized), None) => Some(finalized),
+            (None, _) => None,
+        };
+        if irreversible.is_some_and(|height| target < height) {
+            return Err(StorageError::Unexpected(format!(
+                "Revert to block {target} would remove blocks at or below the irreversible height {}",
+                irreversible.unwrap_or_default()
+            )));
+        }
+        self.buffer
+            .purge(message.block.hash.clone())?;
+        Ok(())
     }
 
     /// Folds every evictable block into `sink`, then removes it from the window.
@@ -221,9 +247,9 @@ impl DeltaWindow {
 
     /// The oldest block number still held in the window, if any.
     pub(crate) fn floor(&self) -> Option<u64> {
-        // Needs a front accessor on `ReorgBuffer` (`get_block_range(None, None)` can reach the
-        // front element, but a dedicated accessor avoids building an iterator for one block).
-        todo!("expose the buffer's oldest block")
+        self.buffer
+            .oldest_block()
+            .map(|b| b.number)
     }
 
     /// The newest block seen by this window, if any.
@@ -239,15 +265,29 @@ impl DeltaWindow {
     /// floor report [`WindowResolution::BelowFloor`] and are served by the database fallback
     /// path; versions above the tip report [`WindowResolution::AboveTip`]. No database lookup is
     /// involved.
-    #[allow(unused_variables)]
     pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
-        // 1. Empty window -> BelowFloor (fallback path).
-        // 2. Timestamp newer than tip -> InWindow(tip)  [clamp preserves today's semantics].
-        // 3. Number/timestamp within [floor, tip] -> InWindow(matching block; timestamps round up).
-        // 4. Number below floor -> BelowFloor; number above tip -> AboveTip. BelowFloor is a
-        //    deliberate fix, not a preservation: today a below-floor end version falls through to
-        //    the front block of the buffer and serves deltas newer than requested.
-        todo!("resolve against buffered blocks")
+        let (Some(oldest), Some(tip)) = (self.buffer.oldest_block(), self.tip()) else {
+            return WindowResolution::BelowFloor;
+        };
+        if is_before(version, &oldest) {
+            return WindowResolution::BelowFloor;
+        }
+        if version.greater_than(&tip) {
+            return match version {
+                BlockNumberOrTimestamp::Number(_) => WindowResolution::AboveTip,
+                BlockNumberOrTimestamp::Timestamp(_) => WindowResolution::InWindow(tip),
+            };
+        }
+        let block = self
+            .buffer
+            .get_block_range(None, None)
+            .ok()
+            .and_then(|mut blocks| blocks.find(|b| is_at_or_before(version, &b.block)))
+            .map(|b| b.block.clone());
+        match block {
+            Some(block) => WindowResolution::InWindow(block),
+            None => WindowResolution::AboveTip,
+        }
     }
 
     /// Commit status of `version` derived from the database-commit watermark.
@@ -256,28 +296,57 @@ impl DeltaWindow {
     /// the oldest buffered block as `Committed`, which is off by one today (the oldest buffered
     /// block is `db_committed + 1`) and would be off by the whole window depth once committed
     /// blocks are retained.
-    #[allow(unused_variables)]
     pub(crate) fn commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
-        // None while the window is empty (mirrors today's "no finality found" default).
-        // - version <= self.db_committed            -> Committed
-        // - version <= tip                          -> Uncommitted
-        // - otherwise                               -> Unseen
-        // Timestamp versions compare against buffered block timestamps.
-        todo!("watermark-based commit status")
+        let oldest = self.buffer.oldest_block()?;
+        let tip = self.tip()?;
+        if version.greater_than(&tip) {
+            return Some(CommitStatus::Unseen);
+        }
+        let committed_block = self.db_committed.and_then(|height| {
+            self.buffer
+                .get_block_range(None, None)
+                .ok()?
+                .find(|b| b.block.number == height)
+                .map(|b| b.block.clone())
+        });
+        let committed = match committed_block {
+            Some(block) => is_at_or_before(version, &block),
+            // The commit watermark is below the window, or nothing was committed yet: only
+            // versions older than the oldest buffered block are in the database.
+            None => is_before(version, &oldest),
+        };
+        Some(if committed { CommitStatus::Committed } else { CommitStatus::Uncommitted })
     }
 
     /// Highest block number that may be folded-and-evicted. `None` when the window is empty or
     /// no database commit has been observed yet; the caller logs both watermarks and the tip so
     /// the two cases are distinguishable.
     fn eviction_bound(&self) -> Option<u64> {
-        // min(finalized, db_committed, tip - depth), where:
-        // - `None` finalized/db_committed/tip means nothing is evictable yet;
-        // - the subtraction saturates at 0: a chain shorter than `depth` evicts nothing through the
-        //   depth term;
-        // - `db_committed <= finalized` holds by construction today (message aggregation rejects
-        //   the opposite), so the finalized term is belt-and-braces against a future change to the
-        //   commit trigger.
-        todo!("compute eviction bound")
+        let tip = self.tip()?.number;
+        let finalized = self.finalized?;
+        let db_committed = self.db_committed?;
+        Some(
+            finalized
+                .min(db_committed)
+                .min(tip.saturating_sub(self.depth)),
+        )
+    }
+}
+
+/// Whether `version` is strictly older than `block`, by number or by timestamp.
+fn is_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
+    match version {
+        BlockNumberOrTimestamp::Number(n) => n < block.number,
+        BlockNumberOrTimestamp::Timestamp(ts) => ts < block.ts,
+    }
+}
+
+/// Whether `version` is `block` or older, by number or by timestamp. Scanning ascending blocks
+/// for the first one that satisfies this rounds a between-blocks timestamp up to the next block.
+fn is_at_or_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
+    match version {
+        BlockNumberOrTimestamp::Number(n) => n <= block.number,
+        BlockNumberOrTimestamp::Timestamp(ts) => ts <= block.ts,
     }
 }
 
@@ -288,5 +357,250 @@ impl DeepSizeOf for DeltaWindow {
             .deep_size_of_children(context) +
             self.buffer
                 .deep_size_of_children(context)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ops::RangeInclusive;
+
+    use rstest::rstest;
+    use tycho_common::Bytes;
+
+    use super::*;
+    use crate::testing;
+
+    const EXTRACTOR: &str = "ex";
+
+    fn msg(number: u64, finalized: u64, committed: Option<u64>) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            extractor: EXTRACTOR.to_string(),
+            block: testing::block(number),
+            finalized_block_height: finalized,
+            db_committed_block_height: committed,
+            ..Default::default()
+        }
+    }
+
+    fn revert_to(number: u64) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
+    }
+
+    fn window(depth: u64, min_fold_batch: u64) -> DeltaWindow {
+        DeltaWindow::new(EXTRACTOR.to_string(), depth, min_fold_batch).unwrap()
+    }
+
+    fn fill(
+        w: &mut DeltaWindow,
+        range: RangeInclusive<u64>,
+        finalized: u64,
+        committed: Option<u64>,
+    ) {
+        for n in range {
+            w.insert(&msg(n, finalized, committed))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn insert_rejects_a_block_that_does_not_extend_the_chain() {
+        let mut w = window(3, 1);
+        w.insert(&msg(1, 0, None)).unwrap();
+
+        let res = w.insert(&msg(3, 0, None));
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[rstest]
+    #[case::at_committed(BlockNumberOrTimestamp::Number(6), Some(CommitStatus::Committed))]
+    #[case::above_committed(BlockNumberOrTimestamp::Number(7), Some(CommitStatus::Uncommitted))]
+    #[case::at_tip(BlockNumberOrTimestamp::Number(10), Some(CommitStatus::Uncommitted))]
+    #[case::above_tip(BlockNumberOrTimestamp::Number(11), Some(CommitStatus::Unseen))]
+    #[case::ts_at_committed(
+        BlockNumberOrTimestamp::Timestamp(testing::block(6).ts),
+        Some(CommitStatus::Committed)
+    )]
+    #[case::ts_above_committed(
+        BlockNumberOrTimestamp::Timestamp(testing::block(7).ts),
+        Some(CommitStatus::Uncommitted)
+    )]
+    #[case::ts_after_tip(
+        BlockNumberOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::seconds(1)),
+        Some(CommitStatus::Unseen)
+    )]
+    fn commit_status_follows_the_watermark(
+        #[case] version: BlockNumberOrTimestamp,
+        #[case] expected: Option<CommitStatus>,
+    ) {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 8, Some(6));
+
+        assert_eq!(w.commit_status(version), expected);
+    }
+
+    #[test]
+    fn the_oldest_buffered_block_is_not_committed() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 0, None);
+
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(1)),
+            Some(CommitStatus::Uncommitted)
+        );
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(0)),
+            Some(CommitStatus::Committed)
+        );
+    }
+
+    #[test]
+    fn a_committed_height_below_the_window_marks_only_below_floor_versions_committed() {
+        let mut w = window(3, 1);
+        fill(&mut w, 5..=10, 10, Some(3));
+
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(4)),
+            Some(CommitStatus::Committed)
+        );
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(5)),
+            Some(CommitStatus::Uncommitted)
+        );
+    }
+
+    #[test]
+    fn commit_status_is_none_on_an_empty_window() {
+        assert_eq!(window(3, 1).commit_status(BlockNumberOrTimestamp::Number(1)), None);
+    }
+
+    #[test]
+    fn floor_is_the_oldest_buffered_block() {
+        let mut w = window(3, 1);
+        assert_eq!(w.floor(), None);
+        fill(&mut w, 4..=6, 0, None);
+        assert_eq!(w.floor(), Some(4));
+    }
+
+    #[rstest]
+    #[case::number_in_window(
+        BlockNumberOrTimestamp::Number(5),
+        WindowResolution::InWindow(testing::block(5))
+    )]
+    #[case::number_below_floor(BlockNumberOrTimestamp::Number(0), WindowResolution::BelowFloor)]
+    #[case::number_above_tip(BlockNumberOrTimestamp::Number(11), WindowResolution::AboveTip)]
+    #[case::timestamp_rounds_up(
+        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
+        WindowResolution::InWindow(testing::block(6))
+    )]
+    #[case::timestamp_after_tip_clamps(
+        BlockNumberOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::hours(1)),
+        WindowResolution::InWindow(testing::block(10))
+    )]
+    #[case::timestamp_before_floor(
+        BlockNumberOrTimestamp::Timestamp(testing::block(1).ts - chrono::Duration::seconds(1)),
+        WindowResolution::BelowFloor
+    )]
+    fn resolve_maps_versions_onto_the_window(
+        #[case] version: BlockNumberOrTimestamp,
+        #[case] expected: WindowResolution,
+    ) {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(5));
+
+        assert_eq!(w.resolve(version), expected);
+    }
+
+    #[test]
+    fn resolve_on_an_empty_window_is_below_floor() {
+        assert_eq!(
+            window(3, 1).resolve(BlockNumberOrTimestamp::Number(1)),
+            WindowResolution::BelowFloor
+        );
+    }
+
+    #[test]
+    fn revert_above_the_irreversible_height_purges_the_abandoned_blocks() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 3, Some(3));
+
+        w.insert(&revert_to(3)).unwrap();
+
+        assert_eq!(w.tip().map(|b| b.number), Some(3));
+        assert_eq!(w.finalized, Some(3));
+        assert_eq!(w.db_committed, Some(3));
+    }
+
+    #[test]
+    fn revert_below_the_irreversible_height_is_an_error() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 3, Some(3));
+
+        let res = w.insert(&revert_to(2));
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(w.tip().map(|b| b.number), Some(5));
+    }
+
+    #[test]
+    fn revert_uses_finalized_alone_before_the_first_commit() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 3, None);
+
+        assert!(w.insert(&revert_to(2)).is_err());
+        assert!(w.insert(&revert_to(3)).is_ok());
+    }
+
+    #[test]
+    fn revert_to_an_unknown_hash_is_not_found() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 1, Some(1));
+        let mut unknown = revert_to(4);
+        unknown.block.hash = Bytes::from(99u64).lpad(32, 0);
+
+        let res = w.insert(&unknown);
+
+        assert!(matches!(res, Err(StorageError::NotFound(_, _))));
+    }
+
+    #[rstest]
+    #[case::depth_binds(10, Some(10), Some(7))]
+    #[case::finalized_binds(5, Some(10), Some(5))]
+    #[case::committed_binds(10, Some(4), Some(4))]
+    #[case::no_commit_yet(10, None, None)]
+    fn eviction_bound_is_the_smallest_term(
+        #[case] finalized: u64,
+        #[case] committed: Option<u64>,
+        #[case] expected: Option<u64>,
+    ) {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, finalized, committed);
+
+        assert_eq!(w.eviction_bound(), expected);
+    }
+
+    #[test]
+    fn eviction_bound_saturates_on_a_chain_shorter_than_the_depth() {
+        let mut w = window(20, 1);
+        fill(&mut w, 1..=5, 5, Some(5));
+
+        assert_eq!(w.eviction_bound(), Some(0));
+    }
+
+    #[test]
+    fn eviction_bound_is_none_on_an_empty_window() {
+        assert_eq!(window(3, 1).eviction_bound(), None);
+    }
+
+    #[test]
+    fn watermarks_only_rise() {
+        let mut w = window(3, 1);
+        w.insert(&msg(1, 0, None)).unwrap();
+        w.insert(&msg(2, 1, Some(0))).unwrap();
+        w.insert(&msg(3, 0, None)).unwrap();
+
+        assert_eq!(w.finalized, Some(1));
+        assert_eq!(w.db_committed, Some(0));
     }
 }
