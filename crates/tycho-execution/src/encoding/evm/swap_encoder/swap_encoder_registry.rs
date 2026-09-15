@@ -8,7 +8,7 @@ use crate::encoding::{
         constants::{
             DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_KEY,
             PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG,
+            PROTOCOL_SPECIFIC_CONFIG, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -140,7 +140,7 @@ impl SwapEncoderRegistry {
         config: Option<HashMap<String, String>>,
     ) -> Result<Box<dyn SwapEncoder>, EncodingError> {
         match protocol_system {
-            "uniswap_v2" | "sushiswap_v2" | "pancakeswap_v2" | "quickswap_v2" => {
+            p if UNISWAP_V2_FORKS.contains(&p) => {
                 Ok(Box::new(UniswapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "ring_swap_v2" => {
@@ -152,7 +152,7 @@ impl SwapEncoderRegistry {
             "vm:balancer_v2" => {
                 Ok(Box::new(BalancerV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" => {
+            p if UNISWAP_V3_FORKS.contains(&p) => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "uniswap_v4" => {

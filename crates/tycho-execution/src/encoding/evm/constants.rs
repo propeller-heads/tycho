@@ -126,6 +126,16 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set
 });
 
+/// Uniswap V2 and its forks encode identically, so they share `UniswapV2SwapEncoder`. The fallback
+/// encoder accepts the same names as aliases for its `UniswapV2` protocol; the
+/// `test_aliases_cover_registry_forks` test keeps the two lists from drifting.
+pub const UNISWAP_V2_FORKS: &[&str] =
+    &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
+pub const UNISWAP_V3_FORKS: &[&str] =
+    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3"];
+
 /// Protocol system prefix carried by components sourced from the pAMM price level stream. The
 /// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
 /// auto-detected pAMMs, the venue address (e.g. `pricelevelstream:0x5979…`); every such protocol
@@ -151,7 +161,7 @@ pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
 
 /// Protocol system prefix for pAMM components executed through `TychoFallbackRouter`, which
-/// retries a failing pAMM on the fallback protocol named in the swap's `user_data`. Venue
+/// retries a failing pAMM on the fallback protocol named in the swap's `user_data`. Protocol
 /// suffixes follow `PRICE_LEVEL_STREAM_PREFIX`. Replaces `PROPAMM_FALLBACK_PREFIX` (Titan's
 /// PropAMMRouter, deprecated): any pAMM qualifies, and the solver picks the fallback protocol per
 /// swap instead of the router owning one Uniswap V3 mapping.
