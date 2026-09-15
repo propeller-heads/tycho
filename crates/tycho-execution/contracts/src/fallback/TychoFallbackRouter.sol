@@ -22,6 +22,7 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPropAMM} from "@interfaces/IPropAMM.sol";
+import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {
     CryptoPool as ICurveCryptoPool,
     StablePool as ICurveStablePool
@@ -115,6 +116,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     IPoolManager public immutable poolManager;
     /// @notice Where `dexCallback` pays a Fluid dex.
     address public immutable fluidLiquidity;
+    /// @notice Prices a Uniswap V3 fallback without running it.
+    IUniswapV3StaticQuoter public immutable uniswapV3StaticQuoter;
 
     /// @notice `protocol` filled instead of the pAMM, for `reason`. Absence of this event on a
     /// filled swap means the pAMM served it, which is the pAMM fill rate.
@@ -129,14 +132,20 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         FallbackReason reason
     );
 
-    constructor(IPoolManager poolManager_, address fluidLiquidity_) {
+    constructor(
+        IPoolManager poolManager_,
+        address fluidLiquidity_,
+        IUniswapV3StaticQuoter uniswapV3StaticQuoter_
+    ) {
         if (
             address(poolManager_) == address(0) || fluidLiquidity_ == address(0)
+                || address(uniswapV3StaticQuoter_) == address(0)
         ) {
             revert TychoFallbackRouter__AddressZero();
         }
         poolManager = poolManager_;
         fluidLiquidity = fluidLiquidity_;
+        uniswapV3StaticQuoter = uniswapV3StaticQuoter_;
     }
 
     /// @notice Quotes `pamm` and `fallbackSwap`, then runs the fallback if it quotes more
@@ -210,9 +219,9 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// @notice Quotes the fallback protocol. External only so `swap` can try/catch it: a
     /// protocol that cannot quote, or malformed protocol data, is a zero quote, and `swap` then
     /// tries the pAMM first as before.
-    /// @dev Uniswap V2 prices off the pair's reserves, Curve asks `get_dy`, Fluid asks the dex
-    /// to price a swap paid to `0xdEaD`. Uniswap V3 and V4 pools have no quote function, so
-    /// `simulateFallback` runs the swap and rolls it back.
+    /// @dev Uniswap V2 prices off the pair's reserves, Uniswap V3 asks the static quoter, Curve
+    /// asks `get_dy`, Fluid asks the dex to price a swap paid to `0xdEaD`. Uniswap V4 has no
+    /// quote function, so `simulateFallback` runs the swap and rolls it back.
     function quoteFallback(Swap calldata swap_, bytes calldata fallbackSwap)
         external
         returns (uint256 amountOut)
@@ -223,6 +232,9 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
 
         if (protocol == FallbackProtocol.UniswapV2) {
             return _quoteUniswapV2(swap_, protocolData);
+        }
+        if (protocol == FallbackProtocol.UniswapV3) {
+            return _quoteUniswapV3(swap_, protocolData);
         }
         if (protocol == FallbackProtocol.Curve) {
             return _quoteCurve(swap_, protocolData);
@@ -284,6 +296,26 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     {
         (IUniswapV2Pair pair, uint256 feeBps) = _decodeUniswapV2(data);
         return _uniswapV2AmountOut(swap_, pair, feeBps);
+    }
+
+    /// @dev The same arguments `_swapUniswapV3` passes to the pool, so the quote is the fill.
+    /// The pool pays out the negative delta.
+    function _quoteUniswapV3(Swap calldata swap_, bytes calldata data)
+        internal
+        view
+        returns (uint256 amountOut)
+    {
+        address pool = _decodeUniswapV3(data);
+        bool zeroForOne = swap_.tokenIn < swap_.tokenOut;
+        (int256 amount0, int256 amount1) = uniswapV3StaticQuoter.quote(
+            pool,
+            zeroForOne,
+            int256(swap_.amountIn),
+            zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        );
+        return uint256(-(zeroForOne ? amount1 : amount0));
     }
 
     function _quoteCurve(Swap calldata swap_, bytes calldata data)
@@ -438,10 +470,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     }
 
     function _swapUniswapV3(Swap calldata swap_, bytes calldata data) internal {
-        if (data.length != 20) {
-            revert TychoFallbackRouter__InvalidSwapLength(data.length);
-        }
-        address pool = address(bytes20(data[0:20]));
+        address pool = _decodeUniswapV3(data);
         bool zeroForOne = swap_.tokenIn < swap_.tokenOut;
 
         _setCallbackContext(pool, swap_.tokenIn, swap_.amountIn);
@@ -457,6 +486,17 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
                 ""
             );
         _clearCallbackContext();
+    }
+
+    function _decodeUniswapV3(bytes calldata data)
+        internal
+        pure
+        returns (address pool)
+    {
+        if (data.length != 20) {
+            revert TychoFallbackRouter__InvalidSwapLength(data.length);
+        }
+        pool = address(bytes20(data[0:20]));
     }
 
     /// @dev One pool, never a path: the currencies come from the sort order of `tokenIn` and

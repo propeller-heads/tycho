@@ -22,6 +22,7 @@ import {
     TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
 import {UniswapV2Math__ZeroReserves} from "../../lib/UniswapV2Math.sol";
+import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 
 /// @notice Builds the protocol entries `TychoFallbackRouter` decodes.
 library FallbackSwaps {
@@ -170,8 +171,14 @@ contract SilentPropAMM {
 
 /// @notice Exposes the two quotes `swap` compares, which are self-only on the router.
 contract TychoFallbackRouterExposed is TychoFallbackRouter {
-    constructor(IPoolManager poolManager_, address fluidLiquidity_)
-        TychoFallbackRouter(poolManager_, fluidLiquidity_)
+    constructor(
+        IPoolManager poolManager_,
+        address fluidLiquidity_,
+        IUniswapV3StaticQuoter uniswapV3StaticQuoter_
+    )
+        TychoFallbackRouter(
+            poolManager_, fluidLiquidity_, uniswapV3StaticQuoter_
+        )
     {}
 
     function quoteFallbackFor(Swap calldata swap_, bytes calldata fallbackSwap)
@@ -201,7 +208,9 @@ abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
     function setUp() public virtual {
         vm.createSelectFork(vm.rpcUrl("mainnet"), getForkBlock());
         router = new TychoFallbackRouterExposed(
-            IPoolManager(POOL_MANAGER), FLUIDV1_LIQUIDITY
+            IPoolManager(POOL_MANAGER),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
         );
         pamm = new MockPropAMM();
     }
@@ -367,12 +376,29 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
     function testConstructorRejectsZeroPoolManager() public {
         vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(IPoolManager(address(0)), FLUIDV1_LIQUIDITY);
+        new TychoFallbackRouter(
+            IPoolManager(address(0)),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
     }
 
     function testConstructorRejectsZeroFluidLiquidity() public {
         vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(IPoolManager(POOL_MANAGER), address(0));
+        new TychoFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
+    }
+
+    function testConstructorRejectsZeroStaticQuoter() public {
+        vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
+        new TychoFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(address(0))
+        );
     }
 
     /// A live pAMM that quotes above the fallback fills, and the fallback is never touched.
@@ -556,7 +582,8 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     }
 
     /// A fallback that cannot quote is a zero quote, never a revert of the swap: a pool that
-    /// reverts, a pair with no reserves, a pool that pays nothing, and malformed protocol data.
+    /// reverts, a pair with no reserves, a "pool" the static quoter cannot read, and malformed
+    /// protocol data.
     function testUnquotableFallbackQuotesZero() public {
         deal(USDC_ADDR, address(router), USDC_IN);
         TychoFallbackRouter.Swap memory swap_ =

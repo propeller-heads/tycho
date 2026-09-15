@@ -174,14 +174,16 @@ the outer frame: it gets no try/catch, so its revert is the swap's revert and th
 never picks a protocol itself -- the encoder decides which fallback to use and supplies its pool address.
 
 **Quotes.** The pAMM quote is `IPropAMM.quote`. The fallback quote depends on the protocol: Uniswap V2 is computed
-from the pair's reserves, Curve asks `get_dy`, Fluid asks the dex to price a swap paid to `0xdEaD`, which reverts
-`FluidDexSwapResult(amountOut)` before moving any token. Uniswap V3 and V4 pools have no quote function, so
-`simulateFallback` runs the real swap and reverts `TychoFallbackRouter__SimulatedAmountOut` with the receiver's
-balance diff, rolling it back. Both quotes run in self-only external functions (`quotePropAMM`, `quoteFallback`) under
-try/catch, so a quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero. Two zero
-quotes or equal quotes keep the pAMM-first order. The fallback quote costs gas on every leg, including the ones the
-pAMM fills: about 100-110k for a Uniswap V3 or V4 simulation, about 40k for Curve or Fluid, about 12k for Uniswap V2
-(router call, cold state, mainnet fork). A stale pAMM is skipped without being called, which saves its failed swap.
+from the pair's reserves, Uniswap V3 asks the static quoter (Eden Network's `view` reimplementation of the tick walk,
+`uniswapV3StaticQuoter` immutable, `IUniswapV3StaticQuoter`), Curve asks `get_dy`, Fluid asks the dex to price a
+swap paid to `0xdEaD`, which reverts `FluidDexSwapResult(amountOut)` before moving any token. Uniswap V4 has no quote
+function, so `simulateFallback` runs the real swap and reverts `TychoFallbackRouter__SimulatedAmountOut` with the
+receiver's balance diff, rolling it back. Both quotes run in self-only external functions (`quotePropAMM`,
+`quoteFallback`) under try/catch, so a quote that reverts, returns nothing decodable or gets malformed protocol data
+counts as zero. Two zero quotes or equal quotes keep the pAMM-first order. The fallback quote costs gas on every leg,
+including the ones the pAMM fills: about 110k for a Uniswap V4 simulation, about 40k for Curve or Fluid, about 30k for
+Uniswap V3, about 12k for Uniswap V2 (router call, cold state, mainnet fork). A stale pAMM is skipped without being
+called, which saves its failed swap.
 
 `FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
@@ -231,8 +233,9 @@ Constraints:
   the fallback to clear.
 - **Uniswap V4 routes are single-pool.** A route names one pool, never a path.
 - `scripts/deploy-fallback-router.js` deploys the contract through the CREATE2 factory. It reads `poolManager` and
-  `fluidLiquidity` from `config/executor_deployments.json` (`uniswap_v4` and `fluid_v1`), so a network missing either
-  entry fails there. Deployed on Ethereum only.
+  `fluidLiquidity` from `config/executor_deployments.json` (`uniswap_v4` and `fluid_v1`) and the Uniswap V3 static
+  quoter from `config/protocol_specific_addresses.json` (`fallback_router.uniswap_v3_static_quoter`), so a network
+  missing any of the three fails there. Deployed on Ethereum only.
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
