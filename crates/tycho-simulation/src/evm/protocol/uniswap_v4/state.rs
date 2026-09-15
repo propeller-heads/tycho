@@ -172,6 +172,72 @@ impl UniswapV4State {
         })
     }
 
+    /// Buy price of `base` denominated in `quote`, derived from the pool's `sqrt_price` and LP
+    /// fee: `pre_fee_price / (1 - fee)` — the `ProtocolSim::spot_price` convention. Ignores any
+    /// hook-specific pricing effects; a hook that reshapes execution should implement its own
+    /// `HookHandler::spot_price`.
+    fn sqrt_price_buy_quote(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        let zero_for_one = base < quote;
+        let fee = self
+            .fees
+            .calculate_swap_fees_pips(zero_for_one, None) as f64 /
+            1_000_000.0;
+
+        let price = if zero_for_one {
+            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
+        } else {
+            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
+        };
+
+        Ok(add_fee_markup(price, fee))
+    }
+
+    /// Marginal buy price of `base` denominated in `quote`, derived from `get_amount_out(quote ->
+    /// base)` at a negligibly small size. Unlike [`Self::sqrt_price_buy_quote`], this reflects the
+    /// hook's execution — the native `sqrt_price` is meaningless for hook-managed-liquidity pools
+    /// (e.g. Euler) — and is expressed as a buy price (`quote` per `base`) consistent with the
+    /// `spot_price` convention: the reciprocal of the marginal `base`-out per `quote`-in.
+    fn hook_marginal_buy_quote(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        // Two small quote-denominated probes approximate d(base_out)/d(quote_in).
+        let x1 = BigUint::from(10u64).pow(quote.decimals) / BigUint::from(100u64); // 0.01 quote
+        let x2 = &x1 + (&x1 / BigUint::from(100u64));
+
+        let base_out_1 = self
+            .get_amount_out(x1.clone(), quote, base)?
+            .amount;
+        let base_out_2 = self
+            .get_amount_out(x2.clone(), quote, base)?
+            .amount;
+
+        let delta_quote = x2.checked_sub(&x1).ok_or_else(|| {
+            SimulationError::FatalError("spot price: quote probe underflow".to_string())
+        })?;
+        let delta_base = base_out_2
+            .checked_sub(&base_out_1)
+            .ok_or_else(|| {
+                SimulationError::RecoverableError(
+                    "spot price: base output not monotonic in quote input".to_string(),
+                )
+            })?;
+
+        if delta_base.is_zero() {
+            return Err(SimulationError::RecoverableError(
+                "spot price: zero base output delta".to_string(),
+            ));
+        }
+
+        let delta_quote_f64 = delta_quote.to_f64().ok_or_else(|| {
+            SimulationError::FatalError("spot price: quote delta to f64".to_string())
+        })?;
+        let delta_base_f64 = delta_base.to_f64().ok_or_else(|| {
+            SimulationError::FatalError("spot price: base delta to f64".to_string())
+        })?;
+
+        // quote-per-base (human) = (Δquote_raw / Δbase_raw) * 10^(base.decimals - quote.decimals)
+        let token_correction = 10f64.powi(base.decimals as i32 - quote.decimals as i32);
+        Ok(delta_quote_f64 / delta_base_f64 * token_correction)
+    }
+
     fn swap(
         &self,
         zero_for_one: bool,
@@ -437,77 +503,19 @@ impl ProtocolSim for UniswapV4State {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        if let Some(hook) = &self.hook {
-            match hook.spot_price(base, quote) {
-                Ok(price) => return Ok(price),
-                Err(SimulationError::RecoverableError(_)) => {
-                    // Calculate spot price by swapping two amounts and use the approximation
-                    // to get the derivative, following the pattern from vm/state.rs
-
-                    // Calculate the first sell amount (x1) as a small amount
-                    let x1 = BigUint::from(10u64).pow(base.decimals) / BigUint::from(100u64); // 0.01 token
-
-                    // Calculate the second sell amount (x2) as x1 + 1% of x1
-                    let x2 = &x1 + (&x1 / BigUint::from(100u64));
-
-                    // Perform swaps to get the received amounts
-                    let y1 = self.get_amount_out(x1.clone(), base, quote)?;
-                    let y2 = self.get_amount_out(x2.clone(), base, quote)?;
-
-                    // Calculate the marginal price
-                    let num = y2
-                        .amount
-                        .checked_sub(&y1.amount)
-                        .ok_or_else(|| {
-                            SimulationError::FatalError(
-                                "Cannot calculate spot price: y2 < y1".to_string(),
-                            )
-                        })?;
-                    let den = x2.checked_sub(&x1).ok_or_else(|| {
-                        SimulationError::FatalError(
-                            "Cannot calculate spot price: x2 < x1".to_string(),
-                        )
-                    })?;
-
-                    if den == BigUint::from(0u64) {
-                        return Err(SimulationError::FatalError(
-                            "Cannot calculate spot price: denominator is zero".to_string(),
-                        ));
-                    }
-
-                    // Convert to f64 and adjust for decimals
-                    let num_f64 = num.to_f64().ok_or_else(|| {
-                        SimulationError::FatalError(
-                            "Failed to convert numerator to f64".to_string(),
-                        )
-                    })?;
-                    let den_f64 = den.to_f64().ok_or_else(|| {
-                        SimulationError::FatalError(
-                            "Failed to convert denominator to f64".to_string(),
-                        )
-                    })?;
-
-                    let token_correction = 10f64.powi(base.decimals as i32 - quote.decimals as i32);
-
-                    return Ok(num_f64 / den_f64 * token_correction);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        let zero_for_one = base < quote;
-        let fee_pips = self
-            .fees
-            .calculate_swap_fees_pips(zero_for_one, None);
-        let fee = fee_pips as f64 / 1_000_000.0;
-
-        let price = if zero_for_one {
-            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
-        } else {
-            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
+        let Some(hook) = &self.hook else {
+            return self.sqrt_price_buy_quote(base, quote);
         };
 
-        Ok(add_fee_markup(price, fee))
+        hook.spot_price(base, quote)
+            .or_else(|err| match err {
+                // The hook does not override spot pricing (e.g. the generic VM handler). Derive the
+                // price from `get_amount_out` so it reflects the hook's execution — the native
+                // `sqrt_price` is a placeholder for hook-managed-liquidity pools (e.g. Euler) — and
+                // express it as a buy price (see `hook_marginal_buy_quote`).
+                SimulationError::RecoverableError(_) => self.hook_marginal_buy_quote(base, quote),
+                e => Err(e),
+            })
     }
 
     fn get_amount_out(
@@ -1019,6 +1027,54 @@ mod tests {
         },
         protocol::models::{DecoderContext, TryFromWithBlock},
     };
+
+    /// The `spot_price` hook fallback (`hook_marginal_buy_quote`) derives the price from
+    /// `get_amount_out`, so it reflects hook execution, and expresses it as a buy price — hence
+    /// the round-trip `spot(a,b) * spot(b,a)` equals `1/(1-fee)^2` (> 1). On an ordinary CL pool
+    /// the native curve is the execution path, so it also tracks the sqrt-price buy quote. Tested
+    /// directly (no hook needed) since the method only depends on `get_amount_out`.
+    #[test]
+    fn test_v4_hook_marginal_buy_quote_is_buy_price() {
+        let pool = create_basic_v4_test_pool();
+        let x = token_x();
+        let y = token_y();
+        let fee = pool.fees.lp_fee as f64 / 1_000_000.0;
+        let expected_buy = 1.0 / (1.0 - fee).powi(2);
+
+        let fwd = pool
+            .hook_marginal_buy_quote(&x, &y)
+            .unwrap();
+        let rev = pool
+            .hook_marginal_buy_quote(&y, &x)
+            .unwrap();
+        let product = fwd * rev;
+
+        assert!(product > 1.0, "round-trip {product} must be > 1 (buy-price convention)");
+        // Finite-difference of get_amount_out, so within probe tolerance of 1/(1-fee)^2.
+        assert!(
+            (product - expected_buy).abs() / expected_buy < 5e-3,
+            "round-trip {product} should be ~1/(1-fee)^2 {expected_buy}"
+        );
+
+        // On this ordinary CL pool the native curve is the execution path, so the execution-aware
+        // fallback tracks the sqrt-price buy quote.
+        assert!(
+            (fwd - pool
+                .sqrt_price_buy_quote(&x, &y)
+                .unwrap())
+            .abs() /
+                fwd <
+                5e-3
+        );
+        assert!(
+            (rev - pool
+                .sqrt_price_buy_quote(&y, &x)
+                .unwrap())
+            .abs() /
+                rev <
+                5e-3
+        );
+    }
 
     // Helper methods to create commonly used tokens
     fn usdc() -> Token {
