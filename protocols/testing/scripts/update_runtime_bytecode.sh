@@ -95,6 +95,7 @@ EXECUTOR_FIXTURES=(
     "LunarBase|base|lunarbase"
     "RingSwapV2|ethereum|ring_swap_v2"
     "Sky|ethereum|sky"
+    "Etherfi|ethereum|etherfi"
 )
 
 if [[ -z "${RPC_URL:-}" ]]; then
@@ -160,6 +161,44 @@ process.stdout.write([e.contract].concat((e.args || []).map(String)).join(' '));
 " "$1" "$2"
 }
 
+# Constructor arguments that have no code at $FORK_BLOCK but are checked for code by the
+# executor's constructor, with the block each was deployed in. The address is what gets baked
+# into the immutable and the code behind it is never read during deployment, so a one-byte stub
+# keeps the fixture identical to one produced against a later block. Mirrors the `vm.etch`
+# calls in contracts/test/TychoRouterTestSetup.sol.
+#
+# address | reason
+STUB_ADDRESSES=(
+    "0xDadEf1fFBFeaAB4f68A9fD181395F68b4e4E7Ae0|EtherFi redemption manager, deployed at block 22090400"
+)
+
+# Plants a stub at each listed address argument that has no code on the fork. Any other
+# codeless address is a wrong address in executor_deployments.json, and stops the run so the
+# constructor's own check is not defeated by a stub.
+plant_stub_code() {
+    for arg in "$@"; do
+        [[ "$arg" =~ ^0x[0-9a-fA-F]{40}$ ]] || continue
+        if [[ "$(cast code "$arg" --rpc-url "$LOCAL_RPC")" != "0x" ]]; then
+            continue
+        fi
+        reason=""
+        for entry in "${STUB_ADDRESSES[@]}"; do
+            IFS='|' read -r address why <<<"$entry"
+            if [[ "${address,,}" == "${arg,,}" ]]; then
+                reason="$why"
+                break
+            fi
+        done
+        if [[ -z "$reason" ]]; then
+            echo "Error: $arg has no code at block $FORK_BLOCK and is not in STUB_ADDRESSES." >&2
+            echo "Fix the address in executor_deployments.json, or list it with its deployment block." >&2
+            exit 1
+        fi
+        echo "  No code at $arg on the fork ($reason); planting a stub."
+        cast rpc anvil_setCode "$arg" "0x00" --rpc-url "$LOCAL_RPC" >/dev/null
+    done
+}
+
 # Generates one fixture: deploys <contract> with the given constructor args,
 # captures its runtime bytecode, and either writes it to fixtures/ or (in
 # --check mode) diffs it against the committed fixture.
@@ -197,6 +236,8 @@ for entry in "${EXECUTOR_FIXTURES[@]}"; do
     IFS='|' read -r fixture chain protocol <<<"$entry"
     deployment="$(resolve_deployment "$chain" "$protocol")" || exit 1
     read -r contract args <<<"$deployment"
+    # shellcheck disable=SC2086 # args is an intentionally word-split arg list
+    plant_stub_code $args
     # shellcheck disable=SC2086 # args is an intentionally word-split arg list
     process_fixture "$fixture" "$contract" $args
 done
