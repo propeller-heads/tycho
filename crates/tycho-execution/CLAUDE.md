@@ -179,9 +179,9 @@ from the pair's reserves, Curve asks `get_dy`, Fluid asks the dex to price a swa
 `simulateFallback` runs the real swap and reverts `TychoFallbackRouter__SimulatedAmountOut` with the receiver's
 balance diff, rolling it back. Both quotes run in self-only external functions (`quotePropAMM`, `quoteFallback`) under
 try/catch, so a quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero. Two zero
-quotes or equal quotes keep the pAMM-first order. The quotes cost gas on every leg: about 50-60k for a Uniswap V3 or
-V4 simulation, and a pAMM quote on top when the pAMM is live; a stale pAMM is skipped without being called, which
-saves its failed swap.
+quotes or equal quotes keep the pAMM-first order. The fallback quote costs gas on every leg, including the ones the
+pAMM fills: about 100-110k for a Uniswap V3 or V4 simulation, about 40k for Curve or Fluid, about 12k for Uniswap V2
+(router call, cold state, mainnet fork). A stale pAMM is skipped without being called, which saves its failed swap.
 
 `FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
