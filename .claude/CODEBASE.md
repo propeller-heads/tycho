@@ -195,6 +195,8 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 | `MAIN_WORKER_THREADS` | Server runtime threads (default 3) |
 | `RPC_MAX_RETRIES` / `RPC_INITIAL_BACKOFF_MS` / `RPC_MAX_BACKOFF_MS` | RPC retry policy |
 | `RPC_MAX_BATCH_SIZE` / `RPC_STORAGE_SLOT_MAX_BATCH_SIZE` | RPC request batching limits |
+| `DELTA_WINDOW_DEPTH` | Blocks each extractor's RPC-side window retains (default 128) |
+| `DELTA_WINDOW_FOLD_BATCH` | Evictable blocks required before a fold runs (default 1) |
 | `TYCHO_S3_BUCKET` | S3 bucket the Substreams spkg packages are fetched from |
 | `OTLP_EXPORTER_ENDPOINT` | OpenTelemetry trace exporter |
 | `RUST_LOG` | Tracing filter (e.g. `tycho_indexer=debug`) |
