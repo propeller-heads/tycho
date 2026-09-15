@@ -1,5 +1,29 @@
 # Getting started
 
+## Testing an EVM node's RPC capabilities
+
+Before pointing the indexer at a new chain or node provider, check that the node supports every
+JSON-RPC method the indexer uses. `test-evm-rpc-capabilities.sh` is chain-agnostic — it discovers a
+historical block and calls Multicall3, which is deployed at the same address on virtually every EVM
+chain.
+
+```bash
+RPC_URL=https://... TRACE_RPC_URL=https://... ./scripts/test-evm-rpc-capabilities.sh
+```
+
+`TRACE_RPC_URL` is optional and falls back to `RPC_URL`, exactly as the indexer does. Checks are
+grouped by feature: `--core-only` covers what any deployment needs, `--dci-only` covers dynamic
+contract indexing. DCI needs capabilities on both endpoints — the hooks DCI runs its slot detectors
+on `RPC_URL`, only the entrypoint tracer uses `TRACE_RPC_URL`. Run `--help` for the full list of
+environment variables (block offset, batch sizes, test contract).
+
+The script exits non-zero when a required capability is missing. `eth_gasPrice` and
+`eth_maxPriorityFeePerGas` are reported as warnings: the indexer itself does not call them, and
+either one satisfies downstream consumers. The header comment lists each method alongside the
+component that needs it.
+
+---
+
 ## Migrating a PR from a related repo
 
 When a PR is open in a related repository (`tycho-protocol-sdk`, `tycho-simulation`,
