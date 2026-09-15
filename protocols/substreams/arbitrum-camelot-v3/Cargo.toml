@@ -1,0 +1,25 @@
+[package]
+name = "arbitrum-camelot-v3"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "arbitrum_camelot_v3"
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.13"
+substreams-helper = { path = "../crates/substreams-helper" }
+tycho-substreams = "0.8.1"
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+num-bigint = "0.4.6"
+hex = "0.4.3"
+itertools = "0.10.5"
+serde = "1.0.217"
+serde_qs = "0.13.0"
+
+[build-dependencies]
+anyhow = "1"
+substreams-ethereum = "0.9.13"

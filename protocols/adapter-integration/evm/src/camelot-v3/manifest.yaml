@@ -1,0 +1,27 @@
+# information about the author helps us reach out in case of issues.
+author:
+  name: Danish Ansari
+  email: kimia.support@gmail.com
+
+# Protocol Constants
+constants:
+  # Lowest pool call measured by CamelotV3SwapAdapterTest.testSwapSell
+  # (1 WETH -> USDC at Arbitrum block 504411371), including the callback
+  # transfer of the input token. Tick crossings add to it.
+  protocol_gas: 279031
+  # Minimum capabilities we can expect, individual pools may extend these
+  capabilities:
+    - SellSide
+    - BuySide
+    - PriceFunction
+
+# The file containing the adapter contract
+contract: CamelotV3SwapAdapter.sol
+
+# Deployment instances used to generate chain specific bytecode.
+instances:
+  - chain:
+      name: arbitrum
+      id: 42161
+    arguments:
+      - "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B" # AlgebraFactory

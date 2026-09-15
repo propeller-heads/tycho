@@ -153,6 +153,7 @@
   "arbitrum": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
+    "vm:camelot_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
       "contract": "UniswapV4Executor",
       "args": [
