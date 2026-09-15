@@ -25,6 +25,7 @@ Options:
 Requires:
   RPC_URL    Ethereum mainnet RPC (the router constructor checks that permit2
              and the fee calculator have deployed code, so a fork is needed).
+  BASE_RPC_URL  Optional Base RPC; omit to skip the BaiBai fixture.
   forge, anvil, cast, node (with contracts/ npm deps installed).
 EOF
     exit 1
@@ -200,6 +201,21 @@ for entry in "${EXECUTOR_FIXTURES[@]}"; do
     # shellcheck disable=SC2086 # args is an intentionally word-split arg list
     process_fixture "$fixture" "$contract" $args
 done
+
+if [[ -n "${BASE_RPC_URL:-}" ]]; then
+    # BaiBai's constructor reads token wiring on Base. Reset only after the mainnet
+    # fixtures are captured; its immutables do not depend on the deployer or nonce.
+    base_fork="$(node -e 'process.stdout.write(JSON.stringify({forking:{jsonRpcUrl:process.env.BASE_RPC_URL,blockNumber:51191196}}))')"
+    cast rpc --rpc-url "$LOCAL_RPC" anvil_reset "$base_fork" >/dev/null
+    # Historical Base fees can exceed the local deployer's estimate after a reset.
+    cast rpc --rpc-url "$LOCAL_RPC" anvil_setNextBlockBaseFeePerGas 0x0 >/dev/null
+    deployment="$(resolve_deployment base baibai)"
+    read -r contract args <<<"$deployment"
+    # shellcheck disable=SC2086 # constructor arguments are intentionally word-split
+    process_fixture Baibai "$contract" $args
+else
+    echo "Skipping BaiBai fixture (BASE_RPC_URL is not set)."
+fi
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
     if [[ "$DRIFT" -eq 1 ]]; then

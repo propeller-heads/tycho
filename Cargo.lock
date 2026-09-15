@@ -6845,6 +6845,7 @@ name = "protocol-testing"
 version = "0.407.1"
 dependencies = [
  "alloy",
+ "chrono",
  "clap",
  "colored",
  "dotenv",
