@@ -332,12 +332,18 @@ impl PendingDeltas {
         loop {
             match all_messages.next().await {
                 Some(DeltaCommand::Block(message)) => {
-                    // Skip partial messages - only full-block updates go to the reorg buffer.
-                    if message.partial_block_index.is_none() {
-                        self.insert(message).map_err(|e| {
-                            error!(error = %e, "Failed to insert into PendingDeltas buffer");
-                            e
-                        })?;
+                    // Skip partial messages - only full-block updates go to the window.
+                    if message.partial_block_index.is_some() {
+                        continue;
+                    }
+                    let extractor = message.extractor.clone();
+                    if let Err(err) = self.insert(message) {
+                        error!(
+                            error = %err,
+                            extractor = %extractor,
+                            "Failed to insert into PendingDeltas window; resetting it"
+                        );
+                        self.reset_window(&extractor)?;
                     }
                 }
                 Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
@@ -888,6 +894,32 @@ mod test {
             )
             .unwrap()
             .is_some()
+    }
+
+    #[tokio::test]
+    async fn run_resets_the_window_after_a_bad_insert_and_keeps_going() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.clone().run(vec![rx], start_tx));
+
+        tx.send(DeltaCommand::Block(native_msg(1, None, 1)))
+            .await
+            .unwrap();
+        // Parent-hash gap: the window rejects it and the pump resets the window.
+        tx.send(DeltaCommand::Block(native_msg(3, None, 3)))
+            .await
+            .unwrap();
+        // First block of the fresh window.
+        tx.send(DeltaCommand::Block(native_msg(7, None, 7)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        pump.await.unwrap().unwrap();
+        assert!(has_block(&buffer, 7));
+        assert!(!has_block(&buffer, 1));
     }
 
     #[test]
