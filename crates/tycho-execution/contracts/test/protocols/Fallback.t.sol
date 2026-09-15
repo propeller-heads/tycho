@@ -137,8 +137,21 @@ contract RevertingPool {
     }
 }
 
-/// @notice Accepts `tokenIn` and reports success without paying anything.
+/// @notice Accepts `tokenIn` and reports success without paying anything. Quotes the maximum so
+/// the router still tries it.
 contract SilentPropAMM {
+    function quote(
+        address, /* tokenIn */
+        address, /* tokenOut */
+        uint256 /* amountIn */
+    )
+        external
+        pure
+        returns (uint256 amountOut)
+    {
+        return type(uint256).max;
+    }
+
     function swap(
         address, /* tokenIn */
         address, /* tokenOut */
@@ -155,21 +168,56 @@ contract SilentPropAMM {
     }
 }
 
+/// @notice Exposes the two quotes `swap` compares, which are self-only on the router.
+contract TychoFallbackRouterExposed is TychoFallbackRouter {
+    constructor(IPoolManager poolManager_, address fluidLiquidity_)
+        TychoFallbackRouter(poolManager_, fluidLiquidity_)
+    {}
+
+    function quoteFallbackFor(Swap calldata swap_, bytes calldata fallbackSwap)
+        external
+        returns (uint256 amountOut)
+    {
+        return _quoteFallback(swap_, fallbackSwap);
+    }
+
+    function quotePropAMMFor(Swap calldata swap_, address pamm_)
+        external
+        returns (uint256 amountOut)
+    {
+        return _quotePropAMM(swap_, pamm_);
+    }
+}
+
 /// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every fallback
 /// test repeats. Subclasses name the fork block, since the protocols are not all live at the
 /// same one.
 abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
-    TychoFallbackRouter router;
+    TychoFallbackRouterExposed router;
     MockPropAMM pamm;
 
     function getForkBlock() internal pure virtual returns (uint256);
 
     function setUp() public virtual {
         vm.createSelectFork(vm.rpcUrl("mainnet"), getForkBlock());
-        router = new TychoFallbackRouter(
+        router = new TychoFallbackRouterExposed(
             IPoolManager(POOL_MANAGER), FLUIDV1_LIQUIDITY
         );
         pamm = new MockPropAMM();
+    }
+
+    /// Requires `swap` to emit `FallbackSwap` for `protocol` and `reason` on the next call.
+    function _expectFallbackSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        TychoFallbackRouter.FallbackProtocol protocol,
+        TychoFallbackRouter.FallbackReason reason
+    ) internal {
+        vm.expectEmit(address(router));
+        emit TychoFallbackRouter.FallbackSwap(
+            address(pamm), tokenIn, tokenOut, amountIn, protocol, reason
+        );
     }
 
     /// Holds no funds once a swap is done.
@@ -204,6 +252,10 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     uint256 constant V4_USDE_OUT = 100_009_300_940_809_442_564;
     uint256 constant CURVE_USDC_OUT = 999_895_324;
     uint256 constant CURVE_CRYPTO_USDC_OUT = 2_766_051_040;
+
+    /// A MockPropAMM price of 5 WETH per 10 000 USDC: above every pool here, so a pAMM at this
+    /// price wins the quote.
+    uint256 constant PAMM_ABOVE_MARKET = 5e26;
 
     function getForkBlock() internal pure override returns (uint256) {
         return FORK_BLOCK;
@@ -323,11 +375,11 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         new TychoFallbackRouter(IPoolManager(POOL_MANAGER), address(0));
     }
 
-    /// A live pAMM fills and the fallback is never touched.
+    /// A live pAMM that quotes above the fallback fills, and the fallback is never touched.
     function testPropAMMFills() public {
-        // 1 WETH for the whole 10 000 USDC, far off the Uniswap V3 price of roughly 4 WETH, so
+        // 5 WETH for the whole 10 000 USDC, above the Uniswap V3 price of roughly 3.6 WETH, so
         // the asserted amount can only have come from the pAMM.
-        pamm.setPrice(USDC_ADDR, WETH_ADDR, 1e26);
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, PAMM_ABOVE_MARKET);
         deal(WETH_ADDR, address(pamm), 100 ether);
         deal(USDC_ADDR, address(router), USDC_IN);
 
@@ -337,23 +389,114 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             FallbackSwaps.uniswapV3(USDC_WETH_USV3)
         );
 
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 1 ether);
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 5 ether);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), USDC_IN);
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
 
-    /// `FallbackSwap` is the pAMM fill-rate signal: it marks the swaps the pAMM
-    /// did not serve, and names the protocol that filled instead.
-    function testFallingBackEmitsFallbackSwap() public {
+    /// A live pAMM that quotes below the fallback is skipped: the fallback fills at its own
+    /// price and the pAMM is never paid.
+    function testFallbackQuotedHigherSkipsPropAMM() public {
+        // 1 WETH for 10 000 USDC, below the Uniswap V3 price of roughly 3.6 WETH.
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, 1e26);
+        deal(WETH_ADDR, address(pamm), 100 ether);
         deal(USDC_ADDR, address(router), USDC_IN);
 
-        vm.expectEmit(address(router));
-        emit TychoFallbackRouter.FallbackSwap(
-            address(pamm),
+        _expectFallbackSwap(
             USDC_ADDR,
             WETH_ADDR,
             USDC_IN,
-            TychoFallbackRouter.FallbackProtocol.UniswapV3
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
+        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
+    }
+
+    /// Equal quotes keep the pAMM: only a strictly higher fallback quote displaces it.
+    function testEqualQuotesKeepPropAMM() public {
+        // MockPropAMM pays amountIn * price / 1e18, so this price quotes exactly V3_WETH_OUT for
+        // USDC_IN.
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, V3_WETH_OUT * 1e8);
+        deal(WETH_ADDR, address(pamm), 100 ether);
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), USDC_IN);
+    }
+
+    /// A pAMM that wins the quote but reverts on the swap still falls through, and the event
+    /// says so.
+    function testPropAMMRevertAfterWinningQuoteFallsThrough() public {
+        // Quotes 5 WETH but holds none, so `swap` reverts.
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, PAMM_ABOVE_MARKET);
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        _expectFallbackSwap(
+            USDC_ADDR,
+            WETH_ADDR,
+            USDC_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.PropAMMReverted
+        );
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        // The transfer to the pAMM reverted with it.
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
+        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
+    }
+
+    /// A pAMM address without code returns nothing to decode. That failure is inside
+    /// `quotePropAMM`'s frame, so it is a zero quote rather than a revert of the swap.
+    function testPropAMMWithoutCodeFallsBack() public {
+        address noCode = makeAddr("no code");
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        assertEq(
+            router.quotePropAMMFor(
+                FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB), noCode
+            ),
+            0
+        );
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            noCode,
+            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+    }
+
+    /// `FallbackSwap` is the pAMM fill-rate signal: it marks the swaps the pAMM did not serve,
+    /// names the protocol that filled instead, and says why. A pAMM with no price cannot
+    /// quote, which counts as quoting zero.
+    function testFallingBackEmitsFallbackSwap() public {
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        _expectFallbackSwap(
+            USDC_ADDR,
+            WETH_ADDR,
+            USDC_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -362,9 +505,115 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
+    /// Every fallback quote is the amount the same fallback then fills, so the comparison
+    /// against the pAMM is made on real numbers. Uniswap V3 and V4 are simulated, which needs
+    /// the input to be here as it is in `swap`.
+    function testFallbackQuotesMatchFills() public {
+        deal(USDC_ADDR, address(router), USDC_IN);
+        deal(USDE_ADDR, address(router), 100 ether);
+
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+                FallbackSwaps.uniswapV2(USDC_WETH_USV2, 30)
+            ),
+            V2_WETH_OUT
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+                FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+            ),
+            V3_WETH_OUT
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(USDE_ADDR, USDT_ADDR, 100 ether, BOB),
+                FallbackSwaps.uniswapV4(100, 1, address(0), bytes(""))
+            ),
+            V4_USDT_OUT
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(DAI_ADDR, USDC_ADDR, 1000e18, BOB),
+                FallbackSwaps.curve(TRIPOOL, 1, 0, 1)
+            ),
+            CURVE_USDC_OUT
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(WETH_ADDR, USDC_ADDR, 1 ether, BOB),
+                FallbackSwaps.curve(TRICRYPTO_POOL, 3, 2, 0)
+            ),
+            CURVE_CRYPTO_USDC_OUT
+        );
+
+        // The simulations rolled back: the input is untouched and nothing was delivered.
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(router)), USDC_IN);
+        assertEq(IERC20(USDE_ADDR).balanceOf(address(router)), 100 ether);
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 0);
+        assertEq(IERC20(USDT_ADDR).balanceOf(BOB), 0);
+    }
+
+    /// A fallback that cannot quote is a zero quote, never a revert of the swap: a pool that
+    /// reverts, a pair with no reserves, a pool that pays nothing, and malformed protocol data.
+    function testUnquotableFallbackQuotesZero() public {
+        deal(USDC_ADDR, address(router), USDC_IN);
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
+
+        assertEq(
+            router.quoteFallbackFor(
+                swap_, FallbackSwaps.uniswapV3(address(new RevertingPool()))
+            ),
+            0
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                swap_,
+                FallbackSwaps.uniswapV2(address(new EmptyReservePair()), 30)
+            ),
+            0
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                swap_, FallbackSwaps.uniswapV3(address(new SilentPool()))
+            ),
+            0
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                swap_, abi.encodePacked(uint8(9), USDC_WETH_USV3)
+            ),
+            0
+        );
+        assertEq(router.quoteFallbackFor(swap_, bytes("")), 0);
+        assertEq(
+            router.quoteFallbackFor(
+                swap_, _truncate(FallbackSwaps.uniswapV3(USDC_WETH_USV3))
+            ),
+            0
+        );
+    }
+
+    /// The quote entry points are external only so `swap` can try/catch them.
+    function testQuoteEntryPointsRejectExternalCaller() public {
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
+
+        vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
+        router.quotePropAMM(swap_, address(pamm));
+
+        vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
+        router.quoteFallback(swap_, FallbackSwaps.uniswapV3(USDC_WETH_USV3));
+
+        vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
+        router.simulateFallback(swap_, FallbackSwaps.uniswapV3(USDC_WETH_USV3));
+    }
+
     /// A pAMM that fills emits nothing, so counting `FallbackSwap` counts misses.
     function testPropAMMFillEmitsNoFallbackSwap() public {
-        pamm.setPrice(USDC_ADDR, WETH_ADDR, 1e26);
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, PAMM_ABOVE_MARKET);
         deal(WETH_ADDR, address(pamm), 100 ether);
         deal(USDC_ADDR, address(router), USDC_IN);
 
@@ -617,6 +866,24 @@ contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
         deal(SUSDE_ADDR, address(router), 0);
     }
 
+    /// Fluid's dead-address estimate is the amount the dex then fills.
+    function testFluidQuoteMatchesFill() public {
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(SUSDE_ADDR, USDT_ADDR, 10e18, BOB),
+                FallbackSwaps.fluidV1(FLUID_DEX, true)
+            ),
+            FLUID_USDT_OUT
+        );
+        assertEq(
+            router.quoteFallbackFor(
+                FallbackSwaps.swap(USDT_ADDR, SUSDE_ADDR, 10e6, BOB),
+                FallbackSwaps.fluidV1(FLUID_DEX, false)
+            ),
+            FLUID_SUSDE_OUT
+        );
+    }
+
     function testFallsBackToFluidV1() public {
         uint256 amountIn = 10e18;
         deal(SUSDE_ADDR, address(router), amountIn);
@@ -770,6 +1037,34 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertEq(amountOut, SINGLE_WETH_OUT);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), amountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+    }
+
+    /// The whole swap when the pAMM quotes above the pool: the pAMM fills, measured by the
+    /// Dispatcher's balance diff like any other leg.
+    function testSingleSwapPropAMMFills() public {
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, 5e26);
+        deal(WETH_ADDR, address(pamm), 100 ether);
+        uint256 amountIn = 10_000e6;
+        deal(USDC_ADDR, ALICE, amountIn);
+
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            USDC_ADDR,
+            WETH_ADDR,
+            5 ether,
+            5 ether,
+            ALICE,
+            noClientFee(),
+            encodeSingleSwap(address(fallbackExecutor), _swapData())
+        );
+        vm.stopPrank();
+
+        assertEq(amountOut, 5 ether);
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 5 ether);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), amountIn);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
     }
 

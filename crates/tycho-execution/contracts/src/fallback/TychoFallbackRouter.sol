@@ -39,10 +39,18 @@ error TychoFallbackRouter__InvalidUniswapV2Fee(uint256 feeBps);
 error TychoFallbackRouter__NoOutput();
 error TychoFallbackRouter__NotPoolManager();
 error TychoFallbackRouter__NotSelf();
+/// @notice Not a failure: `simulateFallback` reverts with the `tokenOut` the fallback delivered,
+/// so the swap it ran is rolled back and only the amount survives.
+error TychoFallbackRouter__SimulatedAmountOut(uint256 amountOut);
 error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 
+/// @notice Fluid's estimate: a dex asked to pay `0xdEaD` reverts with the amount it would have
+/// delivered, before it moves any token.
+error FluidDexSwapResult(uint256 amountOut);
+
 /// @title TychoFallbackRouter
-/// @notice Runs a pAMM and, only if it fails, the caller's chosen fallback protocol.
+/// @notice Quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes
+/// more `tokenOut`. A pAMM that wins the quote but fails still falls through to the fallback.
 /// @dev Exists because an executor cannot fall back: the Dispatcher transfers a swap's input before
 /// it delegatecalls `swap()`, so a reverting pAMM has already been paid and a Uniswap V3 retry,
 /// which pays in a callback, cannot be funded. Here the tokens stay in this contract.
@@ -61,6 +69,15 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         UniswapV4,
         Curve,
         FluidV1
+    }
+
+    /// @notice Why the fallback ran instead of the pAMM.
+    enum FallbackReason {
+        // The fallback quoted more `tokenOut` than the pAMM. A pAMM that cannot quote counts as
+        // quoting zero, so a stale pAMM is skipped without being called.
+        FallbackQuotedHigher,
+        // The pAMM quoted at least as much as the fallback, then reverted or delivered nothing.
+        PropAMMReverted
     }
 
     /// @notice One swap: what goes in, what comes out, and who receives it.
@@ -90,12 +107,17 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     bytes32 private constant _CALLBACK_AMOUNT_SLOT =
         0xde66fd0ca9c728ba44ca7bab17a304d328bf9cf5d5c72b8bf8ea7cd13765e542;
 
+    /// @dev The recipient that makes a Fluid dex revert with `FluidDexSwapResult` instead of
+    /// swapping.
+    address private constant _ADDRESS_DEAD =
+        0x000000000000000000000000000000000000dEaD;
+
     IPoolManager public immutable poolManager;
     /// @notice Where `dexCallback` pays a Fluid dex.
     address public immutable fluidLiquidity;
 
-    /// @notice The pAMM failed and `protocol` filled instead. Absence of this event on a filled swap
-    /// means the pAMM served it, which is the pAMM fill rate.
+    /// @notice `protocol` filled instead of the pAMM, for `reason`. Absence of this event on a
+    /// filled swap means the pAMM served it, which is the pAMM fill rate.
     /// @dev The pAMM's revert reason is deliberately not carried: reading it would copy
     /// caller-controlled returndata of any size into this frame.
     event FallbackSwap(
@@ -103,7 +125,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         address indexed tokenIn,
         address indexed tokenOut,
         uint256 amountIn,
-        FallbackProtocol protocol
+        FallbackProtocol protocol,
+        FallbackReason reason
     );
 
     constructor(IPoolManager poolManager_, address fluidLiquidity_) {
@@ -116,13 +139,16 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         fluidLiquidity = fluidLiquidity_;
     }
 
-    /// @notice Runs `pamm` and, only if it fails, `fallbackSwap`. A failing fallback reverts the
-    /// swap; there is no third attempt.
+    /// @notice Quotes `pamm` and `fallbackSwap`, then runs the fallback if it quotes more
+    /// `tokenOut`, otherwise `pamm` and, only if that fails, `fallbackSwap`. A failing fallback
+    /// reverts the swap; there is no third attempt.
     /// @dev Permissionless: the caller names every parameter, so a balance sitting in this
     /// contract can be taken by anyone and is considered lost. Push-payment: the caller MUST
     /// transfer `swap_.amountIn` of `swap_.tokenIn` here first. Native ETH, fee-on-transfer and
     /// rebasing tokens are not supported.
     /// `fallbackSwap` names one of Uniswap V2, V3 or V4, Curve, or Fluid V1.
+    /// A quote that reverts counts as zero, so two failed quotes keep the pAMM-first order and
+    /// equal quotes keep the pAMM.
     /// No output is returned: the caller measures its own `swap_.tokenOut` balance diff at
     /// `swap_.receiver`, which is how the Dispatcher verifies every swap.
     function swap(
@@ -130,23 +156,25 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         address pamm,
         bytes calldata fallbackSwap
     ) external nonReentrant {
+        uint256 pammAmountOut = _quotePropAMM(swap_, pamm);
+        uint256 fallbackAmountOut = _quoteFallback(swap_, fallbackSwap);
+        if (fallbackAmountOut > pammAmountOut) {
+            _runFallback(
+                swap_, pamm, fallbackSwap, FallbackReason.FallbackQuotedHigher
+            );
+            return;
+        }
+
         try this.executePropAMM(swap_, pamm) {
             return;
         } catch {}
 
-        FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
-        // Reentrancy cannot happen: the function is nonReentrant.
-        // slither-disable-next-line reentrancy-events
-        emit FallbackSwap(
-            pamm, swap_.tokenIn, swap_.tokenOut, swap_.amountIn, protocol
-        );
+        _runFallback(swap_, pamm, fallbackSwap, FallbackReason.PropAMMReverted);
     }
 
     /// @notice Runs the pAMM. External only so `swap` can try/catch it.
     function executePropAMM(Swap calldata swap_, address pamm) external {
-        if (msg.sender != address(this)) {
-            revert TychoFallbackRouter__NotSelf();
-        }
+        _requireSelf();
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
 
         IERC20(swap_.tokenIn).safeTransfer(pamm, swap_.amountIn);
@@ -168,12 +196,188 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
     }
 
+    /// @notice Quotes the pAMM. External only so `swap` can try/catch it: the catch also covers
+    /// a `pamm` that returns nothing decodable, such as an address without code.
+    function quotePropAMM(Swap calldata swap_, address pamm)
+        external
+        returns (uint256 amountOut)
+    {
+        _requireSelf();
+        amountOut =
+            IPropAMM(pamm).quote(swap_.tokenIn, swap_.tokenOut, swap_.amountIn);
+    }
+
+    /// @notice Quotes the fallback protocol. External only so `swap` can try/catch it: a
+    /// protocol that cannot quote, or malformed protocol data, is a zero quote, and `swap` then
+    /// tries the pAMM first as before.
+    /// @dev Uniswap V2 prices off the pair's reserves, Curve asks `get_dy`, Fluid asks the dex
+    /// to price a swap paid to `0xdEaD`. Uniswap V3 and V4 pools have no quote function, so
+    /// `simulateFallback` runs the swap and rolls it back.
+    function quoteFallback(Swap calldata swap_, bytes calldata fallbackSwap)
+        external
+        returns (uint256 amountOut)
+    {
+        _requireSelf();
+        (FallbackProtocol protocol, bytes calldata protocolData) =
+            _decodeFallback(fallbackSwap);
+
+        if (protocol == FallbackProtocol.UniswapV2) {
+            return _quoteUniswapV2(swap_, protocolData);
+        }
+        if (protocol == FallbackProtocol.Curve) {
+            return _quoteCurve(swap_, protocolData);
+        }
+        if (protocol == FallbackProtocol.FluidV1) {
+            return _quoteFluidV1(swap_, protocolData);
+        }
+        return _simulateFallback(swap_, fallbackSwap);
+    }
+
+    /// @notice Runs the fallback and reverts `SimulatedAmountOut` with the `tokenOut` it
+    /// delivered to `swap_.receiver`, rolling the swap back. External only so `quoteFallback`
+    /// can try/catch it.
+    function simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
+        external
+    {
+        _requireSelf();
+        uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
+        _executeFallback(swap_, fallbackSwap);
+        revert TychoFallbackRouter__SimulatedAmountOut(IERC20(swap_.tokenOut)
+                    .balanceOf(swap_.receiver) - balanceBefore);
+    }
+
+    function _quotePropAMM(Swap calldata swap_, address pamm)
+        internal
+        returns (uint256 amountOut)
+    {
+        try this.quotePropAMM(swap_, pamm) returns (uint256 quoted) {
+            amountOut = quoted;
+        } catch {}
+    }
+
+    function _quoteFallback(Swap calldata swap_, bytes calldata fallbackSwap)
+        internal
+        returns (uint256 amountOut)
+    {
+        try this.quoteFallback(swap_, fallbackSwap) returns (uint256 quoted) {
+            amountOut = quoted;
+        } catch {}
+    }
+
+    function _simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
+        internal
+        returns (uint256 amountOut)
+    {
+        try this.simulateFallback(swap_, fallbackSwap) {
+            return 0;
+        } catch (bytes memory reason) {
+            return _decodeAmountOut(
+                reason, TychoFallbackRouter__SimulatedAmountOut.selector
+            );
+        }
+    }
+
+    function _quoteUniswapV2(Swap calldata swap_, bytes calldata data)
+        internal
+        view
+        returns (uint256 amountOut)
+    {
+        (IUniswapV2Pair pair, uint256 feeBps) = _decodeUniswapV2(data);
+        return _uniswapV2AmountOut(swap_, pair, feeBps);
+    }
+
+    function _quoteCurve(Swap calldata swap_, bytes calldata data)
+        internal
+        view
+        returns (uint256 amountOut)
+    {
+        (address pool, uint8 poolType, uint256 i, uint256 j) =
+            _decodeCurve(data);
+        if (_isCurveStablePool(poolType)) {
+            return ICurveStablePool(pool)
+                .get_dy(int128(uint128(i)), int128(uint128(j)), swap_.amountIn);
+        }
+        return ICurveCryptoPool(pool).get_dy(i, j, swap_.amountIn);
+    }
+
+    /// @dev The dex prices the swap and reverts `FluidDexSwapResult` before it pulls any token,
+    /// which is what the Fluid dex reserves resolver's `estimateSwapIn` decodes too.
+    function _quoteFluidV1(Swap calldata swap_, bytes calldata data)
+        internal
+        returns (uint256 amountOut)
+    {
+        (address dex, bool zero2one) = _decodeFluidV1(data);
+        try IFluidV1Dex(dex)
+            .swapIn(zero2one, swap_.amountIn, 0, _ADDRESS_DEAD) {
+            return 0;
+        } catch (bytes memory reason) {
+            return _decodeAmountOut(reason, FluidDexSwapResult.selector);
+        }
+    }
+
+    /// @dev The `uint256` a `selector(uint256)` revert carries, or zero for any other revert.
+    function _decodeAmountOut(bytes memory reason, bytes4 selector)
+        internal
+        pure
+        returns (uint256 amountOut)
+    {
+        if (reason.length != 36 || bytes4(reason) != selector) {
+            return 0;
+        }
+        // slither-disable-next-line assembly
+        assembly {
+            amountOut := mload(add(reason, 36))
+        }
+    }
+
+    function _runFallback(
+        Swap calldata swap_,
+        address pamm,
+        bytes calldata fallbackSwap,
+        FallbackReason reason
+    ) internal {
+        FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
+        // Reentrancy cannot happen: `swap` is nonReentrant.
+        // slither-disable-next-line reentrancy-events
+        emit FallbackSwap(
+            pamm,
+            swap_.tokenIn,
+            swap_.tokenOut,
+            swap_.amountIn,
+            protocol,
+            reason
+        );
+    }
+
     /// @dev Runs the tagged protocol, which pays or forwards to `swap_.receiver`. No output
     /// measurement here: the Dispatcher's balance-diff at the receiver is the single source of
     /// truth.
     function _executeFallback(Swap calldata swap_, bytes calldata fallbackSwap)
         internal
         returns (FallbackProtocol protocol)
+    {
+        bytes calldata protocolData;
+        (protocol, protocolData) = _decodeFallback(fallbackSwap);
+
+        if (protocol == FallbackProtocol.UniswapV2) {
+            _swapUniswapV2(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.UniswapV3) {
+            _swapUniswapV3(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.UniswapV4) {
+            _swapUniswapV4(swap_, protocolData);
+        } else if (protocol == FallbackProtocol.Curve) {
+            _swapCurve(swap_, protocolData);
+        } else {
+            _swapFluidV1(swap_, protocolData);
+        }
+    }
+
+    /// @dev Splits `fallbackSwap` into its protocol tag and protocol data, rejecting an empty
+    /// payload or an unknown tag.
+    function _decodeFallback(bytes calldata fallbackSwap)
+        internal
+        pure
+        returns (FallbackProtocol protocol, bytes calldata protocolData)
     {
         if (fallbackSwap.length == 0) {
             revert TychoFallbackRouter__InvalidSwapLength(fallbackSwap.length);
@@ -184,50 +388,52 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
             revert TychoFallbackRouter__UnknownProtocol(protocolByte);
         }
         protocol = FallbackProtocol(protocolByte);
-        bytes calldata protocolData = fallbackSwap[1:];
-
-        if (protocol == FallbackProtocol.UniswapV2) {
-            _swapUniswapV2(swap_, protocolData);
-        } else if (protocol == FallbackProtocol.UniswapV3) {
-            _swapUniswapV3(swap_, protocolData);
-        } else if (protocol == FallbackProtocol.UniswapV4) {
-            _swapUniswapV4(swap_, protocolData);
-        } else if (protocol == FallbackProtocol.Curve) {
-            _swapCurve(swap_, protocolData);
-        } else if (protocol == FallbackProtocol.FluidV1) {
-            _swapFluidV1(swap_, protocolData);
-        } else {
-            revert TychoFallbackRouter__UnknownProtocol(protocolByte);
-        }
+        protocolData = fallbackSwap[1:];
     }
 
     /// @dev Uniswap V2's `swap` takes explicit output amounts, so this computes the output from
     /// the reserves.
     function _swapUniswapV2(Swap calldata swap_, bytes calldata data) internal {
-        if (data.length != 21) {
-            revert TychoFallbackRouter__InvalidSwapLength(data.length);
-        }
-        IUniswapV2Pair pair = IUniswapV2Pair(address(bytes20(data[0:20])));
-        uint256 feeBps = uint8(data[20]);
-        if (feeBps > 30) {
-            revert TychoFallbackRouter__InvalidUniswapV2Fee(feeBps);
-        }
-
+        (IUniswapV2Pair pair, uint256 feeBps) = _decodeUniswapV2(data);
         bool zeroForOne = swap_.tokenIn < swap_.tokenOut;
-        // slither-disable-next-line unused-return
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        uint256 calculatedAmount = UniswapV2Math.getAmountOut(
-            swap_.amountIn,
-            zeroForOne ? reserve0 : reserve1,
-            zeroForOne ? reserve1 : reserve0,
-            feeBps
-        );
+        uint256 calculatedAmount = _uniswapV2AmountOut(swap_, pair, feeBps);
 
         IERC20(swap_.tokenIn).safeTransfer(address(pair), swap_.amountIn);
         if (zeroForOne) {
             pair.swap(0, calculatedAmount, swap_.receiver, "");
         } else {
             pair.swap(calculatedAmount, 0, swap_.receiver, "");
+        }
+    }
+
+    function _uniswapV2AmountOut(
+        Swap calldata swap_,
+        IUniswapV2Pair pair,
+        uint256 feeBps
+    ) internal view returns (uint256 amountOut) {
+        bool zeroForOne = swap_.tokenIn < swap_.tokenOut;
+        // slither-disable-next-line unused-return
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        return UniswapV2Math.getAmountOut(
+            swap_.amountIn,
+            zeroForOne ? reserve0 : reserve1,
+            zeroForOne ? reserve1 : reserve0,
+            feeBps
+        );
+    }
+
+    function _decodeUniswapV2(bytes calldata data)
+        internal
+        pure
+        returns (IUniswapV2Pair pair, uint256 feeBps)
+    {
+        if (data.length != 21) {
+            revert TychoFallbackRouter__InvalidSwapLength(data.length);
+        }
+        pair = IUniswapV2Pair(address(bytes20(data[0:20])));
+        feeBps = uint8(data[20]);
+        if (feeBps > 30) {
+            revert TychoFallbackRouter__InvalidUniswapV2Fee(feeBps);
         }
     }
 
@@ -275,19 +481,13 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
 
     /// @dev Curve pays the caller, so this forwards to `receiver`.
     function _swapCurve(Swap calldata swap_, bytes calldata data) internal {
-        if (data.length != 23) {
-            revert TychoFallbackRouter__InvalidSwapLength(data.length);
-        }
-        address pool = address(bytes20(data[0:20]));
-        uint8 poolType = uint8(data[20]);
-        uint256 i = uint8(data[21]);
-        uint256 j = uint8(data[22]);
+        (address pool, uint8 poolType, uint256 i, uint256 j) =
+            _decodeCurve(data);
 
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(address(this));
 
         IERC20(swap_.tokenIn).forceApprove(pool, swap_.amountIn);
-        if (poolType == 1 || poolType == 10) {
-            // stable and stable_ng
+        if (_isCurveStablePool(poolType)) {
             ICurveStablePool(pool)
                 .exchange(
                     int128(uint128(i)), int128(uint128(j)), swap_.amountIn, 0
@@ -302,20 +502,47 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         IERC20(swap_.tokenOut).safeTransfer(swap_.receiver, received);
     }
 
+    function _decodeCurve(bytes calldata data)
+        internal
+        pure
+        returns (address pool, uint8 poolType, uint256 i, uint256 j)
+    {
+        if (data.length != 23) {
+            revert TychoFallbackRouter__InvalidSwapLength(data.length);
+        }
+        pool = address(bytes20(data[0:20]));
+        poolType = uint8(data[20]);
+        i = uint8(data[21]);
+        j = uint8(data[22]);
+    }
+
+    /// @dev Stable and stable_ng pools take the `int128` index signatures.
+    function _isCurveStablePool(uint8 poolType) internal pure returns (bool) {
+        return poolType == 1 || poolType == 10;
+    }
+
     /// @dev `zero2one` is the dex's token order, not the address sort order, so it cannot be
     /// derived.
     function _swapFluidV1(Swap calldata swap_, bytes calldata data) internal {
-        if (data.length != 21) {
-            revert TychoFallbackRouter__InvalidSwapLength(data.length);
-        }
-        address dex = address(bytes20(data[0:20]));
-        bool zero2one = uint8(data[20]) > 0;
+        (address dex, bool zero2one) = _decodeFluidV1(data);
 
         _setCallbackContext(dex, swap_.tokenIn, swap_.amountIn);
         // slither-disable-next-line unused-return
         IFluidV1Dex(dex)
             .swapInWithCallback(zero2one, swap_.amountIn, 0, swap_.receiver);
         _clearCallbackContext();
+    }
+
+    function _decodeFluidV1(bytes calldata data)
+        internal
+        pure
+        returns (address dex, bool zero2one)
+    {
+        if (data.length != 21) {
+            revert TychoFallbackRouter__InvalidSwapLength(data.length);
+        }
+        dex = address(bytes20(data[0:20]));
+        zero2one = uint8(data[20]) > 0;
     }
 
     /// @notice Pays a Uniswap V3 pool.
@@ -402,6 +629,12 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
             uint256(uint128(amountOut))
         );
         return "";
+    }
+
+    function _requireSelf() internal view {
+        if (msg.sender != address(this)) {
+            revert TychoFallbackRouter__NotSelf();
+        }
     }
 
     function _clearCallbackContext() internal {

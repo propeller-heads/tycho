@@ -167,14 +167,27 @@ TychoRouterV3 --TransferType.Transfer--> TychoFallbackRouter --> pAMM     (rever
 `FallbackExecutor` declares `TransferType.Transfer` with the fallback router as receiver and `outputToRouter = false`,
 then calls `TychoFallbackRouter.swap()`.
 
-**One pAMM and one caller-chosen fallback.** The pAMM runs inside `executePropAMM`, an external self-call
-wrapped in try/catch, so its transfer reverts with it and the fallback starts from the same balance. The fallback then
-runs in the outer frame: it gets no try/catch, so its revert is the swap's revert and there is no third attempt. The
-contract never picks a protocol itself -- the encoder decides which fallback to use and supplies its pool address.
+**One pAMM and one caller-chosen fallback.** `swap` quotes both first and runs the fallback directly when it quotes
+more `tokenOut` than the pAMM. Otherwise the pAMM runs inside `executePropAMM`, an external self-call wrapped in
+try/catch, so its transfer reverts with it and the fallback starts from the same balance. The fallback then runs in
+the outer frame: it gets no try/catch, so its revert is the swap's revert and there is no third attempt. The contract
+never picks a protocol itself -- the encoder decides which fallback to use and supplies its pool address.
 
-`FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol)` is emitted when the pAMM fails and the fallback runs. A filled leg
-without it was served by the pAMM, so counting the event against filled legs gives the pAMM fill rate. The pAMM's
-revert reason is not carried: reading caller-controlled returndata of any size costs gas.
+**Quotes.** The pAMM quote is `IPropAMM.quote`. The fallback quote depends on the protocol: Uniswap V2 is computed
+from the pair's reserves, Curve asks `get_dy`, Fluid asks the dex to price a swap paid to `0xdEaD`, which reverts
+`FluidDexSwapResult(amountOut)` before moving any token. Uniswap V3 and V4 pools have no quote function, so
+`simulateFallback` runs the real swap and reverts `TychoFallbackRouter__SimulatedAmountOut` with the receiver's
+balance diff, rolling it back. Both quotes run in self-only external functions (`quotePropAMM`, `quoteFallback`) under
+try/catch, so a quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero. Two zero
+quotes or equal quotes keep the pAMM-first order. The quotes cost gas on every leg: about 50-60k for a Uniswap V3 or
+V4 simulation, and a pAMM quote on top when the pAMM is live; a stale pAMM is skipped without being called, which
+saves its failed swap.
+
+`FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
+`FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
+`PropAMMReverted` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
+served by the pAMM, so counting the event against filled legs gives the pAMM fill rate. The pAMM's revert reason is
+not carried: reading caller-controlled returndata of any size costs gas.
 
 A pAMM that reports success but delivers nothing reverts `TychoFallbackRouter__NoOutput`, so a silent fill still falls
 through to the fallback. The fallback slot measures nothing: the Dispatcher's balance-diff at the receiver is the
