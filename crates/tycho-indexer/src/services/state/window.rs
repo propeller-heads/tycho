@@ -25,6 +25,10 @@
 //! commit lag more than `W` blocks behind the tip, the watermark terms of the `min` govern and
 //! the window grows beyond `W` (unfinalized and uncommitted blocks are never evicted).
 //!
+//! `W` is a floor on retention, not a target. `PendingDeltas` receives `db_committed` in jumps of
+//! `--database-insert-batch-size`, so on chains where that batch exceeds `W` (Arbitrum at 1000,
+//! BSC and Polygon at 512 today) the `db_committed` term always binds and `W` never does.
+//!
 //! Folding is batched: [`DeltaWindow::fold_and_evict`] is a no-op until at least
 //! `min_fold_batch` blocks are evictable, then folds all of them, so blocks are not folded one
 //! by one at the chain tip rate. At steady state the window size therefore oscillates between
@@ -37,9 +41,10 @@
 //! - `tip - W`: the serving depth. `W = max(finality horizon, maximum version age served from
 //!   memory) + margin` (~128 on Ethereum).
 //!
-//! Errors from [`DeltaWindow::insert`] and [`DeltaWindow::fold_and_evict`] are fatal: each one
-//! means the window no longer matches the chain or the database, with no in-process recovery —
-//! the caller must terminate the indexer process rather than keep serving.
+//! An error from [`DeltaWindow::insert`] or [`DeltaWindow::fold_and_evict`] means this window
+//! no longer matches the chain or the database and cannot be repaired in place. The caller
+//! resets the extractor's window, the same recovery the supervisor triggers through
+//! `ExtractorRestarted`, and keeps serving the other extractors.
 
 // Not yet constructed by production code; wired into `PendingDeltas` in a follow-up.
 #![allow(dead_code)]
@@ -57,12 +62,8 @@ pub(crate) trait FoldSink: Send + Sync {
     /// Merges one finalized, database-committed block into the long-lived store.
     ///
     /// Blocks arrive in ascending order. Delta values are absolute, so applying the same block
-    /// twice must be a no-op for implementations that tag values with their block number.
-    /// Implementations must be fast: folds run synchronously and delay state reads while they
-    /// run.
-    ///
-    /// An error means the block was not (fully) applied; the caller keeps the block buffered and
-    /// propagates the error.
+    /// twice must be a no-op for implementations that tag values with their block. An error
+    /// means the block was not fully applied.
     fn apply_folded(
         &self,
         extractor: &str,
@@ -71,7 +72,7 @@ pub(crate) trait FoldSink: Send + Sync {
 }
 
 /// Outcome of resolving a requested version against the window contents.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum WindowResolution {
     /// The version maps to a block currently held in the window.
     InWindow(Block),
@@ -87,12 +88,14 @@ pub(crate) enum WindowResolution {
 /// as soon as the database commits, here blocks are kept until they are finalized, committed, and
 /// deeper than the configured depth.
 ///
-/// The type is `Sync` by composition but not internally synchronized: methods rely on the caller
-/// for exclusive access — one instance lives behind the per-extractor `Arc<Mutex<..>>` owned by
-/// the pending-deltas facade. That lock is also the coordination point between eviction and the
-/// database fill path: a fill must not publish state assembled from blocks that
-/// [`DeltaWindow::fold_and_evict`] folded out from under it, so the facade serializes the two
-/// behind the same lock (the fill path lands in a later story).
+/// The type is `Sync` by composition but not internally synchronized: one instance lives behind
+/// the per-extractor `Arc<Mutex<..>>` owned by the pending-deltas facade, and every method relies
+/// on that lock for exclusive access.
+///
+/// The wrapped buffer is the RPC-side instance. It never calls
+/// `ReorgBuffer::drain_into_committing`, so its committing section stays empty and this window's
+/// retention is the only retention on it. Blocks leave only through
+/// [`DeltaWindow::fold_and_evict`].
 ///
 /// Because committed blocks are retained, window contents and database rows overlap by up to
 /// `depth` blocks. Readers that merge window deltas with database queries and assume the two are
@@ -108,9 +111,14 @@ pub(crate) struct DeltaWindow {
     db_committed: Option<u64>,
     /// Highest `finalized_block_height` seen on any inserted message.
     finalized: Option<u64>,
-    /// Minimum number of evictable blocks required before a fold runs. Amortizes folding: with
-    /// 1 every evictable block is folded as soon as possible; larger values trade `min_fold_batch`
-    /// extra buffered blocks for folds that run `min_fold_batch` times less often.
+    /// Minimum number of evictable blocks required before a fold runs. With 1 every evictable
+    /// block is folded as soon as possible; larger values fold `min_fold_batch` blocks at once,
+    /// `min_fold_batch` times less often, at the cost of that many extra buffered blocks.
+    ///
+    /// Blocks become evictable in jumps of `--database-insert-batch-size` whenever the
+    /// `db_committed` term binds, so a commit batch at or above this value already groups the
+    /// folds and this knob has no further effect. It only shapes fold cadence where `tip - W`
+    /// binds, which is chains with the commit batch unset (Ethereum, Unichain).
     min_fold_batch: u64,
 }
 
@@ -155,7 +163,7 @@ impl DeltaWindow {
     ///
     /// # Errors
     ///
-    /// Every error is fatal (see the module doc):
+    /// Every error leaves the window unusable (see the module doc):
     ///
     /// - `StorageError::Unexpected` when a regular message does not extend the buffered chain
     ///   (parent-hash mismatch), or when a revert would remove a block at or below `min(finalized,
@@ -188,8 +196,8 @@ impl DeltaWindow {
     /// # Errors
     ///
     /// Any error from [`FoldSink::apply_folded`] is propagated after evicting the successfully
-    /// folded prefix. Fold errors are treated as fatal until their failure modes are better
-    /// understood (see the module doc).
+    /// folded prefix. A fold error leaves the failing block buffered for the caller to decide on
+    /// (see the module doc).
     #[allow(unused_variables)]
     pub(crate) fn fold_and_evict(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
         // Let `bound = self.eviction_bound()` and count the evictable blocks:
@@ -258,7 +266,9 @@ impl DeltaWindow {
         todo!("watermark-based commit status")
     }
 
-    /// Highest block number that may be folded-and-evicted, if any.
+    /// Highest block number that may be folded-and-evicted. `None` when the window is empty or
+    /// no database commit has been observed yet; the caller logs both watermarks and the tip so
+    /// the two cases are distinguishable.
     fn eviction_bound(&self) -> Option<u64> {
         // min(finalized, db_committed, tip - depth), where:
         // - `None` finalized/db_committed/tip means nothing is evictable yet;
