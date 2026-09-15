@@ -592,10 +592,14 @@ impl ProtocolStreamBuilder {
     /// The exchange must decode into a state whose `delta_transition` can rebuild it from the
     /// `state_deltas` the indexer produces, because that is all
     /// [`apply_deltas_ephemeral`](crate::evm::decoder::TychoStreamDecoder::apply_deltas_ephemeral)
-    /// applies. Native and hybrid states qualify; the generic VM adapter does not, because it
-    /// re-reads pool state from the VM database — an indexer registered for one still gets its
-    /// balance and block-environment attributes applied, but every storage-derived value stays at
-    /// the confirmed block, with no error.
+    /// applies. Each state reports that per delta through
+    /// [`ProtocolSim::transitions_from_delta_alone`], and a delta for a state that reports
+    /// `false` fails the pending update instead of quoting confirmed data. Hybrid states such as
+    /// Fluid and Curve therefore qualify only while the indexer supplies the attribute they
+    /// rebuild from; the generic VM adapter never does.
+    ///
+    /// [`build_with_pending`](Self::build_with_pending) rejects an `extractor` that no
+    /// [`exchange`](Self::exchange) call registered — its deltas would reach no state at all.
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,
@@ -743,12 +747,36 @@ impl ProtocolStreamBuilder {
     ///
     /// Call [`generate_pending_update`](PendingBlockProcessor::generate_pending_update) to
     /// simulate a candidate bundle; it drains the channel automatically before computing.
+    ///
+    /// # Errors
+    /// Returns [`StreamError::SetUpError`] if a
+    /// [`with_pending_indexer`](Self::with_pending_indexer) call named an exchange that was
+    /// never registered with [`exchange`](Self::exchange).
     pub async fn build_with_pending(
         mut self,
     ) -> Result<
         (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
         StreamError,
     > {
+        let mut unregistered = self
+            .pending_indexers
+            .keys()
+            .filter(|extractor| {
+                !self
+                    .registered_exchanges
+                    .contains(*extractor)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unregistered.is_empty() {
+            unregistered.sort();
+            return Err(StreamError::SetUpError(format!(
+                "pending indexers registered for unknown exchanges: {}. Register each with \
+                 exchange() first — otherwise their deltas reach no state.",
+                unregistered.join(", ")
+            )));
+        }
+
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
@@ -973,6 +1001,43 @@ mod tests {
             !second.states.contains_key(&expected_id),
             "second message should NOT have native_wrapper state"
         );
+    }
+
+    /// A pending indexer named after an exchange nobody registered has its deltas applied to
+    /// nothing. `build_with_pending` must say so instead of running.
+    #[tokio::test]
+    async fn test_build_with_pending_rejects_an_unregistered_exchange() {
+        use tycho_common::models::blockchain::{BlockAggregatedChanges, PendingBlock};
+
+        use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        struct NoopIndexer;
+
+        impl TxDeltaIndexer for NoopIndexer {
+            fn apply_block(&mut self, _block: &BlockAggregatedChanges) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn generate_deltas(&self, _pending: &PendingBlock) -> BlockAggregatedChanges {
+                BlockAggregatedChanges::default()
+            }
+        }
+
+        let result = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum)
+            .exchange::<UniswapV2State>(
+                "uniswap_v2",
+                ComponentFilter::with_tvl_range(5.0, 10.0),
+                None,
+            )
+            .with_pending_indexer("uniswap_v3", Box::new(NoopIndexer))
+            .expect("registering an indexer must not fail")
+            .build_with_pending()
+            .await;
+
+        match result {
+            Err(e) => assert!(e.to_string().contains("uniswap_v3"), "{e}"),
+            Ok(_) => panic!("an indexer for an unregistered exchange must be refused"),
+        }
     }
 
     /// Verifies that `with_step_controller` returns both a modified builder and a controller.
