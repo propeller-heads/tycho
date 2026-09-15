@@ -133,7 +133,6 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         try this.executePropAMM(swap_, pamm) {
             return;
         } catch {}
-
         FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
         // Reentrancy cannot happen: the function is nonReentrant.
         // slither-disable-next-line reentrancy-events
@@ -318,15 +317,10 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         _clearCallbackContext();
     }
 
-    /// @notice Pays a Uniswap V3 pool.
-    /// @dev The pool's deltas are ignored; token and amount come from the callback context.
-    function uniswapV3SwapCallback(
-        int256, /* amount0Delta */
-        int256, /* amount1Delta */
-        bytes calldata /* data */
-    )
-        external
-    {
+    /// @notice Pays a Uniswap V3-style pool from the callback context.
+    /// @dev Catch-all so it answers to every V3 fork's callback name. Token and amount come from
+    /// the context, which `_consumeCallbackContext` ties to the pool `_swapUniswapV3` armed.
+    fallback() external {
         (address tokenIn, uint256 amountIn) = _consumeCallbackContext();
         IERC20(tokenIn).safeTransfer(msg.sender, amountIn);
     }

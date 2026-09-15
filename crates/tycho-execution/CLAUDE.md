@@ -202,6 +202,12 @@ deployment per fork.
 The protocol data always occupies the tail of the swap data, so any protocol can be variable-length. Uniswap V4 is the only
 one that is today.
 
+Byte 1 (Uniswap V3) serves every V3-style fork, not just canonical Uniswap V3. A V3 pool pulls its input through a
+callback whose name it picks itself, and forks rename it (`pancakeV3SwapCallback`, `algebraSwapCallback`). The router
+answers all of them through a catch-all `fallback` -- the same selector-agnostic trick `TychoRouterV3.fallback` uses --
+guarded by the transient callback context so only the pool the swap called can be paid. So the solver may map any V3
+fork to byte 1.
+
 Swap direction for Uniswap V2/V3/V4 comes from the sort order of `tokenIn` and `tokenOut`, so it is not encoded. Fluid's
 `zero2one` is the dex's own token order, which is not the address sort order, so it is. A `zero2one` that contradicts
 the leg reverts either `TychoFallbackRouter__CallbackTokenMismatch`, when the dex asks `dexCallback` for the other
@@ -341,17 +347,26 @@ flags) into packed bytes. Each encoder holds its executor address.
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
 e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
-with the venue name or, for auto-detected pAMMs, the venue address). Price-level-stream protocols
+with the protocol name or, for auto-detected pAMMs, the protocol address). Price-level-stream protocols
 resolve generically: a single `pricelevelstream` config entry serves the whole family via a
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
-`pricelevelstream:{venue}` entries overriding per venue.
+`pricelevelstream:{protocol}` entries overriding per protocol.
 
-`propammfallback:{venue}` is the same liquidity executed through Titan's PropAMMRouter
-(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the venue
+`propammfallback:{protocol}` is the same liquidity executed through Titan's PropAMMRouter
+(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the protocol
 directly, so a stale maker quote falls back to a single-hop Uniswap V3 pool rather than reverting
 the route. It resolves the same
-way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only venues
+way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only protocols
 whitelisted on the PropAMMRouter may use the prefix.
+
+`fallback:{protocol}` is the same liquidity executed through `TychoFallbackRouter` (see "protocol
+fallback" above), which replaces the PropAMMRouter path: any pAMM qualifies, and the solver picks
+the fallback protocol per swap instead of the router owning one Uniswap V3 mapping. It resolves the
+same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
+one of Uniswap V2/V3/V4, Curve, or Fluid V1 with its pool parameters — travels as JSON in the
+swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
+static attribute. No `fallback` entry ships in the executor configs until the FallbackExecutor is
+deployed.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 

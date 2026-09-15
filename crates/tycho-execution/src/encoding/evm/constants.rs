@@ -126,6 +126,16 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set
 });
 
+/// Uniswap V2 and its forks encode identically, so they share `UniswapV2SwapEncoder`. The fallback
+/// encoder accepts the same names as aliases for its `UniswapV2` protocol; the
+/// `test_aliases_cover_registry_forks` test keeps the two lists from drifting.
+pub const UNISWAP_V2_FORKS: &[&str] =
+    &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
+pub const UNISWAP_V3_FORKS: &[&str] =
+    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3"];
+
 /// Protocol system prefix carried by components sourced from the pAMM price level stream. The
 /// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
 /// auto-detected pAMMs, the venue address (e.g. `pricelevelstream:0x5979…`); every such protocol
@@ -141,11 +151,25 @@ pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 /// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
 /// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct
 /// path, so both prefixes share `PropAMMSwapEncoder` and differ only in the executor.
+///
+/// Deprecated with `PropAMMFallbackExecutor`: encode no new routes against this family, use
+/// [`FALLBACK_PREFIX`]. Removed in a follow-up PR together with the executor.
 pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 
 /// The executor-config key serving the whole PropAMMRouter protocol family, mirroring
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
+
+/// Protocol system prefix for pAMM components executed through `TychoFallbackRouter`, which
+/// retries a failing pAMM on the fallback protocol named in the swap's `user_data`. Protocol
+/// suffixes follow `PRICE_LEVEL_STREAM_PREFIX`. Replaces `PROPAMM_FALLBACK_PREFIX` (Titan's
+/// PropAMMRouter, deprecated): any pAMM qualifies, and the solver picks the fallback protocol per
+/// swap instead of the router owning one Uniswap V3 mapping.
+pub const FALLBACK_PREFIX: &str = "fallback:";
+
+/// The executor-config key serving the whole fallback protocol family, mirroring
+/// `PRICE_LEVEL_STREAM_KEY`.
+pub const FALLBACK_KEY: &str = "fallback";
 
 #[cfg(test)]
 mod tests {
@@ -157,6 +181,7 @@ mod tests {
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
         assert_eq!(format!("{PROPAMM_FALLBACK_KEY}:"), PROPAMM_FALLBACK_PREFIX);
+        assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

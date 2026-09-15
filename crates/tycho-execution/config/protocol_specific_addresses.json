@@ -3,6 +3,9 @@
     "uniswap_v4": {
       "angstrom_hook_address": "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
     },
+    "fallback": {
+      "angstrom_hook_address": "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+    },
     "etherfi": {
       "eeth_address": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
       "weeth_address": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"

@@ -115,10 +115,14 @@ contract EmptyReservePair {
 /// and the route-level `minAmountOut` must be what catches it.
 contract SilentPool {
     function swap(
-        address, /* recipient */
-        bool, /* zeroForOne */
-        int256, /* amountSpecified */
-        uint160, /* sqrtPriceLimitX96 */
+        address,
+        /* recipient */
+        bool,
+        /* zeroForOne */
+        int256,
+        /* amountSpecified */
+        uint160,
+        /* sqrtPriceLimitX96 */
         bytes calldata /* data */
     )
         external
@@ -137,14 +141,46 @@ contract RevertingPool {
     }
 }
 
+interface IPancakeV3SwapCallback {
+    function pancakeV3SwapCallback(int256, int256, bytes calldata) external;
+}
+
+/// @notice A V3-shaped pool that asks for its input through Pancake's renamed
+/// `pancakeV3SwapCallback` rather than `uniswapV3SwapCallback`. Proves the
+/// catch-all `fallback` pays a V3 fork whatever callback name the pool picks.
+contract RenamedCallbackPool {
+    address immutable tokenOut;
+    uint256 immutable amountOut;
+
+    constructor(address tokenOut_, uint256 amountOut_) {
+        tokenOut = tokenOut_;
+        amountOut = amountOut_;
+    }
+
+    function swap(address recipient, bool, int256, uint160, bytes calldata)
+        external
+        returns (int256, int256)
+    {
+        // A real V3 pool pays the recipient, then pulls its input in the callback.
+        IERC20(tokenOut).transfer(recipient, amountOut);
+        IPancakeV3SwapCallback(msg.sender).pancakeV3SwapCallback(0, 0, "");
+        return (0, 0);
+    }
+}
+
 /// @notice Accepts `tokenIn` and reports success without paying anything.
 contract SilentPropAMM {
     function swap(
-        address, /* tokenIn */
-        address, /* tokenOut */
-        uint256, /* amountIn */
-        uint256, /* minAmountOut */
-        address, /* recipient */
+        address,
+        /* tokenIn */
+        address,
+        /* tokenOut */
+        uint256,
+        /* amountIn */
+        uint256,
+        /* minAmountOut */
+        address,
+        /* recipient */
         uint256 /* deadline */
     )
         external
@@ -204,6 +240,13 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     uint256 constant V4_USDE_OUT = 100_009_300_940_809_442_564;
     uint256 constant CURVE_USDC_OUT = 999_895_324;
     uint256 constant CURVE_CRYPTO_USDC_OUT = 2_766_051_040;
+
+    /// PancakeSwap V3 renames the V3 callback to `pancakeV3SwapCallback`, so
+    /// this exercises the catch-all `fallback` against a real fork's pool. The
+    /// 0.05% USDC/WETH pool from the mainnet PancakeV3 factory.
+    address constant PANCAKE_USDC_WETH_V3 =
+        0x1ac1A8FEaAEa1900C4166dEeed0C11cC10669D36;
+    uint256 constant PANCAKE_V3_WETH_OUT = 3_601_880_052_618_891_035;
 
     function getForkBlock() internal pure override returns (uint256) {
         return FORK_BLOCK;
@@ -400,6 +443,23 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
 
+    /// A real PancakeSwap V3 pool fills through byte 1: its pool calls
+    /// `pancakeV3SwapCallback`, which lands on the catch-all `fallback` since it
+    /// is not one of the router's named callbacks.
+    function testFallsBackToPancakeV3Fork() public {
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(PANCAKE_USDC_WETH_V3)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), PANCAKE_V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
+        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
+    }
+
     /// WETH < USDC is false, so this runs the `!zeroForOne` sqrt limit.
     function testFallsBackToUniswapV3Reverse() public {
         uint256 amountIn = 4 ether;
@@ -576,10 +636,41 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    /// No swap is running, so there is no protocol that may be paid.
-    function testUniswapV3CallbackRejectsStranger() public {
-        vm.expectRevert(TychoFallbackRouter__InvalidCallback.selector);
-        router.uniswapV3SwapCallback(1, -1, bytes(""));
+    /// No swap is running, so no protocol may be paid. A V3-family callback --
+    /// canonical or a fork's renamed selector -- lands on the catch-all
+    /// `fallback` and reverts on the context guard rather than paying out.
+    function testCallbackRejectsStranger() public {
+        (bool success, bytes memory ret) = address(router)
+            .call(
+                abi.encodeWithSignature(
+                    "pancakeV3SwapCallback(int256,int256,bytes)",
+                    int256(1),
+                    int256(-1),
+                    bytes("")
+                )
+            );
+        assertFalse(success);
+        assertEq(bytes4(ret), TychoFallbackRouter__InvalidCallback.selector);
+    }
+
+    /// A Uniswap V3 fork that renamed its callback (Pancake's
+    /// `pancakeV3SwapCallback`) still fills: the pool chooses the selector and
+    /// the catch-all `fallback` answers to it.
+    function testFallsBackToRenamedV3Fork() public {
+        uint256 amountOut = 3 ether;
+        RenamedCallbackPool pool = new RenamedCallbackPool(WETH_ADDR, amountOut);
+        deal(WETH_ADDR, address(pool), amountOut);
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(address(pool))
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), amountOut);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), USDC_IN);
+        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
 
     function testDexCallbackRejectsStranger() public {
@@ -699,6 +790,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         9_916_211_621_040_833_220_196;
     uint256 constant FEE_WETH_OUT = 3_575_878_652_154_429_173;
     uint256 constant SPLIT_WETH_OUT = 3_612_457_039_884_311_273;
+    uint256 constant SUSHI_WETH_OUT = 3_587_564_182_454_912_624;
 
     function getForkBlock() public pure override returns (uint256) {
         return 22689128;
@@ -707,6 +799,44 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
     function setUp() public override {
         super.setUp();
         pamm = new MockPropAMM();
+    }
+
+    function testSingleSwapFromRustCalldata() public {
+        uint256 amountIn = 10_000e6;
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_fallback_usdc_weth"
+        );
+
+        deal(USDC_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SINGLE_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+    }
+
+    /// The `sushiswap_v2` fork name, encoded in Rust, fills through the Uniswap V2 fallback path
+    /// against a real SushiSwap USDC/WETH pair.
+    function testSushiswapV2AliasFromRustCalldata() public {
+        uint256 amountIn = 10_000e6;
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_fallback_sushiswap_v2_alias"
+        );
+
+        deal(USDC_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SUSHI_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
     }
 
     function testGetTransferData() public view {
