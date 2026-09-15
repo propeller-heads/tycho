@@ -12,6 +12,9 @@
     },
     "rfq:native": {
       "router_v6": "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"
+    },
+    "fallback_router": {
+      "uniswap_v3_static_quoter": "0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE"
     }
   },
   "base": {
