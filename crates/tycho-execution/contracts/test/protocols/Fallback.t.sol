@@ -169,50 +169,32 @@ contract SilentPropAMM {
     }
 }
 
-/// @notice Exposes the two quotes `swap` compares, which are self-only on the router.
-contract TychoFallbackRouterExposed is TychoFallbackRouter {
-    constructor(
-        IPoolManager poolManager_,
-        address fluidLiquidity_,
-        IUniswapV3StaticQuoter uniswapV3StaticQuoter_
-    )
-        TychoFallbackRouter(
-            poolManager_, fluidLiquidity_, uniswapV3StaticQuoter_
-        )
-    {}
-
-    function quoteFallbackFor(Swap calldata swap_, bytes calldata fallbackSwap)
-        external
-        returns (uint256 amountOut)
-    {
-        return _quoteFallback(swap_, fallbackSwap);
-    }
-
-    function quotePropAMMFor(Swap calldata swap_, address pamm_)
-        external
-        returns (uint256 amountOut)
-    {
-        return _quotePropAMM(swap_, pamm_);
-    }
-}
-
 /// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every fallback
 /// test repeats. Subclasses name the fork block, since the protocols are not all live at the
 /// same one.
 abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
-    TychoFallbackRouterExposed router;
+    TychoFallbackRouter router;
     MockPropAMM pamm;
 
     function getForkBlock() internal pure virtual returns (uint256);
 
     function setUp() public virtual {
         vm.createSelectFork(vm.rpcUrl("mainnet"), getForkBlock());
-        router = new TychoFallbackRouterExposed(
+        router = new TychoFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
         );
         pamm = new MockPropAMM();
+    }
+
+    /// `quoteFallback` is self-only, so this calls it as the router.
+    function _quoteFallback(
+        TychoFallbackRouter.Swap memory swap_,
+        bytes memory fallbackSwap
+    ) internal returns (uint256 amountOut) {
+        vm.prank(address(router));
+        return router.quoteFallback(swap_, fallbackSwap);
     }
 
     /// Requires `swap` to emit `FallbackSwap` for `protocol` and `reason` on the next call.
@@ -490,18 +472,12 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
 
-    /// A pAMM address without code returns nothing to decode. That failure is inside
-    /// `quotePropAMM`'s frame, so it is a zero quote rather than a revert of the swap.
+    /// A pAMM address without code returns nothing to decode, which is a zero quote rather
+    /// than a revert of the swap.
     function testPropAMMWithoutCodeFallsBack() public {
         address noCode = makeAddr("no code");
         deal(USDC_ADDR, address(router), USDC_IN);
 
-        assertEq(
-            router.quotePropAMMFor(
-                FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB), noCode
-            ),
-            0
-        );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
             noCode,
@@ -539,35 +515,35 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         deal(USDE_ADDR, address(router), 100 ether);
 
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
                 FallbackSwaps.uniswapV2(USDC_WETH_USV2, 30)
             ),
             V2_WETH_OUT
         );
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
                 FallbackSwaps.uniswapV3(USDC_WETH_USV3)
             ),
             V3_WETH_OUT
         );
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(USDE_ADDR, USDT_ADDR, 100 ether, BOB),
                 FallbackSwaps.uniswapV4(100, 1, address(0), bytes(""))
             ),
             V4_USDT_OUT
         );
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(DAI_ADDR, USDC_ADDR, 1000e18, BOB),
                 FallbackSwaps.curve(TRIPOOL, 1, 0, 1)
             ),
             CURVE_USDC_OUT
         );
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(WETH_ADDR, USDC_ADDR, 1 ether, BOB),
                 FallbackSwaps.curve(TRICRYPTO_POOL, 3, 2, 0)
             ),
@@ -581,55 +557,70 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         assertEq(IERC20(USDT_ADDR).balanceOf(BOB), 0);
     }
 
-    /// A fallback that cannot quote is a zero quote, never a revert of the swap: a pool that
-    /// reverts, a pair with no reserves, a "pool" the static quoter cannot read, and malformed
-    /// protocol data.
-    function testUnquotableFallbackQuotesZero() public {
-        deal(USDC_ADDR, address(router), USDC_IN);
+    /// `quoteFallback` reverts with the cause -- the pool's own error, the zero-reserve guard,
+    /// a "pool" the static quoter cannot read, the protocol data decoder's error -- and `swap`
+    /// counts each as a zero quote.
+    function testQuoteFallbackRevertsWithTheCause() public {
         TychoFallbackRouter.Swap memory swap_ =
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
+        address reverting = address(new RevertingPool());
+        address emptyPair = address(new EmptyReservePair());
+        address silent = address(new SilentPool());
 
-        assertEq(
-            router.quoteFallbackFor(
-                swap_, FallbackSwaps.uniswapV3(address(new RevertingPool()))
-            ),
-            0
+        vm.expectRevert(RevertingPool__Nope.selector);
+        _quoteFallback(swap_, FallbackSwaps.uniswapV3(reverting));
+
+        vm.expectRevert(UniswapV2Math__ZeroReserves.selector);
+        _quoteFallback(swap_, FallbackSwaps.uniswapV2(emptyPair, 30));
+
+        vm.expectRevert();
+        _quoteFallback(swap_, FallbackSwaps.uniswapV3(silent));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoFallbackRouter__UnknownProtocol.selector, uint8(9)
+            )
         );
-        assertEq(
-            router.quoteFallbackFor(
-                swap_,
-                FallbackSwaps.uniswapV2(address(new EmptyReservePair()), 30)
-            ),
-            0
+        _quoteFallback(swap_, abi.encodePacked(uint8(9), USDC_WETH_USV3));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoFallbackRouter__InvalidSwapLength.selector, uint256(0)
+            )
         );
-        assertEq(
-            router.quoteFallbackFor(
-                swap_, FallbackSwaps.uniswapV3(address(new SilentPool()))
-            ),
-            0
+        _quoteFallback(swap_, bytes(""));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoFallbackRouter__InvalidSwapLength.selector, uint256(19)
+            )
         );
-        assertEq(
-            router.quoteFallbackFor(
-                swap_, abi.encodePacked(uint8(9), USDC_WETH_USV3)
-            ),
-            0
+        _quoteFallback(
+            swap_, _truncate(FallbackSwaps.uniswapV3(USDC_WETH_USV3))
         );
-        assertEq(router.quoteFallbackFor(swap_, bytes("")), 0);
-        assertEq(
-            router.quoteFallbackFor(
-                swap_, _truncate(FallbackSwaps.uniswapV3(USDC_WETH_USV3))
-            ),
-            0
+    }
+
+    /// A fallback that cannot quote is a zero quote, never a revert of the swap: the pAMM
+    /// still runs first and fills.
+    function testUnquotableFallbackKeepsPropAMMFirst() public {
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, PAMM_ABOVE_MARKET);
+        deal(WETH_ADDR, address(pamm), 100 ether);
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(address(new RevertingPool()))
         );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 5 ether);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), USDC_IN);
     }
 
     /// The quote entry points are external only so `swap` can try/catch them.
     function testQuoteEntryPointsRejectExternalCaller() public {
         TychoFallbackRouter.Swap memory swap_ =
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
-
-        vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
-        router.quotePropAMM(swap_, address(pamm));
 
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
         router.quoteFallback(swap_, FallbackSwaps.uniswapV3(USDC_WETH_USV3));
@@ -896,14 +887,14 @@ contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
     /// Fluid's dead-address estimate is the amount the dex then fills.
     function testFluidQuoteMatchesFill() public {
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(SUSDE_ADDR, USDT_ADDR, 10e18, BOB),
                 FallbackSwaps.fluidV1(FLUID_DEX, true)
             ),
             FLUID_USDT_OUT
         );
         assertEq(
-            router.quoteFallbackFor(
+            _quoteFallback(
                 FallbackSwaps.swap(USDT_ADDR, SUSDE_ADDR, 10e6, BOB),
                 FallbackSwaps.fluidV1(FLUID_DEX, false)
             ),

@@ -105,11 +105,6 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     bytes32 private constant _CALLBACK_AMOUNT_SLOT =
         0xde66fd0ca9c728ba44ca7bab17a304d328bf9cf5d5c72b8bf8ea7cd13765e542;
 
-    /// @dev The recipient that makes a Fluid dex revert with `FluidDexSwapResult` instead of
-    /// swapping.
-    address private constant _ADDRESS_DEAD =
-        0x000000000000000000000000000000000000dEaD;
-
     IPoolManager public immutable poolManager;
     /// @notice Where `dexCallback` pays a Fluid dex.
     address public immutable fluidLiquidity;
@@ -162,24 +157,47 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         address pamm,
         bytes calldata fallbackSwap
     ) external nonReentrant {
-        uint256 pammAmountOut = _quotePropAMM(swap_, pamm);
-        uint256 fallbackAmountOut = _quoteFallback(swap_, fallbackSwap);
-        if (fallbackAmountOut > pammAmountOut) {
-            _runFallback(
-                swap_, pamm, fallbackSwap, FallbackReason.FallbackQuotedHigher
-            );
-            return;
-        }
+        // A low-level call, not `try IPropAMM(pamm).quote(...)`: `try` catches the callee's
+        // revert but not a failure to decode its return data, so a `pamm` without code or one
+        // returning fewer than 32 bytes would revert `swap`. Here it quotes zero.
+        // slither-disable-next-line low-level-calls
+        (bool quoted, bytes memory quote) = pamm.call(
+            abi.encodeCall(
+                IPropAMM.quote, (swap_.tokenIn, swap_.tokenOut, swap_.amountIn)
+            )
+        );
+        uint256 pammAmountOut =
+            quoted && quote.length >= 32 ? abi.decode(quote, (uint256)) : 0;
 
-        try this.executePropAMM(swap_, pamm) {
-            return;
+        uint256 fallbackAmountOut;
+        try this.quoteFallback(swap_, fallbackSwap) returns (
+            uint256 amountOut
+        ) {
+            fallbackAmountOut = amountOut;
         } catch {}
 
-        _runFallback(swap_, pamm, fallbackSwap, FallbackReason.PropAMMReverted);
+        FallbackReason reason = FallbackReason.FallbackQuotedHigher;
+        if (fallbackAmountOut <= pammAmountOut) {
+            try this.executePropAMM(swap_, pamm) {
+                return;
+            } catch {}
+            reason = FallbackReason.PropAMMReverted;
+        }
+
+        FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
+        // Reentrancy cannot happen: `swap` is nonReentrant.
+        // slither-disable-next-line reentrancy-events
+        emit FallbackSwap(
+            pamm,
+            swap_.tokenIn,
+            swap_.tokenOut,
+            swap_.amountIn,
+            protocol,
+            reason
+        );
     }
 
-    /// @notice Runs the pAMM. External only so `swap` can try/catch it: Solidity's `try` takes an
-    /// external call, never an internal function.
+    /// @notice Runs the pAMM. External only so `swap` can try/catch it (see `quoteFallback`).
     function executePropAMM(Swap calldata swap_, address pamm) external {
         _requireSelf();
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
@@ -203,26 +221,14 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
     }
 
-    /// @notice Quotes the pAMM. External only so `swap` can try/catch it.
-    /// @dev `try IPropAMM(pamm).quote(...)` directly in `swap` would not be enough: `try` catches
-    /// the callee's revert but not a failure to decode its return data, so a `pamm` without code
-    /// or with a different return type would revert `swap` itself. Inside this frame that decode
-    /// failure is a revert of the self-call, which `swap` catches.
-    function quotePropAMM(Swap calldata swap_, address pamm)
-        external
-        returns (uint256 amountOut)
-    {
-        _requireSelf();
-        amountOut =
-            IPropAMM(pamm).quote(swap_.tokenIn, swap_.tokenOut, swap_.amountIn);
-    }
-
     /// @notice Quotes the fallback protocol. External only so `swap` can try/catch it: a
     /// protocol that cannot quote, or malformed protocol data, is a zero quote, and `swap` then
-    /// tries the pAMM first as before. As with `quotePropAMM`, the frame also turns a return
-    /// data decode failure on a caller-supplied pool (Curve's `get_dy`, the V2 pair's reserves)
-    /// into a catchable revert.
-    /// @dev Uniswap V2 prices off the pair's reserves, Uniswap V3 asks the static quoter, Curve
+    /// tries the pAMM first.
+    /// @dev Solidity's `try` takes an external call, never an internal function, and it catches
+    /// the callee's revert but not a failure to decode its return data. Inside this frame a
+    /// caller-supplied pool that returns fewer than 32 bytes (Curve's `get_dy`, the V2 pair's
+    /// reserves) reverts the self-call, which `swap` catches.
+    /// Uniswap V2 prices off the pair's reserves, Uniswap V3 asks the static quoter, Curve
     /// asks `get_dy`, Fluid asks the dex to price a swap paid to `0xdEaD`. Uniswap V4 has no
     /// quote function, so `simulateFallback` runs the swap and rolls it back.
     function quoteFallback(Swap calldata swap_, bytes calldata fallbackSwap)
@@ -234,7 +240,9 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
             _decodeFallback(fallbackSwap);
 
         if (protocol == FallbackProtocol.UniswapV2) {
-            return _quoteUniswapV2(swap_, protocolData);
+            (IUniswapV2Pair pair, uint256 feeBps) =
+                _decodeUniswapV2(protocolData);
+            return _uniswapV2AmountOut(swap_, pair, feeBps);
         }
         if (protocol == FallbackProtocol.UniswapV3) {
             return _quoteUniswapV3(swap_, protocolData);
@@ -245,44 +253,6 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         if (protocol == FallbackProtocol.FluidV1) {
             return _quoteFluidV1(swap_, protocolData);
         }
-        return _simulateFallback(swap_, fallbackSwap);
-    }
-
-    /// @notice Runs the fallback and reverts `SimulatedAmountOut` with the `tokenOut` it
-    /// delivered to `swap_.receiver`, rolling the swap back. External only so `quoteFallback`
-    /// can try/catch it and read the amount out of the revert data.
-    function simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
-        external
-    {
-        _requireSelf();
-        uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
-        _executeFallback(swap_, fallbackSwap);
-        revert TychoFallbackRouter__SimulatedAmountOut(IERC20(swap_.tokenOut)
-                    .balanceOf(swap_.receiver) - balanceBefore);
-    }
-
-    function _quotePropAMM(Swap calldata swap_, address pamm)
-        internal
-        returns (uint256 amountOut)
-    {
-        try this.quotePropAMM(swap_, pamm) returns (uint256 quoted) {
-            amountOut = quoted;
-        } catch {}
-    }
-
-    function _quoteFallback(Swap calldata swap_, bytes calldata fallbackSwap)
-        internal
-        returns (uint256 amountOut)
-    {
-        try this.quoteFallback(swap_, fallbackSwap) returns (uint256 quoted) {
-            amountOut = quoted;
-        } catch {}
-    }
-
-    function _simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
-        internal
-        returns (uint256 amountOut)
-    {
         try this.simulateFallback(swap_, fallbackSwap) {
             return 0;
         } catch (bytes memory reason) {
@@ -292,13 +262,17 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
     }
 
-    function _quoteUniswapV2(Swap calldata swap_, bytes calldata data)
-        internal
-        view
-        returns (uint256 amountOut)
+    /// @notice Runs the fallback and reverts `TychoFallbackRouter__SimulatedAmountOut` with the
+    /// `tokenOut` it delivered to `swap_.receiver`, rolling the swap back. External only so
+    /// `quoteFallback` can try/catch it.
+    function simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
+        external
     {
-        (IUniswapV2Pair pair, uint256 feeBps) = _decodeUniswapV2(data);
-        return _uniswapV2AmountOut(swap_, pair, feeBps);
+        _requireSelf();
+        uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
+        _executeFallback(swap_, fallbackSwap);
+        revert TychoFallbackRouter__SimulatedAmountOut(IERC20(swap_.tokenOut)
+                    .balanceOf(swap_.receiver) - balanceBefore);
     }
 
     /// @dev The same arguments `_swapUniswapV3` passes to the pool, so the quote is the fill.
@@ -343,7 +317,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     {
         (address dex, bool zero2one) = _decodeFluidV1(data);
         try IFluidV1Dex(dex)
-            .swapIn(zero2one, swap_.amountIn, 0, _ADDRESS_DEAD) {
+            .swapIn(zero2one, swap_.amountIn, 0, address(0xdEaD)) {
             return 0;
         } catch (bytes memory reason) {
             return _decodeAmountOut(reason, FluidDexSwapResult.selector);
@@ -363,25 +337,6 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         assembly {
             amountOut := mload(add(reason, 36))
         }
-    }
-
-    function _runFallback(
-        Swap calldata swap_,
-        address pamm,
-        bytes calldata fallbackSwap,
-        FallbackReason reason
-    ) internal {
-        FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
-        // Reentrancy cannot happen: `swap` is nonReentrant.
-        // slither-disable-next-line reentrancy-events
-        emit FallbackSwap(
-            pamm,
-            swap_.tokenIn,
-            swap_.tokenOut,
-            swap_.amountIn,
-            protocol,
-            reason
-        );
     }
 
     /// @dev Runs the tagged protocol, which pays or forwards to `swap_.receiver`. No output
