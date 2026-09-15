@@ -24,7 +24,7 @@ pub enum BlockNumberOrTimestamp {
 }
 
 impl BlockNumberOrTimestamp {
-    fn greater_than(&self, other: &Block) -> bool {
+    pub(crate) fn greater_than(&self, other: &Block) -> bool {
         match self {
             BlockNumberOrTimestamp::Number(n) => n > &other.number,
             BlockNumberOrTimestamp::Timestamp(ts) => ts > &other.ts,
@@ -303,6 +303,13 @@ where
 
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
     /// is empty
+    /// Returns the oldest buffered block, or `None` if the buffer is empty.
+    pub fn oldest_block(&self) -> Option<tycho_common::models::blockchain::Block> {
+        self.block_messages
+            .front()
+            .map(|b| b.block())
+    }
+
     pub fn get_most_recent_block(&self) -> Option<tycho_common::models::blockchain::Block> {
         if let Some(block_message) = self.block_messages.back() {
             return Some(block_message.block());
@@ -624,7 +631,7 @@ mod test {
 
     use rstest::rstest;
     use tycho_common::models::{
-        blockchain::{Transaction, TxWithChanges},
+        blockchain::{BlockAggregatedChanges, Transaction, TxWithChanges},
         protocol::{ProtocolComponent, ProtocolComponentStateDelta},
         Chain, ChangeType,
     };
@@ -839,6 +846,24 @@ mod test {
             _ => panic!("block entity version not implemented"),
         }
     }
+    #[test]
+    fn oldest_block_is_the_front_of_the_buffer() {
+        let mut buffer: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
+        assert_eq!(buffer.oldest_block(), None);
+
+        for n in 1..=3 {
+            buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: testing::block(n),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        assert_eq!(buffer.oldest_block(), Some(testing::block(1)));
+        assert_eq!(buffer.get_most_recent_block(), Some(testing::block(3)));
+    }
+
     #[test]
     fn test_reorg_buffer_state_lookup() {
         let mut reorg_buffer = ReorgBuffer::new();
