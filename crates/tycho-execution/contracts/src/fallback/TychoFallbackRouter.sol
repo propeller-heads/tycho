@@ -24,10 +24,11 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPropAMM} from "@interfaces/IPropAMM.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {
-    CryptoPool as ICurveCryptoPool,
-    StablePool as ICurveStablePool
-} from "../executors/CurveExecutor.sol";
-import {IFluidV1Dex} from "../executors/FluidV1Executor.sol";
+    ICurveCryptoPool,
+    ICurveStablePool,
+    CurvePoolType
+} from "@interfaces/ICurvePool.sol";
+import {IFluidV1Dex, FluidDexSwapResult} from "@interfaces/IFluidV1Dex.sol";
 import {UniswapV2Math} from "../../lib/UniswapV2Math.sol";
 
 error TychoFallbackRouter__AddressZero();
@@ -44,10 +45,6 @@ error TychoFallbackRouter__NotSelf();
 /// so the swap it ran is rolled back and only the amount survives.
 error TychoFallbackRouter__SimulatedAmountOut(uint256 amountOut);
 error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
-
-/// @notice Fluid's estimate: a dex asked to pay `0xdEaD` reverts with the amount it would have
-/// delivered, before it moves any token.
-error FluidDexSwapResult(uint256 amountOut);
 
 /// @title TychoFallbackRouter
 /// @notice Quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes
@@ -331,7 +328,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     {
         (address pool, uint8 poolType, uint256 i, uint256 j) =
             _decodeCurve(data);
-        if (_isCurveStablePool(poolType)) {
+        if (CurvePoolType.isStable(poolType)) {
             return ICurveStablePool(pool)
                 .get_dy(int128(uint128(i)), int128(uint128(j)), swap_.amountIn);
         }
@@ -533,7 +530,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(address(this));
 
         IERC20(swap_.tokenIn).forceApprove(pool, swap_.amountIn);
-        if (_isCurveStablePool(poolType)) {
+        if (CurvePoolType.isStable(poolType)) {
             ICurveStablePool(pool)
                 .exchange(
                     int128(uint128(i)), int128(uint128(j)), swap_.amountIn, 0
@@ -560,11 +557,6 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         poolType = uint8(data[20]);
         i = uint8(data[21]);
         j = uint8(data[22]);
-    }
-
-    /// @dev Stable and stable_ng pools take the `int128` index signatures.
-    function _isCurveStablePool(uint8 poolType) internal pure returns (bool) {
-        return poolType == 1 || poolType == 10;
     }
 
     /// @dev `zero2one` is the dex's token order, not the address sort order, so it cannot be

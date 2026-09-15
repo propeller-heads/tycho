@@ -1,7 +1,8 @@
 pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
-import {FluidV1Executor, IFluidV1Dex} from "@src/executors/FluidV1Executor.sol";
+import {FluidV1Executor} from "@src/executors/FluidV1Executor.sol";
+import {IFluidV1Dex} from "@interfaces/IFluidV1Dex.sol";
 import {Constants} from "../Constants.sol";
 import "forge-std/Test.sol";
 
