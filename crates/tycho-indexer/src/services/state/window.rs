@@ -189,8 +189,25 @@ impl DeltaWindow {
         Ok(())
     }
 
+    /// Purges every block after the revert target. Errors when the purge would remove a block at
+    /// or below `min(finalized, db_committed)`: the database may hold rows from the abandoned
+    /// branch, and persisted state is never rolled back. Watermarks stay as they are.
     fn revert_to(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        todo!("revert guard and purge")
+        let target = message.block.number;
+        let irreversible = match (self.finalized, self.db_committed) {
+            (Some(finalized), Some(committed)) => Some(finalized.min(committed)),
+            (Some(finalized), None) => Some(finalized),
+            (None, _) => None,
+        };
+        if irreversible.is_some_and(|height| target < height) {
+            return Err(StorageError::Unexpected(format!(
+                "Revert to block {target} would remove blocks at or below the irreversible height {}",
+                irreversible.unwrap_or_default()
+            )));
+        }
+        self.buffer
+            .purge(message.block.hash.clone())?;
+        Ok(())
     }
 
     /// Folds every evictable block into `sink`, then removes it from the window.
@@ -305,6 +322,7 @@ mod test {
     use std::ops::RangeInclusive;
 
     use rstest::rstest;
+    use tycho_common::Bytes;
 
     use super::*;
     use crate::testing;
@@ -350,6 +368,50 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[test]
+    fn revert_above_the_irreversible_height_purges_the_abandoned_blocks() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 3, Some(3));
+
+        w.insert(&revert_to(3)).unwrap();
+
+        assert_eq!(w.tip().map(|b| b.number), Some(3));
+        assert_eq!(w.finalized, Some(3));
+        assert_eq!(w.db_committed, Some(3));
+    }
+
+    #[test]
+    fn revert_below_the_irreversible_height_is_an_error() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 3, Some(3));
+
+        let res = w.insert(&revert_to(2));
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(w.tip().map(|b| b.number), Some(5));
+    }
+
+    #[test]
+    fn revert_uses_finalized_alone_before_the_first_commit() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 3, None);
+
+        assert!(w.insert(&revert_to(2)).is_err());
+        assert!(w.insert(&revert_to(3)).is_ok());
+    }
+
+    #[test]
+    fn revert_to_an_unknown_hash_is_not_found() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 1, Some(1));
+        let mut unknown = revert_to(4);
+        unknown.block.hash = Bytes::from(99u64).lpad(32, 0);
+
+        let res = w.insert(&unknown);
+
+        assert!(matches!(res, Err(StorageError::NotFound(_, _))));
     }
 
     #[rstest]
