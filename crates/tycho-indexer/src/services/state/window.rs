@@ -170,18 +170,27 @@ impl DeltaWindow {
     ///   db_committed)` — the database then holds rows from the abandoned branch, and persisted
     ///   state is never rolled back.
     /// - `StorageError::NotFound` when a revert targets a hash that is not buffered.
-    #[allow(unused_variables)]
     pub(crate) fn insert(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        // Revert message (`message.revert == true`): error if the purge target would remove any
-        // block at or below `min(self.finalized, self.db_committed)` (see Errors), otherwise
-        // `self.buffer.purge(message.block.hash)`. Purged blocks are unfolded by construction
-        // (folding is gated on the same watermarks) and are discarded. Reverts carry
-        // `db_committed_block_height: None`; watermarks stay as they are.
-        //
-        // Regular message: `self.buffer.insert_block(message.clone())` (parent-hash chain
-        // enforced there), then raise `self.finalized` / `self.db_committed` monotonically from
-        // the message.
-        todo!("insert or purge")
+        if message.revert {
+            return self.revert_to(message);
+        }
+        self.buffer
+            .insert_block(message.clone())?;
+        self.finalized = Some(
+            self.finalized
+                .map_or(message.finalized_block_height, |f| f.max(message.finalized_block_height)),
+        );
+        if let Some(committed) = message.db_committed_block_height {
+            self.db_committed = Some(
+                self.db_committed
+                    .map_or(committed, |c| c.max(committed)),
+            );
+        }
+        Ok(())
+    }
+
+    fn revert_to(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
+        todo!("revert guard and purge")
     }
 
     /// Folds every evictable block into `sink`, then removes it from the window.
@@ -288,5 +297,69 @@ impl DeepSizeOf for DeltaWindow {
             .deep_size_of_children(context) +
             self.buffer
                 .deep_size_of_children(context)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ops::RangeInclusive;
+
+    use rstest::rstest;
+
+    use super::*;
+    use crate::testing;
+
+    const EXTRACTOR: &str = "ex";
+
+    fn msg(number: u64, finalized: u64, committed: Option<u64>) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            extractor: EXTRACTOR.to_string(),
+            block: testing::block(number),
+            finalized_block_height: finalized,
+            db_committed_block_height: committed,
+            ..Default::default()
+        }
+    }
+
+    fn revert_to(number: u64) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
+    }
+
+    fn window(depth: u64, min_fold_batch: u64) -> DeltaWindow {
+        DeltaWindow::new(EXTRACTOR.to_string(), depth, min_fold_batch).unwrap()
+    }
+
+    fn fill(
+        w: &mut DeltaWindow,
+        range: RangeInclusive<u64>,
+        finalized: u64,
+        committed: Option<u64>,
+    ) {
+        for n in range {
+            w.insert(&msg(n, finalized, committed))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn insert_rejects_a_block_that_does_not_extend_the_chain() {
+        let mut w = window(3, 1);
+        w.insert(&msg(1, 0, None)).unwrap();
+
+        let res = w.insert(&msg(3, 0, None));
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[test]
+    fn watermarks_only_rise() {
+        let mut w = window(3, 1);
+        w.insert(&msg(1, 0, None)).unwrap();
+        w.insert(&msg(2, 1, Some(0))).unwrap();
+        w.insert(&msg(3, 0, None)).unwrap();
+
+        assert_eq!(w.finalized, Some(1));
+        assert_eq!(w.db_committed, Some(0));
     }
 }
