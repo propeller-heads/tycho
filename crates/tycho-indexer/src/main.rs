@@ -64,7 +64,7 @@ use tycho_indexer::{
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
-    services::{PlansConfig, ServicesBuilder},
+    services::{PlansConfig, ServicesBuilder, WindowConfig},
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
@@ -534,6 +534,10 @@ async fn create_indexing_tasks(
             .protocol_systems(protocol_systems)
             .register_extractors(extractor_handles.clone())
             .pending_deltas(pending_deltas_rxs)
+            .window_config(WindowConfig {
+                depth: global_args.delta_window_depth,
+                min_fold_batch: global_args.delta_window_fold_batch,
+            })
             .run()?;
     info!(server_url, "Http and Ws server started");
 

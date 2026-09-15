@@ -58,6 +58,14 @@ pub struct GlobalArgs {
     #[clap(long, default_value = "0")]
     pub database_insert_batch_size: usize,
 
+    /// Blocks each extractor keeps in memory before folding them into the entity cache
+    #[clap(long, env, default_value = "128")]
+    pub delta_window_depth: u64,
+
+    /// Evictable blocks that must accumulate before the window folds them
+    #[clap(long, env, default_value = "1")]
+    pub delta_window_fold_batch: u64,
+
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
     //Default is for backward compatibility but needs to be removed later
@@ -340,6 +348,8 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 256,
+                delta_window_depth: 128,
+                delta_window_fold_batch: 1,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -379,6 +389,39 @@ mod cli_tests {
     }
 
     #[tokio::test]
+    async fn test_arg_parsing_delta_window_flags() {
+        let cli = Cli::try_parse_from(vec![
+            "tycho-indexer",
+            "--endpoint",
+            "http://example.com",
+            "--database-url",
+            "my_db",
+            "--rpc-url",
+            "http://example.com",
+            "--rpc-max-retries",
+            "10",
+            "--rpc-initial-backoff-ms",
+            "200",
+            "--rpc-max-backoff-ms",
+            "10000",
+            "--delta-window-depth",
+            "64",
+            "--delta-window-fold-batch",
+            "4",
+            "index",
+            "--extractors-config",
+            "/opt/extractors.yaml",
+            "--api_token",
+            "your_api_token",
+            "--enable-partial-blocks",
+        ])
+        .expect("parse errored");
+
+        assert_eq!(cli.global_args.delta_window_depth, 64);
+        assert_eq!(cli.global_args.delta_window_fold_batch, 4);
+    }
+
+    #[tokio::test]
     async fn test_arg_parsing_index_cmd() {
         let cli = Cli::try_parse_from(vec![
             "tycho-indexer",
@@ -408,6 +451,8 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 0,
+                delta_window_depth: 128,
+                delta_window_fold_batch: 1,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
