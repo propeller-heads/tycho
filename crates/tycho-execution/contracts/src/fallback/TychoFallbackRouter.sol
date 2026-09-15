@@ -181,7 +181,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         _runFallback(swap_, pamm, fallbackSwap, FallbackReason.PropAMMReverted);
     }
 
-    /// @notice Runs the pAMM. External only so `swap` can try/catch it.
+    /// @notice Runs the pAMM. External only so `swap` can try/catch it: Solidity's `try` takes an
+    /// external call, never an internal function.
     function executePropAMM(Swap calldata swap_, address pamm) external {
         _requireSelf();
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
@@ -205,8 +206,11 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
     }
 
-    /// @notice Quotes the pAMM. External only so `swap` can try/catch it: the catch also covers
-    /// a `pamm` that returns nothing decodable, such as an address without code.
+    /// @notice Quotes the pAMM. External only so `swap` can try/catch it.
+    /// @dev `try IPropAMM(pamm).quote(...)` directly in `swap` would not be enough: `try` catches
+    /// the callee's revert but not a failure to decode its return data, so a `pamm` without code
+    /// or with a different return type would revert `swap` itself. Inside this frame that decode
+    /// failure is a revert of the self-call, which `swap` catches.
     function quotePropAMM(Swap calldata swap_, address pamm)
         external
         returns (uint256 amountOut)
@@ -218,7 +222,9 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
 
     /// @notice Quotes the fallback protocol. External only so `swap` can try/catch it: a
     /// protocol that cannot quote, or malformed protocol data, is a zero quote, and `swap` then
-    /// tries the pAMM first as before.
+    /// tries the pAMM first as before. As with `quotePropAMM`, the frame also turns a return
+    /// data decode failure on a caller-supplied pool (Curve's `get_dy`, the V2 pair's reserves)
+    /// into a catchable revert.
     /// @dev Uniswap V2 prices off the pair's reserves, Uniswap V3 asks the static quoter, Curve
     /// asks `get_dy`, Fluid asks the dex to price a swap paid to `0xdEaD`. Uniswap V4 has no
     /// quote function, so `simulateFallback` runs the swap and rolls it back.
@@ -247,7 +253,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
 
     /// @notice Runs the fallback and reverts `SimulatedAmountOut` with the `tokenOut` it
     /// delivered to `swap_.receiver`, rolling the swap back. External only so `quoteFallback`
-    /// can try/catch it.
+    /// can try/catch it and read the amount out of the revert data.
     function simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
         external
     {
