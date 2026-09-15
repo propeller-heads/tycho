@@ -196,6 +196,12 @@ deployment per fork.
 The protocol data always occupies the tail of the swap data, so any protocol can be variable-length. Uniswap V4 is the only
 one that is today.
 
+Byte 1 (Uniswap V3) serves every V3-style fork, not just canonical Uniswap V3. A V3 pool pulls its input through a
+callback whose name it picks itself, and forks rename it (`pancakeV3SwapCallback`, `algebraSwapCallback`). The router
+answers all of them through a catch-all `fallback` -- the same selector-agnostic trick `TychoRouterV3.fallback` uses --
+guarded by the transient callback context so only the pool the swap called can be paid. So the solver may map any V3
+fork to byte 1.
+
 Swap direction for Uniswap V2/V3/V4 comes from the sort order of `tokenIn` and `tokenOut`, so it is not encoded. Fluid's
 `zero2one` is the dex's own token order, which is not the address sort order, so it is. A `zero2one` that contradicts
 the leg reverts either `TychoFallbackRouter__CallbackTokenMismatch`, when the dex asks `dexCallback` for the other

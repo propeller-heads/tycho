@@ -141,6 +141,33 @@ contract RevertingPool {
     }
 }
 
+interface IPancakeV3SwapCallback {
+    function pancakeV3SwapCallback(int256, int256, bytes calldata) external;
+}
+
+/// @notice A V3-shaped pool that asks for its input through Pancake's renamed
+/// `pancakeV3SwapCallback` rather than `uniswapV3SwapCallback`. Proves the
+/// catch-all `fallback` pays a V3 fork whatever callback name the pool picks.
+contract RenamedCallbackPool {
+    address immutable tokenOut;
+    uint256 immutable amountOut;
+
+    constructor(address tokenOut_, uint256 amountOut_) {
+        tokenOut = tokenOut_;
+        amountOut = amountOut_;
+    }
+
+    function swap(address recipient, bool, int256, uint160, bytes calldata)
+        external
+        returns (int256, int256)
+    {
+        // A real V3 pool pays the recipient, then pulls its input in the callback.
+        IERC20(tokenOut).transfer(recipient, amountOut);
+        IPancakeV3SwapCallback(msg.sender).pancakeV3SwapCallback(0, 0, "");
+        return (0, 0);
+    }
+}
+
 /// @notice Accepts `tokenIn` and reports success without paying anything.
 contract SilentPropAMM {
     function swap(
@@ -585,10 +612,41 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    /// No swap is running, so there is no protocol that may be paid.
-    function testUniswapV3CallbackRejectsStranger() public {
-        vm.expectRevert(TychoFallbackRouter__InvalidCallback.selector);
-        router.uniswapV3SwapCallback(1, -1, bytes(""));
+    /// No swap is running, so no protocol may be paid. A V3-family callback --
+    /// canonical or a fork's renamed selector -- lands on the catch-all
+    /// `fallback` and reverts on the context guard rather than paying out.
+    function testCallbackRejectsStranger() public {
+        (bool success, bytes memory ret) = address(router)
+            .call(
+                abi.encodeWithSignature(
+                    "pancakeV3SwapCallback(int256,int256,bytes)",
+                    int256(1),
+                    int256(-1),
+                    bytes("")
+                )
+            );
+        assertFalse(success);
+        assertEq(bytes4(ret), TychoFallbackRouter__InvalidCallback.selector);
+    }
+
+    /// A Uniswap V3 fork that renamed its callback (Pancake's
+    /// `pancakeV3SwapCallback`) still fills: the pool chooses the selector and
+    /// the catch-all `fallback` answers to it.
+    function testFallsBackToRenamedV3Fork() public {
+        uint256 amountOut = 3 ether;
+        RenamedCallbackPool pool = new RenamedCallbackPool(WETH_ADDR, amountOut);
+        deal(WETH_ADDR, address(pool), amountOut);
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(address(pool))
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), amountOut);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), USDC_IN);
+        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
 
     function testDexCallbackRejectsStranger() public {
