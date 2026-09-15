@@ -241,6 +241,13 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     uint256 constant CURVE_USDC_OUT = 999_895_324;
     uint256 constant CURVE_CRYPTO_USDC_OUT = 2_766_051_040;
 
+    /// PancakeSwap V3 renames the V3 callback to `pancakeV3SwapCallback`, so
+    /// this exercises the catch-all `fallback` against a real fork's pool. The
+    /// 0.05% USDC/WETH pool from the mainnet PancakeV3 factory.
+    address constant PANCAKE_USDC_WETH_V3 =
+        0x1ac1A8FEaAEa1900C4166dEeed0C11cC10669D36;
+    uint256 constant PANCAKE_V3_WETH_OUT = 3_601_880_052_618_891_035;
+
     function getForkBlock() internal pure override returns (uint256) {
         return FORK_BLOCK;
     }
@@ -432,6 +439,23 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
         // The transfer to the pAMM reverted with it.
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
+        _assertRouterDrained(USDC_ADDR, WETH_ADDR);
+    }
+
+    /// A real PancakeSwap V3 pool fills through byte 1: its pool calls
+    /// `pancakeV3SwapCallback`, which lands on the catch-all `fallback` since it
+    /// is not one of the router's named callbacks.
+    function testFallsBackToPancakeV3Fork() public {
+        deal(USDC_ADDR, address(router), USDC_IN);
+
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(PANCAKE_USDC_WETH_V3)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), PANCAKE_V3_WETH_OUT);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
     }
