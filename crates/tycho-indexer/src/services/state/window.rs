@@ -282,7 +282,7 @@ impl DeltaWindow {
             .buffer
             .get_block_range(None, None)
             .ok()
-            .and_then(|mut blocks| blocks.find(|b| !version.greater_than(&b.block)))
+            .and_then(|mut blocks| blocks.find(|b| is_at_or_before(version, &b.block)))
             .map(|b| b.block.clone());
         match block {
             Some(block) => WindowResolution::InWindow(block),
@@ -310,7 +310,7 @@ impl DeltaWindow {
                 .map(|b| b.block.clone())
         });
         let committed = match committed_block {
-            Some(block) => !version.greater_than(&block),
+            Some(block) => is_at_or_before(version, &block),
             // The commit watermark is below the window, or nothing was committed yet: only
             // versions older than the oldest buffered block are in the database.
             None => is_before(version, &oldest),
@@ -338,6 +338,15 @@ fn is_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
     match version {
         BlockNumberOrTimestamp::Number(n) => n < block.number,
         BlockNumberOrTimestamp::Timestamp(ts) => ts < block.ts,
+    }
+}
+
+/// Whether `version` is `block` or older, by number or by timestamp. Scanning ascending blocks
+/// for the first one that satisfies this rounds a between-blocks timestamp up to the next block.
+fn is_at_or_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
+    match version {
+        BlockNumberOrTimestamp::Number(n) => n <= block.number,
+        BlockNumberOrTimestamp::Timestamp(ts) => ts <= block.ts,
     }
 }
 
