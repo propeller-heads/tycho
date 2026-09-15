@@ -293,6 +293,7 @@ impl ProtocolStatesParams {
 #[derive(Clone, PartialEq, Debug)]
 pub struct TokensParams {
     chain: Chain,
+    token_addresses: Option<Vec<Bytes>>,
     min_quality: Option<i32>,
     traded_n_days_ago: Option<u64>,
     page: i64,
@@ -303,11 +304,21 @@ impl TokensParams {
     pub fn new(chain: Chain) -> Self {
         Self {
             chain,
+            token_addresses: None,
             min_quality: None,
             traded_n_days_ago: None,
             page: 0,
             page_size: TokensRequestBody::MAX_PAGE_SIZE_COMPRESSED,
         }
+    }
+
+    pub fn with_addresses(mut self, addresses: Vec<Bytes>) -> Self {
+        self.token_addresses = Some(addresses);
+        self
+    }
+
+    pub fn addresses(&self) -> Option<&[Bytes]> {
+        self.token_addresses.as_deref()
     }
 
     pub fn with_min_quality(mut self, min_quality: i32) -> Self {
@@ -1662,7 +1673,7 @@ impl RPCClient for HttpRPCClient {
 
     async fn get_tokens(&self, params: TokensParams) -> Result<Page<Vec<Token>>, RPCError> {
         let request = TokensRequestBody {
-            token_addresses: None,
+            token_addresses: params.token_addresses,
             min_quality: params.min_quality,
             traded_n_days_ago: params.traded_n_days_ago,
             pagination: PaginationParams { page: params.page, page_size: params.page_size },
@@ -1978,7 +1989,7 @@ impl RPCClient for HttpRPCClient {
             HashMap::new()
         };
 
-        Ok(Snapshot { states, vm_storage })
+        Ok(Snapshot { states, vm_storage, tokens: Default::default() })
     }
 }
 
@@ -2352,6 +2363,7 @@ mod tests {
 
         let expected = vec![
             Token {
+                metadata_status: Default::default(),
                 chain: tycho_common::models::Chain::Ethereum,
                 address: Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap(),
                 symbol: "WETH".to_string(),
@@ -2361,6 +2373,7 @@ mod tests {
                 quality: 100,
             },
             Token {
+                metadata_status: Default::default(),
                 chain: tycho_common::models::Chain::Ethereum,
                 address: Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
                 symbol: "USDC".to_string(),

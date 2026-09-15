@@ -80,7 +80,9 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 2. `ProtocolExtractor` deserializes into `BlockChanges` (tx-level state/balance/token deltas) via
    `tycho-protobuf`'s `TryFromMessage` conversions
    - `PartialBlockBuffer` accumulates sub-block messages until full-block signal arrives
-   - `TokenPreProcessor` fetches metadata (symbol, decimals) via Ethereum RPC for unknown tokens
+   - `TokenPreProcessor` fetches metadata (symbol, decimals) via Ethereum RPC for unknown tokens;
+     with an enrichment budget set, slow tokens come back `Pending` and are repaired by the
+     indexer's `token_metadata_recovery` worker (`docs/token-metadata-recovery.md`)
 3. `BlockChanges` inserted into `ReorgBuffer` (one per `ProtocolExtractor`)
    - On `BlockUndoSignal`: purge blocks after the reverted hash (falling back to the target height when the hash is unknown), emit revert messages — no DB rollback needed
    - Drain to DB when `count_blocks_before(finalized_block_height) >= commit_batch_size` — only finalized blocks ever reach DB

@@ -1,13 +1,16 @@
-use tycho_common::dto::{
-    AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
-    ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,
-    PaginationParams, PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
-    ProtocolComponentsRequestBody, ProtocolId, ProtocolStateDelta, ProtocolStateRequestBody,
-    ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
-    RPCTracerParams, ResponseAccount, ResponseProtocolState, ResponseToken, StateRequestBody,
-    StateRequestResponse, StorageOverride, TokensRequestBody, TokensRequestResponse,
-    TracedEntryPointRequestBody, TracedEntryPointRequestResponse, TracingParams, TracingResult,
-    VersionParam,
+use tycho_common::{
+    dto::{
+        AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
+        ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,
+        PaginationParams, PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
+        ProtocolComponentsRequestBody, ProtocolId, ProtocolStateDelta, ProtocolStateRequestBody,
+        ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
+        RPCTracerParams, ResponseAccount, ResponseProtocolState, ResponseToken, StateRequestBody,
+        StateRequestResponse, StorageOverride, TokensRequestBody, TokensRequestResponse,
+        TracedEntryPointRequestBody, TracedEntryPointRequestResponse, TracingParams, TracingResult,
+        VersionParam,
+    },
+    models::token::TokenMetadataStatus,
 };
 use utoipa::{
     openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
@@ -57,6 +60,7 @@ impl Modify for SecurityAddon {
         schemas(PaginationParams),
         schemas(PaginationResponse),
         schemas(ResponseToken),
+        schemas(TokenMetadataStatus),
         schemas(ProtocolComponentsRequestBody),
         schemas(ProtocolComponentRequestResponse),
         schemas(ProtocolComponent),
