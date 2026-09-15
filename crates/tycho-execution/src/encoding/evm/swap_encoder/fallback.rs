@@ -36,13 +36,26 @@ const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
 /// Swap direction on Uniswap V2/V3/V4 comes from the sort order of the swap's tokens, so it is
 /// not part of the JSON. Fluid's `zero2one` is the dex's own token order, which cannot be
 /// derived, and Curve's `i`/`j` are the pool's coin indices.
+///
+/// Uniswap V2 and V3 forks are accepted under their own `protocol` names. `sushiswap_v2`,
+/// `pancakeswap_v2`, `quickswap_v2` resolve to Uniswap V2; `pancakeswap_v3`, `sushiswap_v3`,
+/// `robinswap_v3` resolve to Uniswap V3 — mirroring the `UniswapV2SwapEncoder` /
+/// `UniswapV3SwapEncoder` fork groups in `swap_encoder_registry.rs`. The protocol byte is
+/// unchanged; the fork name only widens what the encoder accepts. Keep these aliases in sync with
+/// those match arms.
+///
+/// The Slipstream family (`aerodrome_slipstreams`, `velodrome_slipstreams`, `up_v3`, `ramses_v3`)
+/// would run the same V3 fallback path — the wire format is just the pool address — but those
+/// venues are Base/L2-only, so their aliases are deferred until Base is supported.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "protocol", rename_all = "snake_case")]
 enum FallbackProtocol {
+    #[serde(alias = "sushiswap_v2", alias = "pancakeswap_v2", alias = "quickswap_v2")]
     UniswapV2 {
         pair: Bytes,
         fee_bps: u8,
     },
+    #[serde(alias = "pancakeswap_v3", alias = "sushiswap_v3", alias = "robinswap_v3")]
     UniswapV3 {
         pool: Bytes,
     },
@@ -328,6 +341,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}00{pair}1e"));
+    }
+
+    #[test]
+    fn test_encode_sushiswap_v2_alias() {
+        let pair = "b4e16d0168e52d35cacd2c6185b44281ec28c9dc";
+        let hex_swap = encode_usdc_weth(Some(&format!(
+            r#"{{"protocol":"sushiswap_v2","pair":"0x{pair}","fee_bps":30}}"#
+        )))
+        .unwrap();
+
+        // Byte 00 = UniswapV2: the fork name resolves to the base variant.
+        assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}00{pair}1e"));
+    }
+
+    #[test]
+    fn test_encode_pancakeswap_v3_alias() {
+        let hex_swap = encode_usdc_weth(Some(&format!(
+            r#"{{"protocol":"pancakeswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#
+        )))
+        .unwrap();
+
+        // Byte 01 = UniswapV3.
+        assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}01{USDC_WETH_USV3}"));
     }
 
     #[test]

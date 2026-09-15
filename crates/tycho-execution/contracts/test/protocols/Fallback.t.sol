@@ -790,6 +790,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         9_916_211_621_040_833_220_196;
     uint256 constant FEE_WETH_OUT = 3_575_878_652_154_429_173;
     uint256 constant SPLIT_WETH_OUT = 3_612_457_039_884_311_273;
+    uint256 constant SUSHI_WETH_OUT = 3_587_564_182_454_912_624;
 
     function getForkBlock() public pure override returns (uint256) {
         return 22689128;
@@ -814,6 +815,26 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
 
         assertTrue(success, "Call Failed");
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SINGLE_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+    }
+
+    /// The `sushiswap_v2` fork name, encoded in Rust, fills through the Uniswap V2 fallback path
+    /// against a real SushiSwap USDC/WETH pair.
+    function testSushiswapV2AliasFromRustCalldata() public {
+        uint256 amountIn = 10_000e6;
+        bytes memory callData = loadCallDataFromFile(
+            "test_single_encoding_strategy_fallback_sushiswap_v2_alias"
+        );
+
+        deal(USDC_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(USDC_ADDR).approve(tychoRouterAddr, amountIn);
+        (bool success,) = tychoRouterAddr.call(callData);
+        vm.stopPrank();
+
+        assertTrue(success, "Call Failed");
+        assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SUSHI_WETH_OUT);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
     }
