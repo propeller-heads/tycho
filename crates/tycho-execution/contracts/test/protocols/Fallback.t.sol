@@ -252,9 +252,9 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         return FORK_BLOCK;
     }
 
-    /// The enum ordinals are the wire format the encoder emits (the protocol
+    /// The enum ordinals are the protocol byte the encoder emits (the protocol
     /// table in CLAUDE.md); reordering the enum must fail here, not silently.
-    function testProtocolWireFormatIsStable() public pure {
+    function testProtocolByteIsStable() public pure {
         assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV2), 0);
         assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV3), 1);
         assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4), 2);
@@ -487,31 +487,10 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
     }
 
-    /// `FallbackSwap` is the pAMM fill-rate signal: it marks the swaps the pAMM did not serve,
-    /// names the protocol that filled instead, and says why. A pAMM with no price cannot
-    /// quote, which counts as quoting zero.
-    function testFallingBackEmitsFallbackSwap() public {
-        deal(USDC_ADDR, address(router), USDC_IN);
-
-        _expectFallbackSwap(
-            USDC_ADDR,
-            WETH_ADDR,
-            USDC_IN,
-            TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
-        );
-        router.swap(
-            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
-            address(pamm),
-            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
-        );
-    }
-
     /// Every fallback quote is the amount the same fallback then fills, so the comparison
-    /// against the pAMM is made on real numbers. Uniswap V3 and V4 are simulated, which needs
-    /// the input to be here as it is in `swap`.
+    /// against the pAMM is made on real numbers. Uniswap V4 is simulated, which needs the input
+    /// to be here as it is in `swap`.
     function testFallbackQuotesMatchFills() public {
-        deal(USDC_ADDR, address(router), USDC_IN);
         deal(USDE_ADDR, address(router), 100 ether);
 
         assertEq(
@@ -550,8 +529,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             CURVE_CRYPTO_USDC_OUT
         );
 
-        // The simulations rolled back: the input is untouched and nothing was delivered.
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(router)), USDC_IN);
+        // The simulation rolled back: the input is untouched and nothing was delivered.
         assertEq(IERC20(USDE_ADDR).balanceOf(address(router)), 100 ether);
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 0);
         assertEq(IERC20(USDT_ADDR).balanceOf(BOB), 0);
@@ -650,11 +628,20 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         }
     }
 
-    /// The pAMM has no price, so `quote` reverts. Uniswap V3 pays inside its callback, reachable
-    /// only because this contract still holds the USDC.
+    /// The pAMM has no price, so `quote` reverts and counts as quoting zero. Uniswap V3 pays
+    /// inside its callback, reachable only because this contract still holds the USDC.
+    /// `FallbackSwap` is the pAMM fill-rate signal: it marks the swaps the pAMM did not serve,
+    /// names the protocol that filled instead, and says why.
     function testFallsBackToUniswapV3() public {
         deal(USDC_ADDR, address(router), USDC_IN);
 
+        _expectFallbackSwap(
+            USDC_ADDR,
+            WETH_ADDR,
+            USDC_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
             address(pamm),
@@ -779,6 +766,15 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         SilentPropAMM silent = new SilentPropAMM();
         deal(USDC_ADDR, address(router), USDC_IN);
 
+        vm.expectEmit(address(router));
+        emit TychoFallbackRouter.FallbackSwap(
+            address(silent),
+            USDC_ADDR,
+            WETH_ADDR,
+            USDC_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.PropAMMReverted
+        );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
             address(silent),
