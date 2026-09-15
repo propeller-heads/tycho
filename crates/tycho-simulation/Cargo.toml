@@ -45,7 +45,7 @@ dotenv = { workspace = true }
 enum_delegate = "0.2.0"
 itertools = { workspace = true }
 rustc-hash = "2.1.2"
-lunarbase-pmm-math = "0.2.4"
+lunarbase-pmm-math = "0.4.1"
 num-traits = { workspace = true }
 
 # Used by the vendored Curve math/adapter modules (src/evm/protocol/curve/{math,adapter}).

@@ -7,7 +7,9 @@ pub mod attrs {
     pub const LATEST_UPDATE_BLOCK: &str = "latest_update_block";
     pub const RESERVE_X: &str = "reserve_x";
     pub const RESERVE_Y: &str = "reserve_y";
-    pub const CONCENTRATION_K: &str = "concentration_k";
+    pub const MAX_PUNISHMENT_X24: &str = "max_punishment_x24";
+    pub const BLACKLIST_FEE_MULTIPLIER: &str = "blacklist_fee_multiplier";
+    pub const QUOTE_CALLER_WHITELISTED: &str = "quote_caller_whitelisted";
     pub const BLOCK_DELAY: &str = "block_delay";
     pub const PAUSED: &str = "paused";
 }

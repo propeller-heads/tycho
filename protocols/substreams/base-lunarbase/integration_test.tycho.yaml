@@ -8,12 +8,13 @@ module_name: "map_protocol_changes"
 # on-chain token balances intentionally do not always equal reserves.
 skip_balance_check: true
 tests:
-  - name: test_latest_implementation_live_state
-    start_block: 46240924
-    stop_block: 46242605
+  - name: test_base_v04_snapshot_replay
+    start_block: 51297755
+    stop_block: 51297765
     expected_components:
       - id: "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"
         tokens:
           - "0x0000000000000000000000000000000000000000"
           - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        creation_tx: "0x9cde54a572dba097f5660b51436e0fa96c6e8bf80e5a5865cc9af56edfdb51ef"
+        # First pool-log transaction at replay start, not original deployment.
+        creation_tx: "0x89f3ab2178d63f32a9b15caf7c53225f1dca3bef15e147a2f393487712fff7e6"
