@@ -296,14 +296,26 @@ impl DeltaWindow {
     /// the oldest buffered block as `Committed`, which is off by one today (the oldest buffered
     /// block is `db_committed + 1`) and would be off by the whole window depth once committed
     /// blocks are retained.
-    #[allow(unused_variables)]
     pub(crate) fn commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
-        // None while the window is empty (mirrors today's "no finality found" default).
-        // - version <= self.db_committed            -> Committed
-        // - version <= tip                          -> Uncommitted
-        // - otherwise                               -> Unseen
-        // Timestamp versions compare against buffered block timestamps.
-        todo!("watermark-based commit status")
+        let oldest = self.buffer.oldest_block()?;
+        let tip = self.tip()?;
+        if version.greater_than(&tip) {
+            return Some(CommitStatus::Unseen);
+        }
+        let committed_block = self.db_committed.and_then(|height| {
+            self.buffer
+                .get_block_range(None, None)
+                .ok()?
+                .find(|b| b.block.number == height)
+                .map(|b| b.block.clone())
+        });
+        let committed = match committed_block {
+            Some(block) => !version.greater_than(&block),
+            // The commit watermark is below the window, or nothing was committed yet: only
+            // versions older than the oldest buffered block are in the database.
+            None => is_before(version, &oldest),
+        };
+        Some(if committed { CommitStatus::Committed } else { CommitStatus::Uncommitted })
     }
 
     /// Highest block number that may be folded-and-evicted. `None` when the window is empty or
@@ -390,6 +402,68 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[rstest]
+    #[case::at_committed(BlockNumberOrTimestamp::Number(6), Some(CommitStatus::Committed))]
+    #[case::above_committed(BlockNumberOrTimestamp::Number(7), Some(CommitStatus::Uncommitted))]
+    #[case::at_tip(BlockNumberOrTimestamp::Number(10), Some(CommitStatus::Uncommitted))]
+    #[case::above_tip(BlockNumberOrTimestamp::Number(11), Some(CommitStatus::Unseen))]
+    #[case::ts_at_committed(
+        BlockNumberOrTimestamp::Timestamp(testing::block(6).ts),
+        Some(CommitStatus::Committed)
+    )]
+    #[case::ts_above_committed(
+        BlockNumberOrTimestamp::Timestamp(testing::block(7).ts),
+        Some(CommitStatus::Uncommitted)
+    )]
+    #[case::ts_after_tip(
+        BlockNumberOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::seconds(1)),
+        Some(CommitStatus::Unseen)
+    )]
+    fn commit_status_follows_the_watermark(
+        #[case] version: BlockNumberOrTimestamp,
+        #[case] expected: Option<CommitStatus>,
+    ) {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 8, Some(6));
+
+        assert_eq!(w.commit_status(version), expected);
+    }
+
+    #[test]
+    fn the_oldest_buffered_block_is_not_committed() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 0, None);
+
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(1)),
+            Some(CommitStatus::Uncommitted)
+        );
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(0)),
+            Some(CommitStatus::Committed)
+        );
+    }
+
+    #[test]
+    fn a_committed_height_below_the_window_marks_only_below_floor_versions_committed() {
+        let mut w = window(3, 1);
+        fill(&mut w, 5..=10, 10, Some(3));
+
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(4)),
+            Some(CommitStatus::Committed)
+        );
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(5)),
+            Some(CommitStatus::Uncommitted)
+        );
+    }
+
+    #[test]
+    fn commit_status_is_none_on_an_empty_window() {
+        assert_eq!(window(3, 1).commit_status(BlockNumberOrTimestamp::Number(1)), None);
     }
 
     #[test]
