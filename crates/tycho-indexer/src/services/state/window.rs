@@ -49,8 +49,11 @@
 // Not yet constructed by production code; wired into `PendingDeltas` in a follow-up.
 #![allow(dead_code)]
 
+use std::time::{Duration, Instant};
+
 use deepsize::DeepSizeOf;
-use tracing::trace;
+use metrics::histogram;
+use tracing::{trace, warn};
 use tycho_common::{
     models::blockchain::{Block, BlockAggregatedChanges},
     storage::StorageError,
@@ -95,6 +98,10 @@ pub(crate) enum WindowResolution {
     /// The version is newer than the newest block this window has seen.
     AboveTip,
 }
+
+/// Folds run under the facade lock every reader contends on; anything slower than this is
+/// logged. The entity cache design expects well under a millisecond.
+const SLOW_FOLD: Duration = Duration::from_millis(5);
 
 /// Fixed-depth window of block deltas for a single extractor.
 ///
@@ -262,7 +269,20 @@ impl DeltaWindow {
             .buffer
             .get_block_range(None, Some(BlockNumberOrTimestamp::Number(bound)))?
         {
-            match sink.apply_folded(&self.extractor, block) {
+            let started = Instant::now();
+            let result = sink.apply_folded(&self.extractor, block);
+            let elapsed = started.elapsed();
+            histogram!("delta_window_fold_duration_ms", "extractor" => self.extractor.clone())
+                .record(elapsed.as_secs_f64() * 1000.0);
+            if elapsed > SLOW_FOLD {
+                warn!(
+                    extractor = %self.extractor,
+                    block = block.block.number,
+                    ?elapsed,
+                    "Slow DeltaWindow fold"
+                );
+            }
+            match result {
                 Ok(()) => folded_upto = Some(block.block.number),
                 Err(err) => {
                     outcome = Err(err);
@@ -546,6 +566,33 @@ mod test {
         let mut all = sink.folded.lock().unwrap().clone();
         all.extend(buffered(&w));
         assert_eq!(all, (1..=10).collect::<Vec<_>>());
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure; the window is sync, so no runtime.
+    #[test]
+    fn fold_duration_is_recorded_per_extractor() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+        let sink = RecordingSink::default();
+
+        metrics::with_local_recorder(&recorder, || w.fold_and_evict(&sink).unwrap());
+
+        let recorded = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .any(|(key, _, _, value)| {
+                key.key().name() == "delta_window_fold_duration_ms" &&
+                    key.key()
+                        .labels()
+                        .any(|l| l.key() == "extractor" && l.value() == EXTRACTOR) &&
+                    matches!(value, DebugValue::Histogram(samples) if samples.len() == 7)
+            });
+        assert!(recorded, "one histogram sample per folded block, labelled by extractor");
     }
 
     #[test]
