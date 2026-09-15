@@ -75,6 +75,21 @@ pub(crate) trait FoldSink: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+/// Retention settings shared by every extractor's [`DeltaWindow`].
+#[derive(Clone, Copy, Debug)]
+pub struct WindowConfig {
+    /// Target retention depth `W` in blocks.
+    pub depth: u64,
+    /// Evictable blocks required before a fold runs.
+    pub min_fold_batch: u64,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self { depth: 128, min_fold_batch: 1 }
+    }
+}
+
 /// Drops every folded block. Stands in for the entity cache until ENG-6291 lands.
 pub(crate) struct DiscardSink;
 
@@ -304,6 +319,38 @@ impl DeltaWindow {
             .map(|b| b.number)
     }
 
+    /// Buffered blocks between two versions, ascending. Same bound semantics as
+    /// [`ReorgBuffer::get_block_range`].
+    pub(crate) fn blocks(
+        &self,
+        start: Option<BlockNumberOrTimestamp>,
+        end: Option<BlockNumberOrTimestamp>,
+    ) -> Result<impl Iterator<Item = &BlockAggregatedChanges>, StorageError> {
+        self.buffer.get_block_range(start, end)
+    }
+
+    /// Buffered blocks the database does not hold yet: everything above `db_committed`.
+    /// Readers that merge window data with database rows must use this rather than
+    /// `blocks(None, ..)`, or they count retained committed blocks twice.
+    pub(crate) fn uncommitted_blocks(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = &BlockAggregatedChanges> + '_>, StorageError> {
+        let Some(tip) = self.tip() else {
+            return Ok(Box::new(std::iter::empty()));
+        };
+        match self.db_committed {
+            Some(committed) if committed >= tip.number => Ok(Box::new(std::iter::empty())),
+            Some(committed) => Ok(Box::new(
+                self.buffer
+                    .get_block_range(Some(BlockNumberOrTimestamp::Number(committed + 1)), None)?,
+            )),
+            None => Ok(Box::new(
+                self.buffer
+                    .get_block_range(None, None)?,
+            )),
+        }
+    }
+
     /// The newest block seen by this window, if any.
     pub(crate) fn tip(&self) -> Option<Block> {
         self.buffer.get_most_recent_block()
@@ -463,6 +510,57 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    fn numbers<'a>(blocks: impl Iterator<Item = &'a BlockAggregatedChanges>) -> Vec<u64> {
+        blocks.map(|b| b.block.number).collect()
+    }
+
+    #[test]
+    fn uncommitted_blocks_start_above_the_commit_watermark() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=10, 10, Some(6));
+
+        assert_eq!(numbers(w.uncommitted_blocks().unwrap()), vec![7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn uncommitted_blocks_are_all_blocks_before_the_first_commit() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=3, 3, None);
+
+        assert_eq!(numbers(w.uncommitted_blocks().unwrap()), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn uncommitted_blocks_are_empty_when_everything_is_committed() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=3, 3, Some(3));
+
+        assert!(numbers(w.uncommitted_blocks().unwrap()).is_empty());
+        assert!(numbers(
+            window(128, 1)
+                .uncommitted_blocks()
+                .unwrap()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn blocks_delegates_to_the_buffer_range() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=10, 10, Some(6));
+
+        let upto_five = w
+            .blocks(None, Some(BlockNumberOrTimestamp::Number(5)))
+            .unwrap();
+        assert_eq!(numbers(upto_five), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn window_config_defaults_match_the_epic() {
+        let config = WindowConfig::default();
+        assert_eq!((config.depth, config.min_fold_batch), (128, 1));
     }
 
     #[derive(Default)]

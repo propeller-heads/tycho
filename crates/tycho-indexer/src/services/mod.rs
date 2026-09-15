@@ -42,6 +42,7 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
+pub use state::window::WindowConfig;
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
