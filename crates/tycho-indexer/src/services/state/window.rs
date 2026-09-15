@@ -49,7 +49,11 @@
 // Not yet constructed by production code; wired into `PendingDeltas` in a follow-up.
 #![allow(dead_code)]
 
+use std::time::{Duration, Instant};
+
 use deepsize::DeepSizeOf;
+use metrics::histogram;
+use tracing::{trace, warn};
 use tycho_common::{
     models::blockchain::{Block, BlockAggregatedChanges},
     storage::StorageError,
@@ -71,6 +75,19 @@ pub(crate) trait FoldSink: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+/// Drops every folded block. Stands in for the entity cache until ENG-6291 lands.
+pub(crate) struct DiscardSink;
+
+impl FoldSink for DiscardSink {
+    fn apply_folded(
+        &self,
+        _extractor: &str,
+        _block: &BlockAggregatedChanges,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
 /// Outcome of resolving a requested version against the window contents.
 #[derive(Debug, PartialEq)]
 pub(crate) enum WindowResolution {
@@ -81,6 +98,10 @@ pub(crate) enum WindowResolution {
     /// The version is newer than the newest block this window has seen.
     AboveTip,
 }
+
+/// Folds run under the facade lock every reader contends on; anything slower than this is
+/// logged. The entity cache design expects well under a millisecond.
+const SLOW_FOLD: Duration = Duration::from_millis(5);
 
 /// Fixed-depth window of block deltas for a single extractor.
 ///
@@ -224,25 +245,56 @@ impl DeltaWindow {
     /// Any error from [`FoldSink::apply_folded`] is propagated after evicting the successfully
     /// folded prefix. A fold error leaves the failing block buffered for the caller to decide on
     /// (see the module doc).
-    #[allow(unused_variables)]
     pub(crate) fn fold_and_evict(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
-        // Let `bound = self.eviction_bound()` and count the evictable blocks:
-        // `self.buffer.count_blocks_before(bound + 1)`, 0 when `bound` is `None`. Return `Ok`
-        // when the count is below `self.min_fold_batch` — this also covers a bound below the
-        // oldest buffered block (count 0), the steady state right after startup, where
-        // `ReorgBuffer::drain_blocks_until` would error because the target is not buffered.
-        //
-        // For each buffered block up to `bound` in ascending order call
-        // `sink.apply_folded(&self.extractor, &block)`, timing each call into a
-        // `delta_window_fold_duration` histogram (label: extractor) and logging a warning above
-        // a slow-fold threshold. On a fold error stop folding.
-        //
-        // Evict with `self.buffer.drain_blocks_until(h + 1)` where `h` is the highest
-        // successfully folded block: the retention bound is inclusive while `drain_blocks_until`
-        // is exclusive, and parent-hash chaining keeps buffered numbers contiguous, so `h + 1`
-        // is buffered whenever `h < tip` (guaranteed by `bound <= tip - depth` with
-        // `depth >= 1`).
-        todo!("fold then evict")
+        let Some(bound) = self.eviction_bound() else {
+            trace!(
+                extractor = %self.extractor,
+                finalized = ?self.finalized,
+                db_committed = ?self.db_committed,
+                tip = ?self.tip().map(|b| b.number),
+                "Nothing evictable yet"
+            );
+            return Ok(());
+        };
+        let evictable = self
+            .buffer
+            .count_blocks_before(bound + 1) as u64;
+        if evictable < self.min_fold_batch {
+            return Ok(());
+        }
+
+        let mut folded_upto = None;
+        let mut outcome = Ok(());
+        for block in self
+            .buffer
+            .get_block_range(None, Some(BlockNumberOrTimestamp::Number(bound)))?
+        {
+            let started = Instant::now();
+            let result = sink.apply_folded(&self.extractor, block);
+            let elapsed = started.elapsed();
+            histogram!("delta_window_fold_duration_ms", "extractor" => self.extractor.clone())
+                .record(elapsed.as_secs_f64() * 1000.0);
+            if elapsed > SLOW_FOLD {
+                warn!(
+                    extractor = %self.extractor,
+                    block = block.block.number,
+                    ?elapsed,
+                    "Slow DeltaWindow fold"
+                );
+            }
+            match result {
+                Ok(()) => folded_upto = Some(block.block.number),
+                Err(err) => {
+                    outcome = Err(err);
+                    break;
+                }
+            }
+        }
+        if let Some(height) = folded_upto {
+            self.buffer
+                .drain_blocks_until(height + 1)?;
+        }
+        outcome
     }
 
     /// The oldest block number still held in the window, if any.
@@ -411,6 +463,146 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        folded: std::sync::Mutex<Vec<u64>>,
+        fail_at: Option<u64>,
+    }
+
+    impl FoldSink for RecordingSink {
+        fn apply_folded(
+            &self,
+            _extractor: &str,
+            block: &BlockAggregatedChanges,
+        ) -> Result<(), StorageError> {
+            let number = block.block.number;
+            if self.fail_at == Some(number) {
+                return Err(StorageError::Unexpected(format!("fold failed at {number}")));
+            }
+            self.folded.lock().unwrap().push(number);
+            Ok(())
+        }
+    }
+
+    fn buffered(w: &DeltaWindow) -> Vec<u64> {
+        w.buffer
+            .get_block_range(None, None)
+            .unwrap()
+            .map(|b| b.block.number)
+            .collect()
+    }
+
+    #[test]
+    fn fold_and_evict_folds_in_order_then_evicts() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+        let sink = RecordingSink::default();
+
+        w.fold_and_evict(&sink).unwrap();
+
+        assert_eq!(*sink.folded.lock().unwrap(), (1..=7).collect::<Vec<_>>());
+        assert_eq!(buffered(&w), vec![8, 9, 10]);
+    }
+
+    #[test]
+    fn nothing_above_the_bound_is_folded() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 5, Some(10));
+        let sink = RecordingSink::default();
+
+        w.fold_and_evict(&sink).unwrap();
+
+        assert_eq!(*sink.folded.lock().unwrap(), (1..=5).collect::<Vec<_>>());
+        assert_eq!(w.floor(), Some(6));
+    }
+
+    #[test]
+    fn fold_is_a_no_op_below_the_batch_size() {
+        let mut w = window(3, 5);
+        fill(&mut w, 1..=5, 5, Some(5));
+        let sink = RecordingSink::default();
+
+        w.fold_and_evict(&sink).unwrap();
+
+        assert!(sink.folded.lock().unwrap().is_empty());
+        assert_eq!(w.floor(), Some(1));
+    }
+
+    #[test]
+    fn fold_is_a_no_op_before_the_first_commit() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, None);
+        let sink = RecordingSink::default();
+
+        w.fold_and_evict(&sink).unwrap();
+
+        assert!(sink.folded.lock().unwrap().is_empty());
+        assert_eq!(w.floor(), Some(1));
+    }
+
+    #[test]
+    fn a_fold_error_evicts_only_the_folded_prefix() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+        let sink = RecordingSink { fail_at: Some(4), ..Default::default() };
+
+        let res = w.fold_and_evict(&sink);
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2, 3]);
+        assert_eq!(w.floor(), Some(4));
+    }
+
+    #[test]
+    fn no_block_is_lost_between_window_and_sink() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+        let sink = RecordingSink::default();
+
+        w.fold_and_evict(&sink).unwrap();
+
+        let mut all = sink.folded.lock().unwrap().clone();
+        all.extend(buffered(&w));
+        assert_eq!(all, (1..=10).collect::<Vec<_>>());
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure; the window is sync, so no runtime.
+    #[test]
+    fn fold_duration_is_recorded_per_extractor() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+        let sink = RecordingSink::default();
+
+        metrics::with_local_recorder(&recorder, || w.fold_and_evict(&sink).unwrap());
+
+        let recorded = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .any(|(key, _, _, value)| {
+                key.key().name() == "delta_window_fold_duration_ms" &&
+                    key.key()
+                        .labels()
+                        .any(|l| l.key() == "extractor" && l.value() == EXTRACTOR) &&
+                    matches!(value, DebugValue::Histogram(samples) if samples.len() == 7)
+            });
+        assert!(recorded, "one histogram sample per folded block, labelled by extractor");
+    }
+
+    #[test]
+    fn discard_sink_accepts_everything() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+
+        w.fold_and_evict(&DiscardSink).unwrap();
+
+        assert_eq!(w.floor(), Some(8));
     }
 
     #[rstest]
