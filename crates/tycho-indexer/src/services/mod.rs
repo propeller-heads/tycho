@@ -38,6 +38,7 @@ mod debug;
 mod deltas_buffer;
 mod middleware;
 mod rpc;
+mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
