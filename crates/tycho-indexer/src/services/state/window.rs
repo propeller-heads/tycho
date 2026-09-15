@@ -247,9 +247,9 @@ impl DeltaWindow {
 
     /// The oldest block number still held in the window, if any.
     pub(crate) fn floor(&self) -> Option<u64> {
-        // Needs a front accessor on `ReorgBuffer` (`get_block_range(None, None)` can reach the
-        // front element, but a dedicated accessor avoids building an iterator for one block).
-        todo!("expose the buffer's oldest block")
+        self.buffer
+            .oldest_block()
+            .map(|b| b.number)
     }
 
     /// The newest block seen by this window, if any.
@@ -265,15 +265,29 @@ impl DeltaWindow {
     /// floor report [`WindowResolution::BelowFloor`] and are served by the database fallback
     /// path; versions above the tip report [`WindowResolution::AboveTip`]. No database lookup is
     /// involved.
-    #[allow(unused_variables)]
     pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
-        // 1. Empty window -> BelowFloor (fallback path).
-        // 2. Timestamp newer than tip -> InWindow(tip)  [clamp preserves today's semantics].
-        // 3. Number/timestamp within [floor, tip] -> InWindow(matching block; timestamps round up).
-        // 4. Number below floor -> BelowFloor; number above tip -> AboveTip. BelowFloor is a
-        //    deliberate fix, not a preservation: today a below-floor end version falls through to
-        //    the front block of the buffer and serves deltas newer than requested.
-        todo!("resolve against buffered blocks")
+        let (Some(oldest), Some(tip)) = (self.buffer.oldest_block(), self.tip()) else {
+            return WindowResolution::BelowFloor;
+        };
+        if is_before(version, &oldest) {
+            return WindowResolution::BelowFloor;
+        }
+        if version.greater_than(&tip) {
+            return match version {
+                BlockNumberOrTimestamp::Number(_) => WindowResolution::AboveTip,
+                BlockNumberOrTimestamp::Timestamp(_) => WindowResolution::InWindow(tip),
+            };
+        }
+        let block = self
+            .buffer
+            .get_block_range(None, None)
+            .ok()
+            .and_then(|mut blocks| blocks.find(|b| !version.greater_than(&b.block)))
+            .map(|b| b.block.clone());
+        match block {
+            Some(block) => WindowResolution::InWindow(block),
+            None => WindowResolution::AboveTip,
+        }
     }
 
     /// Commit status of `version` derived from the database-commit watermark.
@@ -304,6 +318,14 @@ impl DeltaWindow {
                 .min(db_committed)
                 .min(tip.saturating_sub(self.depth)),
         )
+    }
+}
+
+/// Whether `version` is strictly older than `block`, by number or by timestamp.
+fn is_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
+    match version {
+        BlockNumberOrTimestamp::Number(n) => n < block.number,
+        BlockNumberOrTimestamp::Timestamp(ts) => ts < block.ts,
     }
 }
 
@@ -368,6 +390,51 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[test]
+    fn floor_is_the_oldest_buffered_block() {
+        let mut w = window(3, 1);
+        assert_eq!(w.floor(), None);
+        fill(&mut w, 4..=6, 0, None);
+        assert_eq!(w.floor(), Some(4));
+    }
+
+    #[rstest]
+    #[case::number_in_window(
+        BlockNumberOrTimestamp::Number(5),
+        WindowResolution::InWindow(testing::block(5))
+    )]
+    #[case::number_below_floor(BlockNumberOrTimestamp::Number(0), WindowResolution::BelowFloor)]
+    #[case::number_above_tip(BlockNumberOrTimestamp::Number(11), WindowResolution::AboveTip)]
+    #[case::timestamp_rounds_up(
+        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
+        WindowResolution::InWindow(testing::block(6))
+    )]
+    #[case::timestamp_after_tip_clamps(
+        BlockNumberOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::hours(1)),
+        WindowResolution::InWindow(testing::block(10))
+    )]
+    #[case::timestamp_before_floor(
+        BlockNumberOrTimestamp::Timestamp(testing::block(1).ts - chrono::Duration::seconds(1)),
+        WindowResolution::BelowFloor
+    )]
+    fn resolve_maps_versions_onto_the_window(
+        #[case] version: BlockNumberOrTimestamp,
+        #[case] expected: WindowResolution,
+    ) {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(5));
+
+        assert_eq!(w.resolve(version), expected);
+    }
+
+    #[test]
+    fn resolve_on_an_empty_window_is_below_floor() {
+        assert_eq!(
+            window(3, 1).resolve(BlockNumberOrTimestamp::Number(1)),
+            WindowResolution::BelowFloor
+        );
     }
 
     #[test]
