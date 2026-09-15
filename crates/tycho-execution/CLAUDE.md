@@ -45,7 +45,7 @@ Entry (e.g. splitSwap)
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
-| `fallback/TychoFallbackRouter.sol` | Standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, runs a pAMM, and on failure runs the caller's chosen fallback protocol. See "Protocol fallback" below. |
+| `fallback/TychoFallbackRouter.sol` | Standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes more; a pAMM that wins the quote but fails still falls through. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
@@ -178,16 +178,17 @@ from the pair's reserves, Uniswap V3 asks the static quoter (Eden Network's `vie
 `uniswapV3StaticQuoter` immutable, `IUniswapV3StaticQuoter`), Curve asks `get_dy`, Fluid asks the dex to price a
 swap paid to `0xdEaD`, which reverts `FluidDexSwapResult(amountOut)` before moving any token. Uniswap V4 has no quote
 function, so `simulateFallback` runs the real swap and reverts `TychoFallbackRouter__SimulatedAmountOut` with the
-receiver's balance diff, rolling it back. Both quotes run in self-only external functions (`quotePropAMM`,
-`quoteFallback`) under try/catch, so a quote that reverts, returns nothing decodable or gets malformed protocol data
-counts as zero. Two zero quotes or equal quotes keep the pAMM-first order. The fallback quote costs gas on every leg,
+receiver's balance diff, rolling it back. The pAMM quote is a low-level call whose return data counts only when it
+is at least 32 bytes; the fallback quote runs in the self-only external `quoteFallback` under try/catch. A quote that
+reverts, returns nothing decodable or gets malformed protocol data counts as zero. Two zero quotes or equal quotes keep
+the pAMM-first order. The fallback quote costs gas on every leg,
 including the ones the pAMM fills: about 110k for a Uniswap V4 simulation, about 40k for Curve or Fluid, about 30k for
-Uniswap V3, about 12k for Uniswap V2 (router call, cold state, mainnet fork). A stale pAMM is skipped without being
-called, which saves its failed swap.
+Uniswap V3, about 12k for Uniswap V2 (router call, cold state, mainnet fork). A stale pAMM is skipped without its
+swap being attempted, which saves that failed attempt.
 
 `FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
-`PropAMMReverted` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
+`PropAMMFailed` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
 served by the pAMM, so counting the event against filled legs gives the pAMM fill rate. The pAMM's revert reason is
 not carried: reading caller-controlled returndata of any size costs gas.
 

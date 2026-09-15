@@ -458,7 +458,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.PropAMMReverted
+            TychoFallbackRouter.FallbackReason.PropAMMFailed
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -773,7 +773,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.PropAMMReverted
+            TychoFallbackRouter.FallbackReason.PropAMMFailed
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),

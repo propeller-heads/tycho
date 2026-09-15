@@ -72,10 +72,10 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// @notice Why the fallback ran instead of the pAMM.
     enum FallbackReason {
         // The fallback quoted more `tokenOut` than the pAMM. A pAMM that cannot quote counts as
-        // quoting zero, so a stale pAMM is skipped without being called.
+        // quoting zero, so a stale pAMM is skipped without its swap being attempted.
         FallbackQuotedHigher,
         // The pAMM quoted at least as much as the fallback, then reverted or delivered nothing.
-        PropAMMReverted
+        PropAMMFailed
     }
 
     /// @notice One swap: what goes in, what comes out, and who receives it.
@@ -181,7 +181,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
             try this.executePropAMM(swap_, pamm) {
                 return;
             } catch {}
-            reason = FallbackReason.PropAMMReverted;
+            reason = FallbackReason.PropAMMFailed;
         }
 
         FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
