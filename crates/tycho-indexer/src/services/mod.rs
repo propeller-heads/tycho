@@ -42,6 +42,7 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
+pub use state::window::WindowConfig;
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
@@ -58,6 +59,7 @@ pub struct ServicesBuilder<G> {
     protocol_systems: Vec<String>,
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
+    window_config: WindowConfig,
 }
 
 impl<G> ServicesBuilder<G>
@@ -77,7 +79,13 @@ where
             dci_protocols: Vec::new(),
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
+            window_config: WindowConfig::default(),
         }
+    }
+
+    pub fn window_config(mut self, v: WindowConfig) -> Self {
+        self.window_config = v;
+        self
     }
 
     /// Sets protocol systems that use Dynamic Contract Indexing (DCI).
@@ -158,10 +166,18 @@ where
         mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
-        let pending_deltas = PendingDeltas::new(
+        let pending_deltas = PendingDeltas::with_config(
             self.extractor_handles
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
+            self.window_config,
+            Arc::new(state::window::DiscardSink),
+        )
+        .map_err(|err| ExtractionError::ServiceError(err.to_string()))?;
+        info!(
+            depth = self.window_config.depth,
+            min_fold_batch = self.window_config.min_fold_batch,
+            "DeltaWindow configured"
         );
 
         let pending_deltas_rxs = std::mem::take(&mut self.pending_deltas_rxs);
