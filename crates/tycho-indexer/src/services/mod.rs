@@ -59,6 +59,21 @@ pub struct ServicesBuilder<G> {
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
 }
 
+/// Resolves with the first error either service task produces, or with `Ok` once both end
+/// cleanly. A task that ends cleanly on its own does not end the join, so the shutdown
+/// sequence still drains the server.
+async fn join_services(
+    tasks: [JoinHandle<Result<(), ExtractionError>>; 2],
+) -> Result<(), ExtractionError> {
+    let flattened = tasks.map(|task| async move {
+        task.await.unwrap_or_else(|join_err| {
+            Err(ExtractionError::Unknown(format!("Service task panicked: {join_err}")))
+        })
+    });
+    try_join_all(flattened).await?;
+    Ok(())
+}
+
 impl<G> ServicesBuilder<G>
 where
     G: Gateway + Send + Sync + 'static,
@@ -184,12 +199,7 @@ where
         let (server_handle, server_task) =
             self.start_server(Some(ws_data), openapi, Some(Arc::new(pending_deltas)))?;
 
-        let task = tokio::spawn(async move {
-            try_join_all(vec![deltas_task, server_task])
-                .await
-                .map_err(|err| ExtractionError::Unknown(err.to_string()))?;
-            Ok(())
-        });
+        let task = tokio::spawn(join_services([deltas_task, server_task]));
 
         Ok((server_handle, task))
     }
@@ -310,5 +320,58 @@ where
                 .map_err(|err| ExtractionError::Unknown(err.to_string()))
         });
         Ok((handle, task))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn never() -> JoinHandle<Result<(), ExtractionError>> {
+        tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok(())
+        })
+    }
+
+    #[tokio::test]
+    async fn join_services_returns_the_error_of_a_failed_task() {
+        let failing = tokio::spawn(async { Err(ExtractionError::Unknown("boom".to_string())) });
+
+        let res = join_services([failing, never()]).await;
+
+        assert!(matches!(res, Err(ExtractionError::Unknown(msg)) if msg == "boom"));
+    }
+
+    #[tokio::test]
+    async fn join_services_reports_a_panic_as_an_error() {
+        let panicking: JoinHandle<Result<(), ExtractionError>> =
+            tokio::spawn(async { panic!("kaboom") });
+
+        let res = join_services([panicking, never()]).await;
+
+        assert!(matches!(res, Err(ExtractionError::Unknown(msg)) if msg.contains("panicked")));
+    }
+
+    #[tokio::test]
+    async fn join_services_waits_for_the_other_task_after_a_clean_exit() {
+        let clean = tokio::spawn(async { Ok(()) });
+
+        let res =
+            tokio::time::timeout(Duration::from_millis(100), join_services([clean, never()])).await;
+
+        assert!(res.is_err(), "a clean exit must not resolve the join");
+    }
+
+    #[tokio::test]
+    async fn join_services_is_ok_when_both_tasks_end_cleanly() {
+        let first = tokio::spawn(async { Ok(()) });
+        let second = tokio::spawn(async { Ok(()) });
+
+        let res = join_services([first, second]).await;
+
+        assert!(res.is_ok());
     }
 }
