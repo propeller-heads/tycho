@@ -106,6 +106,7 @@ pub trait PendingDeltasBuffer {
 
 impl PendingDeltas {
     /// Windows at the default depth, folding into a [`DiscardSink`].
+    #[allow(dead_code)] // production builds the facade through `with_config`
     pub fn new<'a>(extractors: impl IntoIterator<Item = &'a str>) -> Self {
         Self::with_config(extractors, WindowConfig::default(), Arc::new(DiscardSink))
             .expect("the default window config is valid")

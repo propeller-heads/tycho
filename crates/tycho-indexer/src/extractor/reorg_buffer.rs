@@ -391,6 +391,9 @@ where
     }
 
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
+    // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
+    // the buffer-bound behaviour the window deliberately diverges from.
+    #[allow(dead_code)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();

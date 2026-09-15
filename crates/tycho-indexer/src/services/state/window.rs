@@ -46,9 +46,6 @@
 //! resets the extractor's window, the same recovery the supervisor triggers through
 //! `ExtractorRestarted`, and keeps serving the other extractors.
 
-// Not yet constructed by production code; wired into `PendingDeltas` in a follow-up.
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use deepsize::DeepSizeOf;
@@ -104,6 +101,7 @@ impl FoldSink for DiscardSink {
 }
 
 /// Outcome of resolving a requested version against the window contents.
+#[allow(dead_code)] // consumed by the state service, ENG-6293
 #[derive(Debug, PartialEq)]
 pub(crate) enum WindowResolution {
     /// The version maps to a block currently held in the window.
@@ -313,6 +311,7 @@ impl DeltaWindow {
     }
 
     /// The oldest block number still held in the window, if any.
+    #[allow(dead_code)] // consumed by the state service, ENG-6293
     pub(crate) fn floor(&self) -> Option<u64> {
         self.buffer
             .oldest_block()
@@ -364,6 +363,7 @@ impl DeltaWindow {
     /// floor report [`WindowResolution::BelowFloor`] and are served by the database fallback
     /// path; versions above the tip report [`WindowResolution::AboveTip`]. No database lookup is
     /// involved.
+    #[allow(dead_code)] // consumed by the state service, ENG-6293
     pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
         let (Some(oldest), Some(tip)) = (self.buffer.oldest_block(), self.tip()) else {
             return WindowResolution::BelowFloor;
