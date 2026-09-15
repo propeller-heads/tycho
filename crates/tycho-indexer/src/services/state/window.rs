@@ -279,14 +279,14 @@ impl DeltaWindow {
     /// no database commit has been observed yet; the caller logs both watermarks and the tip so
     /// the two cases are distinguishable.
     fn eviction_bound(&self) -> Option<u64> {
-        // min(finalized, db_committed, tip - depth), where:
-        // - `None` finalized/db_committed/tip means nothing is evictable yet;
-        // - the subtraction saturates at 0: a chain shorter than `depth` evicts nothing through the
-        //   depth term;
-        // - `db_committed <= finalized` holds by construction today (message aggregation rejects
-        //   the opposite), so the finalized term is belt-and-braces against a future change to the
-        //   commit trigger.
-        todo!("compute eviction bound")
+        let tip = self.tip()?.number;
+        let finalized = self.finalized?;
+        let db_committed = self.db_committed?;
+        Some(
+            finalized
+                .min(db_committed)
+                .min(tip.saturating_sub(self.depth)),
+        )
     }
 }
 
@@ -350,6 +350,35 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    #[rstest]
+    #[case::depth_binds(10, Some(10), Some(7))]
+    #[case::finalized_binds(5, Some(10), Some(5))]
+    #[case::committed_binds(10, Some(4), Some(4))]
+    #[case::no_commit_yet(10, None, None)]
+    fn eviction_bound_is_the_smallest_term(
+        #[case] finalized: u64,
+        #[case] committed: Option<u64>,
+        #[case] expected: Option<u64>,
+    ) {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, finalized, committed);
+
+        assert_eq!(w.eviction_bound(), expected);
+    }
+
+    #[test]
+    fn eviction_bound_saturates_on_a_chain_shorter_than_the_depth() {
+        let mut w = window(20, 1);
+        fill(&mut w, 1..=5, 5, Some(5));
+
+        assert_eq!(w.eviction_bound(), Some(0));
+    }
+
+    #[test]
+    fn eviction_bound_is_none_on_an_empty_window() {
+        assert_eq!(window(3, 1).eviction_bound(), None);
     }
 
     #[test]
