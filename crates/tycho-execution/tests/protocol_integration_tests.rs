@@ -1873,7 +1873,7 @@ fn test_single_encoding_strategy_fallback_usdc_weth() {
         BigUint::ZERO,
     )
     .with_user_data(Bytes::from(
-        format!(r#"{{"protocol":"uniswap_v3","pool":"0x{pool}"}}"#).as_bytes(),
+        format!(r#"{{"fallback_protocol":"uniswap_v3","pool":"0x{pool}"}}"#).as_bytes(),
     ));
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
@@ -1936,7 +1936,7 @@ fn test_single_encoding_strategy_fallback_sushiswap_v2_alias() {
         BigUint::ZERO,
     )
     .with_user_data(Bytes::from(
-        format!(r#"{{"protocol":"sushiswap_v2","pair":"0x{pair}","fee_bps":30}}"#).as_bytes(),
+        format!(r#"{{"fallback_protocol":"sushiswap_v2","pair":"0x{pair}","fee_bps":30}}"#).as_bytes(),
     ));
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
