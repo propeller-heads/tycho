@@ -46,14 +46,23 @@
 //! resets the extractor's window, the same recovery the supervisor triggers through
 //! `ExtractorRestarted`, and keeps serving the other extractors.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use deepsize::DeepSizeOf;
 use metrics::histogram;
 use tracing::{trace, warn};
 use tycho_common::{
-    models::blockchain::{Block, BlockAggregatedChanges},
+    models::{
+        blockchain::{Block, BlockAggregatedChanges},
+        contract::{AccountBalance, AccountDelta},
+        protocol::{ComponentBalance, ProtocolComponentStateDelta},
+        Address,
+    },
     storage::StorageError,
+    Bytes,
 };
 
 use crate::extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer};
@@ -110,6 +119,32 @@ pub(crate) enum WindowResolution {
     BelowFloor,
     /// The version is newer than the newest block this window has seen.
     AboveTip,
+}
+
+/// One block's changes to a component, as captured from the window.
+#[allow(dead_code)] // consumed by the state service, ENG-6293
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComponentChange {
+    pub block: u64,
+    pub state: Option<ProtocolComponentStateDelta>,
+    pub balances: Option<HashMap<Bytes, ComponentBalance>>,
+}
+
+/// One block's changes to an account, as captured from the window.
+#[allow(dead_code)] // consumed by the state service, ENG-6293
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AccountChange {
+    pub block: u64,
+    pub delta: Option<AccountDelta>,
+    pub token_balances: Option<HashMap<Address, AccountBalance>>,
+}
+
+/// Window changes for a set of keys up to a version, ascending by block within each key.
+#[allow(dead_code)] // consumed by the state service, ENG-6293
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct WindowPatch {
+    pub components: HashMap<String, Vec<ComponentChange>>,
+    pub accounts: HashMap<Bytes, Vec<AccountChange>>,
 }
 
 /// Folds run under the facade lock every reader contends on; anything slower than this is
@@ -318,6 +353,58 @@ impl DeltaWindow {
             .map(|b| b.number)
     }
 
+    /// Collects every buffered change for the given keys up to `upto`, ascending by block. This
+    /// is the filtering the facade applies in place, returned as data so a caller can lay it
+    /// over a cache entry. The caller resolves `upto` with [`DeltaWindow::resolve`] first; a
+    /// version below the floor never reaches here.
+    #[allow(dead_code)] // consumed by the state service, ENG-6293
+    pub(crate) fn capture_patch(
+        &self,
+        components: &[&str],
+        accounts: &[Bytes],
+        upto: Option<BlockNumberOrTimestamp>,
+    ) -> Result<WindowPatch, StorageError> {
+        let mut patch = WindowPatch::default();
+        for entry in self
+            .buffer
+            .get_block_range(None, upto)?
+        {
+            let block = entry.block.number;
+            for id in components {
+                let state = entry.state_deltas.get(*id).cloned();
+                let balances = entry
+                    .component_balances
+                    .get(*id)
+                    .cloned();
+                if state.is_some() || balances.is_some() {
+                    patch
+                        .components
+                        .entry(id.to_string())
+                        .or_default()
+                        .push(ComponentChange { block, state, balances });
+                }
+            }
+            for address in accounts {
+                let delta = entry
+                    .account_deltas
+                    .get(address)
+                    .cloned();
+                let token_balances = entry
+                    .account_balances
+                    .get(address)
+                    .cloned();
+                if delta.is_some() || token_balances.is_some() {
+                    patch
+                        .accounts
+                        .entry(address.clone())
+                        .or_default()
+                        .push(AccountChange { block, delta, token_balances });
+                }
+            }
+        }
+        Ok(patch)
+    }
+
     /// Buffered blocks between two versions, ascending. Same bound semantics as
     /// [`ReorgBuffer::get_block_range`].
     pub(crate) fn blocks(
@@ -461,13 +548,13 @@ impl DeepSizeOf for DeltaWindow {
 
 #[cfg(test)]
 mod test {
-    use std::ops::RangeInclusive;
+    use std::{collections::HashSet, ops::RangeInclusive, str::FromStr};
 
     use rstest::rstest;
-    use tycho_common::Bytes;
+    use tycho_common::models::{Chain, ChangeType};
 
     use super::*;
-    use crate::testing;
+    use crate::{extractor::models::fixtures, testing};
 
     const EXTRACTOR: &str = "ex";
 
@@ -510,6 +597,89 @@ mod test {
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
+    }
+
+    fn with_component_delta(
+        mut m: BlockAggregatedChanges,
+        id: &str,
+        x: u64,
+    ) -> BlockAggregatedChanges {
+        m.state_deltas.insert(
+            id.to_string(),
+            ProtocolComponentStateDelta {
+                component_id: id.to_string(),
+                updated_attributes: HashMap::from([("x".to_string(), Bytes::from(x))]),
+                deleted_attributes: HashSet::new(),
+                ..Default::default()
+            },
+        );
+        m
+    }
+
+    fn with_account_delta(
+        mut m: BlockAggregatedChanges,
+        address: &Bytes,
+        x: u64,
+    ) -> BlockAggregatedChanges {
+        m.account_deltas.insert(
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                fixtures::optional_slots([(1, x)]),
+                None,
+                None,
+                ChangeType::Update,
+            ),
+        );
+        m
+    }
+
+    #[test]
+    fn capture_patch_returns_exactly_the_changes_up_to_the_version_in_order() {
+        let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
+        let mut w = window(128, 1);
+        for n in 1..=6u64 {
+            let mut m = msg(n, 0, None);
+            if n % 2 == 0 {
+                m = with_component_delta(m, "c1", n);
+            }
+            if n == 3 || n == 5 {
+                m = with_account_delta(m, &address, n);
+            }
+            w.insert(&m).unwrap();
+        }
+
+        let patch = w
+            .capture_patch(
+                &["c1", "absent"],
+                std::slice::from_ref(&address),
+                Some(BlockNumberOrTimestamp::Number(5)),
+            )
+            .unwrap();
+
+        let component_blocks: Vec<u64> = patch.components["c1"]
+            .iter()
+            .map(|c| c.block)
+            .collect();
+        assert_eq!(component_blocks, vec![2, 4]);
+        assert!(!patch.components.contains_key("absent"));
+        let account_blocks: Vec<u64> = patch.accounts[&address]
+            .iter()
+            .map(|c| c.block)
+            .collect();
+        assert_eq!(account_blocks, vec![3, 5]);
+        assert!(patch.components["c1"]
+            .iter()
+            .all(|c| c.state.is_some() && c.balances.is_none()));
+    }
+
+    #[test]
+    fn capture_patch_on_an_empty_window_is_empty() {
+        let patch = window(128, 1)
+            .capture_patch(&["c1"], &[], None)
+            .unwrap();
+        assert!(patch.components.is_empty() && patch.accounts.is_empty());
     }
 
     fn numbers<'a>(blocks: impl Iterator<Item = &'a BlockAggregatedChanges>) -> Vec<u64> {
