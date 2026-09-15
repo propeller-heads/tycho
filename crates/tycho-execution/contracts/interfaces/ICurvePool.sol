@@ -7,6 +7,7 @@ interface ICurveCryptoPool {
         external
         payable;
 
+    // slither-disable-next-line naming-convention
     function get_dy(uint256 i, uint256 j, uint256 dx)
         external
         view
@@ -30,6 +31,7 @@ interface ICurveStablePool {
         external
         payable;
 
+    // slither-disable-next-line naming-convention
     function get_dy(int128 i, int128 j, uint256 dx)
         external
         view

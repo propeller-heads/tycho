@@ -158,8 +158,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         bytes calldata fallbackSwap
     ) external nonReentrant {
         // Low-level so a `pamm` without code, or one returning nothing decodable, quotes zero
-        // instead of reverting `swap`.
-        // slither-disable-next-line low-level-calls
+        // instead of reverting `swap`. That covers `pamm == address(0)`, so no zero check.
+        // slither-disable-next-line low-level-calls,missing-zero-check
         (bool quoted, bytes memory quote) = pamm.call(
             abi.encodeCall(
                 IPropAMM.quote, (swap_.tokenIn, swap_.tokenOut, swap_.amountIn)
@@ -168,7 +168,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         uint256 pammAmountOut =
             quoted && quote.length >= 32 ? abi.decode(quote, (uint256)) : 0;
 
-        uint256 fallbackAmountOut;
+        uint256 fallbackAmountOut = 0;
         try this.quoteFallback(swap_, fallbackSwap) returns (
             uint256 amountOut
         ) {
@@ -306,6 +306,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         returns (uint256 amountOut)
     {
         (address dex, bool zero2one) = _decodeFluidV1(data);
+        // slither-disable-next-line unused-return
         try IFluidV1Dex(dex)
             .swapIn(zero2one, swap_.amountIn, 0, address(0xdEaD)) {
             return 0;
