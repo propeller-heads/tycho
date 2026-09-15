@@ -2,8 +2,7 @@
 pragma solidity ^0.8.26;
 
 /// @title IUniswapV3StaticQuoter
-/// @notice A `view` quoter for Uniswap V3 pools: walks the pool's ticks off its storage and
-/// returns what `swap` would, without writing state, moving tokens or entering the callback.
+/// @notice A `view` quoter for Uniswap V3 pools: returns what `swap` would, without running it.
 /// @dev Source: https://github.com/eden-network/uniswap-v3-static-quoter. Deployments are in
 /// `config/protocol_specific_addresses.json` under `fallback_router`.
 interface IUniswapV3StaticQuoter {
