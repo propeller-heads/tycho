@@ -125,8 +125,7 @@ impl PendingDeltas {
         Self { buffers, sink }
     }
 
-    /// Replaces one extractor's window with an empty one. Used after a restart and after an
-    /// insert the window could not apply.
+    /// Folds one extractor's committed blocks into the sink and empties its window.
     fn reset_window(&self, extractor: &str) -> Result<()> {
         let Some(window) = self.buffers.get(extractor) else {
             warn!(extractor, "No window found for reset — extractor unknown");
@@ -135,7 +134,7 @@ impl PendingDeltas {
         let mut guard = window
             .lock()
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
-        guard.clear();
+        guard.reset(self.sink.as_ref())?;
         debug!(extractor, "PendingDeltas window reset");
         Ok(())
     }

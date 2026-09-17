@@ -188,11 +188,6 @@ impl DeltaWindow {
         Self { extractor, buffer: ReorgBuffer::new(), config, db_committed: None, finalized: None }
     }
 
-    /// Empties the window and keeps its configuration.
-    pub(crate) fn clear(&mut self) {
-        *self = Self::new(std::mem::take(&mut self.extractor), self.config);
-    }
-
     /// Applies one full-block message to the window.
     ///
     /// Regular messages must extend the buffered chain; revert messages purge the abandoned
@@ -283,12 +278,43 @@ impl DeltaWindow {
         if evictable < self.config.min_fold_batch {
             return Ok(());
         }
+        self.fold_oldest(evictable, sink)
+    }
 
+    /// Folds every finalized, committed block into `sink`, then empties the window.
+    ///
+    /// Depth and fold batching do not apply: everything at or below `min(finalized,
+    /// db_committed)` is handed to the sink, so the store behind it misses nothing the window
+    /// held. Uncommitted blocks are dropped; the extractor re-sends them.
+    ///
+    /// # Errors
+    ///
+    /// The first [`FoldSink::apply_folded`] error is returned after the window is emptied; the
+    /// blocks after the failing one were not folded.
+    pub(crate) fn reset(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
+        let outcome = match (self.finalized, self.db_committed) {
+            (Some(finalized), Some(committed)) => {
+                let count = self
+                    .buffer
+                    .count_blocks_before(finalized.min(committed) + 1);
+                self.fold_oldest(count, sink)
+            }
+            _ => Ok(()),
+        };
+        self.buffer = ReorgBuffer::new();
+        self.db_committed = None;
+        self.finalized = None;
+        outcome
+    }
+
+    /// Folds the `count` oldest blocks into `sink` and evicts the folded prefix.
+    fn fold_oldest(&mut self, count: usize, sink: &dyn FoldSink) -> Result<(), StorageError> {
         let mut folded_upto = None;
         let mut outcome = Ok(());
         for block in self
             .buffer
-            .get_block_range(None, Some(BlockNumberOrTimestamp::Number(bound)))?
+            .get_block_range(None, None)?
+            .take(count)
         {
             let started = Instant::now();
             let result = sink.apply_folded(&self.extractor, block);
@@ -796,6 +822,44 @@ mod test {
         let mut all = sink.folded.lock().unwrap().clone();
         all.extend(buffered(&w));
         assert_eq!(all, (1..=10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn reset_folds_committed_blocks_beyond_the_depth_then_empties_the_window() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 8, Some(10));
+        let sink = RecordingSink::default();
+
+        w.reset(&sink).unwrap();
+
+        assert_eq!(*sink.folded.lock().unwrap(), (1..=8).collect::<Vec<_>>());
+        assert!(buffered(&w).is_empty());
+        assert_eq!(w.commit_status(BlockNumberOrTimestamp::Number(1)), None);
+    }
+
+    #[test]
+    fn reset_before_the_first_commit_folds_nothing() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 5, None);
+        let sink = RecordingSink::default();
+
+        w.reset(&sink).unwrap();
+
+        assert!(sink.folded.lock().unwrap().is_empty());
+        assert!(buffered(&w).is_empty());
+    }
+
+    #[test]
+    fn reset_empties_the_window_even_when_a_fold_fails() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 5, Some(5));
+        let sink = RecordingSink { fail_at: Some(3), ..Default::default() };
+
+        let res = w.reset(&sink);
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2]);
+        assert!(buffered(&w).is_empty());
     }
 
     // `metrics::with_local_recorder` takes a sync closure; the window is sync, so no runtime.
