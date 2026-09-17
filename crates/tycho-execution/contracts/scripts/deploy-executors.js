@@ -37,6 +37,7 @@ const deploy_protocols = {
         "rfq:native",
         "propammfallback",
         "sky",
+        "lido_v4",
     ],
     "base": [
         "uniswap_v2",

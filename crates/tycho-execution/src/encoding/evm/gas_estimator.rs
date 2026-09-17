@@ -91,7 +91,21 @@ pub const PROPAMM_FALLBACK_OVERHEAD_GAS: u64 = 70_000;
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper"];
+    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4"];
+
+/// Mainnet stETH, the only Lido input token whose leg the router has to approve. Lido is
+/// configured on mainnet only, so a plain constant is enough.
+const LIDO_STETH_ADDRESS: [u8; 20] =
+    alloy::primitives::hex!("ae7ab96520DE3A18E5e111B5EaAb095312D7fE84");
+
+/// Only the stETH -> wstETH leg approves the wrapper to debit stETH.
+/// Submit legs send native ETH; unwrap burns wstETH held by the router.
+fn lido_leg_needs_approval(
+    protocol_system: &str,
+    token_in: &tycho_common::models::token::Token,
+) -> bool {
+    protocol_system == "lido_v4" && token_in.address.as_ref() == LIDO_STETH_ADDRESS
+}
 
 pub const ROUTER_FEES_ACTIVE: bool = true;
 
@@ -228,7 +242,7 @@ fn estimate_transfer_overhead(
         overhead += transfer_token_gas(token_in);
     }
 
-    if needs_approval(protocol_system) {
+    if needs_approval(protocol_system) || lido_leg_needs_approval(protocol_system, token_in) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
     }
 
@@ -253,6 +267,43 @@ mod tests {
 
     use super::*;
     use crate::encoding::models::{default_token, Solution, Strategy, Swap, UserTransferType};
+
+    fn lido_swap(token_in: Bytes, token_out: Bytes) -> Swap {
+        Swap::new(
+            ProtocolComponent { protocol_system: "lido_v4".to_string(), ..Default::default() },
+            default_token(token_in),
+            default_token(token_out),
+            BigUint::from(100_000u64),
+        )
+    }
+
+    /// Every Lido direction has `outputToRouter = true`, so each one pays an output transfer;
+    /// only the wrap leg debits stETH from the router and needs the approval on top.
+    #[test]
+    fn lido_overhead_charges_the_output_transfer_and_only_the_wrap_approval() {
+        let eth = Bytes::from(vec![0u8; 20]);
+        let steth = Bytes::from(LIDO_STETH_ADDRESS.to_vec());
+        let wsteth = Bytes::from(vec![0x77u8; 20]);
+
+        let overhead = |token_in: Bytes, token_out: Bytes| {
+            let swap = lido_swap(token_in, token_out);
+            estimate_transfer_overhead(
+                "lido_v4",
+                swap.token_in(),
+                swap.token_out(),
+                &Strategy::Single,
+            )
+        };
+
+        // One transfer in, one transfer out, each priced from the token's own measured gas.
+        let one_transfer = transfer_token_gas(&default_token(Bytes::from(vec![0u8; 20])));
+        let input_and_output = &one_transfer + &one_transfer;
+
+        assert_eq!(overhead(eth.clone(), steth.clone()), input_and_output.clone());
+        assert_eq!(overhead(eth, wsteth.clone()), input_and_output.clone());
+        assert_eq!(overhead(wsteth.clone(), steth.clone()), input_and_output.clone());
+        assert_eq!(overhead(steth, wsteth), input_and_output + BigUint::from(TOKEN_APPROVAL_GAS));
+    }
 
     fn make_swap(protocol: &str) -> Swap {
         Swap::new(
