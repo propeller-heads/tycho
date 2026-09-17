@@ -29,6 +29,14 @@
 //! Folding is batched: [`DeltaWindow::fold_and_evict`] is a no-op until at least
 //! `min_fold_batch` blocks are evictable, then folds all of them. At steady state the window
 //! size oscillates between `W` and `W + min_fold_batch` blocks.
+//!
+//! An error from [`DeltaWindow::insert`] or [`DeltaWindow::fold_and_evict`] means the window no
+//! longer matches the extractor's chain or the sink. The window cannot repair itself: the
+//! blocks it is missing come only from the extractor, and clearing the window alone leaves a
+//! gap of blocks that are neither in the database nor in memory. The pump therefore ends, and
+//! with it the process. The one recovery is an extractor restart: the extractor replays every
+//! block above its database cursor, so the pump folds the committed blocks with
+//! [`DeltaWindow::fold_committed`], clears the window, and lets the replay refill it.
 
 use std::{
     collections::HashMap,

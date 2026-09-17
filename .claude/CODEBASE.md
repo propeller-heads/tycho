@@ -94,11 +94,13 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 7. WebSocket subscribers (`services/ws.rs`) receive broadcast directly; revert flag signals chain
    reorg. On `ExtractorRestarted`, `ws.rs` sends `Response::SubscriptionEnded` and `PendingDeltas`
-   resets that extractor's buffer
+   folds that extractor's committed blocks into the sink and clears its window
 8. `PendingDeltas` (`services/deltas_buffer.rs`) receives broadcast
    - Inserts every full block (partial blocks skipped) into that extractor's `DeltaWindow`
    - Retains a block until it is at or below `min(finalized, db_committed, tip - depth)`, then
      folds it into a `FoldSink` and evicts it; committed blocks stay servable meanwhile
+   - A block the window cannot apply ends the pump and the process; the window cannot refill
+     itself (see `crates/tycho-indexer/CLAUDE.md`, "Reorg handling")
    - RPC handlers query DB snapshot + pending deltas = consistent view of latest state
 
 ### Client (tycho-client)

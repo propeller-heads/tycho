@@ -132,8 +132,11 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 
 `PendingDeltas` (RPC side) mirrors this through its per-extractor `DeltaWindow`, using the
 strict hash-only `purge` on the block named by the broadcast revert message. A revert to a block
-below `min(finalized, db_committed)` is an error: the pump then resets that extractor's window
-and keeps serving the others.
+below `min(finalized, db_committed)`, a revert to an unknown hash, or a block that does not
+extend the window's chain is an error that ends the pump and the process: only the extractor's
+replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
+blocks into the sink and clears it; the restarted extractor replays everything above its
+database cursor.
 
 ## Persistence
 
