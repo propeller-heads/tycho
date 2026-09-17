@@ -2,7 +2,7 @@
 //!
 //! The window retains roughly the last `W` blocks of [`BlockAggregatedChanges`] instead of
 //! dropping blocks as soon as the database commits them. Blocks leave the window only through
-//! [`DeltaWindow::fold_and_evict`] and [`DeltaWindow::fold_committed`], which fold each evicted
+//! [`DeltaWindow::fold_evictable`] and [`DeltaWindow::fold_committed`], which fold each evicted
 //! block into a [`FoldSink`] before removing it, so no committed block's deltas can be lost
 //! between the window and the long-lived store behind the sink.
 //!
@@ -26,11 +26,11 @@
 //! govern and the window grows beyond `W`. `db_committed` advances in jumps of
 //! `--database-insert-batch-size`, so a commit batch larger than `W` always binds.
 //!
-//! Folding is batched: [`DeltaWindow::fold_and_evict`] is a no-op until at least
+//! Folding is batched: [`DeltaWindow::fold_evictable`] is a no-op until at least
 //! `min_fold_batch` blocks are evictable, then folds all of them. At steady state the window
 //! size oscillates between `W` and `W + min_fold_batch` blocks.
 //!
-//! An error from [`DeltaWindow::insert`] or [`DeltaWindow::fold_and_evict`] means the window no
+//! An error from [`DeltaWindow::insert`] or [`DeltaWindow::fold_evictable`] means the window no
 //! longer matches the extractor's chain or the sink. The window cannot repair itself: the
 //! blocks it is missing come only from the extractor, and clearing the window alone leaves a
 //! gap of blocks that are neither in the database nor in memory. The pump therefore ends, and
@@ -169,7 +169,7 @@ impl DeltaWindow {
     /// Applies one full-block message to the window.
     ///
     /// Regular messages must extend the buffered chain; revert messages purge the abandoned
-    /// blocks. No folding or eviction happens here — see [`DeltaWindow::fold_and_evict`]. The
+    /// blocks. No folding or eviction happens here — see [`DeltaWindow::fold_evictable`]. The
     /// caller filters partial-block messages.
     ///
     /// # Errors
@@ -232,7 +232,7 @@ impl DeltaWindow {
     ///
     /// The first [`FoldSink::fold`] error is returned after the folded prefix is evicted; the
     /// failing block stays in the window.
-    pub(crate) fn fold_and_evict(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
+    pub(crate) fn fold_evictable(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
         let Some(bound) = self.eviction_bound() else {
             trace!(
                 extractor = %self.extractor,
@@ -249,7 +249,7 @@ impl DeltaWindow {
         if evictable < self.config.min_fold_batch {
             return Ok(());
         }
-        self.fold(evictable, sink)
+        self.fold_and_evict(evictable, sink)
     }
 
     /// Folds every finalized, committed block into `sink` and evicts it. Depth and fold
@@ -267,7 +267,7 @@ impl DeltaWindow {
         let count = self
             .buffer
             .count_blocks_before(finalized.min(committed) + 1);
-        self.fold(count, sink)
+        self.fold_and_evict(count, sink)
     }
 
     /// Empties the window and forgets both watermarks. The configuration stays. The next
@@ -279,7 +279,7 @@ impl DeltaWindow {
     }
 
     /// Folds the `count` oldest blocks into `sink` and evicts the folded prefix.
-    fn fold(&mut self, count: usize, sink: &dyn FoldSink) -> Result<(), StorageError> {
+    fn fold_and_evict(&mut self, count: usize, sink: &dyn FoldSink) -> Result<(), StorageError> {
         let mut folded_upto = None;
         let mut outcome = Ok(());
         for block in self
@@ -732,12 +732,12 @@ mod test {
     }
 
     #[test]
-    fn fold_and_evict_folds_in_order_then_evicts() {
+    fn fold_evictable_folds_in_order_then_evicts() {
         let mut w = window(3, 1);
         fill(&mut w, 1..=10, 10, Some(10));
         let sink = RecordingSink::default();
 
-        w.fold_and_evict(&sink).unwrap();
+        w.fold_evictable(&sink).unwrap();
 
         assert_eq!(sink.folded(), (1..=7).collect::<Vec<_>>());
         assert_eq!(buffered(&w), vec![8, 9, 10]);
@@ -748,7 +748,7 @@ mod test {
     #[case::finalized_binds(5, Some(10), 5)]
     #[case::committed_binds(10, Some(4), 4)]
     #[case::no_commit_yet(10, None, 0)]
-    fn fold_and_evict_stops_at_the_smallest_bound(
+    fn fold_evictable_stops_at_the_smallest_bound(
         #[case] finalized: u64,
         #[case] committed: Option<u64>,
         #[case] folded_upto: u64,
@@ -757,7 +757,7 @@ mod test {
         fill(&mut w, 1..=10, finalized, committed);
         let sink = RecordingSink::default();
 
-        w.fold_and_evict(&sink).unwrap();
+        w.fold_evictable(&sink).unwrap();
 
         assert_eq!(sink.folded(), (1..=folded_upto).collect::<Vec<_>>());
         assert_eq!(floor_number(&w), Some(folded_upto + 1));
@@ -769,30 +769,30 @@ mod test {
         fill(&mut w, 1..=5, 5, Some(5));
         let sink = RecordingSink::default();
 
-        w.fold_and_evict(&sink).unwrap();
+        w.fold_evictable(&sink).unwrap();
 
         assert!(sink.folded().is_empty());
         assert_eq!(floor_number(&w), Some(1));
     }
 
     #[test]
-    fn fold_and_evict_on_an_empty_window_is_a_no_op() {
+    fn fold_evictable_on_an_empty_window_is_a_no_op() {
         let sink = RecordingSink::default();
 
         window(3, 1)
-            .fold_and_evict(&sink)
+            .fold_evictable(&sink)
             .unwrap();
 
         assert!(sink.folded().is_empty());
     }
 
     #[test]
-    fn fold_is_a_no_op_below_the_batch_size() {
+    fn fold_evictable_is_a_no_op_below_the_batch_size() {
         let mut w = window(3, 5);
         fill(&mut w, 1..=5, 5, Some(5));
         let sink = RecordingSink::default();
 
-        w.fold_and_evict(&sink).unwrap();
+        w.fold_evictable(&sink).unwrap();
 
         assert!(sink.folded().is_empty());
         assert_eq!(floor_number(&w), Some(1));
@@ -804,7 +804,7 @@ mod test {
         fill(&mut w, 1..=10, 10, Some(10));
         let sink = RecordingSink { fail_at: Some(4), ..Default::default() };
 
-        let res = w.fold_and_evict(&sink);
+        let res = w.fold_evictable(&sink);
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(sink.folded(), vec![1, 2, 3]);
@@ -822,7 +822,7 @@ mod test {
         fill(&mut w, 1..=10, 10, Some(10));
         let sink = RecordingSink::default();
 
-        metrics::with_local_recorder(&recorder, || w.fold_and_evict(&sink).unwrap());
+        metrics::with_local_recorder(&recorder, || w.fold_evictable(&sink).unwrap());
 
         let recorded = snapshotter
             .snapshot()

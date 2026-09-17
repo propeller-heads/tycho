@@ -158,7 +158,7 @@ impl PendingDeltas {
             "DeltaWindowInsertion"
         );
         guard.insert(message)?;
-        guard.fold_and_evict(self.sink.as_ref())?;
+        guard.fold_evictable(self.sink.as_ref())?;
         Ok(())
     }
 
