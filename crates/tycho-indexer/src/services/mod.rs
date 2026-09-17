@@ -98,6 +98,7 @@ where
         }
     }
 
+    /// Sets the retention depth and fold batch of every extractor's `DeltaWindow`.
     pub fn window_config(mut self, v: WindowConfig) -> Self {
         self.window_config = v;
         self
@@ -187,8 +188,7 @@ where
                 .map(|e_id| e_id.name.as_str()),
             self.window_config,
             Arc::new(state::window::DiscardSink),
-        )
-        .map_err(|err| ExtractionError::ServiceError(err.to_string()))?;
+        );
         info!(
             depth = self.window_config.depth,
             min_fold_batch = self.window_config.min_fold_batch,

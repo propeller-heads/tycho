@@ -41,7 +41,6 @@ use crate::{
 pub struct PendingDeltas {
     // Map with the protocol system name as key and its `DeltaWindow` as value.
     buffers: HashMap<String, Arc<Mutex<DeltaWindow>>>,
-    config: WindowConfig,
     sink: Arc<dyn FoldSink>,
 }
 
@@ -109,23 +108,21 @@ impl PendingDeltas {
     #[allow(dead_code)] // production builds the facade through `with_config`
     pub fn new<'a>(extractors: impl IntoIterator<Item = &'a str>) -> Self {
         Self::with_config(extractors, WindowConfig::default(), Arc::new(DiscardSink))
-            .expect("the default window config is valid")
     }
 
     pub fn with_config<'a>(
         extractors: impl IntoIterator<Item = &'a str>,
         config: WindowConfig,
         sink: Arc<dyn FoldSink>,
-    ) -> Result<Self> {
+    ) -> Self {
         let buffers = extractors
             .into_iter()
             .map(|e| {
                 debug!("Creating new DeltaWindow for {}", e);
-                let window = DeltaWindow::new(e.to_string(), config.depth, config.min_fold_batch)?;
-                Ok((e.to_string(), Arc::new(Mutex::new(window))))
+                (e.to_string(), Arc::new(Mutex::new(DeltaWindow::new(e.to_string(), config))))
             })
-            .collect::<Result<_>>()?;
-        Ok(Self { buffers, config, sink })
+            .collect();
+        Self { buffers, sink }
     }
 
     /// Replaces one extractor's window with an empty one. Used after a restart and after an
@@ -138,8 +135,7 @@ impl PendingDeltas {
         let mut guard = window
             .lock()
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
-        *guard =
-            DeltaWindow::new(extractor.to_string(), self.config.depth, self.config.min_fold_batch)?;
+        guard.clear();
         debug!(extractor, "PendingDeltas window reset");
         Ok(())
     }
@@ -942,8 +938,7 @@ mod test {
             ["native:extractor"],
             WindowConfig { depth: 1, min_fold_batch: 1 },
             Arc::new(DiscardSink),
-        )
-        .unwrap();
+        );
         for n in 1..=5 {
             buffer
                 .insert(native_msg(n, Some(4), n))
@@ -1254,8 +1249,7 @@ mod test {
             ["vm:extractor"],
             WindowConfig { depth: 1, min_fold_batch: 1 },
             Arc::new(DiscardSink),
-        )
-        .unwrap();
+        );
 
         let exp1 = simple_block_changes(1, None);
         let exp2 = simple_block_changes(2, None);

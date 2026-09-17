@@ -87,7 +87,7 @@ pub struct WindowConfig {
     /// Target retention depth `W` in blocks.
     pub depth: u64,
     /// Evictable blocks required before a fold runs.
-    pub min_fold_batch: u64,
+    pub min_fold_batch: usize,
 }
 
 impl Default for WindowConfig {
@@ -173,54 +173,23 @@ const SLOW_FOLD: Duration = Duration::from_millis(5);
 pub(crate) struct DeltaWindow {
     extractor: String,
     buffer: ReorgBuffer<BlockAggregatedChanges>,
-    /// Target retention depth `W` in blocks.
-    depth: u64,
+    config: WindowConfig,
     /// Highest `db_committed_block_height` seen on any inserted message. `None` until the first
     /// commit is observed; nothing is evictable before that.
     db_committed: Option<u64>,
     /// Highest `finalized_block_height` seen on any inserted message.
     finalized: Option<u64>,
-    /// Minimum number of evictable blocks required before a fold runs. With 1 every evictable
-    /// block is folded as soon as possible; larger values fold `min_fold_batch` blocks at once,
-    /// `min_fold_batch` times less often, at the cost of that many extra buffered blocks.
-    ///
-    /// Blocks become evictable in jumps of `--database-insert-batch-size` whenever the
-    /// `db_committed` term binds, so a commit batch at or above this value already groups the
-    /// folds and this knob has no further effect. It only shapes fold cadence where `tip - W`
-    /// binds, which is chains with the commit batch unset (Ethereum, Unichain).
-    min_fold_batch: u64,
 }
 
 impl DeltaWindow {
-    /// Creates an empty window with the given target retention depth `W` and fold batch size
-    /// (see [`DeltaWindow::fold_and_evict`]).
-    ///
-    /// # Errors
-    ///
-    /// `StorageError::Unexpected` when `depth` or `min_fold_batch` is 0; both must be at least 1.
-    pub(crate) fn new(
-        extractor: String,
-        depth: u64,
-        min_fold_batch: u64,
-    ) -> Result<Self, StorageError> {
-        if depth < 1 {
-            return Err(StorageError::Unexpected(format!(
-                "DeltaWindow depth must be at least 1, got {depth}"
-            )));
-        }
-        if min_fold_batch < 1 {
-            return Err(StorageError::Unexpected(format!(
-                "DeltaWindow fold batch must be at least 1, got {min_fold_batch}"
-            )));
-        }
-        Ok(Self {
-            extractor,
-            buffer: ReorgBuffer::new(),
-            depth,
-            db_committed: None,
-            finalized: None,
-            min_fold_batch,
-        })
+    /// Creates an empty window.
+    pub(crate) fn new(extractor: String, config: WindowConfig) -> Self {
+        Self { extractor, buffer: ReorgBuffer::new(), config, db_committed: None, finalized: None }
+    }
+
+    /// Empties the window and keeps its configuration.
+    pub(crate) fn clear(&mut self) {
+        *self = Self::new(std::mem::take(&mut self.extractor), self.config);
     }
 
     /// Applies one full-block message to the window.
@@ -306,8 +275,8 @@ impl DeltaWindow {
         };
         let evictable = self
             .buffer
-            .count_blocks_before(bound + 1) as u64;
-        if evictable < self.min_fold_batch {
+            .count_blocks_before(bound + 1);
+        if evictable < self.config.min_fold_batch {
             return Ok(());
         }
 
@@ -518,7 +487,7 @@ impl DeltaWindow {
         Some(
             finalized
                 .min(db_committed)
-                .min(tip.saturating_sub(self.depth)),
+                .min(tip.saturating_sub(self.config.depth)),
         )
     }
 }
@@ -559,8 +528,8 @@ mod test {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
     }
 
-    fn window(depth: u64, min_fold_batch: u64) -> DeltaWindow {
-        DeltaWindow::new(EXTRACTOR.to_string(), depth, min_fold_batch).unwrap()
+    fn window(depth: u64, min_fold_batch: usize) -> DeltaWindow {
+        DeltaWindow::new(EXTRACTOR.to_string(), WindowConfig { depth, min_fold_batch })
     }
 
     fn fill(

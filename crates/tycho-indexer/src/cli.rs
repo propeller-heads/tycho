@@ -1,11 +1,11 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{builder::TypedValueParser as _, Args, Parser, Subcommand};
 use tycho_common::{models::Chain, Bytes};
 use tycho_ethereum::rpc::{
     config::{RPCBatchingConfig, RPCRetryConfig},
     EthereumRpcClient,
 };
 
-use crate::extractor::ExtractionError;
+use crate::{extractor::ExtractionError, services::WindowConfig};
 
 /// Tycho Indexer using Substreams
 ///
@@ -58,13 +58,23 @@ pub struct GlobalArgs {
     #[clap(long, default_value = "0")]
     pub database_insert_batch_size: usize,
 
-    /// Blocks each extractor keeps in memory before folding them into the entity cache
-    #[clap(long, env, default_value = "128")]
+    /// Minimum number of blocks each extractor's delta window retains in memory
+    #[clap(
+        long,
+        env,
+        default_value_t = WindowConfig::default().depth,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     pub delta_window_depth: u64,
 
-    /// Evictable blocks that must accumulate before the window folds them
-    #[clap(long, env, default_value = "1")]
-    pub delta_window_fold_batch: u64,
+    /// Number of retired blocks the delta window collects before it folds them out in one batch
+    #[clap(
+        long,
+        env,
+        default_value_t = WindowConfig::default().min_fold_batch,
+        value_parser = clap::value_parser!(u64).range(1..).try_map(usize::try_from)
+    )]
+    pub delta_window_fold_batch: usize,
 
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
@@ -388,9 +398,8 @@ mod cli_tests {
         assert_eq!(cli, expected_args);
     }
 
-    #[tokio::test]
-    async fn test_arg_parsing_delta_window_flags() {
-        let cli = Cli::try_parse_from(vec![
+    fn args_with_delta_window(depth: &'static str, fold_batch: &'static str) -> Vec<&'static str> {
+        vec![
             "tycho-indexer",
             "--endpoint",
             "http://example.com",
@@ -405,20 +414,30 @@ mod cli_tests {
             "--rpc-max-backoff-ms",
             "10000",
             "--delta-window-depth",
-            "64",
+            depth,
             "--delta-window-fold-batch",
-            "4",
+            fold_batch,
             "index",
             "--extractors-config",
             "/opt/extractors.yaml",
             "--api_token",
             "your_api_token",
             "--enable-partial-blocks",
-        ])
-        .expect("parse errored");
+        ]
+    }
+
+    #[test]
+    fn test_arg_parsing_delta_window_flags() {
+        let cli = Cli::try_parse_from(args_with_delta_window("64", "4")).expect("parse errored");
 
         assert_eq!(cli.global_args.delta_window_depth, 64);
         assert_eq!(cli.global_args.delta_window_fold_batch, 4);
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_zero_delta_window_flags() {
+        assert!(Cli::try_parse_from(args_with_delta_window("0", "1")).is_err());
+        assert!(Cli::try_parse_from(args_with_delta_window("128", "0")).is_err());
     }
 
     #[tokio::test]
