@@ -75,15 +75,11 @@ pub(crate) trait FoldSink: Send + Sync {
     /// Blocks arrive in ascending order. Delta values are absolute, so applying the same block
     /// twice must be a no-op for implementations that tag values with their block. An error
     /// means the block was not fully applied.
-    fn apply_folded(
-        &self,
-        extractor: &str,
-        block: &BlockAggregatedChanges,
-    ) -> Result<(), StorageError>;
+    fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError>;
 }
 
 /// Retention settings shared by every extractor's [`DeltaWindow`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, DeepSizeOf)]
 pub struct WindowConfig {
     /// Target retention depth `W` in blocks.
     pub depth: u64,
@@ -101,11 +97,7 @@ impl Default for WindowConfig {
 pub(crate) struct DiscardSink;
 
 impl FoldSink for DiscardSink {
-    fn apply_folded(
-        &self,
-        _extractor: &str,
-        _block: &BlockAggregatedChanges,
-    ) -> Result<(), StorageError> {
+    fn fold(&self, _block: &BlockAggregatedChanges) -> Result<(), StorageError> {
         Ok(())
     }
 }
@@ -171,6 +163,7 @@ const SLOW_FOLD: Duration = Duration::from_millis(5);
 /// `depth` blocks. Readers that merge window deltas with database queries and assume the two are
 /// disjoint (e.g. the new-components listing, which concatenates and counts both sides) must
 /// bound window reads below by `db_committed + 1`, not by [`DeltaWindow::floor`].
+#[derive(DeepSizeOf)]
 pub(crate) struct DeltaWindow {
     extractor: String,
     buffer: ReorgBuffer<Arc<BlockAggregatedChanges>>,
@@ -258,7 +251,7 @@ impl DeltaWindow {
     ///
     /// # Errors
     ///
-    /// Any error from [`FoldSink::apply_folded`] is propagated after evicting the successfully
+    /// Any error from [`FoldSink::fold`] is propagated after evicting the successfully
     /// folded prefix. A fold error leaves the failing block buffered for the caller to decide on
     /// (see the module doc).
     pub(crate) fn fold_and_evict(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
@@ -289,7 +282,7 @@ impl DeltaWindow {
     ///
     /// # Errors
     ///
-    /// The first [`FoldSink::apply_folded`] error is returned after the window is emptied; the
+    /// The first [`FoldSink::fold`] error is returned after the window is emptied; the
     /// blocks after the failing one were not folded.
     pub(crate) fn reset(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
         let outcome = match (self.finalized, self.db_committed) {
@@ -317,7 +310,7 @@ impl DeltaWindow {
             .take(count)
         {
             let started = Instant::now();
-            let result = sink.apply_folded(&self.extractor, block);
+            let result = sink.fold(block);
             let elapsed = started.elapsed();
             histogram!("delta_window_fold_duration_ms", "extractor" => self.extractor.clone())
                 .record(elapsed.as_secs_f64() * 1000.0);
@@ -422,20 +415,15 @@ impl DeltaWindow {
     /// `blocks(None, ..)`, or they count retained committed blocks twice.
     pub(crate) fn uncommitted_blocks(
         &self,
-    ) -> Result<Box<dyn Iterator<Item = &BlockAggregatedChanges> + '_>, StorageError> {
-        let Some(tip) = self.tip() else {
-            return Ok(Box::new(std::iter::empty()));
-        };
-        match self.db_committed {
-            Some(committed) if committed >= tip.number => Ok(Box::new(std::iter::empty())),
-            Some(committed) => Ok(Box::new(
-                self.blocks(Some(BlockNumberOrTimestamp::Number(committed + 1)), None)?,
-            )),
-            None => Ok(Box::new(self.blocks(None, None)?)),
-        }
+    ) -> Result<impl Iterator<Item = &BlockAggregatedChanges>, StorageError> {
+        let committed = self.db_committed;
+        Ok(self
+            .blocks(None, None)?
+            .skip_while(move |b| committed.is_some_and(|c| b.block.number <= c)))
     }
 
     /// The newest block seen by this window, if any.
+    #[allow(dead_code)] // consumed by the state service, ENG-6293
     pub(crate) fn tip(&self) -> Option<Block> {
         self.buffer
             .newest()
@@ -518,16 +506,6 @@ impl DeltaWindow {
                 .min(db_committed)
                 .min(tip.saturating_sub(self.config.depth)),
         )
-    }
-}
-
-impl DeepSizeOf for DeltaWindow {
-    fn deep_size_of_children(&self, context: &mut deepsize::Context) -> usize {
-        // The buffered blocks dominate.
-        self.extractor
-            .deep_size_of_children(context) +
-            self.buffer
-                .deep_size_of_children(context)
     }
 }
 
@@ -696,6 +674,10 @@ mod test {
         fill(&mut w, 1..=3, 3, Some(3));
 
         assert!(numbers(w.uncommitted_blocks().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn uncommitted_blocks_are_empty_on_an_empty_window() {
         assert!(numbers(
             window(128, 1)
                 .uncommitted_blocks()
@@ -728,11 +710,7 @@ mod test {
     }
 
     impl FoldSink for RecordingSink {
-        fn apply_folded(
-            &self,
-            _extractor: &str,
-            block: &BlockAggregatedChanges,
-        ) -> Result<(), StorageError> {
+        fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
             let number = block.block.number;
             if self.fail_at == Some(number) {
                 return Err(StorageError::Unexpected(format!("fold failed at {number}")));
