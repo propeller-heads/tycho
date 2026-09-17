@@ -123,10 +123,12 @@ impl PendingDeltas {
         Self { windows, sink }
     }
 
-    /// Folds one extractor's committed blocks into the sink and empties its window.
-    fn reset_window(&self, extractor: &str) -> Result<()> {
+    /// Folds one extractor's committed blocks into the sink, then empties its window. Nothing
+    /// the window held is lost: the restarted extractor replays every block above its database
+    /// cursor.
+    fn fold_committed_and_clear(&self, extractor: &str) -> Result<()> {
         let Some(window) = self.windows.get(extractor) else {
-            warn!(extractor, "No window found for reset — extractor unknown");
+            warn!(extractor, "No window found for the restarted extractor");
             return Ok(());
         };
         let mut guard = window
@@ -134,7 +136,7 @@ impl PendingDeltas {
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
         guard.fold_committed(self.sink.as_ref())?;
         guard.clear();
-        debug!(extractor, "PendingDeltas window reset");
+        debug!(extractor, "PendingDeltas window cleared");
         Ok(())
     }
 
@@ -338,12 +340,15 @@ impl PendingDeltas {
                             extractor = %message.extractor,
                             "Failed to insert into PendingDeltas window; resetting it"
                         );
-                        self.reset_window(&message.extractor)?;
+                        self.fold_committed_and_clear(&message.extractor)?;
                     }
                 }
                 Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
-                    debug!(extractor = %extractor_name, "Resetting PendingDeltas window for extractor");
-                    self.reset_window(&extractor_name)?;
+                    debug!(
+                        extractor = %extractor_name,
+                        "Extractor restarted; folding committed blocks and clearing its window"
+                    );
+                    self.fold_committed_and_clear(&extractor_name)?;
                 }
                 None => {
                     info!("All PendingDeltas streams ended");
@@ -879,6 +884,51 @@ mod test {
             )
             .unwrap()
             .is_some()
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        folded: Mutex<Vec<u64>>,
+    }
+
+    impl FoldSink for RecordingSink {
+        fn fold(&self, block: &BlockAggregatedChanges) -> std::result::Result<(), StorageError> {
+            self.folded
+                .lock()
+                .unwrap()
+                .push(block.block.number);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_folds_committed_blocks_and_clears_the_window_when_the_extractor_restarts() {
+        let sink = Arc::new(RecordingSink::default());
+        let buffer =
+            PendingDeltas::with_config(["native:extractor"], WindowConfig::default(), sink.clone());
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.clone().run(vec![rx], start_tx));
+
+        for n in 1..=5 {
+            tx.send(DeltaCommand::Block(native_msg(n, Some(3), n)))
+                .await
+                .unwrap();
+        }
+        tx.send(DeltaCommand::ExtractorRestarted("native:extractor".to_string()))
+            .await
+            .unwrap();
+        // The restarted extractor replays from above its database cursor.
+        tx.send(DeltaCommand::Block(native_msg(4, Some(3), 4)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        pump.await.unwrap().unwrap();
+        assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2, 3]);
+        assert!(has_block(&buffer, 4));
+        assert!(!has_block(&buffer, 1) && !has_block(&buffer, 5));
     }
 
     #[tokio::test]
