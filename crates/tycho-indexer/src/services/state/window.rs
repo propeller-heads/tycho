@@ -48,6 +48,7 @@
 
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -172,7 +173,7 @@ const SLOW_FOLD: Duration = Duration::from_millis(5);
 /// bound window reads below by `db_committed + 1`, not by [`DeltaWindow::floor`].
 pub(crate) struct DeltaWindow {
     extractor: String,
-    buffer: ReorgBuffer<BlockAggregatedChanges>,
+    buffer: ReorgBuffer<Arc<BlockAggregatedChanges>>,
     config: WindowConfig,
     /// Highest `db_committed_block_height` seen on any inserted message. `None` until the first
     /// commit is observed; nothing is evictable before that.
@@ -208,12 +209,15 @@ impl DeltaWindow {
     ///   db_committed)` — the database then holds rows from the abandoned branch, and persisted
     ///   state is never rolled back.
     /// - `StorageError::NotFound` when a revert targets a hash that is not buffered.
-    pub(crate) fn insert(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
+    pub(crate) fn insert(
+        &mut self,
+        message: &Arc<BlockAggregatedChanges>,
+    ) -> Result<(), StorageError> {
         if message.revert {
             return self.revert_to(message);
         }
         self.buffer
-            .insert_block(message.clone())?;
+            .insert_block(Arc::clone(message))?;
         self.finalized = Some(
             self.finalized
                 .map_or(message.finalized_block_height, |f| f.max(message.finalized_block_height)),
@@ -381,7 +385,10 @@ impl DeltaWindow {
         start: Option<BlockNumberOrTimestamp>,
         end: Option<BlockNumberOrTimestamp>,
     ) -> Result<impl Iterator<Item = &BlockAggregatedChanges>, StorageError> {
-        self.buffer.get_block_range(start, end)
+        Ok(self
+            .buffer
+            .get_block_range(start, end)?
+            .map(Arc::as_ref))
     }
 
     /// Buffered blocks the database does not hold yet: everything above `db_committed`.
@@ -396,13 +403,9 @@ impl DeltaWindow {
         match self.db_committed {
             Some(committed) if committed >= tip.number => Ok(Box::new(std::iter::empty())),
             Some(committed) => Ok(Box::new(
-                self.buffer
-                    .get_block_range(Some(BlockNumberOrTimestamp::Number(committed + 1)), None)?,
+                self.blocks(Some(BlockNumberOrTimestamp::Number(committed + 1)), None)?,
             )),
-            None => Ok(Box::new(
-                self.buffer
-                    .get_block_range(None, None)?,
-            )),
+            None => Ok(Box::new(self.blocks(None, None)?)),
         }
     }
 
@@ -532,6 +535,10 @@ mod test {
         DeltaWindow::new(EXTRACTOR.to_string(), WindowConfig { depth, min_fold_batch })
     }
 
+    fn put(w: &mut DeltaWindow, m: BlockAggregatedChanges) -> Result<(), StorageError> {
+        w.insert(&Arc::new(m))
+    }
+
     fn fill(
         w: &mut DeltaWindow,
         range: RangeInclusive<u64>,
@@ -539,17 +546,16 @@ mod test {
         committed: Option<u64>,
     ) {
         for n in range {
-            w.insert(&msg(n, finalized, committed))
-                .unwrap();
+            put(w, msg(n, finalized, committed)).unwrap();
         }
     }
 
     #[test]
     fn insert_rejects_a_block_that_does_not_extend_the_chain() {
         let mut w = window(3, 1);
-        w.insert(&msg(1, 0, None)).unwrap();
+        put(&mut w, msg(1, 0, None)).unwrap();
 
-        let res = w.insert(&msg(3, 0, None));
+        let res = put(&mut w, msg(3, 0, None));
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(1));
@@ -603,7 +609,7 @@ mod test {
             if n == 3 || n == 5 {
                 m = with_account_delta(m, &address, n);
             }
-            w.insert(&m).unwrap();
+            put(&mut w, m).unwrap();
         }
 
         let patch = w
@@ -941,7 +947,7 @@ mod test {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 3, Some(3));
 
-        w.insert(&revert_to(3)).unwrap();
+        put(&mut w, revert_to(3)).unwrap();
 
         assert_eq!(w.tip().map(|b| b.number), Some(3));
         assert_eq!(w.finalized, Some(3));
@@ -953,7 +959,7 @@ mod test {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 3, Some(3));
 
-        let res = w.insert(&revert_to(2));
+        let res = put(&mut w, revert_to(2));
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(w.tip().map(|b| b.number), Some(5));
@@ -964,8 +970,8 @@ mod test {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 3, None);
 
-        assert!(w.insert(&revert_to(2)).is_err());
-        assert!(w.insert(&revert_to(3)).is_ok());
+        assert!(put(&mut w, revert_to(2)).is_err());
+        assert!(put(&mut w, revert_to(3)).is_ok());
     }
 
     #[test]
@@ -975,7 +981,7 @@ mod test {
         let mut unknown = revert_to(4);
         unknown.block.hash = Bytes::from(99u64).lpad(32, 0);
 
-        let res = w.insert(&unknown);
+        let res = put(&mut w, unknown);
 
         assert!(matches!(res, Err(StorageError::NotFound(_, _))));
     }
@@ -1012,9 +1018,9 @@ mod test {
     #[test]
     fn watermarks_only_rise() {
         let mut w = window(3, 1);
-        w.insert(&msg(1, 0, None)).unwrap();
-        w.insert(&msg(2, 1, Some(0))).unwrap();
-        w.insert(&msg(3, 0, None)).unwrap();
+        put(&mut w, msg(1, 0, None)).unwrap();
+        put(&mut w, msg(2, 1, Some(0))).unwrap();
+        put(&mut w, msg(3, 0, None)).unwrap();
 
         assert_eq!(w.finalized, Some(1));
         assert_eq!(w.db_committed, Some(0));

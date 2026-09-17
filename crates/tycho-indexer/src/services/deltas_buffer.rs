@@ -140,7 +140,7 @@ impl PendingDeltas {
         Ok(())
     }
 
-    fn insert(&self, message: Arc<BlockAggregatedChanges>) -> Result<()> {
+    fn insert(&self, message: &Arc<BlockAggregatedChanges>) -> Result<()> {
         let window = self
             .buffers
             .get(&message.extractor)
@@ -156,7 +156,7 @@ impl PendingDeltas {
             extractor = message.extractor,
             "DeltaWindowInsertion"
         );
-        guard.insert(&message)?;
+        guard.insert(message)?;
         guard.fold_and_evict(self.sink.as_ref())?;
         Ok(())
     }
@@ -333,14 +333,13 @@ impl PendingDeltas {
                     if message.partial_block_index.is_some() {
                         continue;
                     }
-                    let extractor = message.extractor.clone();
-                    if let Err(err) = self.insert(message) {
+                    if let Err(err) = self.insert(&message) {
                         error!(
                             error = %err,
-                            extractor = %extractor,
+                            extractor = %message.extractor,
                             "Failed to insert into PendingDeltas window; resetting it"
                         );
-                        self.reset_window(&extractor)?;
+                        self.reset_window(&message.extractor)?;
                     }
                 }
                 Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
@@ -924,7 +923,7 @@ mod test {
         let buffer = PendingDeltas::new(["native:extractor"]);
         for n in 1..=5 {
             buffer
-                .insert(native_msg(n, Some(4), n))
+                .insert(&native_msg(n, Some(4), n))
                 .unwrap();
         }
 
@@ -941,7 +940,7 @@ mod test {
         );
         for n in 1..=5 {
             buffer
-                .insert(native_msg(n, Some(4), n))
+                .insert(&native_msg(n, Some(4), n))
                 .unwrap();
         }
 
@@ -955,7 +954,7 @@ mod test {
         let buffer = PendingDeltas::new(["native:extractor"]);
         for n in 1..=5 {
             buffer
-                .insert(native_msg(n, Some(3), n * 10))
+                .insert(&native_msg(n, Some(3), n * 10))
                 .unwrap();
         }
         // The database at its committed height already holds block 3's write.
@@ -993,7 +992,7 @@ mod test {
         let buffer = PendingDeltas::new(["native:extractor"]);
         for n in 1..=5 {
             buffer
-                .insert(native_msg(n, Some(3), n))
+                .insert(&native_msg(n, Some(3), n))
                 .unwrap();
         }
 
@@ -1013,7 +1012,7 @@ mod test {
         let buffer = PendingDeltas::new(["native:extractor"]);
         for n in 1..=5 {
             buffer
-                .insert(native_msg(n, Some(3), n))
+                .insert(&native_msg(n, Some(3), n))
                 .unwrap();
         }
 
@@ -1033,7 +1032,7 @@ mod test {
         let exp: BlockAggregatedChanges = vm_block_deltas();
 
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .expect("insert failed");
 
         let reorg_buffer = buffer
@@ -1053,7 +1052,7 @@ mod test {
         let mut state = vec![native_state()]; // db state
         let buffer = PendingDeltas::new(["native:extractor"]);
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .unwrap();
         // expected state after applying buffer deltas to the given db state
         let exp1 = ProtocolComponentState::new(
@@ -1097,7 +1096,7 @@ mod test {
         let mut state = vec![vm_state()];
         let buffer = PendingDeltas::new(["vm:extractor"]);
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .unwrap();
         let address0 = Bytes::from("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05");
         let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
@@ -1217,10 +1216,10 @@ mod test {
         ];
         let buffer = PendingDeltas::new(["vm:extractor", "native:extractor"]);
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .unwrap();
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .unwrap();
 
         let new_components = buffer
@@ -1256,10 +1255,10 @@ mod test {
         let exp3 = simple_block_changes(3, Some(2));
 
         buffer
-            .insert(Arc::new(exp1.clone()))
+            .insert(&Arc::new(exp1.clone()))
             .expect("first insert failed");
         buffer
-            .insert(Arc::new(exp2.clone()))
+            .insert(&Arc::new(exp2.clone()))
             .expect("second insert failed");
 
         {
@@ -1282,7 +1281,7 @@ mod test {
         }
 
         buffer
-            .insert(Arc::new(exp3.clone()))
+            .insert(&Arc::new(exp3.clone()))
             .expect("third insert failed");
 
         let reorg_buffer = buffer
@@ -1315,10 +1314,10 @@ mod test {
     ) {
         let buffer = PendingDeltas::new(["vm:extractor", "native:extractor"]);
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .expect("vm insert failed");
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .expect("native insert failed");
 
         let version = BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap());
@@ -1347,7 +1346,7 @@ mod test {
     ) {
         let buffer = PendingDeltas::new(["native:extractor"]);
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .unwrap();
 
         let res = buffer
