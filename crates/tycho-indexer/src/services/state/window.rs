@@ -2,9 +2,9 @@
 //!
 //! The window retains roughly the last `W` blocks of [`BlockAggregatedChanges`] instead of
 //! dropping blocks as soon as the database commits them. Blocks leave the window only through
-//! [`DeltaWindow::fold_and_evict`], which folds each evicted block into a [`FoldSink`] before
-//! removing it, so no block's deltas can be lost between the window and the long-lived store
-//! behind the sink.
+//! [`DeltaWindow::fold_and_evict`] and [`DeltaWindow::reset`], which fold each evicted block into
+//! a [`FoldSink`] before removing it, so no committed block's deltas can be lost between the
+//! window and the long-lived store behind the sink.
 //!
 //! Retention rule: a block is evictable only when its number is at or below
 //! `min(finalized, db_committed, tip - W)`, the subtraction saturating.
@@ -20,31 +20,15 @@
 //!    ◄───────────────────────── ≥ W blocks ───────────────────────►
 //! ```
 //!
-//! `W` is the total window depth measured from the tip — it includes the unfinalized and
-//! uncommitted blocks, it is not extra retention on top of them. When finality or the database
-//! commit lag more than `W` blocks behind the tip, the watermark terms of the `min` govern and
-//! the window grows beyond `W` (unfinalized and uncommitted blocks are never evicted).
-//!
-//! `W` is a floor on retention, not a target. `PendingDeltas` receives `db_committed` in jumps of
-//! `--database-insert-batch-size`, so on chains where that batch exceeds `W` (Arbitrum at 1000,
-//! BSC and Polygon at 512 today) the `db_committed` term always binds and `W` never does.
+//! `W` is the total window depth measured from the tip, not extra retention on top of the
+//! unfinalized and uncommitted blocks. It is a floor, not a target: when finality or the
+//! database commit lag more than `W` blocks behind the tip, the watermark terms of the `min`
+//! govern and the window grows beyond `W`. `db_committed` advances in jumps of
+//! `--database-insert-batch-size`, so a commit batch larger than `W` always binds.
 //!
 //! Folding is batched: [`DeltaWindow::fold_and_evict`] is a no-op until at least
-//! `min_fold_batch` blocks are evictable, then folds all of them, so blocks are not folded one
-//! by one at the chain tip rate. At steady state the window size therefore oscillates between
-//! `W` and `W + min_fold_batch` blocks.
-//!
-//! - `finalized`: folded data must never be affected by a reorg; reverts purge unfolded window
-//!   blocks only.
-//! - `db_committed`: readers of the pending-deltas facade assume every uncommitted block is
-//!   buffered; the database fallback path assumes every below-floor block is in the database.
-//! - `tip - W`: the serving depth. `W = max(finality horizon, maximum version age served from
-//!   memory) + margin` (~128 on Ethereum).
-//!
-//! An error from [`DeltaWindow::insert`] or [`DeltaWindow::fold_and_evict`] means this window
-//! no longer matches the chain or the database and cannot be repaired in place. The caller
-//! resets the extractor's window, the same recovery the supervisor triggers through
-//! `ExtractorRestarted`, and keeps serving the other extractors.
+//! `min_fold_batch` blocks are evictable, then folds all of them. At steady state the window
+//! size oscillates between `W` and `W + min_fold_batch` blocks.
 
 use std::{
     collections::HashMap,
@@ -78,12 +62,14 @@ pub(crate) trait FoldSink: Send + Sync {
     fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError>;
 }
 
-/// Retention settings shared by every extractor's [`DeltaWindow`].
+/// Retention settings shared by every extractor's [`DeltaWindow`]. Both values are at least 1;
+/// the CLI enforces this.
 #[derive(Clone, Copy, Debug, DeepSizeOf)]
 pub struct WindowConfig {
-    /// Target retention depth `W` in blocks.
+    /// Retention depth `W` in blocks, a lower bound on how many blocks the window keeps.
     pub depth: u64,
-    /// Evictable blocks required before a fold runs.
+    /// Evictable blocks required before a fold runs. Only shapes fold cadence when `tip - depth`
+    /// binds; a `--database-insert-batch-size` at or above it already groups the folds.
     pub min_fold_batch: usize,
 }
 
@@ -93,7 +79,8 @@ impl Default for WindowConfig {
     }
 }
 
-/// Drops every folded block. Stands in for the entity cache until ENG-6291 lands.
+/// Drops every folded block.
+// Placeholder until the entity cache (ENG-6291) provides the real sink.
 pub(crate) struct DiscardSink;
 
 impl FoldSink for DiscardSink {
@@ -103,66 +90,56 @@ impl FoldSink for DiscardSink {
 }
 
 /// Outcome of resolving a requested version against the window contents.
-#[allow(dead_code)] // consumed by the state service, ENG-6293
 #[derive(Debug, PartialEq)]
 pub(crate) enum WindowResolution {
     /// The version maps to a block currently held in the window.
     InWindow(Block),
-    /// The version is older than the window floor; the database fallback path serves it.
+    /// The version is older than the window floor.
     BelowFloor,
     /// The version is newer than the newest block this window has seen.
     AboveTip,
 }
 
 /// One block's changes to a component, as captured from the window.
-#[allow(dead_code)] // consumed by the state service, ENG-6293
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ComponentChange {
+    /// Block number the change belongs to.
     pub block: u64,
-    pub state: Option<ProtocolComponentStateDelta>,
+    /// State delta of the block, if the block changed the component's state.
+    pub delta: Option<ProtocolComponentStateDelta>,
+    /// Token balances of the block, if the block changed the component's balances.
     pub balances: Option<HashMap<Bytes, ComponentBalance>>,
 }
 
 /// One block's changes to an account, as captured from the window.
-#[allow(dead_code)] // consumed by the state service, ENG-6293
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AccountChange {
+    /// Block number the change belongs to.
     pub block: u64,
+    /// Account delta of the block, if the block changed the account.
     pub delta: Option<AccountDelta>,
-    pub token_balances: Option<HashMap<Address, AccountBalance>>,
+    /// Token balances of the block, if the block changed the account's balances.
+    pub balances: Option<HashMap<Address, AccountBalance>>,
 }
 
 /// Window changes for a set of keys up to a version, ascending by block within each key.
-#[allow(dead_code)] // consumed by the state service, ENG-6293
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct WindowPatch {
+    /// Changes per component id.
     pub components: HashMap<String, Vec<ComponentChange>>,
+    /// Changes per account address.
     pub accounts: HashMap<Bytes, Vec<AccountChange>>,
 }
 
-/// Folds run under the facade lock every reader contends on; anything slower than this is
-/// logged. The entity cache design expects well under a millisecond.
-const SLOW_FOLD: Duration = Duration::from_millis(5);
+/// Folds slower than this are logged at `warn`.
+const SLOW_FOLD_THRESHOLD: Duration = Duration::from_millis(5);
 
-/// Fixed-depth window of block deltas for a single extractor.
+/// Window of block deltas for one extractor.
 ///
-/// Wraps the extractor's [`ReorgBuffer`] and owns the retention decision: today the buffer drains
-/// as soon as the database commits, here blocks are kept until they are finalized, committed, and
-/// deeper than the configured depth.
-///
-/// The type is `Sync` by composition but not internally synchronized: one instance lives behind
-/// the per-extractor `Arc<Mutex<..>>` owned by the pending-deltas facade, and every method relies
-/// on that lock for exclusive access.
-///
-/// The wrapped buffer is the RPC-side instance. It never calls
-/// `ReorgBuffer::drain_into_committing`, so its committing section stays empty and this window's
-/// retention is the only retention on it. Blocks leave only through
-/// [`DeltaWindow::fold_and_evict`].
-///
-/// Because committed blocks are retained, window contents and database rows overlap by up to
-/// `depth` blocks. Readers that merge window deltas with database queries and assume the two are
-/// disjoint (e.g. the new-components listing, which concatenates and counts both sides) must
-/// bound window reads below by `db_committed + 1`, not by [`DeltaWindow::floor`].
+/// Owns an RPC-side [`ReorgBuffer`] and decides retention: a block stays until it is finalized,
+/// committed, and deeper than `config.depth`. Not internally synchronized; the owner holds it
+/// behind a `Mutex`. Window and database overlap by up to `depth` blocks; readers that merge both
+/// must start window reads at `db_committed + 1` (see [`DeltaWindow::uncommitted_blocks`]).
 #[derive(DeepSizeOf)]
 pub(crate) struct DeltaWindow {
     extractor: String,
@@ -184,19 +161,17 @@ impl DeltaWindow {
     /// Applies one full-block message to the window.
     ///
     /// Regular messages must extend the buffered chain; revert messages purge the abandoned
-    /// blocks. No folding or eviction happens here — see [`DeltaWindow::fold_and_evict`].
-    ///
-    /// The message must be a full-block message; the caller filters partial-block messages.
+    /// blocks. No folding or eviction happens here — see [`DeltaWindow::fold_and_evict`]. The
+    /// caller filters partial-block messages.
     ///
     /// # Errors
-    ///
-    /// Every error leaves the window unusable (see the module doc):
     ///
     /// - `StorageError::Unexpected` when a regular message does not extend the buffered chain
     ///   (parent-hash mismatch), or when a revert would remove a block at or below `min(finalized,
     ///   db_committed)` — the database then holds rows from the abandoned branch, and persisted
-    ///   state is never rolled back.
-    /// - `StorageError::NotFound` when a revert targets a hash that is not buffered.
+    ///   state is never rolled back. The window no longer matches the extractor's chain.
+    /// - `StorageError::NotFound` when a revert targets a hash that is not buffered. The window is
+    ///   unchanged.
     pub(crate) fn insert(
         &mut self,
         message: &Arc<BlockAggregatedChanges>,
@@ -240,20 +215,15 @@ impl DeltaWindow {
         Ok(())
     }
 
-    /// Folds every evictable block into `sink`, then removes it from the window.
+    /// Folds every evictable block into `sink`, oldest first, then evicts it.
     ///
-    /// Folding is batched: when fewer than `min_fold_batch` blocks are evictable the call is a
-    /// no-op, otherwise the whole batch is folded. Fold and eviction are a single operation per
-    /// block: a block is removed only after its fold succeeded, and evicted blocks are never
-    /// returned to the caller, so no block's deltas can be lost between the window and the store
-    /// behind the sink. Folds run while the caller holds exclusive access: every facade read on
-    /// this extractor waits while a fold runs, which is why fold duration is metered.
+    /// No-op while fewer than `min_fold_batch` blocks are evictable. A block is evicted only
+    /// after its fold succeeds.
     ///
     /// # Errors
     ///
-    /// Any error from [`FoldSink::fold`] is propagated after evicting the successfully
-    /// folded prefix. A fold error leaves the failing block buffered for the caller to decide on
-    /// (see the module doc).
+    /// The first [`FoldSink::fold`] error is returned after the folded prefix is evicted; the
+    /// failing block stays in the window.
     pub(crate) fn fold_and_evict(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
         let Some(bound) = self.eviction_bound() else {
             trace!(
@@ -282,8 +252,8 @@ impl DeltaWindow {
     ///
     /// # Errors
     ///
-    /// The first [`FoldSink::fold`] error is returned after the window is emptied; the
-    /// blocks after the failing one were not folded.
+    /// The first [`FoldSink::fold`] error is returned after the window is emptied; the blocks
+    /// after the failing one were not folded.
     pub(crate) fn reset(&mut self, sink: &dyn FoldSink) -> Result<(), StorageError> {
         let outcome = match (self.finalized, self.db_committed) {
             (Some(finalized), Some(committed)) => {
@@ -314,7 +284,7 @@ impl DeltaWindow {
             let elapsed = started.elapsed();
             histogram!("delta_window_fold_duration_ms", "extractor" => self.extractor.clone())
                 .record(elapsed.as_secs_f64() * 1000.0);
-            if elapsed > SLOW_FOLD {
+            if elapsed > SLOW_FOLD_THRESHOLD {
                 warn!(
                     extractor = %self.extractor,
                     block = block.block.number,
@@ -335,66 +305,6 @@ impl DeltaWindow {
                 .drain_blocks_until(height + 1)?;
         }
         outcome
-    }
-
-    /// The oldest block number still held in the window, if any.
-    #[allow(dead_code)] // consumed by the state service, ENG-6293
-    pub(crate) fn floor(&self) -> Option<u64> {
-        self.buffer
-            .oldest()
-            .map(|m| m.block.number)
-    }
-
-    /// Collects every buffered change for the given keys up to `upto`, ascending by block. This
-    /// is the filtering the facade applies in place, returned as data so a caller can lay it
-    /// over a cache entry. The caller resolves `upto` with [`DeltaWindow::resolve`] first; a
-    /// version below the floor never reaches here.
-    #[allow(dead_code)] // consumed by the state service, ENG-6293
-    pub(crate) fn capture_patch(
-        &self,
-        components: &[&str],
-        accounts: &[Bytes],
-        upto: Option<BlockNumberOrTimestamp>,
-    ) -> Result<WindowPatch, StorageError> {
-        let mut patch = WindowPatch::default();
-        for entry in self
-            .buffer
-            .get_block_range(None, upto)?
-        {
-            let block = entry.block.number;
-            for id in components {
-                let state = entry.state_deltas.get(*id).cloned();
-                let balances = entry
-                    .component_balances
-                    .get(*id)
-                    .cloned();
-                if state.is_some() || balances.is_some() {
-                    patch
-                        .components
-                        .entry(id.to_string())
-                        .or_default()
-                        .push(ComponentChange { block, state, balances });
-                }
-            }
-            for address in accounts {
-                let delta = entry
-                    .account_deltas
-                    .get(address)
-                    .cloned();
-                let token_balances = entry
-                    .account_balances
-                    .get(address)
-                    .cloned();
-                if delta.is_some() || token_balances.is_some() {
-                    patch
-                        .accounts
-                        .entry(address.clone())
-                        .or_default()
-                        .push(AccountChange { block, delta, token_balances });
-                }
-            }
-        }
-        Ok(patch)
     }
 
     /// Buffered blocks between two versions, ascending. Same bound semantics as
@@ -422,56 +332,11 @@ impl DeltaWindow {
             .skip_while(move |b| committed.is_some_and(|c| b.block.number <= c)))
     }
 
-    /// The newest block seen by this window, if any.
-    #[allow(dead_code)] // consumed by the state service, ENG-6293
-    pub(crate) fn tip(&self) -> Option<Block> {
-        self.buffer
-            .newest()
-            .map(|m| m.block.clone())
-    }
-
-    /// Resolves a requested version to a servable window block.
+    /// Commit status of `version`.
     ///
-    /// The default request ("now", a timestamp newer than the tip) clamps to the tip. A
-    /// timestamp between two buffered blocks rounds up to the first block whose timestamp is not
-    /// older than the request, matching the buffer's range lookup today. Versions below the
-    /// floor report [`WindowResolution::BelowFloor`] and are served by the database fallback
-    /// path; versions above the tip report [`WindowResolution::AboveTip`]. No database lookup is
-    /// involved.
-    #[allow(dead_code)] // consumed by the state service, ENG-6293
-    pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
-        let (Some(oldest), Some(tip)) = (self.buffer.oldest(), self.buffer.newest()) else {
-            return WindowResolution::BelowFloor;
-        };
-        if version.less_than(&oldest.block) {
-            return WindowResolution::BelowFloor;
-        }
-        if version.greater_than(&tip.block) {
-            return match version {
-                BlockNumberOrTimestamp::Number(_) => WindowResolution::AboveTip,
-                BlockNumberOrTimestamp::Timestamp(_) => {
-                    WindowResolution::InWindow(tip.block.clone())
-                }
-            };
-        }
-        let block = self
-            .buffer
-            .get_block_range(None, None)
-            .ok()
-            .and_then(|mut blocks| blocks.find(|b| !version.greater_than(&b.block)))
-            .map(|b| b.block.clone());
-        match block {
-            Some(block) => WindowResolution::InWindow(block),
-            None => WindowResolution::AboveTip,
-        }
-    }
-
-    /// Commit status of `version` derived from the database-commit watermark.
-    ///
-    /// Deliberately not `ReorgBuffer::get_commit_status`: that reports any version at or below
-    /// the oldest buffered block as `Committed`, which is off by one today (the oldest buffered
-    /// block is `db_committed + 1`) and would be off by the whole window depth once committed
-    /// blocks are retained.
+    /// `Unseen` above the tip. `Committed` for versions at or below `db_committed`, or below the
+    /// floor when no committed block is in the window. `Uncommitted` otherwise. `None` on an
+    /// empty window.
     pub(crate) fn commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let oldest = &self.buffer.oldest()?.block;
         let tip = &self.buffer.newest()?.block;
@@ -495,8 +360,7 @@ impl DeltaWindow {
     }
 
     /// Highest block number that may be folded-and-evicted. `None` when the window is empty or
-    /// no database commit has been observed yet; the caller logs both watermarks and the tip so
-    /// the two cases are distinguishable.
+    /// no database commit has been observed yet.
     fn eviction_bound(&self) -> Option<u64> {
         let tip = self.buffer.newest()?.block.number;
         let finalized = self.finalized?;
@@ -506,6 +370,103 @@ impl DeltaWindow {
                 .min(db_committed)
                 .min(tip.saturating_sub(self.config.depth)),
         )
+    }
+}
+
+#[allow(dead_code)] // consumed by the state service, ENG-6293
+impl DeltaWindow {
+    /// The oldest block still held in the window, if any.
+    pub(crate) fn floor(&self) -> Option<Block> {
+        self.buffer
+            .oldest()
+            .map(|m| m.block.clone())
+    }
+
+    /// The newest block held in the window, if any.
+    pub(crate) fn tip(&self) -> Option<Block> {
+        self.buffer
+            .newest()
+            .map(|m| m.block.clone())
+    }
+
+    /// Every buffered change to `components` and `accounts` up to `upto`, ascending by block.
+    /// Keys with no change are absent. An `upto` below the floor yields the floor block alone;
+    /// resolve it first with [`DeltaWindow::resolve`] if that matters.
+    pub(crate) fn capture_patch(
+        &self,
+        components: &[&str],
+        accounts: &[Bytes],
+        upto: Option<BlockNumberOrTimestamp>,
+    ) -> Result<WindowPatch, StorageError> {
+        let mut patch = WindowPatch::default();
+        for entry in self.blocks(None, upto)? {
+            let block = entry.block.number;
+            for id in components {
+                let delta = entry.state_deltas.get(*id).cloned();
+                let balances = entry
+                    .component_balances
+                    .get(*id)
+                    .cloned();
+                if delta.is_some() || balances.is_some() {
+                    patch
+                        .components
+                        .entry(id.to_string())
+                        .or_default()
+                        .push(ComponentChange { block, delta, balances });
+                }
+            }
+            for address in accounts {
+                let delta = entry
+                    .account_deltas
+                    .get(address)
+                    .cloned();
+                let balances = entry
+                    .account_balances
+                    .get(address)
+                    .cloned();
+                if delta.is_some() || balances.is_some() {
+                    patch
+                        .accounts
+                        .entry(address.clone())
+                        .or_default()
+                        .push(AccountChange { block, delta, balances });
+                }
+            }
+        }
+        Ok(patch)
+    }
+
+    /// Resolves a requested version to a servable window block.
+    ///
+    /// A timestamp newer than the tip clamps to the tip. A timestamp between two buffered blocks
+    /// rounds up to the first block whose timestamp is not older than the request, like
+    /// [`ReorgBuffer::get_block_range`]. Versions below the floor report
+    /// [`WindowResolution::BelowFloor`]; block numbers above the tip report
+    /// [`WindowResolution::AboveTip`].
+    pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
+        let (Some(oldest), Some(tip)) = (self.buffer.oldest(), self.buffer.newest()) else {
+            return WindowResolution::BelowFloor;
+        };
+        if version.less_than(&oldest.block) {
+            return WindowResolution::BelowFloor;
+        }
+        if version.greater_than(&tip.block) {
+            return match version {
+                BlockNumberOrTimestamp::Number(_) => WindowResolution::AboveTip,
+                BlockNumberOrTimestamp::Timestamp(_) => {
+                    WindowResolution::InWindow(tip.block.clone())
+                }
+            };
+        }
+        let block = self
+            .blocks(None, None)
+            .ok()
+            .and_then(|mut blocks| blocks.find(|b| !version.greater_than(&b.block)))
+            .map(|b| b.block.clone());
+        match block {
+            Some(block) => WindowResolution::InWindow(block),
+            None => WindowResolution::AboveTip,
+        }
     }
 }
 
@@ -525,7 +486,7 @@ mod test {
         testing::aggregated_changes(EXTRACTOR, number, finalized, committed)
     }
 
-    fn revert_to(number: u64) -> BlockAggregatedChanges {
+    fn revert_msg(number: u64) -> BlockAggregatedChanges {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
     }
 
@@ -601,7 +562,7 @@ mod test {
     }
 
     fn floor_number(w: &DeltaWindow) -> Option<u64> {
-        w.floor()
+        w.floor().map(|b| b.number)
     }
 
     fn tip_number(w: &DeltaWindow) -> Option<u64> {
@@ -678,7 +639,7 @@ mod test {
         assert_eq!(account_blocks, vec![3, 5]);
         assert!(patch.components["c1"]
             .iter()
-            .all(|c| c.state.is_some() && c.balances.is_none()));
+            .all(|c| c.delta.is_some() && c.balances.is_none()));
     }
 
     #[test]
@@ -694,11 +655,11 @@ mod test {
 
         assert_eq!(
             patch.components["c1"],
-            vec![ComponentChange { block: 1, state: None, balances: Some(HashMap::new()) }]
+            vec![ComponentChange { block: 1, delta: None, balances: Some(HashMap::new()) }]
         );
         assert_eq!(
             patch.accounts[&address],
-            vec![AccountChange { block: 2, delta: None, token_balances: Some(HashMap::new()) }]
+            vec![AccountChange { block: 2, delta: None, balances: Some(HashMap::new()) }]
         );
     }
 
@@ -974,7 +935,7 @@ mod test {
         let mut w = window(3, 1);
         assert_eq!(w.floor(), None);
         fill(&mut w, 4..=6, 0, None);
-        assert_eq!(w.floor(), Some(4));
+        assert_eq!(w.floor(), Some(testing::block(4)));
     }
 
     #[rstest]
@@ -1023,7 +984,7 @@ mod test {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 3, Some(3));
 
-        put(&mut w, revert_to(3)).unwrap();
+        put(&mut w, revert_msg(3)).unwrap();
 
         assert_eq!(tip_number(&w), Some(3));
         assert_eq!(
@@ -1037,7 +998,7 @@ mod test {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 3, Some(3));
 
-        let res = put(&mut w, revert_to(2));
+        let res = put(&mut w, revert_msg(2));
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
         assert_eq!(tip_number(&w), Some(5));
@@ -1048,15 +1009,15 @@ mod test {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 3, None);
 
-        assert!(put(&mut w, revert_to(2)).is_err());
-        assert!(put(&mut w, revert_to(3)).is_ok());
+        assert!(put(&mut w, revert_msg(2)).is_err());
+        assert!(put(&mut w, revert_msg(3)).is_ok());
     }
 
     #[test]
     fn revert_to_an_unknown_hash_is_not_found() {
         let mut w = window(3, 1);
         fill(&mut w, 1..=5, 1, Some(1));
-        let mut unknown = revert_to(4);
+        let mut unknown = revert_msg(4);
         unknown.block.hash = Bytes::from(99u64).lpad(32, 0);
 
         let res = put(&mut w, unknown);
@@ -1072,7 +1033,7 @@ mod test {
         put(&mut w, msg(3, 0, None)).unwrap();
 
         // `finalized` stayed at 2: a revert below it is still rejected.
-        assert!(put(&mut w, revert_to(1)).is_err());
+        assert!(put(&mut w, revert_msg(1)).is_err());
         // `db_committed` stayed at 2.
         assert_eq!(
             w.commit_status(BlockNumberOrTimestamp::Number(2)),

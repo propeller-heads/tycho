@@ -29,24 +29,21 @@ use crate::{
     services::state::window::{DeltaWindow, DiscardSink, FoldSink, WindowConfig},
 };
 
-/// The `PendingDeltas` struct manages access to the reorg buffers maintained by each extractor.
+/// Facade over one [`DeltaWindow`] per extractor.
 ///
-/// The main responsibilities of `PendingDeltas` include:
-/// - Inserting new blocks and deltas into the correct `ReorgBuffer`.
-/// - Managing and applying deltas to state data, which includes merging buffered changes with data
-///   fetched from the database.
-/// - Retrieving commit status for blocks, which is used to determine whether to fetch data from the
-///   database and/or from the buffer.
+/// Inserts full-block messages and folds evictable blocks into the sink; merges window deltas over
+/// database state; reports commit status so RPC handlers know whether to read the database, the
+/// window, or both.
 #[derive(Clone)]
 pub struct PendingDeltas {
-    // Map with the protocol system name as key and its `DeltaWindow` as value.
-    buffers: HashMap<String, Arc<Mutex<DeltaWindow>>>,
+    /// Keyed by protocol system name.
+    windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
     sink: Arc<dyn FoldSink>,
 }
 
 impl DeepSizeOf for PendingDeltas {
     fn deep_size_of_children(&self, context: &mut deepsize::Context) -> usize {
-        self.buffers
+        self.windows
             .deep_size_of_children(context)
     }
 }
@@ -110,24 +107,25 @@ impl PendingDeltas {
         Self::with_config(extractors, WindowConfig::default(), Arc::new(DiscardSink))
     }
 
+    /// One empty window per extractor, all with the same `config`, folding into `sink`.
     pub fn with_config<'a>(
         extractors: impl IntoIterator<Item = &'a str>,
         config: WindowConfig,
         sink: Arc<dyn FoldSink>,
     ) -> Self {
-        let buffers = extractors
+        let windows = extractors
             .into_iter()
             .map(|e| {
                 debug!("Creating new DeltaWindow for {}", e);
                 (e.to_string(), Arc::new(Mutex::new(DeltaWindow::new(e.to_string(), config))))
             })
             .collect();
-        Self { buffers, sink }
+        Self { windows, sink }
     }
 
     /// Folds one extractor's committed blocks into the sink and empties its window.
     fn reset_window(&self, extractor: &str) -> Result<()> {
-        let Some(window) = self.buffers.get(extractor) else {
+        let Some(window) = self.windows.get(extractor) else {
             warn!(extractor, "No window found for reset — extractor unknown");
             return Ok(());
         };
@@ -139,9 +137,10 @@ impl PendingDeltas {
         Ok(())
     }
 
+    /// Inserts the message into its extractor's window and folds evictable blocks into the sink.
     fn insert(&self, message: &Arc<BlockAggregatedChanges>) -> Result<()> {
         let window = self
-            .buffers
+            .windows
             .get(&message.extractor)
             .ok_or_else(|| PendingDeltasError::UnknownExtractor(message.extractor.clone()))?;
         let mut guard = window.lock().map_err(|e| {
@@ -169,7 +168,7 @@ impl PendingDeltas {
         let mut change_found = false;
 
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -213,7 +212,7 @@ impl PendingDeltas {
         let mut change_found = false;
 
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -263,7 +262,7 @@ impl PendingDeltas {
         version: Option<BlockNumberOrTimestamp>,
     ) -> Result<Account> {
         let mut account: Option<Account> = None;
-        for buffer in self.buffers.values() {
+        for buffer in self.windows.values() {
             let guard = buffer
                 .lock()
                 .map_err(|e| PendingDeltasError::LockError("VM".to_string(), e.to_string()))?;
@@ -469,7 +468,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         let mut new_components = Vec::new();
 
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -520,7 +519,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         protocol_system: &str,
     ) -> Result<Option<CommitStatus>> {
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -539,7 +538,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         protocol_system: &str,
     ) -> Result<Option<BlockAggregatedChanges>> {
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -1050,7 +1049,7 @@ mod test {
             .expect("insert failed");
 
         let reorg_buffer = buffer
-            .buffers
+            .windows
             .get("vm:extractor")
             .expect("extractor buffer missing");
         let binding = reorg_buffer.lock().unwrap();
@@ -1278,7 +1277,7 @@ mod test {
 
         {
             let reorg_buffer = buffer
-                .buffers
+                .windows
                 .get("vm:extractor")
                 .expect("extractor buffer missing");
             let guard = reorg_buffer
@@ -1300,7 +1299,7 @@ mod test {
             .expect("third insert failed");
 
         let reorg_buffer = buffer
-            .buffers
+            .windows
             .get("vm:extractor")
             .expect("extractor buffer missing");
         let guard = reorg_buffer

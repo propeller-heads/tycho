@@ -131,7 +131,7 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    state is always on the canonical chain.
 
 `PendingDeltas` (RPC side) mirrors this through its per-extractor `DeltaWindow`, using the
-strict hash-only `purge` on the block named by the broadcast revert message. A revert at or
+strict hash-only `purge` on the block named by the broadcast revert message. A revert to a block
 below `min(finalized, db_committed)` is an error: the pump then resets that extractor's window
 and keeps serving the others.
 
