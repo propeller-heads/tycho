@@ -9,6 +9,7 @@ mod ekubo;
 mod ekubo_v3;
 mod erc_4626;
 mod etherfi;
+mod euclid;
 mod fermiswap;
 mod fluid_v1;
 mod hashflow;

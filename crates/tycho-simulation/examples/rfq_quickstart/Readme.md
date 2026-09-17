@@ -25,6 +25,10 @@ export NATIVE_API_KEY=<your-native-api-key>
 
 export METRIC_API_URL=<optional-custom-metric-api-url>
 export METRIC_API_KEY=<optional-metric-api-key>
+
+export EUCLID_ENABLED=true # Euclid's levels stream is public
+export EUCLID_API_KEY=<optional-euclid-firm-quote-key>
+export EUCLID_API_URL=<optional-custom-euclid-api-url>
 ```
 
 Then, you can run the example with:
