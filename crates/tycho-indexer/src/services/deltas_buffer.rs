@@ -570,11 +570,7 @@ mod test {
     };
 
     use super::*;
-    use crate::{
-        extractor::models::fixtures,
-        services::state::window::{DiscardSink, WindowConfig},
-        testing::block,
-    };
+    use crate::{extractor::models::fixtures, testing, testing::block};
 
     fn vm_state() -> Account {
         Account::new(
@@ -857,27 +853,21 @@ mod test {
         }
     }
 
-    fn state_delta(id: &str, x: u64) -> ProtocolComponentStateDelta {
-        ProtocolComponentStateDelta {
-            component_id: id.to_string(),
-            updated_attributes: HashMap::from([("x".to_string(), Bytes::from(x))]),
-            deleted_attributes: HashSet::new(),
-            ..Default::default()
-        }
-    }
-
     fn native_msg(number: u64, committed: Option<u64>, x: u64) -> Arc<BlockAggregatedChanges> {
         Arc::new(BlockAggregatedChanges {
-            extractor: "native:extractor".to_string(),
-            block: block(number),
-            finalized_block_height: number,
-            db_committed_block_height: committed,
             new_protocol_components: HashMap::from([(
                 format!("new{number}"),
                 ProtocolComponent { id: format!("new{number}"), ..Default::default() },
             )]),
-            state_deltas: HashMap::from([("c1".to_string(), state_delta("c1", x))]),
-            ..Default::default()
+            state_deltas: HashMap::from([("c1".to_string(), testing::state_delta("c1", x))]),
+            ..testing::aggregated_changes("native:extractor", number, number, committed)
+        })
+    }
+
+    fn native_revert(number: u64) -> Arc<BlockAggregatedChanges> {
+        Arc::new(BlockAggregatedChanges {
+            revert: true,
+            ..testing::aggregated_changes("native:extractor", number, 0, None)
         })
     }
 
@@ -906,15 +896,18 @@ mod test {
         tx.send(DeltaCommand::Block(native_msg(3, None, 3)))
             .await
             .unwrap();
-        // First block of the fresh window.
+        // First blocks of the fresh window.
         tx.send(DeltaCommand::Block(native_msg(7, None, 7)))
+            .await
+            .unwrap();
+        tx.send(DeltaCommand::Block(native_msg(8, None, 8)))
             .await
             .unwrap();
         drop(tx);
 
         pump.await.unwrap().unwrap();
-        assert!(has_block(&buffer, 7));
-        assert!(!has_block(&buffer, 1));
+        assert!(has_block(&buffer, 7) && has_block(&buffer, 8));
+        assert!(!has_block(&buffer, 1) && !has_block(&buffer, 3));
     }
 
     #[test]
@@ -931,7 +924,7 @@ mod test {
     }
 
     #[test]
-    fn depth_one_drains_like_the_old_buffer() {
+    fn depth_one_retains_only_the_tip() {
         let buffer = PendingDeltas::with_config(
             ["native:extractor"],
             WindowConfig { depth: 1, min_fold_batch: 1 },
@@ -946,6 +939,28 @@ mod test {
         // bound = min(finalized 5, committed 4, tip 5 - 1) = 4
         assert!(!has_block(&buffer, 4));
         assert!(has_block(&buffer, 5));
+    }
+
+    #[test]
+    fn a_revert_purges_the_abandoned_blocks_and_keeps_the_commit_status() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(3), n))
+                .unwrap();
+        }
+
+        buffer
+            .insert(&native_revert(3))
+            .unwrap();
+
+        assert!(has_block(&buffer, 3) && !has_block(&buffer, 4));
+        assert_eq!(
+            buffer
+                .get_block_commit_status(BlockNumberOrTimestamp::Number(3), "native:extractor")
+                .unwrap(),
+            Some(CommitStatus::Committed)
+        );
     }
 
     #[test]
@@ -1243,6 +1258,7 @@ mod test {
 
     #[test]
     fn test_insert_respects_db_committed_height() {
+        // depth 1 alone would allow evicting up to block 2; the commit height must hold it back
         let buffer = PendingDeltas::with_config(
             ["vm:extractor"],
             WindowConfig { depth: 1, min_fold_batch: 1 },
@@ -1251,7 +1267,7 @@ mod test {
 
         let exp1 = simple_block_changes(1, None);
         let exp2 = simple_block_changes(2, None);
-        let exp3 = simple_block_changes(3, Some(2));
+        let exp3 = simple_block_changes(3, Some(1));
 
         buffer
             .insert(&Arc::new(exp1.clone()))
@@ -1295,7 +1311,7 @@ mod test {
             .expect("Failed to get block range")
             .collect();
 
-        assert_eq!(block_numbers, vec![&exp3], "blocks <= commit height should be drained");
+        assert_eq!(block_numbers, vec![&exp2, &exp3], "blocks <= commit height should be drained");
     }
 
     use rstest::rstest;

@@ -511,7 +511,7 @@ impl DeltaWindow {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashSet, ops::RangeInclusive, str::FromStr};
+    use std::{ops::RangeInclusive, str::FromStr};
 
     use rstest::rstest;
     use tycho_common::models::{Chain, ChangeType};
@@ -522,17 +522,55 @@ mod test {
     const EXTRACTOR: &str = "ex";
 
     fn msg(number: u64, finalized: u64, committed: Option<u64>) -> BlockAggregatedChanges {
-        BlockAggregatedChanges {
-            extractor: EXTRACTOR.to_string(),
-            block: testing::block(number),
-            finalized_block_height: finalized,
-            db_committed_block_height: committed,
-            ..Default::default()
-        }
+        testing::aggregated_changes(EXTRACTOR, number, finalized, committed)
     }
 
     fn revert_to(number: u64) -> BlockAggregatedChanges {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
+    }
+
+    fn with_component_delta(
+        mut m: BlockAggregatedChanges,
+        id: &str,
+        x: u64,
+    ) -> BlockAggregatedChanges {
+        m.state_deltas
+            .insert(id.to_string(), testing::state_delta(id, x));
+        m
+    }
+
+    fn with_component_balance(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.component_balances
+            .insert(id.to_string(), HashMap::new());
+        m
+    }
+
+    fn with_account_delta(
+        mut m: BlockAggregatedChanges,
+        address: &Bytes,
+        x: u64,
+    ) -> BlockAggregatedChanges {
+        m.account_deltas.insert(
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                fixtures::optional_slots([(1, x)]),
+                None,
+                None,
+                ChangeType::Update,
+            ),
+        );
+        m
+    }
+
+    fn with_account_balance(
+        mut m: BlockAggregatedChanges,
+        address: &Bytes,
+    ) -> BlockAggregatedChanges {
+        m.account_balances
+            .insert(address.clone(), HashMap::new());
+        m
     }
 
     fn window(depth: u64, min_fold_batch: usize) -> DeltaWindow {
@@ -554,6 +592,45 @@ mod test {
         }
     }
 
+    fn numbers<'a>(blocks: impl Iterator<Item = &'a BlockAggregatedChanges>) -> Vec<u64> {
+        blocks.map(|b| b.block.number).collect()
+    }
+
+    fn buffered(w: &DeltaWindow) -> Vec<u64> {
+        numbers(w.blocks(None, None).unwrap())
+    }
+
+    fn floor_number(w: &DeltaWindow) -> Option<u64> {
+        w.floor()
+    }
+
+    fn tip_number(w: &DeltaWindow) -> Option<u64> {
+        w.tip().map(|b| b.number)
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        folded: std::sync::Mutex<Vec<u64>>,
+        fail_at: Option<u64>,
+    }
+
+    impl RecordingSink {
+        fn folded(&self) -> Vec<u64> {
+            self.folded.lock().unwrap().clone()
+        }
+    }
+
+    impl FoldSink for RecordingSink {
+        fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
+            let number = block.block.number;
+            if self.fail_at == Some(number) {
+                return Err(StorageError::Unexpected(format!("fold failed at {number}")));
+            }
+            self.folded.lock().unwrap().push(number);
+            Ok(())
+        }
+    }
+
     #[test]
     fn insert_rejects_a_block_that_does_not_extend_the_chain() {
         let mut w = window(3, 1);
@@ -562,43 +639,7 @@ mod test {
         let res = put(&mut w, msg(3, 0, None));
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
-        assert_eq!(w.tip().map(|b| b.number), Some(1));
-    }
-
-    fn with_component_delta(
-        mut m: BlockAggregatedChanges,
-        id: &str,
-        x: u64,
-    ) -> BlockAggregatedChanges {
-        m.state_deltas.insert(
-            id.to_string(),
-            ProtocolComponentStateDelta {
-                component_id: id.to_string(),
-                updated_attributes: HashMap::from([("x".to_string(), Bytes::from(x))]),
-                deleted_attributes: HashSet::new(),
-                ..Default::default()
-            },
-        );
-        m
-    }
-
-    fn with_account_delta(
-        mut m: BlockAggregatedChanges,
-        address: &Bytes,
-        x: u64,
-    ) -> BlockAggregatedChanges {
-        m.account_deltas.insert(
-            address.clone(),
-            AccountDelta::new(
-                Chain::Ethereum,
-                address.clone(),
-                fixtures::optional_slots([(1, x)]),
-                None,
-                None,
-                ChangeType::Update,
-            ),
-        );
-        m
+        assert_eq!(tip_number(&w), Some(1));
     }
 
     #[test]
@@ -641,15 +682,50 @@ mod test {
     }
 
     #[test]
+    fn capture_patch_captures_balance_only_changes() {
+        let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
+        let mut w = window(128, 1);
+        put(&mut w, with_component_balance(msg(1, 0, None), "c1")).unwrap();
+        put(&mut w, with_account_balance(msg(2, 0, None), &address)).unwrap();
+
+        let patch = w
+            .capture_patch(&["c1"], std::slice::from_ref(&address), None)
+            .unwrap();
+
+        assert_eq!(
+            patch.components["c1"],
+            vec![ComponentChange { block: 1, state: None, balances: Some(HashMap::new()) }]
+        );
+        assert_eq!(
+            patch.accounts[&address],
+            vec![AccountChange { block: 2, delta: None, token_balances: Some(HashMap::new()) }]
+        );
+    }
+
+    #[test]
+    fn capture_patch_below_the_floor_yields_the_floor_block_alone() {
+        let mut w = window(128, 1);
+        for n in 5..=7u64 {
+            put(&mut w, with_component_delta(msg(n, 0, None), "c1", n)).unwrap();
+        }
+
+        let patch = w
+            .capture_patch(&["c1"], &[], Some(BlockNumberOrTimestamp::Number(2)))
+            .unwrap();
+
+        let blocks: Vec<u64> = patch.components["c1"]
+            .iter()
+            .map(|c| c.block)
+            .collect();
+        assert_eq!(blocks, vec![5]);
+    }
+
+    #[test]
     fn capture_patch_on_an_empty_window_is_empty() {
         let patch = window(128, 1)
             .capture_patch(&["c1"], &[], None)
             .unwrap();
         assert!(patch.components.is_empty() && patch.accounts.is_empty());
-    }
-
-    fn numbers<'a>(blocks: impl Iterator<Item = &'a BlockAggregatedChanges>) -> Vec<u64> {
-        blocks.map(|b| b.block.number).collect()
     }
 
     #[test]
@@ -687,48 +763,6 @@ mod test {
     }
 
     #[test]
-    fn blocks_delegates_to_the_buffer_range() {
-        let mut w = window(128, 1);
-        fill(&mut w, 1..=10, 10, Some(6));
-
-        let upto_five = w
-            .blocks(None, Some(BlockNumberOrTimestamp::Number(5)))
-            .unwrap();
-        assert_eq!(numbers(upto_five), vec![1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn window_config_defaults_match_the_epic() {
-        let config = WindowConfig::default();
-        assert_eq!((config.depth, config.min_fold_batch), (128, 1));
-    }
-
-    #[derive(Default)]
-    struct RecordingSink {
-        folded: std::sync::Mutex<Vec<u64>>,
-        fail_at: Option<u64>,
-    }
-
-    impl FoldSink for RecordingSink {
-        fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
-            let number = block.block.number;
-            if self.fail_at == Some(number) {
-                return Err(StorageError::Unexpected(format!("fold failed at {number}")));
-            }
-            self.folded.lock().unwrap().push(number);
-            Ok(())
-        }
-    }
-
-    fn buffered(w: &DeltaWindow) -> Vec<u64> {
-        w.buffer
-            .get_block_range(None, None)
-            .unwrap()
-            .map(|b| b.block.number)
-            .collect()
-    }
-
-    #[test]
     fn fold_and_evict_folds_in_order_then_evicts() {
         let mut w = window(3, 1);
         fill(&mut w, 1..=10, 10, Some(10));
@@ -736,20 +770,51 @@ mod test {
 
         w.fold_and_evict(&sink).unwrap();
 
-        assert_eq!(*sink.folded.lock().unwrap(), (1..=7).collect::<Vec<_>>());
+        assert_eq!(sink.folded(), (1..=7).collect::<Vec<_>>());
         assert_eq!(buffered(&w), vec![8, 9, 10]);
     }
 
-    #[test]
-    fn nothing_above_the_bound_is_folded() {
+    #[rstest]
+    #[case::depth_binds(10, Some(10), 7)]
+    #[case::finalized_binds(5, Some(10), 5)]
+    #[case::committed_binds(10, Some(4), 4)]
+    #[case::no_commit_yet(10, None, 0)]
+    fn fold_and_evict_stops_at_the_smallest_bound(
+        #[case] finalized: u64,
+        #[case] committed: Option<u64>,
+        #[case] folded_upto: u64,
+    ) {
         let mut w = window(3, 1);
-        fill(&mut w, 1..=10, 5, Some(10));
+        fill(&mut w, 1..=10, finalized, committed);
         let sink = RecordingSink::default();
 
         w.fold_and_evict(&sink).unwrap();
 
-        assert_eq!(*sink.folded.lock().unwrap(), (1..=5).collect::<Vec<_>>());
-        assert_eq!(w.floor(), Some(6));
+        assert_eq!(sink.folded(), (1..=folded_upto).collect::<Vec<_>>());
+        assert_eq!(floor_number(&w), Some(folded_upto + 1));
+    }
+
+    #[test]
+    fn nothing_is_folded_on_a_chain_shorter_than_the_depth() {
+        let mut w = window(20, 1);
+        fill(&mut w, 1..=5, 5, Some(5));
+        let sink = RecordingSink::default();
+
+        w.fold_and_evict(&sink).unwrap();
+
+        assert!(sink.folded().is_empty());
+        assert_eq!(floor_number(&w), Some(1));
+    }
+
+    #[test]
+    fn fold_and_evict_on_an_empty_window_is_a_no_op() {
+        let sink = RecordingSink::default();
+
+        window(3, 1)
+            .fold_and_evict(&sink)
+            .unwrap();
+
+        assert!(sink.folded().is_empty());
     }
 
     #[test]
@@ -760,20 +825,8 @@ mod test {
 
         w.fold_and_evict(&sink).unwrap();
 
-        assert!(sink.folded.lock().unwrap().is_empty());
-        assert_eq!(w.floor(), Some(1));
-    }
-
-    #[test]
-    fn fold_is_a_no_op_before_the_first_commit() {
-        let mut w = window(3, 1);
-        fill(&mut w, 1..=10, 10, None);
-        let sink = RecordingSink::default();
-
-        w.fold_and_evict(&sink).unwrap();
-
-        assert!(sink.folded.lock().unwrap().is_empty());
-        assert_eq!(w.floor(), Some(1));
+        assert!(sink.folded().is_empty());
+        assert_eq!(floor_number(&w), Some(1));
     }
 
     #[test]
@@ -785,59 +838,8 @@ mod test {
         let res = w.fold_and_evict(&sink);
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
-        assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2, 3]);
-        assert_eq!(w.floor(), Some(4));
-    }
-
-    #[test]
-    fn no_block_is_lost_between_window_and_sink() {
-        let mut w = window(3, 1);
-        fill(&mut w, 1..=10, 10, Some(10));
-        let sink = RecordingSink::default();
-
-        w.fold_and_evict(&sink).unwrap();
-
-        let mut all = sink.folded.lock().unwrap().clone();
-        all.extend(buffered(&w));
-        assert_eq!(all, (1..=10).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn reset_folds_committed_blocks_beyond_the_depth_then_empties_the_window() {
-        let mut w = window(3, 1);
-        fill(&mut w, 1..=10, 8, Some(10));
-        let sink = RecordingSink::default();
-
-        w.reset(&sink).unwrap();
-
-        assert_eq!(*sink.folded.lock().unwrap(), (1..=8).collect::<Vec<_>>());
-        assert!(buffered(&w).is_empty());
-        assert_eq!(w.commit_status(BlockNumberOrTimestamp::Number(1)), None);
-    }
-
-    #[test]
-    fn reset_before_the_first_commit_folds_nothing() {
-        let mut w = window(3, 1);
-        fill(&mut w, 1..=5, 5, None);
-        let sink = RecordingSink::default();
-
-        w.reset(&sink).unwrap();
-
-        assert!(sink.folded.lock().unwrap().is_empty());
-        assert!(buffered(&w).is_empty());
-    }
-
-    #[test]
-    fn reset_empties_the_window_even_when_a_fold_fails() {
-        let mut w = window(3, 1);
-        fill(&mut w, 1..=5, 5, Some(5));
-        let sink = RecordingSink { fail_at: Some(3), ..Default::default() };
-
-        let res = w.reset(&sink);
-
-        assert!(matches!(res, Err(StorageError::Unexpected(_))));
-        assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2]);
-        assert!(buffered(&w).is_empty());
+        assert_eq!(sink.folded(), vec![1, 2, 3]);
+        assert_eq!(floor_number(&w), Some(4));
     }
 
     // `metrics::with_local_recorder` takes a sync closure; the window is sync, so no runtime.
@@ -868,13 +870,41 @@ mod test {
     }
 
     #[test]
-    fn discard_sink_accepts_everything() {
+    fn reset_folds_committed_blocks_beyond_the_depth_then_empties_the_window() {
         let mut w = window(3, 1);
-        fill(&mut w, 1..=10, 10, Some(10));
+        fill(&mut w, 1..=10, 8, Some(10));
+        let sink = RecordingSink::default();
 
-        w.fold_and_evict(&DiscardSink).unwrap();
+        w.reset(&sink).unwrap();
 
-        assert_eq!(w.floor(), Some(8));
+        assert_eq!(sink.folded(), (1..=8).collect::<Vec<_>>());
+        assert!(buffered(&w).is_empty());
+        assert_eq!(w.commit_status(BlockNumberOrTimestamp::Number(1)), None);
+    }
+
+    #[test]
+    fn reset_before_the_first_commit_folds_nothing() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 5, None);
+        let sink = RecordingSink::default();
+
+        w.reset(&sink).unwrap();
+
+        assert!(sink.folded().is_empty());
+        assert!(buffered(&w).is_empty());
+    }
+
+    #[test]
+    fn reset_empties_the_window_even_when_a_fold_fails() {
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=5, 5, Some(5));
+        let sink = RecordingSink { fail_at: Some(3), ..Default::default() };
+
+        let res = w.reset(&sink);
+
+        assert!(matches!(res, Err(StorageError::Unexpected(_))));
+        assert_eq!(sink.folded(), vec![1, 2]);
+        assert!(buffered(&w).is_empty());
     }
 
     #[rstest]
@@ -954,6 +984,10 @@ mod test {
     )]
     #[case::number_below_floor(BlockNumberOrTimestamp::Number(0), WindowResolution::BelowFloor)]
     #[case::number_above_tip(BlockNumberOrTimestamp::Number(11), WindowResolution::AboveTip)]
+    #[case::timestamp_at_block(
+        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts),
+        WindowResolution::InWindow(testing::block(5))
+    )]
     #[case::timestamp_rounds_up(
         BlockNumberOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
         WindowResolution::InWindow(testing::block(6))
@@ -991,9 +1025,11 @@ mod test {
 
         put(&mut w, revert_to(3)).unwrap();
 
-        assert_eq!(w.tip().map(|b| b.number), Some(3));
-        assert_eq!(w.finalized, Some(3));
-        assert_eq!(w.db_committed, Some(3));
+        assert_eq!(tip_number(&w), Some(3));
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(3)),
+            Some(CommitStatus::Committed)
+        );
     }
 
     #[test]
@@ -1004,7 +1040,7 @@ mod test {
         let res = put(&mut w, revert_to(2));
 
         assert!(matches!(res, Err(StorageError::Unexpected(_))));
-        assert_eq!(w.tip().map(|b| b.number), Some(5));
+        assert_eq!(tip_number(&w), Some(5));
     }
 
     #[test]
@@ -1028,43 +1064,19 @@ mod test {
         assert!(matches!(res, Err(StorageError::NotFound(_, _))));
     }
 
-    #[rstest]
-    #[case::depth_binds(10, Some(10), Some(7))]
-    #[case::finalized_binds(5, Some(10), Some(5))]
-    #[case::committed_binds(10, Some(4), Some(4))]
-    #[case::no_commit_yet(10, None, None)]
-    fn eviction_bound_is_the_smallest_term(
-        #[case] finalized: u64,
-        #[case] committed: Option<u64>,
-        #[case] expected: Option<u64>,
-    ) {
-        let mut w = window(3, 1);
-        fill(&mut w, 1..=10, finalized, committed);
-
-        assert_eq!(w.eviction_bound(), expected);
-    }
-
-    #[test]
-    fn eviction_bound_saturates_on_a_chain_shorter_than_the_depth() {
-        let mut w = window(20, 1);
-        fill(&mut w, 1..=5, 5, Some(5));
-
-        assert_eq!(w.eviction_bound(), Some(0));
-    }
-
-    #[test]
-    fn eviction_bound_is_none_on_an_empty_window() {
-        assert_eq!(window(3, 1).eviction_bound(), None);
-    }
-
     #[test]
     fn watermarks_only_rise() {
         let mut w = window(3, 1);
         put(&mut w, msg(1, 0, None)).unwrap();
-        put(&mut w, msg(2, 1, Some(0))).unwrap();
+        put(&mut w, msg(2, 2, Some(2))).unwrap();
         put(&mut w, msg(3, 0, None)).unwrap();
 
-        assert_eq!(w.finalized, Some(1));
-        assert_eq!(w.db_committed, Some(0));
+        // `finalized` stayed at 2: a revert below it is still rejected.
+        assert!(put(&mut w, revert_to(1)).is_err());
+        // `db_committed` stayed at 2.
+        assert_eq!(
+            w.commit_status(BlockNumberOrTimestamp::Number(2)),
+            Some(CommitStatus::Committed)
+        );
     }
 }
