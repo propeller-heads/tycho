@@ -334,14 +334,15 @@ impl PendingDeltas {
                     if message.partial_block_index.is_some() {
                         continue;
                     }
-                    if let Err(err) = self.insert(&message) {
+                    self.insert(&message).map_err(|err| {
                         error!(
                             error = %err,
                             extractor = %message.extractor,
-                            "Failed to insert into PendingDeltas window; resetting it"
+                            block = message.block.number,
+                            "Failed to insert into PendingDeltas window"
                         );
-                        self.fold_committed_and_clear(&message.extractor)?;
-                    }
+                        err
+                    })?;
                 }
                 Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
                     debug!(
@@ -932,7 +933,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn run_resets_the_window_after_a_bad_insert_and_keeps_going() {
+    async fn run_ends_with_the_error_after_a_bad_insert() {
         let buffer = PendingDeltas::new(["native:extractor"]);
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         // `run` sends the start signal into this buffered channel; nothing needs to receive it.
@@ -942,22 +943,20 @@ mod test {
         tx.send(DeltaCommand::Block(native_msg(1, None, 1)))
             .await
             .unwrap();
-        // Parent-hash gap: the window rejects it and the pump resets the window.
+        // Parent-hash gap: the window rejects it.
         tx.send(DeltaCommand::Block(native_msg(3, None, 3)))
             .await
             .unwrap();
-        // First blocks of the fresh window.
-        tx.send(DeltaCommand::Block(native_msg(7, None, 7)))
-            .await
-            .unwrap();
-        tx.send(DeltaCommand::Block(native_msg(8, None, 8)))
-            .await
-            .unwrap();
-        drop(tx);
 
-        pump.await.unwrap().unwrap();
-        assert!(has_block(&buffer, 7) && has_block(&buffer, 8));
-        assert!(!has_block(&buffer, 1) && !has_block(&buffer, 3));
+        // The sender stays open: the pump must return without waiting for the stream to end.
+        let err = pump.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unexpected block sequence"),
+            "{err}"
+        );
+        assert!(has_block(&buffer, 1) && !has_block(&buffer, 3));
+        drop(tx);
     }
 
     #[test]
