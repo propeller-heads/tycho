@@ -132,7 +132,8 @@ impl PendingDeltas {
         let mut guard = window
             .lock()
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
-        guard.reset(self.sink.as_ref())?;
+        guard.fold_committed(self.sink.as_ref())?;
+        guard.clear();
         debug!(extractor, "PendingDeltas window reset");
         Ok(())
     }
