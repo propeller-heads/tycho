@@ -299,7 +299,7 @@ impl DeltaWindow {
                 extractor = %self.extractor,
                 finalized = ?self.finalized,
                 db_committed = ?self.db_committed,
-                tip = ?self.tip().map(|b| b.number),
+                tip = ?self.buffer.newest().map(|m| m.block.number),
                 "Nothing evictable yet"
             );
             return Ok(());
@@ -349,8 +349,8 @@ impl DeltaWindow {
     #[allow(dead_code)] // consumed by the state service, ENG-6293
     pub(crate) fn floor(&self) -> Option<u64> {
         self.buffer
-            .oldest_block()
-            .map(|b| b.number)
+            .oldest()
+            .map(|m| m.block.number)
     }
 
     /// Collects every buffered change for the given keys up to `upto`, ascending by block. This
@@ -439,7 +439,9 @@ impl DeltaWindow {
 
     /// The newest block seen by this window, if any.
     pub(crate) fn tip(&self) -> Option<Block> {
-        self.buffer.get_most_recent_block()
+        self.buffer
+            .newest()
+            .map(|m| m.block.clone())
     }
 
     /// Resolves a requested version to a servable window block.
@@ -452,23 +454,25 @@ impl DeltaWindow {
     /// involved.
     #[allow(dead_code)] // consumed by the state service, ENG-6293
     pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
-        let (Some(oldest), Some(tip)) = (self.buffer.oldest_block(), self.tip()) else {
+        let (Some(oldest), Some(tip)) = (self.buffer.oldest(), self.buffer.newest()) else {
             return WindowResolution::BelowFloor;
         };
-        if is_before(version, &oldest) {
+        if version.less_than(&oldest.block) {
             return WindowResolution::BelowFloor;
         }
-        if version.greater_than(&tip) {
+        if version.greater_than(&tip.block) {
             return match version {
                 BlockNumberOrTimestamp::Number(_) => WindowResolution::AboveTip,
-                BlockNumberOrTimestamp::Timestamp(_) => WindowResolution::InWindow(tip),
+                BlockNumberOrTimestamp::Timestamp(_) => {
+                    WindowResolution::InWindow(tip.block.clone())
+                }
             };
         }
         let block = self
             .buffer
             .get_block_range(None, None)
             .ok()
-            .and_then(|mut blocks| blocks.find(|b| is_at_or_before(version, &b.block)))
+            .and_then(|mut blocks| blocks.find(|b| !version.greater_than(&b.block)))
             .map(|b| b.block.clone());
         match block {
             Some(block) => WindowResolution::InWindow(block),
@@ -483,32 +487,32 @@ impl DeltaWindow {
     /// block is `db_committed + 1`) and would be off by the whole window depth once committed
     /// blocks are retained.
     pub(crate) fn commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
-        let oldest = self.buffer.oldest_block()?;
-        let tip = self.tip()?;
-        if version.greater_than(&tip) {
+        let oldest = &self.buffer.oldest()?.block;
+        let tip = &self.buffer.newest()?.block;
+        if version.greater_than(tip) {
             return Some(CommitStatus::Unseen);
         }
-        let committed_block = self.db_committed.and_then(|height| {
-            self.buffer
-                .get_block_range(None, None)
-                .ok()?
-                .find(|b| b.block.number == height)
-                .map(|b| b.block.clone())
-        });
-        let committed = match committed_block {
-            Some(block) => is_at_or_before(version, &block),
-            // The commit watermark is below the window, or nothing was committed yet: only
-            // versions older than the oldest buffered block are in the database.
-            None => is_before(version, &oldest),
+        let committed = match self.committed_block() {
+            Some(block) => !version.greater_than(block),
+            // No committed block is in the window: everything below the floor counts as
+            // committed.
+            None => version.less_than(oldest),
         };
         Some(if committed { CommitStatus::Committed } else { CommitStatus::Uncommitted })
+    }
+
+    /// The buffered block at `db_committed`, if the window still holds it.
+    fn committed_block(&self) -> Option<&Block> {
+        self.buffer
+            .block_at(self.db_committed?)
+            .map(|m| &m.block)
     }
 
     /// Highest block number that may be folded-and-evicted. `None` when the window is empty or
     /// no database commit has been observed yet; the caller logs both watermarks and the tip so
     /// the two cases are distinguishable.
     fn eviction_bound(&self) -> Option<u64> {
-        let tip = self.tip()?.number;
+        let tip = self.buffer.newest()?.block.number;
         let finalized = self.finalized?;
         let db_committed = self.db_committed?;
         Some(
@@ -516,23 +520,6 @@ impl DeltaWindow {
                 .min(db_committed)
                 .min(tip.saturating_sub(self.depth)),
         )
-    }
-}
-
-/// Whether `version` is strictly older than `block`, by number or by timestamp.
-fn is_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
-    match version {
-        BlockNumberOrTimestamp::Number(n) => n < block.number,
-        BlockNumberOrTimestamp::Timestamp(ts) => ts < block.ts,
-    }
-}
-
-/// Whether `version` is `block` or older, by number or by timestamp. Scanning ascending blocks
-/// for the first one that satisfies this rounds a between-blocks timestamp up to the next block.
-fn is_at_or_before(version: BlockNumberOrTimestamp, block: &Block) -> bool {
-    match version {
-        BlockNumberOrTimestamp::Number(n) => n <= block.number,
-        BlockNumberOrTimestamp::Timestamp(ts) => ts <= block.ts,
     }
 }
 

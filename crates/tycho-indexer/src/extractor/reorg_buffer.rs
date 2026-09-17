@@ -30,6 +30,13 @@ impl BlockNumberOrTimestamp {
             BlockNumberOrTimestamp::Timestamp(ts) => ts > &other.ts,
         }
     }
+
+    pub(crate) fn less_than(&self, other: &Block) -> bool {
+        match self {
+            BlockNumberOrTimestamp::Number(n) => n < &other.number,
+            BlockNumberOrTimestamp::Timestamp(ts) => ts < &other.ts,
+        }
+    }
 }
 
 impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
@@ -301,15 +308,28 @@ where
         Ok(PurgeOutcome::HeightMatch(purged))
     }
 
-    /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
-    /// is empty
-    /// Returns the oldest buffered block, or `None` if the buffer is empty.
-    pub fn oldest_block(&self) -> Option<tycho_common::models::blockchain::Block> {
-        self.block_messages
-            .front()
-            .map(|b| b.block())
+    /// The oldest buffered message, or `None` if the buffer is empty.
+    pub fn oldest(&self) -> Option<&B> {
+        self.block_messages.front()
     }
 
+    /// The newest buffered message, or `None` if the buffer is empty.
+    pub fn newest(&self) -> Option<&B> {
+        self.block_messages.back()
+    }
+
+    /// The buffered message for block `number`, or `None` if that block is not buffered.
+    /// Buffered blocks are contiguous, so this is an index lookup.
+    pub fn block_at(&self, number: u64) -> Option<&B> {
+        let first = self.oldest()?.block().number;
+        let index = usize::try_from(number.checked_sub(first)?).ok()?;
+        self.block_messages
+            .get(index)
+            .filter(|b| b.block().number == number)
+    }
+
+    /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
+    /// is empty
     pub fn get_most_recent_block(&self) -> Option<tycho_common::models::blockchain::Block> {
         if let Some(block_message) = self.block_messages.back() {
             return Some(block_message.block());
@@ -849,12 +869,11 @@ mod test {
             _ => panic!("block entity version not implemented"),
         }
     }
-    #[test]
-    fn oldest_block_is_the_front_of_the_buffer() {
-        let mut buffer: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
-        assert_eq!(buffer.oldest_block(), None);
-
-        for n in 1..=3 {
+    fn numbered_buffer(
+        range: std::ops::RangeInclusive<u64>,
+    ) -> ReorgBuffer<BlockAggregatedChanges> {
+        let mut buffer = ReorgBuffer::new();
+        for n in range {
             buffer
                 .insert_block(BlockAggregatedChanges {
                     block: testing::block(n),
@@ -862,9 +881,37 @@ mod test {
                 })
                 .unwrap();
         }
+        buffer
+    }
 
-        assert_eq!(buffer.oldest_block(), Some(testing::block(1)));
-        assert_eq!(buffer.get_most_recent_block(), Some(testing::block(3)));
+    #[test]
+    fn oldest_and_newest_are_the_buffer_ends() {
+        let empty: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
+        assert!(empty.oldest().is_none() && empty.newest().is_none());
+
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(buffer.oldest().map(|b| b.block.number), Some(4));
+        assert_eq!(buffer.newest().map(|b| b.block.number), Some(6));
+    }
+
+    #[rstest]
+    #[case::first(4, Some(4))]
+    #[case::middle(5, Some(5))]
+    #[case::below(3, None)]
+    #[case::above(7, None)]
+    fn block_at_finds_a_buffered_block_by_number(
+        #[case] number: u64,
+        #[case] expected: Option<u64>,
+    ) {
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(
+            buffer
+                .block_at(number)
+                .map(|b| b.block.number),
+            expected
+        );
     }
 
     #[test]

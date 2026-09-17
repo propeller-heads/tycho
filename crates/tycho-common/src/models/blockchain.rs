@@ -369,6 +369,12 @@ pub trait BlockScoped {
     fn block(&self) -> Block;
 }
 
+impl<T: BlockScoped> BlockScoped for std::sync::Arc<T> {
+    fn block(&self) -> Block {
+        (**self).block()
+    }
+}
+
 impl BlockScoped for BlockAggregatedChanges {
     fn block(&self) -> Block {
         self.block.clone()
