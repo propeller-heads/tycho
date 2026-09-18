@@ -38,8 +38,8 @@ use tycho_common::{
         blockchain::BlockAggregatedChanges,
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
-        Address, AttrStoreKey, Balance, Chain, Code, CodeHash, ComponentId, StoreKey, StoreVal,
-        TxHash,
+        Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId, StoreKey,
+        StoreVal, TxHash,
     },
     storage::StorageError,
     Bytes,
@@ -415,6 +415,32 @@ impl CacheState {
             family.remove(id);
         }
     }
+
+    /// Applies one block's account changes. A `Creation` delta carries the whole initial state
+    /// and may create an entry; anything else for an unknown address is partial data and is
+    /// skipped. A `Deletion` removes the entry.
+    fn fold_accounts(&mut self, block: &BlockAggregatedChanges, at: NaiveDateTime) {
+        for (address, delta) in &block.account_deltas {
+            if delta.change_type() == ChangeType::Deletion {
+                self.accounts.remove(address);
+                continue;
+            }
+            match self.accounts.get_mut(address) {
+                Some(entry) => entry.fold(delta, at),
+                None if delta.is_creation() => {
+                    self.accounts
+                        .insert(address.clone(), CachedAccount::from_creation(delta, at));
+                }
+                None => trace!(%address, "Change for an unknown account skipped"),
+            }
+        }
+        for (address, balances) in &block.account_balances {
+            match self.accounts.get_mut(address) {
+                Some(entry) => entry.fold_balances(balances, at),
+                None => trace!(%address, "Balances for an unknown account skipped"),
+            }
+        }
+    }
 }
 
 impl FoldSink for EntityCache {
@@ -427,6 +453,7 @@ impl FoldSink for EntityCache {
         let at = block.block.ts;
         let mut state = self.write();
         state.fold_components(&block.extractor, block, at);
+        state.fold_accounts(block, at);
         Ok(())
     }
 }
@@ -435,7 +462,7 @@ impl FoldSink for EntityCache {
 mod test {
     use std::str::FromStr;
 
-    use tycho_common::models::{protocol::ProtocolComponent, ChangeType};
+    use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
     use crate::{extractor::models::fixtures, testing};
@@ -527,6 +554,32 @@ mod test {
 
     fn update(address: &Bytes, slots: HashMap<Bytes, Option<Bytes>>) -> AccountDelta {
         AccountDelta::new(Chain::Ethereum, address.clone(), slots, None, None, ChangeType::Update)
+    }
+
+    fn deletion(address: &Bytes) -> AccountDelta {
+        AccountDelta::deleted(&Chain::Ethereum, address)
+    }
+
+    fn with_account_delta(
+        mut m: BlockAggregatedChanges,
+        delta: AccountDelta,
+    ) -> BlockAggregatedChanges {
+        m.account_deltas
+            .insert(delta.address.clone(), delta);
+        m
+    }
+
+    fn with_account_balance(
+        mut m: BlockAggregatedChanges,
+        address: &Bytes,
+        token: &Bytes,
+        amount: u64,
+    ) -> BlockAggregatedChanges {
+        m.account_balances
+            .entry(address.clone())
+            .or_default()
+            .insert(token.clone(), account_balance(address, token, amount));
+        m
     }
 
     fn msg(n: u64) -> BlockAggregatedChanges {
@@ -861,5 +914,109 @@ mod test {
             .fold(&with_deleted_component(msg(3), "c1"))
             .unwrap();
         assert!(cached_component(&cache, "c1").is_none());
+    }
+
+    #[test]
+    fn fold_creation_creates_a_complete_account() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let delta = creation(&address, [(1, 1), (2, 2)], 10, "0x6000");
+
+        cache
+            .fold(&with_account_balance(
+                with_account_delta(msg(1), delta.clone()),
+                &address,
+                &addr(9),
+                7,
+            ))
+            .unwrap();
+
+        let mut expected = delta.into_account_without_tx();
+        expected
+            .token_balances
+            .insert(addr(9), account_balance(&address, &addr(9), 7));
+        assert_eq!(cached_account(&cache, &address), Some(expected));
+    }
+
+    #[test]
+    fn fold_skips_changes_for_an_unknown_account() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let block = with_account_balance(
+            with_account_delta(msg(1), update(&address, fixtures::optional_slots([(1, 1)]))),
+            &address,
+            &addr(9),
+            7,
+        );
+
+        cache.fold(&block).unwrap();
+
+        assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn fold_removes_a_deleted_account() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [], 0, "0x")))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(msg(2), deletion(&address)))
+            .unwrap();
+
+        assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn folding_the_same_block_twice_changes_nothing() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_component(msg(1), "c1"),
+                creation(&address, [(1, 1)], 10, "0x6000"),
+            ))
+            .unwrap();
+        let block = with_account_delta(
+            with_state_delta(msg(2), "c1", 2),
+            update(&address, fixtures::optional_slots([(1, 11), (2, 2)])),
+        );
+
+        cache.fold(&block).unwrap();
+        let account_once = cached_account(&cache, &address);
+        let component_once = cached_component(&cache, "c1");
+        cache.fold(&block).unwrap();
+
+        assert_eq!(cached_account(&cache, &address), account_once);
+        assert_eq!(cached_component(&cache, "c1"), component_once);
+    }
+
+    #[test]
+    fn two_extractors_folding_the_same_account_keep_both_values() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1), (2, 2)], 0, "0x")))
+            .unwrap();
+        let ahead =
+            with_account_delta(msg(5), update(&address, fixtures::optional_slots([(1, 15)])));
+        let behind = with_account_delta(
+            testing::aggregated_changes("other", 3, 3, Some(3)),
+            update(&address, fixtures::optional_slots([(1, 13), (2, 23)])),
+        );
+
+        cache.fold(&ahead).unwrap();
+        cache.fold(&behind).unwrap();
+
+        let slots = cached_account(&cache, &address)
+            .unwrap()
+            .slots;
+        assert_eq!(
+            slots,
+            fixtures::slots([(1, 15), (2, 23)]),
+            "slot 1 keeps block 5, slot 2 takes block 3"
+        );
     }
 }
