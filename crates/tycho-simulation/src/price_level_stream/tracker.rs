@@ -23,9 +23,9 @@ use super::{
 };
 use crate::protocol::models::{ProtocolComponent, Update};
 
-/// How long the data of one frame may be served without a fresher frame carrying it: two block
-/// times. Titan streams at 1 Hz and its frames arrive within about 3 s of being built, so this
-/// leaves ample margin for jitter while bounding stale exposure.
+/// How long a component stays served after the last accepted frame that carried it: two slots.
+/// Titan streams at 1 Hz and its frames arrive within about 3 s of being built, so 24 s absorbs
+/// jitter and still removes a silent component within two blocks.
 pub(super) const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(24);
 
 pub(super) const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -38,27 +38,29 @@ const MAX_FUTURE_SKEW_NANOS: u64 = 12 * NANOS_PER_SECOND;
 /// Post-merge Ethereum slot duration in seconds.
 const SECONDS_PER_SLOT: u64 = 12;
 
-/// Extra blocks allowed beyond what elapsed time explains. Titan builds at chain head + 1 and
-/// sometimes + 2, so a frame right after a block boundary may jump by two.
+/// Extra blocks a frame may jump beyond one block per elapsed slot. Titan builds at chain head + 1
+/// and sometimes + 2, so a frame right after a block boundary may jump by two.
 const BLOCK_JUMP_SLACK: u64 = 2;
 
-/// How many distinct unregistered venue addresses get a first-sight INFO line per process.
-/// Addresses come from an external source; the set is bounded so a misbehaving upstream cannot
-/// grow memory, and they never become metric labels.
+/// How many distinct unregistered venue addresses the tracker logs at INFO, once each. The
+/// addresses come from the wire, so the set is capped to keep a misbehaving upstream from growing
+/// memory, and no address becomes a metric label.
 const MAX_UNREGISTERED_LOGGED: usize = 64;
 
-/// The instants a tracker event is judged against.
+/// The wall-clock and monotonic time at which the tracker handles a frame or a deadline.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Now {
     /// Wall clock, nanoseconds since the Unix epoch. Only ever compared against Titan's
     /// `timestamp`.
     pub wall_nanos: u64,
-    /// Monotonic clock; drives every deadline, so a wall-clock jump cannot expire or freeze
-    /// anything.
+    /// Monotonic clock. Every deadline is computed from it, so a wall-clock jump cannot remove a
+    /// component early or keep it served late.
     pub monotonic: Instant,
 }
 
 impl Now {
+    /// Reads both clocks. A system clock unrepresentable as unix nanoseconds yields
+    /// `wall_nanos = 0`, which rejects every frame as `in_future`.
     pub(super) fn current() -> Self {
         let since_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -78,7 +80,7 @@ impl Now {
     }
 }
 
-/// Why a parsed frame was dropped before touching the served set.
+/// Why the tracker rejected a parsed frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rejection {
     /// Built `stale_after` ago or earlier.
@@ -89,7 +91,8 @@ enum Rejection {
     OutOfOrder,
     /// Targets a block below the newest accepted one.
     BlockRegression,
-    /// Targets a block further ahead than elapsed time allows.
+    /// Targets a block above the newest accepted block by more than one block per elapsed 12 s
+    /// plus [`BLOCK_JUMP_SLACK`].
     BlockJump,
 }
 
@@ -105,7 +108,7 @@ impl Rejection {
     }
 }
 
-/// A component the stream currently vouches for.
+/// A component the stream currently serves.
 struct ServedComponent {
     component: ProtocolComponent,
     /// The venue name, for logs and metric labels.
@@ -116,13 +119,13 @@ struct ServedComponent {
     stale_at: Instant,
 }
 
-/// What the stream can currently vouch for.
+/// The stream's serving state.
 enum ServingState {
     /// The PropAMMRouter whitelist has not been read yet: the family of every component is
     /// unknown, so frames are validated but nothing is emitted.
     AwaitingWhitelist,
     /// Whitelist known (or not needed) and nothing served: at start, and whenever the last
-    /// served component expired.
+    /// served component turned stale.
     Unserved,
     /// At least one component is served; `deadline` is the earliest component deadline.
     Serving { deadline: Instant },
@@ -138,10 +141,9 @@ impl ServingState {
     }
 }
 
-/// Turns Titan frames into [`Update`]s. Frames are additive only: a component (or a whole venue)
-/// a frame omits is presumed still fresh until its own deadline lapses in
-/// [`on_stale_deadline`](Self::on_stale_deadline). There is no diff-based removal — omission from
-/// a single frame never removes anything by itself.
+/// Turns Titan frames into [`Update`]s. A frame only adds or refreshes components: a component (or
+/// a whole venue) that a frame omits stays served until its own deadline passes in
+/// [`on_stale_deadline`](Self::on_stale_deadline).
 pub(super) struct FreshnessTracker {
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
     /// Venues excluded from auto-detection. The builder keeps this disjoint from the registry:
@@ -158,24 +160,24 @@ pub(super) struct FreshnessTracker {
     router_venues: HashSet<Bytes>,
     /// The components currently served, keyed by component id.
     served: HashMap<String, ServedComponent>,
-    /// What the stream can currently vouch for; drives [`Self::stale_deadline`] and the
-    /// per-venue gauges.
+    /// The stream's serving state; drives [`Self::stale_deadline`] and the per-venue gauges.
     serving_state: ServingState,
-    /// The data freshness window; see [`DEFAULT_STALE_AFTER`].
+    /// How long a component stays served after the last accepted frame that carried it; see
+    /// [`DEFAULT_STALE_AFTER`].
     stale_after: Duration,
     /// The `timestamp` of the newest accepted frame. Frames older than it are out of order;
     /// equal ones are re-emissions within a build round and accepted. Never reset.
     newest_timestamp_nanos: u64,
     /// The block of the newest accepted frame. Later frames may not regress below it, nor jump
-    /// further ahead than the elapsed time explains. Reset with `last_accepted`.
+    /// more than one block per elapsed slot plus 2. Reset with `last_accepted`.
     newest_block: u64,
     /// When the newest frame was accepted; `None` whenever nothing is served, which skips the
-    /// block checks for the next frame. The frontier is established only while the stream
-    /// serves something: a frame that serves nothing — because the whitelist is still awaited,
-    /// or because it carries nothing this tracker can build — resets it immediately.
+    /// block checks for the next frame. It is set only while the stream serves something: a
+    /// frame that serves nothing — because the whitelist is still awaited, or because it carries
+    /// nothing this tracker can build — resets it immediately.
     last_accepted: Option<Instant>,
-    /// Whether the last frame was rejected: the first rejection of a streak logs at WARN, the
-    /// rest at DEBUG, and the counter carries the rate.
+    /// Whether the last frame was rejected. The first rejection of a streak logs at WARN and the
+    /// rest at DEBUG; `price_level_stream_frames_rejected_total` counts every rejection.
     rejecting: bool,
     /// Unregistered venue addresses already logged, at most [`MAX_UNREGISTERED_LOGGED`].
     logged_unregistered: HashSet<Bytes>,
@@ -223,9 +225,9 @@ impl FreshnessTracker {
         self.router_venues = venues;
     }
 
-    /// Applies a whitelist read. A failed read keeps the last known set (the reader already
-    /// logged it). A successful read that changes a served venue's family removes that venue's
-    /// components now; the next accepted frame carrying them re-adds them under the new family.
+    /// Applies a whitelist read. A failed read keeps the last known set. A successful read that
+    /// changes a served venue's family removes that venue's components now; the next accepted
+    /// frame carrying them re-adds them under the new family.
     pub(super) fn on_whitelist_read(&mut self, read: WhitelistRead) -> Option<Update> {
         let venues = match read {
             WhitelistRead::Failed(error) => {
@@ -271,15 +273,15 @@ impl FreshnessTracker {
             );
             removed.insert(id, served.component);
         }
-        // Build the update off the still-current frontier before `refresh_serving_state` may reset
-        // it (it does, once nothing is left served) — mirrors `on_stale_deadline`.
+        // Build the update before `refresh_serving_state`, which resets `newest_block` to 0 once
+        // nothing is served: the removal must carry the newest accepted block.
         let update = self.removal_update(removed);
         self.refresh_serving_state();
         Some(update)
     }
 
-    /// Checks a frame against the freshness and ordering rules, returning its age when it is
-    /// acceptable.
+    /// Returns the frame's age if the frame passes the timestamp and block checks, or the
+    /// [`Rejection`] that names the first failed check.
     fn check_frame(&self, frame: &TitanPriceLevelMessage, now: Now) -> Result<Duration, Rejection> {
         let frame_age = Duration::from_nanos(
             now.wall_nanos
@@ -319,8 +321,8 @@ impl FreshnessTracker {
     }
 
     /// Processes one frame into an [`Update`], or `None` if the frame is rejected (see
-    /// [`Rejection`]), the whitelist has not been read yet, or the frame carries nothing
-    /// relevant.
+    /// [`Rejection`]), the whitelist has not been read yet, or the frame carries no served pAMM
+    /// with a pair of known tokens.
     pub(super) fn on_frame(&mut self, frame: TitanPriceLevelMessage, now: Now) -> Option<Update> {
         let frame_age = match self.check_frame(&frame, now) {
             Ok(frame_age) => frame_age,
@@ -344,6 +346,9 @@ impl FreshnessTracker {
         let deadline = now.monotonic +
             self.stale_after
                 .saturating_sub(frame_age);
+        // `QUOTE_TTL` counts from the frame's wire `timestamp` and is enforced on the monotonic
+        // clock; it does not depend on whether the ladder's content changed, because quiet
+        // venues repeat a ladder for minutes.
         let quotable_until = now.monotonic + QUOTE_TTL.saturating_sub(frame_age);
         let frame_unix_seconds = frame.timestamp / NANOS_PER_SECOND;
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
@@ -404,7 +409,8 @@ impl FreshnessTracker {
         Some(Update::new(frame.block_number, states, new_pairs).set_is_partial(true))
     }
 
-    /// The configuration a streamed venue is served under, or `None` when it is skipped.
+    /// The configuration a streamed venue is served under. `None` when the venue is denied, or
+    /// unregistered while auto-detection is off. An auto-detected venue is added to the registry.
     fn resolve_config(&mut self, pamm: &Bytes) -> Option<PriceLevelStreamConfig> {
         if let Some(config) = self.registry.get(pamm) {
             return Some(config.clone());
@@ -500,11 +506,10 @@ impl FreshnessTracker {
             venues = ?venues,
             components = ?component_ids,
             stale_after_secs = self.stale_after.as_secs(),
-            "Removing price level components: no fresh frame carried them within the window"
+            "Removing price level components: no accepted frame carried them within stale_after"
         );
-        // Build the update off the still-current frontier before `refresh_serving_state` may reset
-        // it (it does, once nothing is left served) — a removal always reports the block it
-        // was last known fresh at, never the reset value.
+        // Build the update before `refresh_serving_state`, which resets `newest_block` to 0 once
+        // nothing is served: the removal must carry the newest accepted block.
         let update = self.removal_update(removed);
         self.refresh_serving_state();
         Some(update)
@@ -524,12 +529,12 @@ impl FreshnessTracker {
             .set_removed_pairs(removed)
     }
 
-    /// Recomputes the serving state and the per-venue gauges from the served set. The block
-    /// frontier is reset whenever nothing is served — after the last served component expired,
-    /// after a frame that carried nothing this tracker can build, and on every frame accepted
-    /// while the whitelist is still awaited — so one absurd block can never outlive the window
-    /// it was served for. The whitelist wait itself is left only by a successful read, never by
-    /// the served set.
+    /// Recomputes the serving state and the per-venue gauges from the served set. When nothing is
+    /// served it also resets `newest_block` and `last_accepted`, so the next frame skips the block
+    /// checks. This happens after the last stale removal, after a frame whose pairs were all
+    /// skipped, and on every frame accepted while the whitelist is awaited. A frame with an
+    /// implausible block therefore cannot cause rejections for longer than `stale_after`. Only
+    /// [`on_whitelist_read`](Self::on_whitelist_read) leaves `AwaitingWhitelist`.
     fn refresh_serving_state(&mut self) {
         let awaiting_whitelist = match self.serving_state {
             ServingState::AwaitingWhitelist => true,
@@ -567,7 +572,7 @@ impl FreshnessTracker {
         }
     }
 
-    /// WARN for the first rejected frame of a streak, DEBUG for the rest.
+    /// Logs the first rejected frame of a streak at WARN and the rest at DEBUG.
     fn log_rejection(&mut self, rejection: Rejection, frame: &TitanPriceLevelMessage) {
         if self.rejecting {
             tracing::debug!(

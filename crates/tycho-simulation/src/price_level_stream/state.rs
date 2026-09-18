@@ -17,11 +17,9 @@ use tycho_common::{
     Bytes,
 };
 
-/// How long the ladders of one frame stay quotable: one block time. Titan quotes the pending
-/// block, so a ladder older than that is not fillable directly (the venue reverts
-/// `StaleUpdate`) and must not be priced. Anchored on the frame's wire `timestamp` at
-/// acceptance and enforced on the monotonic clock; never derived from whether the ladder's
-/// content changed, since quiet venues legitimately repeat a ladder for minutes.
+/// How long the ladders of one frame stay quotable: one slot. Titan quotes the pending block, so
+/// a ladder older than that is not fillable directly (the venue reverts `StaleUpdate`) and must
+/// not be priced.
 pub const QUOTE_TTL: Duration = Duration::from_secs(12);
 
 /// A single price level: the total `amount_out` a swap of exactly `amount_in` would deliver.
@@ -53,9 +51,9 @@ pub struct PriceLevelStreamState {
     pub quotes_0_to_1: Vec<PriceLevelStreamQuote>,
     pub quotes_1_to_0: Vec<PriceLevelStreamQuote>,
     pub gas_cost: BigUint,
-    /// Monotonic instant from which every query on this state is refused. A live, in-process
-    /// property: never serialized, and `None` (never expires) after deserialization, so
-    /// recordings replay as they always did.
+    /// Monotonic instant from which this state refuses every query. `None` means the state never
+    /// expires. The field is never serialized and deserializes as `None`, so a replayed
+    /// recording always quotes.
     #[serde(skip)]
     pub quotable_until: Option<Instant>,
 }
@@ -79,17 +77,18 @@ impl PriceLevelStreamState {
         Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost, quotable_until: None }
     }
 
-    /// Sets the monotonic instant from which every query on this state is refused.
+    /// Sets the monotonic instant from which this state refuses every query.
     pub fn with_quotable_until(mut self, until: Instant) -> Self {
         self.quotable_until = Some(until);
         self
     }
 
-    /// Errors once `now` has reached `quotable_until`.
+    /// Returns a `RecoverableError` once `now` reaches `quotable_until`. A state without
+    /// `quotable_until` never errors.
     fn ensure_quotable(&self, now: Instant) -> Result<(), SimulationError> {
         match self.quotable_until {
             Some(until) if now >= until => Err(SimulationError::RecoverableError(
-                "price levels expired: the frame that carried them is older than one block"
+                "price levels expired: the frame that carried them is older than 12 s (one slot)"
                     .to_string(),
             )),
             Some(_) | None => Ok(()),

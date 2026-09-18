@@ -1,19 +1,47 @@
 //! Metrics of the price level stream, emitted through the `metrics` facade. A consumer that
-//! installs a recorder (Fynd, tycho-integration-test) sees them without any wiring; without a
-//! recorder every call is a no-op. Label values are registered venue names or fixed
-//! enumerations, never values from the wire.
+//! installs a `metrics` recorder receives them with no further setup; without a recorder every
+//! call is a no-op. Label values are registered venue names or fixed enumerations, never values
+//! from the wire, with one exception: an auto-detected venue is named by its address, so its
+//! `venue` label carries the address the frame named it by.
 
 use metrics::{counter, gauge};
 
+/// Counter, no labels. Incremented once per frame the tracker accepts.
 pub(super) const FRAMES_ACCEPTED: &str = "price_level_stream_frames_accepted_total";
+/// Counter, label `reason`. Incremented once per frame the stream drops. `reason` is one of
+/// `parse_error` (the text did not parse as a frame), `too_old` (wire `timestamp` older than
+/// `stale_after`), `in_future` (wire `timestamp` more than one slot ahead of the wall clock),
+/// `out_of_order` (wire `timestamp` older than the newest accepted frame's), `block_regression`
+/// (block below the newest accepted block) or `block_jump` (block jumps more than one block per
+/// elapsed slot plus 2).
 pub(super) const FRAMES_REJECTED: &str = "price_level_stream_frames_rejected_total";
+/// Gauge, label `venue`. The wire `timestamp` of the newest accepted frame that carried the
+/// venue, in seconds since the Unix epoch; 0 until the first such frame. `venue` is the
+/// registered venue name, or the address of an auto-detected venue.
 pub(super) const LAST_SEEN: &str = "price_level_stream_last_seen_timestamp_seconds";
+/// Gauge, label `venue`. The number of components the stream currently serves for the venue;
+/// 0 for every registered venue from the start. `venue` is as on `LAST_SEEN`.
 pub(super) const SERVED_COMPONENTS: &str = "price_level_stream_served_components";
+/// Counter, label `venue`. Incremented once per component that turns stale at its `stale_at`
+/// deadline and is emitted in `removed_pairs`. `venue` is as on `LAST_SEEN`.
 pub(super) const STALE_REMOVALS: &str = "price_level_stream_stale_removals_total";
+/// Gauge, no labels. The stream's serving state as a [`ServingState`] number: 0 = awaiting the
+/// whitelist, 1 = unserved, 2 = serving.
 pub(super) const SERVING_STATE: &str = "price_level_stream_serving_state";
+/// Counter, label `reason`. Incremented once per Titan connection the stream gives up on, or
+/// fails to establish, before backing off. `reason` is one of `idle_timeout` (no parsed frame
+/// within the idle timeout), `ended` (the server hung up without a close frame), `closed` (the
+/// server sent a close frame), `read_error` (transport or protocol error), `connect_failed`
+/// (connection refused or TLS error) or `connect_timeout` (the handshake did not complete
+/// within the connect timeout).
 pub(super) const RECONNECTS: &str = "price_level_stream_reconnects_total";
+/// Counter, label `outcome`. Incremented once per PropAMMRouter whitelist read. `outcome` is
+/// `ok` or `error` (a failed or timed-out `eth_call`).
 pub(super) const WHITELIST_READS: &str = "price_level_stream_whitelist_reads_total";
+/// Gauge, no labels. The number of venues on the whitelist as of the last successful read.
 pub(super) const WHITELISTED_VENUES: &str = "price_level_stream_whitelisted_venues";
+/// Counter, no labels. Incremented once per pAMM entry in an accepted frame that names a venue
+/// which is neither registered nor denied while auto-detection is off.
 pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
     "price_level_stream_unregistered_pamm_entries_total";
 
@@ -22,7 +50,7 @@ pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
 pub(super) enum ServingState {
     /// The PropAMMRouter whitelist has not been read yet; nothing is served.
     AwaitingWhitelist = 0,
-    /// Whitelist known (or not needed), no component currently served.
+    /// The whitelist is known or not needed, and no component is served.
     Unserved = 1,
     /// At least one component is served.
     Serving = 2,

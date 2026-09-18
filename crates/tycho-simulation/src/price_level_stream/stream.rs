@@ -61,9 +61,9 @@ pub struct PriceLevelStreamBuilder {
     whitelist_refresh_interval: Duration,
     /// See [`fallback_router_rpc_url`](Self::fallback_router_rpc_url).
     fallback_router_rpc_url: Option<String>,
-    /// Whether `RPC_URL` from the environment (or `.env`) is consulted when no explicit
-    /// fallback router URL is set. Only tests turn this off, to pin down the no-URL path
-    /// without touching process-global state.
+    /// Whether [`build`](Self::build) falls back to `RPC_URL` from the environment (or `.env`)
+    /// when [`fallback_router_rpc_url`](Self::fallback_router_rpc_url) is unset. Only tests turn
+    /// this off, so they can run the missing-URL path without changing the process environment.
     env_rpc_url: bool,
 }
 
@@ -133,7 +133,7 @@ impl PriceLevelStreamBuilder {
     /// Overrides the longest gap between parsed Titan frames tolerated before the connection is
     /// treated as dead and re-established (default: 10s). Titan pushes one frame per second and
     /// sends no keepalives, so a multi-second silence means a stalled or half-open connection.
-    /// Control frames and unparsable text do not count as liveness.
+    /// Control frames and unparsable text do not reset this timeout.
     pub fn read_idle_timeout(mut self, timeout: Duration) -> Self {
         self.connection.read_idle_timeout = timeout;
         self
@@ -216,11 +216,11 @@ impl PriceLevelStreamBuilder {
         self
     }
 
-    /// Overrides how long the data of one frame may be served without a fresher frame carrying
-    /// it (default: 24s, two block times). A component no accepted frame has carried for this
-    /// long is emitted in `removed_pairs`; the next accepted frame carrying it re-adds it in
-    /// `new_pairs`. Frames whose data is this old or older are rejected outright. Independent
-    /// of this setting, a state refuses to quote once its frame is one block time old.
+    /// Overrides how long a component stays served after the last accepted frame that carried
+    /// it (default: 24s, two slots). A component no accepted frame has carried for this long
+    /// turns stale and is emitted in `removed_pairs`; the next accepted frame carrying it
+    /// re-adds it in `new_pairs`. Frames whose `timestamp` is this old or older are rejected.
+    /// Independent of this setting, a state refuses to quote once its frame is one slot old.
     pub fn stale_after(mut self, duration: Duration) -> Self {
         self.stale_after = duration;
         self
@@ -235,9 +235,9 @@ impl PriceLevelStreamBuilder {
     }
 
     /// Sets the node URL the PropAMMRouter whitelist is read from, taking precedence over
-    /// `RPC_URL` from the environment or `.env`. Consumers that already hold a node URL as
-    /// configuration should pass it here rather than depend on process environment for an
-    /// execution-affecting decision.
+    /// `RPC_URL` from the environment or `.env`. Consumers that already hold a node URL should
+    /// pass it here, so that the family their swaps execute under does not depend on the process
+    /// environment.
     pub fn fallback_router_rpc_url(mut self, url: impl Into<String>) -> Self {
         self.fallback_router_rpc_url = Some(url.into());
         self
@@ -256,14 +256,14 @@ impl PriceLevelStreamBuilder {
     /// closes the connection and stops the whitelist reader.
     ///
     /// Every accepted frame yields an update with the states of the served pairs it carries,
-    /// with `new_pairs` for pairs not currently served. Pairs the frame does not carry keep their
-    /// previous state downstream. A component no accepted frame has carried for
-    /// [`stale_after`](Self::stale_after) is emitted in `removed_pairs`, together with every
-    /// other component expiring at that instant, and re-added by the next accepted frame
-    /// carrying it. Frames that are too old, from the future, out of order, or whose block
-    /// regresses or jumps implausibly are rejected without effect. Frames that contain no served
-    /// pAMM produce no update. Pairs whose tokens are missing from the provided token metadata
-    /// are skipped.
+    /// with `new_pairs` for pairs not currently served. The update does not mention pairs the
+    /// frame does not carry, so consumers keep their previous state. A component no accepted
+    /// frame has carried for [`stale_after`](Self::stale_after) turns stale and is emitted in
+    /// `removed_pairs`, together with every other component turning stale at that instant, and
+    /// re-added by the next accepted frame carrying it. Frames that are too old, from the
+    /// future, out of order, or whose block regresses or jumps more than one block per elapsed
+    /// slot plus 2 are rejected without effect. Frames that contain no served pAMM produce no
+    /// update. Pairs whose tokens are missing from the provided token metadata are skipped.
     ///
     /// With the fallback router enabled (the default), nothing is emitted until the
     /// PropAMMRouter whitelist has been read from the node at
@@ -371,8 +371,8 @@ impl PriceLevelStreamBuilder {
 
 type WhitelistReader = Pin<Box<dyn Stream<Item = WhitelistRead> + Send>>;
 
-/// The next whitelist read, or a future that never resolves when the whitelist is not read at
-/// all, so the `select!` arm simply never fires.
+/// Returns the next whitelist read. Never resolves when `reader` is `None` or has ended, so its
+/// `select!` arm never fires.
 async fn next_whitelist_read(reader: &mut Option<WhitelistReader>) -> WhitelistRead {
     let Some(reader) = reader else {
         return std::future::pending().await;
@@ -593,7 +593,7 @@ mod tests {
 
         let first = next_within(&mut stream, Duration::from_secs(2))
             .await
-            .expect("first snapshot");
+            .expect("first update");
         assert_eq!(first.new_pairs.len(), 1);
         assert!(first.removed_pairs.is_empty());
 
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(
             next_within(&mut stream, Duration::from_secs(2))
                 .await
-                .expect("first snapshot")
+                .expect("first update")
                 .new_pairs
                 .len(),
             1
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(
             next_within(&mut stream, Duration::from_secs(2))
                 .await
-                .expect("first snapshot")
+                .expect("first update")
                 .new_pairs
                 .len(),
             1
@@ -693,7 +693,7 @@ mod tests {
         assert_eq!(
             next_within(&mut stream, Duration::from_secs(2))
                 .await
-                .expect("first snapshot")
+                .expect("first update")
                 .new_pairs
                 .len(),
             1
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(
             next_within(&mut stream, Duration::from_secs(2))
                 .await
-                .expect("first snapshot")
+                .expect("first update")
                 .new_pairs
                 .len(),
             1
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(
             next_within(&mut stream, Duration::from_secs(2))
                 .await
-                .expect("first snapshot")
+                .expect("first update")
                 .new_pairs
                 .len(),
             1
@@ -810,7 +810,7 @@ mod tests {
 
         let first = next_within(&mut stream, Duration::from_secs(2))
             .await
-            .expect("first snapshot");
+            .expect("first update");
         assert_eq!(first.new_pairs.len(), 1);
         let removal = next_within(&mut stream, Duration::from_secs(2))
             .await
@@ -845,7 +845,7 @@ mod tests {
         tokio::pin!(stream);
         next_within(&mut stream, Duration::from_secs(2))
             .await
-            .expect("first snapshot");
+            .expect("first update");
         for _ in 0..5 {
             let started = std::time::Instant::now();
             let update = next_within(&mut stream, Duration::from_secs(1))
@@ -892,7 +892,7 @@ mod tests {
             let mut polled = stream.as_mut();
             next_within(&mut polled, Duration::from_secs(2))
                 .await
-                .expect("first snapshot");
+                .expect("first update");
         }
         assert_eq!(fake.connections.load(Ordering::SeqCst), 1);
 

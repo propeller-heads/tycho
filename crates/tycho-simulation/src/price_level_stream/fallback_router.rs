@@ -55,28 +55,28 @@ pub enum FetchVenuesError {
     /// The `eth_call` did not resolve within the read timeout.
     #[error("getWhitelistedVenues call to the PropAMMRouter timed out after {after:?}")]
     Timeout {
-        /// The bound that elapsed.
+        /// The read timeout that elapsed.
         after: Duration,
     },
 }
 
-/// The outcome of one whitelist read, as delivered to the tracker.
+/// The outcome of one whitelist read.
 #[derive(Debug)]
 pub(super) enum WhitelistRead {
     Ok(HashSet<Bytes>),
     Failed(FetchVenuesError),
 }
 
-/// Longest a single whitelist read may take. A read that hangs past this is a failure like any
-/// other, so a node that accepts the connection and never answers cannot keep the stream in
-/// its pre-whitelist state, or freeze a stale whitelist, forever.
+/// Longest a single whitelist read may take. A read that takes longer fails with
+/// `FetchVenuesError::Timeout` and is retried, so a node that accepts the connection and never
+/// answers cannot block the first read or a refresh forever.
 pub(super) const WHITELIST_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Reads the whitelist through `fetch`, yielding every outcome: a read is bounded by
-/// `read_timeout`; failures (including timeouts) are retried with exponential backoff
-/// (`2^attempt` seconds, capped at `max_backoff`); successes are repeated every
-/// `refresh_interval`. Never ends. Logs one WARN per failure; consumers of the outcomes should
-/// not log them again.
+/// Reads the whitelist through `fetch` in a loop and yields the outcome of every read. A read
+/// that takes longer than `read_timeout` fails. After a failure the reader waits `2^attempt`
+/// seconds, capped at `max_backoff`, and reads again; after a success it waits
+/// `refresh_interval` and reads again. The stream never ends. The reader logs one WARN per
+/// failure.
 pub(super) fn whitelist_reader<F, Fut>(
     fetch: F,
     read_timeout: Duration,
@@ -122,10 +122,7 @@ where
 
 /// Reads the router's whitelisted pAMM venues via `eth_call` on the node at `rpc_url`.
 ///
-/// Read at startup with retries and refreshed periodically by `whitelist_reader`, each
-/// read bounded by `WHITELIST_READ_TIMEOUT`. The whitelist is governance-gated and changes
-/// rarely, and renaming a running component's protocol system would churn every consumer's
-/// component set.
+/// A single read with no timeout or retry; the caller bounds it.
 ///
 /// # Errors
 ///

@@ -8,28 +8,27 @@
 //! # Freshness contract
 //!
 //! Frames are best effort, not complete snapshots: a venue or a pair can be absent from one
-//! frame and present in the next, so absence is never read as retirement. Instead every served
-//! component is vouched for only as long as an accepted frame carried it within `stale_after`
-//! (default 24 s, two block times, see
-//! [`stale_after`](stream::PriceLevelStreamBuilder::stale_after)):
+//! frame and present in the next, so absence is never read as retirement. Instead the stream
+//! serves a component only while an accepted frame carried it within the last `stale_after`
+//! (default 24 s, two slots, see [`stale_after`](stream::PriceLevelStreamBuilder::stale_after)):
 //!
 //! - A frame is accepted only if its wire `timestamp` is younger than `stale_after`, not more than
 //!   one slot in the future, not older than the newest accepted frame (equal is fine: Titan
-//!   re-emits within a build round), and its block neither regresses nor jumps further than elapsed
-//!   time allows. Rejected frames change nothing.
-//! - A component no accepted frame has carried for `stale_after` is emitted in `removed_pairs`,
-//!   together with every other component that expired at the same instant. The next accepted frame
-//!   carrying it re-adds it in `new_pairs`. Silence, disconnects, keepalive-only or unparsable
-//!   traffic, and replayed frames all end in this removal.
-//! - Every emitted state also carries a one-block-time quote guard
-//!   ([`QUOTE_TTL`](state::QUOTE_TTL)) anchored on its frame's `timestamp`, so a ladder cannot be
-//!   quoted past the block it targeted even before the removal arrives. The guard is a live
-//!   property and is never serialized.
+//!   re-emits within a build round), and its block neither regresses nor jumps more than one block
+//!   per elapsed slot plus 2. Rejected frames change nothing.
+//! - A component no accepted frame has carried for `stale_after` turns stale and is emitted in
+//!   `removed_pairs`, together with every other component that turned stale at the same instant.
+//!   The next accepted frame carrying it re-adds it in `new_pairs`. Silence, disconnects,
+//!   keepalive-only or unparsable traffic, and replayed frames all end in this stale removal.
+//! - Every emitted state also refuses to quote once its frame's `timestamp` is one slot
+//!   ([`QUOTE_TTL`](state::QUOTE_TTL)) old, so a ladder cannot be quoted past the block it targeted
+//!   even before the removal arrives. The deadline is an `Instant` of this process and is never
+//!   serialized.
 //!
 //! Recovery is per component: a frame carrying a pair re-adds that pair, nothing more, and a
 //! frame carrying one direction re-adds the pair with the other direction unquotable.
-//! Consumers cannot tell an expiry from a retired venue; both mean the component must not be
-//! routed until it reappears in `new_pairs`. Removal and re-add are always separate updates.
+//! Consumers cannot tell a stale removal from a retired venue; both mean the component must not
+//! be routed until it reappears in `new_pairs`. Removal and re-add are always separate updates.
 //!
 //! Quotes target the block currently being built, so every emitted update is marked as partial
 //! and supersedes the previous one for the pairs it contains.
@@ -49,9 +48,9 @@
 //! re-read every
 //! [`whitelist_refresh_interval`](stream::PriceLevelStreamBuilder::whitelist_refresh_interval).
 //! Nothing is served until the first read succeeds, and without a node URL nothing is ever
-//! served, so a misconfigured deployment never silently lands on the unfloored direct family.
-//! A venue whose membership changes is removed at once and re-added under its new family by
-//! the next frame carrying it.
+//! served, so a misconfigured deployment never silently serves whitelisted venues under the
+//! direct family, which has no Uniswap V3 fallback. A venue whose membership changes is removed
+//! at once and re-added under its new family by the next frame carrying it.
 //! [`without_fallback_router`](stream::PriceLevelStreamBuilder::without_fallback_router) skips
 //! the read and keeps every venue on the direct path unconditionally.
 //!
@@ -66,10 +65,21 @@
 //!
 //! The stream emits `price_level_stream_*` metrics through the `metrics` facade (frames
 //! accepted and rejected by reason, last seen timestamp and served components per registered
-//! venue, stale removals, serving state, reconnects, whitelist reads); a consumer with a
-//! recorder installed sees them without wiring. Per-venue series start at zero for every
-//! registered venue, and no label ever carries a value from the wire, except the venue address
-//! itself when a pAMM is served under auto-detection.
+//! venue, stale removals, serving state, reconnects, whitelist reads); a consumer that installs
+//! a `metrics` recorder receives them with no further setup. Per-venue series start at zero for
+//! every registered venue, and no label ever carries a value from the wire, except the venue
+//! address itself when a pAMM is served under auto-detection.
+//!
+//! Label values and gauge encodings, for dashboards and alerts:
+//! - `price_level_stream_frames_rejected_total{reason}`: `parse_error`, `too_old`, `in_future`,
+//!   `out_of_order`, `block_regression`, `block_jump`.
+//! - `price_level_stream_reconnects_total{reason}`: `idle_timeout`, `ended`, `closed`,
+//!   `read_error`, `connect_failed`, `connect_timeout`.
+//! - `price_level_stream_whitelist_reads_total{outcome}`: `ok`, `error`.
+//! - `price_level_stream_serving_state`: 0 = awaiting whitelist, 1 = unserved, 2 = serving.
+//! - `venue` on `price_level_stream_last_seen_timestamp_seconds`,
+//!   `price_level_stream_served_components` and `price_level_stream_stale_removals_total`: the
+//!   registered venue name, or the address of an auto-detected venue.
 //!
 //! Entry point: [`PriceLevelStreamBuilder`](stream::PriceLevelStreamBuilder). Register the pAMMs
 //! to serve — the known venues via

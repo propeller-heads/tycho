@@ -3,9 +3,8 @@
 //! Connects to the Titan `pamm_price_levels` WebSocket (see
 //! <https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level>) and yields parsed frames.
 //! Each frame carries the quote ladders Titan simulated in one build round, targeting the block
-//! it is currently building. Frames are best effort, not complete snapshots: a venue or pair can
-//! be absent from one frame and present in the next, so absence must never be read as
-//! retirement. Consumers key freshness on the frame `timestamp`, not on what a frame omits.
+//! it is currently building. Consumers decide how fresh a component is from the frame
+//! `timestamp`, not from what a frame omits.
 //!
 //! All Titan specifics (endpoint, JSON shape, reconnect policy) live in this module; the rest of
 //! the price level stream machinery is venue-agnostic.
@@ -36,8 +35,9 @@ pub(super) struct ConnectionSettings {
     pub connect_timeout: Duration,
     /// Longest gap between *parsed* Titan frames tolerated before the socket is treated as dead
     /// and re-established. Titan pushes one frame per second and sends no keepalives, so a
-    /// half-open socket is indistinguishable from silence; ten seconds catches it well before
-    /// any served component expires. Pings, binary frames, and unparsable text do not count.
+    /// half-open socket is indistinguishable from silence; the 10 s default reconnects before
+    /// the 24 s `stale_after` default removes any component. Pings, binary frames, and
+    /// unparsable text do not reset the gap.
     pub read_idle_timeout: Duration,
     /// Cap on the exponential reconnect backoff (`2^attempt` seconds, at most this).
     pub max_backoff: Duration,
@@ -77,12 +77,11 @@ pub(super) struct TitanPriceLevelMessage {
     /// When Titan built this frame, in nanoseconds since the Unix epoch. Frames re-emitted
     /// within one build round share a timestamp, so it is a freshness marker, not an identity.
     pub timestamp: u64,
-    /// Per-pAMM quote snapshots.
+    /// Per-pAMM quote ladders.
     pub pamms: Vec<TitanPammLevels>,
 }
 
-/// The quote ladders one pAMM was simulated for within a frame. Not every pair the venue trades
-/// is necessarily present.
+/// One pAMM's quote ladders within a frame. A frame can omit pairs the venue trades.
 #[derive(Debug, Deserialize)]
 pub(super) struct TitanPammLevels {
     /// The pAMM venue address.
@@ -142,8 +141,8 @@ pub(super) fn messages(
                     info!(%url, "Connected to Titan pAMM price level stream");
                     let mut last_parsed = Instant::now();
                     loop {
-                        // Liveness is measured from the last parsed frame, so control frames and
-                        // garbage cannot keep a data-silent socket alive.
+                        // The idle timeout counts from the last parsed frame, so control frames
+                        // and unparsable text cannot keep a socket that sends no frames alive.
                         let remaining = settings
                             .read_idle_timeout
                             .saturating_sub(last_parsed.elapsed());
@@ -163,7 +162,7 @@ pub(super) fn messages(
                                 telemetry::record_reconnect("ended");
                                 break;
                             }
-                            // No traffic within the idle window: assume a stalled socket.
+                            // No parsed frame within the idle window: assume a stalled socket.
                             Err(_elapsed) => {
                                 warn!(
                                     idle_secs = settings.read_idle_timeout.as_secs(),
@@ -179,7 +178,7 @@ pub(super) fn messages(
                                 match serde_json::from_str::<TitanPriceLevelMessage>(text.as_str())
                                 {
                                     // A parsed frame proves the connection is healthy: reset
-                                    // both the reconnect backoff and the idle watchdog.
+                                    // both the reconnect backoff and the idle timeout.
                                     Ok(message) => {
                                         attempt = 0;
                                         last_parsed = Instant::now();
