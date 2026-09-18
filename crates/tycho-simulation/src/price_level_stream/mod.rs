@@ -31,6 +31,10 @@
 //! frame carrying one direction re-adds the pair with the other direction unquotable.
 //! Consumers cannot tell a stale removal from a retired venue; both mean the component must not
 //! be routed until it reappears in `new_pairs`. Removal and re-add are always separate updates.
+//! Updates are stamped with the block their frame targets (a removal with the newest accepted
+//! block); the number never decreases while something is served, but once every component has
+//! turned stale the next accepted frame is judged as a first frame and may carry a lower block,
+//! which is how the stream recovers from a frame with an implausible block.
 //!
 //! Quotes target the block currently being built, so every emitted update is marked as partial
 //! and supersedes the previous one for the pairs it contains.
@@ -75,8 +79,8 @@
 //!
 //! Label values and gauge encodings, for dashboards and alerts:
 //! - `price_level_stream_frame_age_seconds`: a histogram of the wall-clock age of every accepted
-//!   frame at acceptance. Titan's lag plus delivery delay; above one slot the frame's states
-//!   refuse to quote.
+//!   frame at acceptance, negative for a frame stamped ahead of the local clock. Titan's lag plus
+//!   delivery delay and clock skew; above one slot the frame's states refuse to quote.
 //! - `price_level_stream_frames_rejected_total{reason}`: `parse_error`, `too_old`, `in_future`,
 //!   `out_of_order`, `block_regression`, `block_jump`.
 //! - `price_level_stream_reconnects_total{reason}`: `idle_timeout`, `ended`, `closed`,

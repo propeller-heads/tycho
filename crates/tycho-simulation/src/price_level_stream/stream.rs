@@ -323,6 +323,13 @@ impl PriceLevelStreamBuilder {
     /// slot plus 2 are rejected without effect. Frames that contain no served pAMM produce no
     /// update. Pairs whose tokens are missing from the provided token metadata are skipped.
     ///
+    /// Every update is stamped with the block its frame targets, a removal with the newest
+    /// accepted block. Block numbers never decrease while something is served. Once every
+    /// component has turned stale, the next accepted frame is judged as a first frame and may
+    /// carry a lower block than the removal did: that is how the stream recovers from a frame
+    /// with an implausible block, so consumers must not rely on the block number to order
+    /// updates across such a gap.
+    ///
     /// With the fallback router enabled (the default), nothing is emitted until the
     /// PropAMMRouter whitelist has been read from the node at
     /// [`fallback_router_rpc_url`](Self::fallback_router_rpc_url) or `RPC_URL`; each read is
@@ -437,9 +444,9 @@ impl PriceLevelStreamBuilder {
                     deadline.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                 );
                 let update = tokio::select! {
-                    Some(frame) = frames.next() => tracker.on_frame(frame, Now::current()),
+                    Some(frame) = frames.next() => tracker.on_frame(frame, Now::at(timer_now())),
                     () = sleep_until_deadline, if deadline.is_some() => {
-                        tracker.on_stale_deadline(Instant::now())
+                        tracker.on_stale_deadline(timer_now())
                     }
                     Some(venues) = whitelist.next() => tracker.on_whitelist_read(venues),
                 };
@@ -452,6 +459,13 @@ impl PriceLevelStreamBuilder {
 }
 
 type WhitelistReader = Pin<Box<dyn Stream<Item = HashSet<Bytes>> + Send>>;
+
+/// The clock the deadline timer runs on. Deadlines are set and swept with it so that a sweep
+/// fired by the timer finds the component due, also under `tokio::time::pause()`, where the
+/// runtime's virtual time and `std::time::Instant` diverge.
+fn timer_now() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
 
 /// The node URL the whitelist is read from: `RPC_URL` from the environment, falling back to
 /// `.env`.
@@ -641,7 +655,7 @@ mod tests {
         assert_eq!(format!("{PROPAMM_FALLBACK_FAMILY}:"), PROPAMM_FALLBACK_PREFIX);
     }
 
-    /// A builder with short timings: `stale_after` 1 s, `read_idle_timeout` 100 ms,
+    /// A builder with short timings: `stale_after` 2 s, `read_idle_timeout` 100 ms,
     /// `max_backoff` 20 ms.
     fn fast_builder(fake: &FakeTitan) -> PriceLevelStreamBuilder {
         PriceLevelStreamBuilder::new()
@@ -657,10 +671,10 @@ mod tests {
 
     /// The `stale_after` of [`fast_builder`]: long enough that a loaded runner does not reject
     /// the first frame as too old, short enough that a removal arrives within [`WAIT`].
-    const STALE_AFTER: Duration = Duration::from_secs(1);
+    const STALE_AFTER: Duration = Duration::from_secs(2);
 
     /// How long a test waits for one update.
-    const WAIT: Duration = Duration::from_secs(3);
+    const WAIT: Duration = Duration::from_secs(5);
 
     async fn next_within(
         stream: &mut Pin<&mut impl Stream<Item = Update>>,

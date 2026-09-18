@@ -4,8 +4,6 @@
 //! values from the wire, with one exception: an auto-detected venue is named by its address, so
 //! its `venue` label carries the address the frame named it by.
 
-use std::time::Duration;
-
 use metrics::{counter, gauge, histogram};
 
 /// Counter, no labels. Incremented once per frame the tracker accepts.
@@ -13,8 +11,9 @@ pub(super) const FRAMES_ACCEPTED: &str = "price_level_stream_frames_accepted_tot
 /// Counter, label `reason`, one of [`RejectReason`]. Incremented once per frame the stream drops.
 pub(super) const FRAMES_REJECTED: &str = "price_level_stream_frames_rejected_total";
 /// Histogram, no labels. The age of every accepted frame at acceptance, in seconds: the local
-/// wall clock minus the frame's wire `timestamp`. It measures Titan's lag plus delivery delay;
-/// a frame older than one slot yields states that refuse to quote.
+/// wall clock minus the frame's wire `timestamp`, negative when the frame is stamped ahead of
+/// the local clock. It measures Titan's lag plus delivery delay, and a clock skew between Titan
+/// and this host; a frame older than one slot yields states that refuse to quote.
 pub(super) const FRAME_AGE: &str = "price_level_stream_frame_age_seconds";
 /// Gauge, label `venue`. The wire `timestamp` of the newest accepted frame that carried the
 /// venue, in seconds since the Unix epoch; 0 until the first such frame. `venue` is the
@@ -140,8 +139,8 @@ pub(super) fn record_frame_rejected(reason: RejectReason) {
     counter!(FRAMES_REJECTED, "reason" => reason.as_str()).increment(1);
 }
 
-pub(super) fn record_frame_age(age: Duration) {
-    histogram!(FRAME_AGE).record(age.as_secs_f64());
+pub(super) fn record_frame_age(age_seconds: f64) {
+    histogram!(FRAME_AGE).record(age_seconds);
 }
 
 pub(super) fn record_last_seen(venue: &str, unix_seconds: u64) {
@@ -280,7 +279,7 @@ mod tests {
             record_frame_accepted();
             record_frame_rejected(RejectReason::TooOld);
             record_frame_rejected(RejectReason::TooOld);
-            record_frame_age(Duration::from_millis(250));
+            record_frame_age(0.25);
             record_last_seen("fermiswap", 1_700_000_000);
             record_served_components("fermiswap", 3);
             record_stale_removal("fermiswap");

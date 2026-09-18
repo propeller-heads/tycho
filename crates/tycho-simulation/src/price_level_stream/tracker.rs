@@ -44,6 +44,12 @@ const BLOCK_JUMP_SLACK: u64 = 2;
 /// memory, and no address becomes a metric label.
 const MAX_UNREGISTERED_LOGGED: usize = 64;
 
+/// How many venues auto-detection may add to the registry per process. Titan streamed seven
+/// venues in the 2026-09 capture; the cap keeps a misbehaving upstream from growing the registry,
+/// the served set and the per-venue metric series without bound. Venues past the cap are skipped
+/// like unregistered ones.
+const MAX_AUTO_DETECTED: usize = 64;
+
 /// The wall-clock and monotonic time at which the tracker handles a frame.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Now {
@@ -56,9 +62,10 @@ pub(super) struct Now {
 }
 
 impl Now {
-    /// Reads both clocks. A system clock unrepresentable as unix nanoseconds yields
+    /// Reads the wall clock and pairs it with `monotonic`, an instant of the clock the caller's
+    /// deadlines run on. A system clock unrepresentable as unix nanoseconds yields
     /// `wall_nanos = 0`, which rejects every frame as `in_future`.
-    pub(super) fn current() -> Self {
+    pub(super) fn at(monotonic: Instant) -> Self {
         let since_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -73,7 +80,7 @@ impl Now {
                 0
             }
         };
-        Self { wall_nanos, monotonic: Instant::now() }
+        Self { wall_nanos, monotonic }
     }
 }
 
@@ -178,6 +185,8 @@ pub(super) struct FreshnessTracker {
     rejecting: bool,
     /// Unregistered venue addresses already logged, at most [`MAX_UNREGISTERED_LOGGED`].
     logged_unregistered: HashSet<Bytes>,
+    /// Venues auto-detection has added to the registry, at most [`MAX_AUTO_DETECTED`].
+    auto_detected: usize,
 }
 
 impl FreshnessTracker {
@@ -217,6 +226,7 @@ impl FreshnessTracker {
             newest_timestamp_nanos: 0,
             rejecting: false,
             logged_unregistered: HashSet::new(),
+            auto_detected: 0,
         }
     }
 
@@ -322,11 +332,16 @@ impl FreshnessTracker {
         };
         self.rejecting = false;
         telemetry::record_frame_accepted();
-        telemetry::record_frame_age(frame_age);
+        // Signed, unlike `frame_age`: a frame stamped ahead of the local clock records a negative
+        // age, so a clock skew between Titan and this host shows on the histogram instead of
+        // looking like a perfect feed.
+        let age_nanos = i128::from(now.wall_nanos) - i128::from(frame.timestamp);
+        telemetry::record_frame_age(age_nanos as f64 / NANOS_PER_SECOND as f64);
         self.newest_timestamp_nanos = frame.timestamp;
 
-        if let ServingState::AwaitingWhitelist = self.serving_state {
-            return None;
+        match self.serving_state {
+            ServingState::AwaitingWhitelist => return None,
+            ServingState::Unserved | ServingState::Serving { deadline: _, frontier: _ } => {}
         }
 
         let stale_at = now.monotonic +
@@ -395,8 +410,9 @@ impl FreshnessTracker {
         Some(Update::new(frame.block_number, states, new_pairs).set_is_partial(true))
     }
 
-    /// Registers an auto-detected venue on first sight. A denied venue, or an unregistered one
-    /// while auto-detection is off, stays out of the registry.
+    /// Registers an auto-detected venue on first sight, up to [`MAX_AUTO_DETECTED`]. A denied
+    /// venue, an unregistered one while auto-detection is off, and any venue past the cap stay
+    /// out of the registry.
     fn admit(&mut self, pamm: &Bytes) {
         if self.registry.contains_key(pamm) {
             return;
@@ -405,28 +421,38 @@ impl FreshnessTracker {
             tracing::debug!(%pamm, "Skipping denied pAMM");
             return;
         }
-        if !self.auto_detect {
-            telemetry::record_unregistered_pamm();
-            if self.logged_unregistered.len() < MAX_UNREGISTERED_LOGGED &&
-                self.logged_unregistered
-                    .insert(pamm.clone())
-            {
+        if self.auto_detect && self.auto_detected < MAX_AUTO_DETECTED {
+            tracing::info!(%pamm, "Serving auto-detected pAMM");
+            let config = PriceLevelStreamConfig::auto_detected(
+                pamm.clone(),
+                self.auto_detected_gas_cost.clone(),
+            );
+            telemetry::record_served_components(&config.protocol, 0);
+            telemetry::record_last_seen(&config.protocol, 0);
+            self.registry
+                .insert(pamm.clone(), config);
+            self.auto_detected += 1;
+            return;
+        }
+        telemetry::record_unregistered_pamm();
+        if self.logged_unregistered.len() < MAX_UNREGISTERED_LOGGED &&
+            self.logged_unregistered
+                .insert(pamm.clone())
+        {
+            if self.auto_detect {
+                tracing::warn!(
+                    %pamm,
+                    cap = MAX_AUTO_DETECTED,
+                    "Skipping unknown pAMM: the auto-detection cap is reached; register it via \
+                     add_pamm to serve it"
+                );
+            } else {
                 tracing::info!(
                     %pamm,
                     "Skipping unregistered pAMM; register it via add_pamm to serve it"
                 );
             }
-            return;
         }
-        tracing::info!(%pamm, "Serving auto-detected pAMM");
-        let config = PriceLevelStreamConfig::auto_detected(
-            pamm.clone(),
-            self.auto_detected_gas_cost.clone(),
-        );
-        telemetry::record_served_components(&config.protocol, 0);
-        telemetry::record_last_seen(&config.protocol, 0);
-        self.registry
-            .insert(pamm.clone(), config);
     }
 
     /// Removes every served component whose deadline has passed, as one [`Update`].
@@ -945,16 +971,64 @@ mod tests {
     }
 
     #[test]
-    fn accepted_frame_records_its_age() {
+    fn accepted_frame_records_its_signed_age() {
         let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
             // Built at t=7, accepted at t=9: 2 s old.
             tracker.on_frame(message_at(100, 7, wbtc_usdc_pairs()), clock.at(9));
+            // Stamped 3 s ahead of the local clock: a negative age, so a skew is visible.
+            tracker.on_frame(message_at(100, 12, wbtc_usdc_pairs()), clock.at(9));
             // Rejected frames record no age.
             tracker.on_frame(message_at(100, 6, wbtc_usdc_pairs()), clock.at(9));
         });
-        assert_eq!(histogram_values(&snapshot, FRAME_AGE, &[]), vec![2.0]);
+        assert_eq!(histogram_values(&snapshot, FRAME_AGE, &[]), vec![2.0, -3.0]);
+    }
+
+    /// An id is never in both `removed_pairs` and `new_pairs` of one update, and a removal
+    /// carries no states, across every path that removes: family change and stale deadline.
+    #[test]
+    fn no_update_both_removes_and_adds_an_id() {
+        let clock = Clock::new();
+        let mut tracker = tracker_awaiting_whitelist();
+        tracker.on_whitelist_read(venues(&[PAMM]));
+        let mut updates = Vec::new();
+        updates.extend(tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0)));
+        updates.extend(tracker.on_whitelist_read(venues(&[])));
+        updates.extend(tracker.on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1)));
+        updates.extend(tracker.on_stale_deadline(clock.at(25).monotonic));
+        updates.extend(tracker.on_frame(message_at(102, 26, wbtc_usdc_pairs()), clock.at(26)));
+        assert_eq!(updates.len(), 5);
+        for update in &updates {
+            for id in update.removed_pairs.keys() {
+                assert!(!update.new_pairs.contains_key(id), "{id} removed and added");
+                assert!(!update.states.contains_key(id), "{id} removed with a state");
+            }
+        }
+    }
+
+    #[test]
+    fn auto_detection_stops_at_its_cap() {
+        let (registered, snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker =
+                FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
+            for index in 0..(MAX_AUTO_DETECTED + 2) as u64 {
+                let address = Bytes::from_str(&format!("0x{index:040x}")).unwrap();
+                let frame = TitanPriceLevelMessage {
+                    block_number: 100,
+                    timestamp: BASE_WALL_NANOS + index * 1_000,
+                    pamms: vec![TitanPammLevels { pamm: address, pairs: wbtc_usdc_pairs() }],
+                };
+                let served = tracker
+                    .on_frame(frame, clock.at(1))
+                    .is_some();
+                assert_eq!(served, (index as usize) < MAX_AUTO_DETECTED, "venue {index}");
+            }
+            tracker.registry.len()
+        });
+        assert_eq!(registered, MAX_AUTO_DETECTED);
+        assert_eq!(counter_value(&snapshot, UNREGISTERED_PAMM_ENTRIES, &[]), 2);
     }
 
     #[test]

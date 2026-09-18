@@ -95,10 +95,10 @@ impl PriceLevelStreamState {
     /// `quotable_until` never errors.
     fn ensure_quotable(&self, now: Instant) -> Result<(), SimulationError> {
         match self.quotable_until {
-            Some(until) if now >= until => Err(SimulationError::RecoverableError(
-                "price levels expired: the frame that carried them is older than 12 s (one slot)"
-                    .to_string(),
-            )),
+            Some(until) if now >= until => Err(SimulationError::RecoverableError(format!(
+                "price levels expired: the frame that carried them is older than {} s (one slot)",
+                QUOTE_TTL.as_secs()
+            ))),
             Some(_) | None => Ok(()),
         }
     }

@@ -258,7 +258,7 @@ let price_level_stream = PriceLevelStreamBuilder::new()
     .build()?;                        // fails without a node URL for the whitelist read
 ```
 
-Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. The stream never terminates — run it in its own task alongside your protocol stream.
+Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. Each update carries the block its frame targets; that number only decreases after every component has been removed, when the stream re-anchors on the next frame. The stream never terminates — run it in its own task alongside your protocol stream.
 
 Frames are best effort, not complete snapshots: a venue or a pair can be absent from one frame and present in the next, so the stream never removes a component because a frame omits it. Instead it serves a component for `stale_after` (default 24 s) after the last frame that carried it, then lists the component in `removed_pairs`; the next frame that carries it adds it back in `new_pairs`. Every state also refuses to quote once its frame is 12 s old, so you cannot quote a ladder past the block it targeted even before the removal arrives. Treat a removal like any other: stop routing through the component until it reappears in `new_pairs`. If you quote states more than 12 s after they arrive by design (a batch simulator, a validation harness), `without_quote_guard()` emits states that never refuse; the 24 s removal still applies, and a quote from such a state may no longer be fillable.
 
