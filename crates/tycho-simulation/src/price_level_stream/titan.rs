@@ -146,24 +146,25 @@ pub(super) fn messages(
                         let remaining = settings
                             .read_idle_timeout
                             .saturating_sub(last_parsed.elapsed());
-                        if remaining.is_zero() {
-                            warn!(
-                                idle_secs = settings.read_idle_timeout.as_secs(),
-                                "No parsed Titan frame within idle timeout; reconnecting"
-                            );
-                            telemetry::record_reconnect("idle_timeout");
-                            break;
-                        }
-                        let message = match timeout(remaining, ws_stream.next()).await {
-                            Ok(Some(message)) => message,
+                        // `None` once the idle timeout has elapsed, either before this read or
+                        // while waiting on it.
+                        let next = if remaining.is_zero() {
+                            None
+                        } else {
+                            timeout(remaining, ws_stream.next())
+                                .await
+                                .ok()
+                        };
+                        let message = match next {
+                            Some(Some(message)) => message,
                             // Stream ended: the server hung up without sending a close frame.
-                            Ok(None) => {
+                            Some(None) => {
                                 warn!("Titan price level stream ended; reconnecting");
                                 telemetry::record_reconnect("ended");
                                 break;
                             }
                             // No parsed frame within the idle window: assume a stalled socket.
-                            Err(_elapsed) => {
+                            None => {
                                 warn!(
                                     idle_secs = settings.read_idle_timeout.as_secs(),
                                     "No parsed Titan frame within idle timeout; reconnecting"

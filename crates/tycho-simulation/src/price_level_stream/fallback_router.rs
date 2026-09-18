@@ -90,10 +90,9 @@ where
     stream! {
         let mut attempt: u32 = 0;
         loop {
-            let outcome = match timeout(read_timeout, fetch()).await {
-                Ok(outcome) => outcome,
-                Err(_elapsed) => Err(FetchVenuesError::Timeout { after: read_timeout }),
-            };
+            let outcome = timeout(read_timeout, fetch())
+                .await
+                .unwrap_or(Err(FetchVenuesError::Timeout { after: read_timeout }));
             match outcome {
                 Ok(venues) => {
                     attempt = 0;

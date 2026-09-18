@@ -242,31 +242,22 @@ impl FreshnessTracker {
             telemetry::record_serving_state(self.serving_state.telemetry_state());
             return None;
         }
-        let moved: Vec<String> = self
-            .served
-            .iter()
-            .filter(|(_, served)| {
+        let previous = std::mem::replace(&mut self.router_venues, venues);
+        let mut removed = HashMap::new();
+        for (id, served) in self.served.extract_if(|_, served| {
+            previous.contains(&served.venue_address) !=
                 self.router_venues
-                    .contains(&served.venue_address) !=
-                    venues.contains(&served.venue_address)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        self.router_venues = venues;
-        if moved.is_empty() {
-            return None;
-        }
-        let mut removed = HashMap::with_capacity(moved.len());
-        for id in moved {
-            let Some(served) = self.served.remove(&id) else {
-                continue;
-            };
+                    .contains(&served.venue_address)
+        }) {
             tracing::info!(
                 venue = %served.venue_name,
                 "pAMM changed PropAMMRouter whitelist membership; re-adding it under its new \
                  family on the next frame"
             );
             removed.insert(id, served.component);
+        }
+        if removed.is_empty() {
+            return None;
         }
         // Build the update before `refresh_serving_state`, which resets `newest_block` to 0 once
         // nothing is served: the removal must carry the newest accepted block.
@@ -476,24 +467,18 @@ impl FreshnessTracker {
 
     /// Removes every served component whose deadline has passed, as one [`Update`].
     pub(super) fn on_stale_deadline(&mut self, now: Now) -> Option<Update> {
-        let due: Vec<String> = self
-            .served
-            .iter()
-            .filter(|(_, served)| served.stale_at <= now.monotonic)
-            .map(|(id, _)| id.clone())
-            .collect();
-        if due.is_empty() {
-            return None;
-        }
-        let mut removed = HashMap::with_capacity(due.len());
+        let mut removed = HashMap::new();
         let mut venues = BTreeSet::new();
-        for id in due {
-            let Some(served) = self.served.remove(&id) else {
-                continue;
-            };
+        for (id, served) in self
+            .served
+            .extract_if(|_, served| served.stale_at <= now.monotonic)
+        {
             telemetry::record_stale_removal(&served.venue_name);
             venues.insert(served.venue_name);
             removed.insert(id, served.component);
+        }
+        if removed.is_empty() {
+            return None;
         }
         let component_ids: Vec<&String> = removed.keys().collect();
         tracing::warn!(
