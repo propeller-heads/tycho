@@ -1349,7 +1349,7 @@ mod test {
                 .await
         }
 
-        async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError> {
+        async fn connect(&self) -> Result<crate::deltas::ConnectionHandle, DeltasError> {
             self.0.connect().await
         }
 

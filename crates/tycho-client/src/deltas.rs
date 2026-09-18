@@ -21,10 +21,13 @@
 //! consumption, and enhances overall software scalability.
 use std::{
     collections::{hash_map::Entry, HashMap},
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -46,7 +49,7 @@ use tokio::{
         mpsc::{self, error::TrySendError, Receiver, Sender},
         oneshot, Mutex, MutexGuard, Notify,
     },
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
     time::sleep,
 };
 use tokio_tungstenite::{
@@ -164,10 +167,45 @@ pub trait DeltasClient {
     async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError>;
 
     /// Start the clients message handling loop.
-    async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError>;
+    ///
+    /// The connection stays open for as long as the returned handle is alive; dropping the handle
+    /// closes it. Awaiting the handle yields the result of the message handling loop.
+    async fn connect(&self) -> Result<ConnectionHandle, DeltasError>;
 
     /// Close the clients message handling loop.
     async fn close(&self) -> Result<(), DeltasError>;
+}
+
+/// Owns the websocket task started by [`DeltasClient::connect`].
+///
+/// Dropping the handle shuts the task down the same way [`DeltasClient::close`] does, so a
+/// caller that loses it — an early return, a finished `select!` — closes the connection instead
+/// of detaching it. Awaiting the handle yields the task's result.
+pub struct ConnectionHandle {
+    task: JoinHandle<Result<(), DeltasError>>,
+    cmd_tx: Sender<()>,
+    dead: Arc<AtomicBool>,
+    conn_notify: Arc<Notify>,
+}
+
+impl Future for ConnectionHandle {
+    type Output = Result<Result<(), DeltasError>, JoinError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.task).poll(cx)
+    }
+}
+
+impl Drop for ConnectionHandle {
+    fn drop(&mut self) {
+        // A closed channel means the task already ended. A full one cannot happen: this is the
+        // only message sent per shutdown into a channel sized for message buffering.
+        let _ = self.cmd_tx.try_send(());
+        // Mark dead and notify so ensure_connection() callers return NotConnected instead of
+        // waiting for a connection that will never come.
+        self.dead.store(true, Ordering::SeqCst);
+        self.conn_notify.notify_waiters();
+    }
 }
 
 #[derive(Clone)]
@@ -893,7 +931,7 @@ impl DeltasClient for WsDeltasClient {
     }
 
     #[instrument(skip(self))]
-    async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError> {
+    async fn connect(&self) -> Result<ConnectionHandle, DeltasError> {
         if self.is_connected().await {
             return Err(DeltasError::AlreadyConnected);
         }
@@ -905,6 +943,7 @@ impl DeltasClient for WsDeltasClient {
             let mut guard = self.inner.as_ref().lock().await;
             *guard = None;
         }
+        let handle_cmd_tx = cmd_tx.clone();
         let this = self.clone();
         let jh = tokio::spawn(async move {
             let mut retry_count = 0;
@@ -1042,7 +1081,12 @@ impl DeltasClient for WsDeltasClient {
         self.conn_notify.notified().await;
 
         if self.is_connected().await {
-            Ok(jh)
+            Ok(ConnectionHandle {
+                task: jh,
+                cmd_tx: handle_cmd_tx,
+                dead: Arc::clone(&self.dead),
+                conn_notify: Arc::clone(&self.conn_notify),
+            })
         } else {
             Err(DeltasError::NotConnected)
         }
@@ -1139,6 +1183,35 @@ mod tests {
             info!("mock server ended");
         });
         (addr, jh)
+    }
+
+    /// Accepts one websocket connection and reports when the client closes it.
+    async fn mock_ws_reporting_close() -> (SocketAddr, oneshot::Receiver<()>) {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("localhost bind failed");
+        let addr = server.local_addr().unwrap();
+        let (closed_tx, closed_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (stream, _) = server
+                .accept()
+                .await
+                .expect("accept failed");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake failed");
+            loop {
+                match websocket.next().await {
+                    Some(Ok(tungstenite::protocol::Message::Close(_))) | Some(Err(_)) | None => {
+                        break
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        (addr, closed_rx)
     }
 
     const SUBSCRIPTION_ID: &str = "30b740d1-cf09-4e0e-8cfe-b1434d447ece";
@@ -1590,7 +1663,7 @@ mod tests {
         )
         .unwrap();
 
-        let jh: JoinHandle<Result<(), DeltasError>> = client
+        let jh: ConnectionHandle = client
             .connect()
             .await
             .expect("connect failed");
@@ -1676,6 +1749,46 @@ mod tests {
         .await
         .unwrap();
         assert!(subscription_res.is_err());
+    }
+
+    /// A caller that loses the connection handle — an early return, a finished `select!` —
+    /// must close the websocket rather than leave it running until the process exits.
+    #[test_log::test(tokio::test)]
+    async fn test_dropping_connection_handle_closes_socket() {
+        let (addr, closed_rx) = mock_ws_reporting_close().await;
+        let client = WsDeltasClient::new(&format!("ws://{addr}"), None).unwrap();
+
+        let handle = client.connect().await.unwrap();
+        drop(handle);
+
+        timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("server should observe the connection closing")
+            .expect("mock server exited without reporting");
+        assert!(!client.is_connected().await);
+        let subscription_res = timeout(
+            Duration::from_millis(10),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new(),
+            ),
+        )
+        .await
+        .expect("subscribe on a closed client must fail fast");
+        assert!(subscription_res.is_err());
+    }
+
+    /// Holding the handle keeps the connection open; only its drop closes the socket.
+    #[test_log::test(tokio::test)]
+    async fn test_connection_handle_keeps_socket_open_while_held() {
+        let (addr, mut closed_rx) = mock_ws_reporting_close().await;
+        let client = WsDeltasClient::new(&format!("ws://{addr}"), None).unwrap();
+
+        let _handle = client.connect().await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+
+        assert!(matches!(closed_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(client.is_connected().await);
     }
 
     #[test_log::test(tokio::test)]
@@ -1877,11 +1990,10 @@ mod tests {
         drop(rx); // Explicitly drop the receiver
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Abort the tasks to clean up
-        jh.abort();
+        // Dropping the handle shuts the client down; the mock server needs an explicit abort.
+        drop(jh);
         server_thread.abort();
 
-        let _ = jh.await;
         let _ = server_thread.await;
     }
 
