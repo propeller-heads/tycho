@@ -1,4 +1,8 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    sync::LazyLock,
+};
 
 use alloy::sol_types::SolValue;
 use serde::Deserialize;
@@ -7,7 +11,7 @@ use tycho_common::{models::Chain, Bytes};
 use crate::encoding::{
     errors::EncodingError,
     evm::{
-        constants::{UNISWAP_V2_FORKS, UNISWAP_V3_FORKS},
+        constants::{DEFAULT_EXECUTORS_JSON, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS},
         utils::bytes_to_address,
     },
     models::{EncodingContext, Swap},
@@ -27,17 +31,135 @@ const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
 const SLIPSTREAMS_FORKS: &[&str] =
     &["aerodrome_slipstreams", "velodrome_slipstreams", "up_v3", "ramses_v3"];
 
-/// The fallback protocol that fills a pAMM swap when the pAMM fails. The solver picks it and its
-/// pool, JSON-encoded into `Swap::user_data` (e.g.
-/// `{"fallback_protocol":"uniswap_v3","pool":"0x…"}`); a swap without one is rejected. Each
-/// protocol's JSON fields are the variant fields below. The variants mirror
-/// `TychoFallbackRouter.FallbackProtocol`.
+/// The protocols a chain's executor config names, keyed by chain. A chain has a protocol's
+/// per-chain singleton exactly when it has that protocol's executor, which is also how
+/// `deploy-fallback-router.js` decides which singletons the chain's `TychoFallbackRouter` gets.
+static EXECUTOR_PROTOCOLS: LazyLock<HashMap<Chain, HashSet<String>>> = LazyLock::new(|| {
+    let config: HashMap<Chain, HashMap<String, String>> =
+        serde_json::from_str(DEFAULT_EXECUTORS_JSON)
+            // Embedded at compile time and parsed by every registry test, so a failure here
+            // is a broken build, not a runtime condition.
+            .expect("config/executor_addresses.json is valid");
+    config
+        .into_iter()
+        .map(|(chain, executors)| (chain, executors.into_keys().collect()))
+        .collect()
+});
+
+/// A protocol `TychoFallbackRouter` can fall back on, one per variant of the contract's
+/// `FallbackProtocol` enum.
 ///
-/// A fork name resolves to the variant whose pool ABI it shares, see
-/// [`FallbackProtocol::canonical_name`].
+/// The solver names one per swap in `user_data`; [`FallbackProtocol::from_protocol_system`]
+/// says which one a Tycho component encodes as, and [`FallbackProtocol::supported_on`] whether
+/// a chain's deployment can run it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FallbackProtocol {
+    UniswapV2,
+    UniswapV3,
+    UniswapV4,
+    Curve,
+    FluidV1,
+    AerodromeV1,
+}
+
+impl FallbackProtocol {
+    /// Every protocol, in protocol-byte order.
+    pub const ALL: [FallbackProtocol; 6] = [
+        FallbackProtocol::UniswapV2,
+        FallbackProtocol::UniswapV3,
+        FallbackProtocol::UniswapV4,
+        FallbackProtocol::Curve,
+        FallbackProtocol::FluidV1,
+        FallbackProtocol::AerodromeV1,
+    ];
+
+    /// The ordinal of the matching `TychoFallbackRouter.FallbackProtocol` variant — the wire
+    /// format's protocol byte.
+    pub fn protocol_byte(self) -> u8 {
+        match self {
+            FallbackProtocol::UniswapV2 => 0,
+            FallbackProtocol::UniswapV3 => 1,
+            FallbackProtocol::UniswapV4 => 2,
+            FallbackProtocol::Curve => 3,
+            FallbackProtocol::FluidV1 => 4,
+            FallbackProtocol::AerodromeV1 => 5,
+        }
+    }
+
+    /// The `fallback_protocol` value naming this protocol in a swap's `user_data`.
+    pub fn user_data_name(self) -> &'static str {
+        match self {
+            FallbackProtocol::UniswapV2 => "uniswap_v2",
+            FallbackProtocol::UniswapV3 => "uniswap_v3",
+            FallbackProtocol::UniswapV4 => "uniswap_v4",
+            FallbackProtocol::Curve => "curve",
+            FallbackProtocol::FluidV1 => "fluid_v1",
+            FallbackProtocol::AerodromeV1 => "aerodrome_v1",
+        }
+    }
+
+    /// The protocol a Tycho `protocol_system` (or a [`user_data_name`](Self::user_data_name))
+    /// encodes as, or `None` for one `TychoFallbackRouter` cannot run.
+    ///
+    /// Uniswap V2 forks share the constant-fee `swap(amount0Out, amount1Out, to, data)` pool;
+    /// Uniswap V3 forks and the Slipstream deployments share V3's `swap` and callback, which
+    /// `TychoFallbackRouter` answers whatever selector the fork renamed it to.
+    pub fn from_protocol_system(protocol_system: &str) -> Option<Self> {
+        if UNISWAP_V2_FORKS.contains(&protocol_system) {
+            return Some(FallbackProtocol::UniswapV2);
+        }
+        if UNISWAP_V3_FORKS.contains(&protocol_system) ||
+            SLIPSTREAMS_FORKS.contains(&protocol_system)
+        {
+            return Some(FallbackProtocol::UniswapV3);
+        }
+        match protocol_system {
+            "uniswap_v4" | "uniswap_v4_hooks" => Some(FallbackProtocol::UniswapV4),
+            "curve" | "vm:curve" => Some(FallbackProtocol::Curve),
+            "fluid_v1" => Some(FallbackProtocol::FluidV1),
+            "aerodrome_v1" => Some(FallbackProtocol::AerodromeV1),
+            _ => None,
+        }
+    }
+
+    /// Whether `chain`'s `TychoFallbackRouter` can run this protocol.
+    ///
+    /// Uniswap V4 and Fluid V1 call a per-chain singleton the router takes as a constructor
+    /// immutable, and a chain without it deploys the router with `address(0)` there, which makes
+    /// the protocol revert `TychoFallbackRouter__ProtocolUnavailable`. The chain has the
+    /// singleton exactly when it has the protocol's executor. Every other protocol is addressed
+    /// per swap and needs nothing from the deployment.
+    pub fn supported_on(self, chain: Chain) -> bool {
+        let executor = match self {
+            FallbackProtocol::UniswapV4 => "uniswap_v4",
+            FallbackProtocol::FluidV1 => "fluid_v1",
+            FallbackProtocol::UniswapV2 |
+            FallbackProtocol::UniswapV3 |
+            FallbackProtocol::Curve |
+            FallbackProtocol::AerodromeV1 => return true,
+        };
+        EXECUTOR_PROTOCOLS
+            .get(&chain)
+            .is_some_and(|executors| executors.contains(executor))
+    }
+
+    /// The protocols `chain`'s `TychoFallbackRouter` can run, in protocol-byte order.
+    pub fn supported(chain: Chain) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|protocol| protocol.supported_on(chain))
+            .collect()
+    }
+}
+
+/// The fallback protocol and pool that fill a pAMM swap when the pAMM fails. The solver picks
+/// them, JSON-encoded into `Swap::user_data` (e.g.
+/// `{"fallback_protocol":"uniswap_v3","pool":"0x…"}`); a swap without one is rejected. Each
+/// protocol's JSON fields are the variant fields below; the tag is any name
+/// [`FallbackProtocol::from_protocol_system`] resolves.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "fallback_protocol", rename_all = "snake_case")]
-enum FallbackProtocol {
+enum FallbackSwapData {
     UniswapV2 {
         pair: Bytes,
         fee_bps: u8,
@@ -67,7 +189,7 @@ enum FallbackProtocol {
     },
 }
 
-impl FallbackProtocol {
+impl FallbackSwapData {
     fn from_swap_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
         let Some(bytes) = user_data
             .as_ref()
@@ -87,47 +209,31 @@ impl FallbackProtocol {
         let canonical = value
             .get("fallback_protocol")
             .and_then(serde_json::Value::as_str)
-            .and_then(Self::canonical_name);
+            .and_then(FallbackProtocol::from_protocol_system)
+            .map(FallbackProtocol::user_data_name);
         if let Some(canonical) = canonical {
             value["fallback_protocol"] = canonical.into();
         }
         serde_json::from_value(value).map_err(invalid_json)
     }
 
-    /// The variant name a fork encodes as, or `None` for a name that is not a known fork.
-    ///
-    /// Uniswap V2 forks share the constant-fee `swap(amount0Out, amount1Out, to, data)` pool;
-    /// Uniswap V3 forks and the Slipstream deployments share V3's `swap` and callback, which
-    /// `TychoFallbackRouter` answers whatever selector the fork renamed it to.
-    fn canonical_name(protocol: &str) -> Option<&'static str> {
-        if UNISWAP_V2_FORKS.contains(&protocol) {
-            Some("uniswap_v2")
-        } else if UNISWAP_V3_FORKS.contains(&protocol) || SLIPSTREAMS_FORKS.contains(&protocol) {
-            Some("uniswap_v3")
-        } else {
-            None
-        }
-    }
-
-    /// The ordinal of the matching `TychoFallbackRouter.FallbackProtocol` variant — the wire
-    /// format's protocol byte.
-    fn protocol_byte(&self) -> u8 {
+    fn protocol(&self) -> FallbackProtocol {
         match self {
-            FallbackProtocol::UniswapV2 { .. } => 0,
-            FallbackProtocol::UniswapV3 { .. } => 1,
-            FallbackProtocol::UniswapV4 { .. } => 2,
-            FallbackProtocol::Curve { .. } => 3,
-            FallbackProtocol::FluidV1 { .. } => 4,
-            FallbackProtocol::AerodromeV1 { .. } => 5,
+            FallbackSwapData::UniswapV2 { .. } => FallbackProtocol::UniswapV2,
+            FallbackSwapData::UniswapV3 { .. } => FallbackProtocol::UniswapV3,
+            FallbackSwapData::UniswapV4 { .. } => FallbackProtocol::UniswapV4,
+            FallbackSwapData::Curve { .. } => FallbackProtocol::Curve,
+            FallbackSwapData::FluidV1 { .. } => FallbackProtocol::FluidV1,
+            FallbackSwapData::AerodromeV1 { .. } => FallbackProtocol::AerodromeV1,
         }
     }
 
     /// Encodes the protocol byte followed by its data, rejecting values `TychoFallbackRouter`
     /// would revert on.
     fn encode(&self) -> Result<Vec<u8>, EncodingError> {
-        let mut data = vec![self.protocol_byte()];
+        let mut data = vec![self.protocol().protocol_byte()];
         match self {
-            FallbackProtocol::UniswapV2 { pair, fee_bps } => {
+            FallbackSwapData::UniswapV2 { pair, fee_bps } => {
                 if *fee_bps > MAX_UNISWAP_V2_FEE_BPS {
                     return Err(EncodingError::InvalidInput(format!(
                         "Uniswap V2 fallback fee is {fee_bps} bps, the fallback router accepts \
@@ -137,10 +243,10 @@ impl FallbackProtocol {
                 data.extend_from_slice(bytes_to_address(pair)?.as_slice());
                 data.push(*fee_bps);
             }
-            FallbackProtocol::UniswapV3 { pool } => {
+            FallbackSwapData::UniswapV3 { pool } => {
                 data.extend_from_slice(bytes_to_address(pool)?.as_slice());
             }
-            FallbackProtocol::UniswapV4 { fee, tick_spacing, hook, hook_data } => {
+            FallbackSwapData::UniswapV4 { fee, tick_spacing, hook, hook_data } => {
                 if *fee >= 1 << 24 {
                     return Err(EncodingError::InvalidInput(format!(
                         "Uniswap V4 fallback fee {fee} does not fit uint24"
@@ -156,15 +262,15 @@ impl FallbackProtocol {
                 data.extend_from_slice(bytes_to_address(hook)?.as_slice());
                 data.extend_from_slice(hook_data.as_ref());
             }
-            FallbackProtocol::Curve { pool, pool_type, i, j } => {
+            FallbackSwapData::Curve { pool, pool_type, i, j } => {
                 data.extend_from_slice(bytes_to_address(pool)?.as_slice());
                 data.extend_from_slice(&[*pool_type, *i, *j]);
             }
-            FallbackProtocol::FluidV1 { dex, zero2one } => {
+            FallbackSwapData::FluidV1 { dex, zero2one } => {
                 data.extend_from_slice(bytes_to_address(dex)?.as_slice());
                 data.push(u8::from(*zero2one));
             }
-            FallbackProtocol::AerodromeV1 { pool } => {
+            FallbackSwapData::AerodromeV1 { pool } => {
                 data.extend_from_slice(bytes_to_address(pool)?.as_slice());
             }
         }
@@ -179,12 +285,15 @@ impl FallbackProtocol {
 ///
 /// # Fields
 /// * `executor_address` - The address of the executor contract that will perform the swap.
+/// * `chain` - The chain whose `TychoFallbackRouter` runs the swap; a fallback protocol it cannot
+///   run ([`FallbackProtocol::supported_on`]) is rejected at encoding time.
 /// * `angstrom_hook_address` - The chain's Angstrom hook, from the `fallback` section of
 ///   `protocol_specific_addresses.json`. Uniswap V4 fallbacks naming this hook are rejected. `None`
 ///   on a chain without Angstrom, where there is nothing to reject.
 #[derive(Clone)]
 pub struct FallbackSwapEncoder {
     executor_address: Bytes,
+    chain: Chain,
     angstrom_hook_address: Option<Bytes>,
 }
 
@@ -204,9 +313,22 @@ impl FallbackSwapEncoder {
             })
     }
 
+    /// Rejects a protocol the chain's `TychoFallbackRouter` deploys without.
+    fn reject_unsupported(&self, protocol: FallbackProtocol) -> Result<(), EncodingError> {
+        if !protocol.supported_on(self.chain) {
+            return Err(EncodingError::InvalidInput(format!(
+                "Fallback protocol {} is unavailable on {}: the chain's TychoFallbackRouter \
+                 deploys without its singleton, so the swap would revert on chain",
+                protocol.user_data_name(),
+                self.chain
+            )));
+        }
+        Ok(())
+    }
+
     /// Rejects a Uniswap V4 fallback whose hook is the chain's Angstrom hook.
-    fn reject_angstrom_hook(&self, protocol: &FallbackProtocol) -> Result<(), EncodingError> {
-        if let FallbackProtocol::UniswapV4 { hook, .. } = protocol {
+    fn reject_angstrom_hook(&self, protocol: &FallbackSwapData) -> Result<(), EncodingError> {
+        if let FallbackSwapData::UniswapV4 { hook, .. } = protocol {
             if Some(hook) == self.angstrom_hook_address.as_ref() {
                 return Err(EncodingError::InvalidInput(
                     "Angstrom pools are unsupported as a fallback protocol".to_string(),
@@ -220,7 +342,7 @@ impl FallbackSwapEncoder {
 impl SwapEncoder for FallbackSwapEncoder {
     fn new(
         executor_address: Bytes,
-        _chain: Chain,
+        chain: Chain,
         config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         let angstrom_hook_address = config
@@ -233,7 +355,7 @@ impl SwapEncoder for FallbackSwapEncoder {
             })
             .transpose()?;
 
-        Ok(Self { executor_address, angstrom_hook_address })
+        Ok(Self { executor_address, chain, angstrom_hook_address })
     }
 
     fn encode_swap(
@@ -241,7 +363,8 @@ impl SwapEncoder for FallbackSwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let protocol = FallbackProtocol::from_swap_user_data(swap.user_data())?;
+        let protocol = FallbackSwapData::from_swap_user_data(swap.user_data())?;
+        self.reject_unsupported(protocol.protocol())?;
         self.reject_angstrom_hook(&protocol)?;
         let pamm = bytes_to_address(&Self::pamm_address(swap)?)?;
         let token_in = bytes_to_address(&swap.token_in().address)?;
@@ -382,6 +505,106 @@ mod tests {
 
             assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}01{USDC_WETH_USV3}"), "{fork}");
         }
+    }
+
+    #[test]
+    fn test_encode_curve_by_protocol_system_name() {
+        let pool = "3333333333333333333333333333333333333333";
+        let hex_swap = encode_usdc_weth(Some(&format!(
+            r#"{{"fallback_protocol":"vm:curve","pool":"0x{pool}","pool_type":1,"i":0,"j":2}}"#
+        )))
+        .unwrap();
+
+        assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}03{pool}010002"));
+    }
+
+    #[test]
+    fn test_protocol_bytes_follow_all_order() {
+        for (byte, protocol) in FallbackProtocol::ALL
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(usize::from(protocol.protocol_byte()), byte, "{protocol:?}");
+        }
+    }
+
+    #[test]
+    fn test_from_protocol_system() {
+        let cases = [
+            ("uniswap_v2", Some(FallbackProtocol::UniswapV2)),
+            ("quickswap_v2", Some(FallbackProtocol::UniswapV2)),
+            ("uniswap_v3", Some(FallbackProtocol::UniswapV3)),
+            ("pancakeswap_v3", Some(FallbackProtocol::UniswapV3)),
+            ("velodrome_slipstreams", Some(FallbackProtocol::UniswapV3)),
+            ("uniswap_v4", Some(FallbackProtocol::UniswapV4)),
+            ("uniswap_v4_hooks", Some(FallbackProtocol::UniswapV4)),
+            ("curve", Some(FallbackProtocol::Curve)),
+            ("vm:curve", Some(FallbackProtocol::Curve)),
+            ("fluid_v1", Some(FallbackProtocol::FluidV1)),
+            ("aerodrome_v1", Some(FallbackProtocol::AerodromeV1)),
+            ("vm:balancer_v2", None),
+            ("pricelevelstream:kipseli", None),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(FallbackProtocol::from_protocol_system(name), expected, "{name}");
+        }
+    }
+
+    /// Every protocol's own name round-trips, so a solver can hand a `FallbackProtocol` back as
+    /// the `user_data` tag.
+    #[test]
+    fn test_user_data_name_round_trips() {
+        for protocol in FallbackProtocol::ALL {
+            assert_eq!(
+                FallbackProtocol::from_protocol_system(protocol.user_data_name()),
+                Some(protocol)
+            );
+        }
+    }
+
+    /// Ethereum has every singleton; Base has no Fluid; Plasma has no Uniswap V4.
+    #[test]
+    fn test_supported_follows_executor_config() {
+        assert_eq!(FallbackProtocol::supported(Chain::Ethereum), FallbackProtocol::ALL.to_vec());
+        assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Base));
+        assert!(FallbackProtocol::UniswapV4.supported_on(Chain::Base));
+        assert!(!FallbackProtocol::UniswapV4.supported_on(Chain::Plasma));
+        assert!(FallbackProtocol::FluidV1.supported_on(Chain::Plasma));
+        // Per-swap protocols need nothing from the deployment.
+        for chain in [Chain::Base, Chain::Plasma, Chain::Unichain] {
+            assert!(FallbackProtocol::UniswapV3.supported_on(chain), "{chain}");
+            assert!(FallbackProtocol::AerodromeV1.supported_on(chain), "{chain}");
+        }
+    }
+
+    #[test]
+    fn test_rejects_protocol_unavailable_on_chain() {
+        let encoder = FallbackSwapEncoder::new(Bytes::default(), Chain::Base, None).unwrap();
+        let dex = "4444444444444444444444444444444444444444";
+        let token_in = Bytes::from(format!("0x{USDC}").as_str());
+        let token_out = Bytes::from(format!("0x{WETH}").as_str());
+        let swap = Swap::new(
+            usdc_weth_component(),
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_user_data(Bytes::from(
+            format!(r#"{{"fallback_protocol":"fluid_v1","dex":"0x{dex}","zero2one":true}}"#)
+                .into_bytes(),
+        ));
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in,
+            group_token_out: token_out,
+        };
+
+        let err = encoder
+            .encode_swap(&swap, &encoding_context)
+            .unwrap_err();
+        assert!(
+            matches!(err, EncodingError::InvalidInput(msg) if msg.contains("fluid_v1") && msg.contains("base"))
+        );
     }
 
     #[test]

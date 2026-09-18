@@ -396,10 +396,17 @@ the fallback protocol per swap instead of the router owning one Uniswap V3 mappi
 same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
 one of Uniswap V2/V3/V4, Curve, Fluid V1 or Aerodrome V1 with its pool parameters — travels as JSON in the
 swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
-static attribute. A fork name (`UNISWAP_V2_FORKS`, `UNISWAP_V3_FORKS`, or a Slipstreams deployment)
-resolves to the variant whose pool ABI it shares. The encoder builds on any chain; the `fallback`
-section of `protocol_specific_addresses.json` is optional and only carries the Angstrom hook to
-reject on chains that have one. No `fallback` entry ships in the executor configs until the
+static attribute. The public `FallbackProtocol` enum (`swap_encoder::FallbackProtocol`) is the
+list other projects import: `from_protocol_system` maps a Tycho protocol name to the variant it
+encodes as (`UNISWAP_V2_FORKS`, `UNISWAP_V3_FORKS` and the Slipstreams deployments resolve to
+their base variant, `vm:curve` to Curve), `supported_on(chain)` says whether the chain's
+`TychoFallbackRouter` can run it, derived from `executor_addresses.json` -- Uniswap V4 and
+Fluid V1 need the chain to have that executor, since that is what the deploy script keys their
+singletons on -- and `user_data_name` is the tag to write. The encoder rejects a protocol the
+chain's deployment cannot run with an `InvalidInput` error instead of letting it revert on
+chain. The encoder builds on any chain; the `fallback` section of
+`protocol_specific_addresses.json` is optional and only carries the Angstrom hook to reject on
+chains that have one. No `fallback` entry ships in the executor configs until the
 FallbackExecutor is deployed.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
