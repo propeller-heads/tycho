@@ -216,6 +216,10 @@ contract Constants is
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
 
+    // Ekubo V3 SignedExclusiveSwap extension on mainnet
+    address EKUBO_V3_SIGNED_EXCLUSIVE_SWAP =
+        0x55b703eED01b35641963da2FB2E14885993605A3;
+
     // Eden Network's view quoter for Uniswap V3 pools, used by TychoFallbackRouter
     address UNISWAP_V3_STATIC_QUOTER =
         0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE;

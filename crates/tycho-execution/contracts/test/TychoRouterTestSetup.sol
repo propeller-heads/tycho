@@ -230,7 +230,7 @@ contract TychoRouterTestSetup is
         rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
         erc4626Executor = new ERC4626Executor();
         nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor();
+        ekuboV3Executor = new EkuboV3Executor(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
         // Etch placeholder bytecode if Etherfi contracts are not yet deployed
         // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
         if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));

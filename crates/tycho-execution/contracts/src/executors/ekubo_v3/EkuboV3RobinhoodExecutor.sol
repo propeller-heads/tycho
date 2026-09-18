@@ -17,6 +17,10 @@ address constant VE33_ADDRESS = 0xD18685a514E59b06d59824e16Db07e73345d9953;
 /// a forward-only swap call point with the normal fixed 52-byte hop
 /// encoding, on top of the chain-agnostic executor's extensions.
 contract EkuboV3RobinhoodExecutor is EkuboV3Executor {
+    constructor(address signedExclusiveSwap_)
+        EkuboV3Executor(signedExclusiveSwap_)
+    {}
+
     function _swapHop(
         PoolKey memory poolKey,
         SwapParameters swapParameters,
