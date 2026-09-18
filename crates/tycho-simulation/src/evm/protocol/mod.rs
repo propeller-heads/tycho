@@ -10,6 +10,7 @@ pub mod ekubo_v3;
 pub mod erc4626;
 pub mod etherfi;
 pub mod filters;
+pub mod flamm;
 pub mod fluid;
 pub mod lunarbase;
 pub mod native_wrapper;

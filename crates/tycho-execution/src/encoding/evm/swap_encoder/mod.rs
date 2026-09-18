@@ -11,6 +11,7 @@ mod erc_4626;
 mod etherfi;
 mod fallback;
 mod fermiswap;
+mod flamm;
 mod fluid_v1;
 mod hashflow;
 mod liquidity_party;

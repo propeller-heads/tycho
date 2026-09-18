@@ -14,6 +14,8 @@ rust-version = "1.91.0"
 exclude = [
     "benches/fixtures",
     "tests/assets",
+    # The FLAMM parity fixtures (5.7 MB, read by the module's tests only).
+    "src/evm/protocol/flamm/testdata",
 ]
 
 [package.metadata.cargo-machete]
@@ -115,6 +117,11 @@ unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
 criterion = "0.8.2"
+# The FLAMM parity replays read gzipped Solidity-generated fixtures (src/evm/protocol/flamm/testdata),
+# one of them a tar archive, and pin their sha256 digests.
+flate2 = "1"
+sha2 = "0.10"
+tar = "0.4"
 
 [features]
 default = ["evm", "rfq", "price-level-stream"]

@@ -118,6 +118,10 @@
       "args": ["0x4200000000000000000000000000000000000006"]
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "flamm": {
+      "contract": "FLAMMExecutor",
+      "args": ["0x1BfcE014774D0DD7e04bC595D46Fa09F7dCCF45f"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []

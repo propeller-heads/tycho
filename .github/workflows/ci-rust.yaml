@@ -114,11 +114,12 @@ jobs:
         # Exclusions:
         # - test(serial_db), test(db_): explicit DB test naming conventions
         # - package(tycho-storage): all tests in tycho-storage require a live DB connection
-        # - test(evm), test(fork): require RPC/anvil
+        # - test(evm), test(fork): require RPC/anvil; the evm::protocol::flamm tests stay in, they
+        #   replay committed fixtures and need neither
         # - protocol-testing rpc/test_token_balance_validation: require ETH_RPC_URL
         run: |
           cargo nextest run --workspace --all-features --locked \
-            -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation))))'
+            -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | (test(evm) and not test(flamm)) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation))))'
 
   test-unit-skip:
     name: Unit tests (no external deps)

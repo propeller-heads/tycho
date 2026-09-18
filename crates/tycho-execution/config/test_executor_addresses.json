@@ -33,7 +33,8 @@
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",
     "aerodrome_v1": "0x1aF7f588A501EA2B5bB3feeFA744892aA2CF00e6",
     "rfq:metric": "0x3Cff5E7eBecb676c3Cb602D0ef2d46710b88854E",
-    "rfq:native": "0x886D6d1eB8D415b00052828CD6d5B321f072073d"
+    "rfq:native": "0x886D6d1eB8D415b00052828CD6d5B321f072073d",
+    "flamm": "0x94771550282853f6E0124c302F7dE1Cf50aa45CA"
   },
   "arbitrum": {
     "uniswap_v3": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",

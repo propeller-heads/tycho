@@ -1,0 +1,371 @@
+{
+  "abi": [
+    {
+      "type": "function",
+      "name": "createPool",
+      "inputs": [
+        {
+          "name": "p",
+          "type": "tuple",
+          "internalType": "struct FLAMMFactory.PoolParams",
+          "components": [
+            {
+              "name": "core",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "poolAsset",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "loanAsset",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "priceFeed",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "allowlist",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "internalType": "string"
+            },
+            {
+              "name": "symbol",
+              "type": "string",
+              "internalType": "string"
+            },
+            {
+              "name": "risk",
+              "type": "tuple",
+              "internalType": "struct FLAMMStore.RiskInit",
+              "components": [
+                {
+                  "name": "phiWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "phiMinWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "phiMaxWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "ltvWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "ltvMinWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "ltvMaxWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "ltvMaxStepWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "ltvCooldownSec",
+                  "type": "uint32",
+                  "internalType": "uint32"
+                },
+                {
+                  "name": "minStructDistWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "roomEpsilonWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "swapPriceBandWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "feeFloorWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "feeCapWad",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "depositCapPoolAsset",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "maxSwapNotionalLoan",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "reserveTargetLoan",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "maxPerformanceFeeBp",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "governanceDelaySec",
+                  "type": "uint32",
+                  "internalType": "uint32"
+                },
+                {
+                  "name": "maxPriceAgeSec",
+                  "type": "uint32",
+                  "internalType": "uint32"
+                },
+                {
+                  "name": "features",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "startPaused",
+                  "type": "bool",
+                  "internalType": "bool"
+                }
+              ]
+            },
+            {
+              "name": "safetyGapWad",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "venueOracleBandWad",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "seedPoolAssets",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "seedReceiver",
+              "type": "address",
+              "internalType": "address"
+            }
+          ]
+        },
+        {
+          "name": "hooks",
+          "type": "tuple",
+          "internalType": "struct IFLAMM.HookSet",
+          "components": [
+            {
+              "name": "invariantHook",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "feeHook",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "recenterHook",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "controllerHook",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "leverageHook",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "spreadHook",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "loanSwapHook",
+              "type": "address",
+              "internalType": "address"
+            }
+          ]
+        },
+        {
+          "name": "salt",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "venues",
+          "type": "tuple[]",
+          "internalType": "struct IFLAMM.VenueInit[]",
+          "components": [
+            {
+              "name": "kind",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "loanIndex",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "venueParams",
+              "type": "bytes",
+              "internalType": "bytes"
+            },
+            {
+              "name": "borrowEnabled",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "supplyEnabled",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "debtCap",
+              "type": "uint128",
+              "internalType": "uint128"
+            },
+            {
+              "name": "supplyCap",
+              "type": "uint128",
+              "internalType": "uint128"
+            },
+            {
+              "name": "maxBorrowRateWad",
+              "type": "uint64",
+              "internalType": "uint64"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pool",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "PoolCreated",
+      "inputs": [
+        {
+          "name": "pool",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "core",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "creator",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "implementation",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "account",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "invariantHook",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "feeHook",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "recenterHook",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "invariantCodehash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "feeCodehash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "recenterCodehash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "hookSetHash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "riskHash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    }
+  ]
+}
