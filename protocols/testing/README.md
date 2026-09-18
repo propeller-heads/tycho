@@ -82,14 +82,21 @@ Execution validation overrides the TychoRouterV3, FeeCalculator, and protocol ex
 time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated from the
 `tycho-execution` contracts, so they must be regenerated whenever those contracts change.
 
+`crates/tycho-execution/contracts/test/RuntimeBytecodeFixtures.t.sol` lists every fixture and
+deploys it with CREATE3 at an address derived from the contract name, with executor constructor
+arguments read from `crates/tycho-execution/config/executor_deployments.json`. A fixture runs
+against the default fork unless its constructor reads state that fork does not carry — an address
+it checks for code, or a value it keeps in an immutable — in which case it names a fork of its own.
+
 ```bash
-export RPC_URL=..   # Ethereum mainnet RPC (the router constructor requires a fork)
+cd crates/tycho-execution/contracts
+export RPC_URL=..   # plus <CHAIN>_RPC_URL for any fixture that forks another chain
+
+# Verify the committed fixtures match the current contracts (forge test runs this in CI)
+forge test --match-contract RuntimeBytecodeFixtures
 
 # Regenerate every fixture from the current contracts
-./scripts/update_runtime_bytecode.sh
-
-# Verify the committed fixtures match the current contracts (CI / drift check)
-./scripts/update_runtime_bytecode.sh --check
+FIXTURES_WRITE=1 forge test --match-contract RuntimeBytecodeFixtures
 ```
 
 The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op during simulation

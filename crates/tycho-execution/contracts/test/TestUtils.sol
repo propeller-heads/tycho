@@ -1,9 +1,25 @@
 pragma solidity ^0.8.10;
 
 import "forge-std/Test.sol";
+import {CREATE3} from "@solady/utils/CREATE3.sol";
 
 contract TestUtils is Test {
     constructor() {}
+
+    /// Deploys `contractName` with CREATE3, at an address derived from that name and this test
+    /// contract alone: a CREATE2 proxy keyed by `keccak256(contractName)` performs the CREATE, so
+    /// the address does not depend on the order in which contracts are deployed, on the
+    /// contract's own bytecode, or on where its source sits in the tree. Constructors run
+    /// normally; `msg.sender` inside them is the proxy and `address(this)` is the final address.
+    function _deployDeterministic(
+        string memory contractName,
+        bytes memory constructorArgs
+    ) internal returns (address) {
+        return CREATE3.deployDeterministic(
+            abi.encodePacked(vm.getCode(contractName), constructorArgs),
+            keccak256(bytes(contractName))
+        );
+    }
 
     function loadCallDataFromFile(string memory testName)
         internal
