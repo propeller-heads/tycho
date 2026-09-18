@@ -24,11 +24,13 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
+    hash::Hash,
     sync::{RwLock, RwLockReadGuard},
 };
 
 use chrono::NaiveDateTime;
+use deepsize::{Context, DeepSizeOf};
 use tycho_common::{
     models::{
         blockchain::BlockAggregatedChanges,
@@ -43,7 +45,37 @@ use tycho_common::{
 use super::window::FoldSink;
 
 /// A cached value together with the time it was last written (the writing block's timestamp).
-type Tagged<T> = (T, NaiveDateTime);
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Tagged<T>(pub(crate) T, pub(crate) NaiveDateTime);
+
+// `NaiveDateTime` has no `DeepSizeOf` impl; it is inline, so only the value has children.
+impl<T: DeepSizeOf> DeepSizeOf for Tagged<T> {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.0.deep_size_of_children(context)
+    }
+}
+
+impl<T> Tagged<T> {
+    /// Writes `value` at `at` unless this slot holds a newer value. Equal times apply: delta
+    /// values are absolute, so re-applying a block is harmless, and consecutive blocks can share
+    /// a timestamp on fast chains.
+    pub(crate) fn write(&mut self, value: T, at: NaiveDateTime) {
+        if at < self.1 {
+            return;
+        }
+        *self = Tagged(value, at);
+    }
+}
+
+/// [`Tagged::write`] for a map entry; a missing key is inserted.
+fn write<K: Eq + Hash, V>(map: &mut HashMap<K, Tagged<V>>, key: K, value: V, at: NaiveDateTime) {
+    match map.entry(key) {
+        Entry::Occupied(mut e) => e.get_mut().write(value, at),
+        Entry::Vacant(e) => {
+            e.insert(Tagged(value, at));
+        }
+    }
+}
 
 /// Cached state of one contract account.
 ///
@@ -200,5 +232,45 @@ impl FoldSink for EntityCache {
         // An error means the block was not applied: the window keeps it and the process stops.
         // Fail before mutating, so a replay of the same block converges.
         todo!("fold one block")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::testing;
+
+    fn ts(n: u64) -> NaiveDateTime {
+        testing::block(n).ts
+    }
+
+    #[test]
+    fn write_keeps_a_newer_value() {
+        let mut slot = Tagged(1u64, ts(5));
+
+        slot.write(2, ts(4));
+
+        assert_eq!(slot, Tagged(1, ts(5)));
+    }
+
+    #[test]
+    fn write_applies_an_equal_time_value() {
+        let mut slot = Tagged(1u64, ts(5));
+
+        slot.write(2, ts(5));
+
+        assert_eq!(slot, Tagged(2, ts(5)));
+    }
+
+    #[test]
+    fn write_inserts_a_missing_key_and_updates_a_present_one() {
+        let mut map: HashMap<&str, Tagged<u64>> = HashMap::new();
+
+        write(&mut map, "a", 1, ts(3));
+        write(&mut map, "a", 2, ts(2));
+        write(&mut map, "b", 9, ts(1));
+
+        assert_eq!(map["a"], Tagged(1, ts(3)));
+        assert_eq!(map["b"], Tagged(9, ts(1)));
     }
 }
