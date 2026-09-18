@@ -6,8 +6,8 @@
 //!   account, so every cached value carries the time it was last written — the writing block's
 //!   timestamp, the same unit the database's `valid_from` versioning uses. A newer write always
 //!   wins; re-applying an equal-time change is a no-op because delta values are absolute.
-//! - **Component states** (protocol state), keyed by `(protocol system, component id)`. Exactly one
-//!   extractor writes each protocol system, in order, so one write time per entry is enough.
+//! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
+//!   one extractor writes each protocol system, in order, so one write time per entry is enough.
 //!
 //! Tags compare with "not older" (>=), never "strictly newer": consecutive blocks can share a
 //! timestamp on fast chains, and a strict comparison would silently drop the second block.
@@ -37,7 +37,7 @@ use tycho_common::{
     models::{
         blockchain::BlockAggregatedChanges,
         contract::{Account, AccountBalance, AccountDelta},
-        protocol::{ProtocolComponentState, ProtocolComponentStateDelta},
+        protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
         Address, AttrStoreKey, Balance, Chain, Code, CodeHash, ComponentId, StoreKey, StoreVal,
         TxHash,
     },
@@ -306,39 +306,115 @@ impl CachedAccount {
 }
 
 /// Cached state of one protocol component.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CachedComponentState {
     attributes: HashMap<AttrStoreKey, StoreVal>,
     balances: HashMap<Address, Balance>,
     /// One write time covers the whole entry: a single extractor writes each protocol system,
     /// in order.
     updated_at: NaiveDateTime,
+    /// Running size of this entry, maintained by every write.
+    bytes: usize,
+}
+
+// Manual impl as `NaiveDateTime` does not implement `DeepSizeOf`.
+impl DeepSizeOf for CachedComponentState {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.attributes
+            .deep_size_of_children(context) +
+            self.balances
+                .deep_size_of_children(context)
+    }
 }
 
 impl CachedComponentState {
     /// Builds an entry from the startup snapshot, tagged with its newest `valid_from`.
-    #[allow(unused_variables)]
-    fn from_snapshot(state: &ProtocolComponentState, at: NaiveDateTime) -> Self {
-        todo!("build entry from snapshot")
+    pub(crate) fn from_snapshot(state: ProtocolComponentState, at: NaiveDateTime) -> Self {
+        Self::sized(Self {
+            attributes: state.attributes,
+            balances: state.balances,
+            updated_at: at,
+            bytes: 0,
+        })
     }
 
-    /// Applies one folded state delta when it is not older than the entry.
-    #[allow(unused_variables)]
-    fn fold(&mut self, delta: &ProtocolComponentStateDelta, at: NaiveDateTime) {
-        // Skip when `at < self.updated_at` (replayed block). Deleted attributes are plain key
-        // removals. Out-of-order folds from the single writer are a bug — debug-assert.
-        todo!("apply folded state delta")
+    /// An entry for a component created at `at`, before its first attributes arrive.
+    pub(crate) fn created(at: NaiveDateTime) -> Self {
+        Self::sized(Self {
+            attributes: HashMap::new(),
+            balances: HashMap::new(),
+            updated_at: at,
+            bytes: 0,
+        })
     }
 
-    /// Applies folded balance changes.
-    #[allow(unused_variables)]
-    fn fold_balances(&mut self, balances: &HashMap<Address, Balance>, at: NaiveDateTime) {
-        todo!("apply folded balances")
+    fn sized(mut entry: Self) -> Self {
+        entry.bytes = entry.deep_size_of();
+        entry
+    }
+
+    /// Applies one folded state delta unless the entry is newer than `at`. Updates apply first,
+    /// then deletions, like [`ProtocolComponentState::apply_state_delta`].
+    pub(crate) fn fold(&mut self, delta: &ProtocolComponentStateDelta, at: NaiveDateTime) {
+        if !self.accepts(at) {
+            return;
+        }
+        let mut change = 0isize;
+        for (key, value) in &delta.updated_attributes {
+            change += replace(&mut self.attributes, key.clone(), value.clone());
+        }
+        for key in &delta.deleted_attributes {
+            change -= remove(&mut self.attributes, key) as isize;
+        }
+        self.charge(change);
+    }
+
+    /// Applies folded balances unless the entry is newer than `at`.
+    pub(crate) fn fold_balances(
+        &mut self,
+        balances: &HashMap<Bytes, ComponentBalance>,
+        at: NaiveDateTime,
+    ) {
+        if !self.accepts(at) {
+            return;
+        }
+        let mut change = 0isize;
+        for (token, balance) in balances {
+            change += replace(&mut self.balances, token.clone(), balance.balance.clone());
+        }
+        self.charge(change);
+    }
+
+    /// The single writer folds in order, so an older block is a replay: skip it. Otherwise the
+    /// entry moves to `at`.
+    fn accepts(&mut self, at: NaiveDateTime) -> bool {
+        if at < self.updated_at {
+            return false;
+        }
+        self.updated_at = at;
+        true
     }
 
     /// Materializes the cached state for response assembly.
-    #[allow(unused_variables)]
-    fn materialize(&self, component_id: &str) -> ProtocolComponentState {
-        todo!("assemble component state")
+    pub(crate) fn materialize(&self, component_id: &str) -> ProtocolComponentState {
+        ProtocolComponentState::new(component_id, self.attributes.clone(), self.balances.clone())
+    }
+
+    /// Time of the last write, for readers that apply only newer window changes.
+    pub(crate) fn updated_at(&self) -> NaiveDateTime {
+        self.updated_at
+    }
+
+    /// See [`CachedAccount::bytes`].
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn charge(&mut self, change: isize) {
+        self.bytes = self
+            .bytes
+            .checked_add_signed(change)
+            .expect("entry size underflow");
     }
 }
 
@@ -352,8 +428,9 @@ pub(crate) struct EntityCache {
 /// The maps behind the lock.
 pub(crate) struct CacheState {
     pub(crate) accounts: HashMap<Address, CachedAccount>,
-    pub(crate) components: HashMap<(String, ComponentId), CachedComponentState>,
-    // Memory accounting (running byte total, reconciled periodically) attaches here.
+    /// Component states by protocol system, then component id. The system is the extractor name:
+    /// the RPC resolves one window per protocol system by extractor name, so both are one string.
+    pub(crate) components: HashMap<String, HashMap<ComponentId, CachedComponentState>>,
 }
 
 impl EntityCache {
@@ -416,10 +493,12 @@ impl FoldSink for EntityCache {
 mod test {
     use std::str::FromStr;
 
-    use tycho_common::models::ChangeType;
+    use tycho_common::models::{protocol::ProtocolComponent, ChangeType};
 
     use super::*;
     use crate::{extractor::models::fixtures, testing};
+
+    const EXTRACTOR: &str = "ex";
 
     fn ts(n: u64) -> NaiveDateTime {
         testing::block(n).ts
@@ -435,6 +514,16 @@ mod test {
 
     fn account_balance(account: &Bytes, token: &Bytes, amount: u64) -> AccountBalance {
         AccountBalance::new(account.clone(), token.clone(), Bytes::from(amount), Bytes::default())
+    }
+
+    fn component_balance(id: &str, token: &Bytes, amount: u64) -> ComponentBalance {
+        ComponentBalance {
+            token: token.clone(),
+            balance: Bytes::from(amount),
+            balance_float: amount as f64,
+            modify_tx: Bytes::default(),
+            component_id: id.to_string(),
+        }
     }
 
     fn account(address: &Bytes) -> Account {
@@ -491,6 +580,21 @@ mod test {
         AccountDelta::new(Chain::Ethereum, address.clone(), slots, None, None, ChangeType::Update)
     }
 
+    fn component(id: &str) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            EXTRACTOR,
+            "pool",
+            Chain::Ethereum,
+            vec![],
+            vec![],
+            HashMap::new(),
+            ChangeType::Creation,
+            Bytes::default(),
+            ts(1),
+        )
+    }
+
     #[test]
     fn account_snapshot_round_trips() {
         let address = addr(1);
@@ -504,6 +608,20 @@ mod test {
             .next()
             .unwrap();
         assert_eq!(cached.slots()[&key1].1, ts(1));
+    }
+
+    #[test]
+    fn component_snapshot_round_trips() {
+        let loaded = ProtocolComponentState::new(
+            "c1",
+            HashMap::from([("x".to_string(), Bytes::from(1u64))]),
+            HashMap::from([(addr(9), Bytes::from(5u64))]),
+        );
+
+        let cached = CachedComponentState::from_snapshot(loaded.clone(), ts(3));
+
+        assert_eq!(cached.materialize("c1"), loaded);
+        assert_eq!(cached.updated_at(), ts(3));
     }
 
     #[test]
@@ -609,6 +727,43 @@ mod test {
                 .balance,
             Bytes::from(7u64)
         );
+    }
+
+    #[test]
+    fn component_fold_skips_an_older_block_and_removes_deleted_attributes() {
+        let mut cached = CachedComponentState::from_snapshot(
+            ProtocolComponentState::new(
+                "c1",
+                HashMap::from([("x".to_string(), Bytes::from(1u64))]),
+                HashMap::new(),
+            ),
+            ts(5),
+        );
+
+        cached.fold(&testing::state_delta("c1", 9), ts(4));
+        assert_eq!(
+            cached.materialize("c1").attributes["x"],
+            Bytes::from(1u64),
+            "older block skipped"
+        );
+
+        let mut delta = testing::state_delta("c1", 2);
+        delta
+            .updated_attributes
+            .insert("y".to_string(), Bytes::from(3u64));
+        delta
+            .deleted_attributes
+            .insert("x".to_string());
+        cached.fold(&delta, ts(5));
+        cached.fold_balances(
+            &HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))]),
+            ts(6),
+        );
+
+        let state = cached.materialize("c1");
+        assert_eq!(state.attributes, HashMap::from([("y".to_string(), Bytes::from(3u64))]));
+        assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
+        assert_eq!(cached.updated_at(), ts(6));
     }
 
     #[test]
