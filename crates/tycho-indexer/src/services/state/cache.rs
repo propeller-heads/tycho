@@ -172,6 +172,36 @@ impl CachedAccount {
         }
     }
 
+    /// Applies one folded delta; every changed value gets `at` as its tag, values with a newer tag
+    /// stay. A deleted slot becomes the zero value, as in [`Account::apply_delta`]. A delta that
+    /// carries code also refreshes `code_hash`.
+    pub(crate) fn fold(&mut self, delta: &AccountDelta, at: NaiveDateTime) {
+        for (key, value) in &delta.slots {
+            write(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), at);
+        }
+        if let Some(balance) = &delta.balance {
+            self.native_balance
+                .write(balance.clone(), at);
+        }
+        if let Some(code) = delta.code() {
+            if at >= self.code.1 {
+                self.code_hash = keccak256(code).into();
+            }
+            self.code.write(code.clone(), at);
+        }
+    }
+
+    /// Applies folded token balances under the same tag rule as [`CachedAccount::fold`].
+    pub(crate) fn fold_balances(
+        &mut self,
+        balances: &HashMap<Address, AccountBalance>,
+        at: NaiveDateTime,
+    ) {
+        for (token, balance) in balances {
+            write(&mut self.token_balances, token.clone(), balance.clone(), at);
+        }
+    }
+
     /// Materializes the cached state as an [`Account`] for response assembly.
     pub(crate) fn materialize(&self, address: &Address) -> Account {
         Account::new(
@@ -395,6 +425,10 @@ mod test {
         )
     }
 
+    fn update(address: &Bytes, slots: HashMap<Bytes, Option<Bytes>>) -> AccountDelta {
+        AccountDelta::new(Chain::Ethereum, address.clone(), slots, None, None, ChangeType::Update)
+    }
+
     #[test]
     fn write_keeps_a_newer_value() {
         let mut slot = Tagged(1u64, ts(5));
@@ -449,5 +483,95 @@ mod test {
 
         assert_eq!(cached.materialize(&address), delta.into_account_without_tx());
         assert_eq!(cached.code().1, ts(1));
+    }
+
+    #[test]
+    fn account_fold_keeps_newer_values_per_slot() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_snapshot(account(&address), tags(&account(&address), ts(5)));
+
+        cached.fold(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), ts(3));
+
+        let slots = cached.materialize(&address).slots;
+        assert_eq!(
+            slots,
+            fixtures::slots([(1, 1), (2, 2), (3, 3)]),
+            "older slot 1 kept, new slot 3 added"
+        );
+        let key3 = fixtures::slots([(3, 3)])
+            .into_keys()
+            .next()
+            .unwrap();
+        assert_eq!(cached.slots()[&key3].1, ts(3));
+    }
+
+    #[test]
+    fn account_fold_applies_an_equal_time_write() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_snapshot(account(&address), tags(&account(&address), ts(5)));
+
+        cached.fold(&update(&address, fixtures::optional_slots([(1, 11)])), ts(5));
+
+        assert_eq!(cached.materialize(&address).slots, fixtures::slots([(1, 11), (2, 2)]));
+    }
+
+    #[test]
+    fn account_fold_twice_changes_nothing() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+        let delta = update(&address, fixtures::optional_slots([(1, 11), (2, 2)]));
+
+        cached.fold(&delta, ts(2));
+        let once = cached.clone();
+        cached.fold(&delta, ts(2));
+
+        assert_eq!(cached, once);
+    }
+
+    #[test]
+    fn account_fold_zeroes_deleted_slots_and_refreshes_the_code_hash() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+        let key1 = fixtures::slots([(1, 1)])
+            .into_keys()
+            .next()
+            .unwrap();
+        let mut delta = update(&address, HashMap::from([(key1.clone(), None)]));
+        delta.set_code(code("0x6001"));
+
+        cached.fold(&delta, ts(2));
+
+        let account = cached.materialize(&address);
+        assert_eq!(account.slots[&key1], Bytes::default());
+        assert_eq!(account.code, code("0x6001"));
+        assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
+        assert_eq!(cached.code().1, ts(2));
+    }
+
+    #[test]
+    fn account_fold_balances_follow_the_tag_rule() {
+        let address = addr(1);
+        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x"), ts(5));
+
+        cached.fold_balances(
+            &HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))]),
+            ts(5),
+        );
+        cached.fold_balances(
+            &HashMap::from([(addr(9), account_balance(&address, &addr(9), 1))]),
+            ts(4),
+        );
+
+        assert_eq!(
+            cached
+                .materialize(&address)
+                .token_balances[&addr(9)]
+                .balance,
+            Bytes::from(7u64)
+        );
     }
 }
