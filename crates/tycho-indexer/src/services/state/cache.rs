@@ -27,19 +27,23 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
     mem::size_of,
-    sync::{RwLock, RwLockReadGuard},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        RwLock, RwLockReadGuard, RwLockWriteGuard,
+    },
 };
 
 use chrono::NaiveDateTime;
 use deepsize::{Context, DeepSizeOf};
+use tracing::trace;
 use tycho_common::{
     keccak256,
     models::{
         blockchain::BlockAggregatedChanges,
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
-        Address, AttrStoreKey, Balance, Chain, Code, CodeHash, ComponentId, StoreKey, StoreVal,
-        TxHash,
+        Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId, StoreKey,
+        StoreVal, TxHash,
     },
     storage::StorageError,
     Bytes,
@@ -423,6 +427,11 @@ pub(crate) struct EntityCache {
     /// Folds take the write side and apply one whole block atomically; reads take the read
     /// side. Folds are fast, so waiting is fine and a reader never sees half a block.
     state: RwLock<CacheState>,
+    /// Running byte totals per family. Every write adjusts them under the write lock;
+    /// [`EntityCache::reconcile`] replaces them. They live outside the lock so the reporter reads
+    /// them without waiting on a fold.
+    account_bytes: AtomicUsize,
+    component_bytes: AtomicUsize,
 }
 
 /// The maps behind the lock.
@@ -437,6 +446,8 @@ impl EntityCache {
     pub(crate) fn new() -> Self {
         Self {
             state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
+            account_bytes: AtomicUsize::new(0),
+            component_bytes: AtomicUsize::new(0),
         }
     }
 
@@ -448,44 +459,140 @@ impl EntityCache {
             .expect("entity cache lock poisoned")
     }
 
+    fn write(&self) -> RwLockWriteGuard<'_, CacheState> {
+        self.state
+            .write()
+            .expect("entity cache lock poisoned")
+    }
+
     /// Startup load only: runs before the extractors start, so nothing else is writing.
-    #[allow(unused_variables)]
     pub(crate) fn insert_loaded_account(&self, address: Address, entry: CachedAccount) {
-        todo!("insert loaded account")
+        let mut change = entry.bytes() as isize;
+        if let Some(old) = self
+            .write()
+            .accounts
+            .insert(address, entry)
+        {
+            change -= old.bytes() as isize;
+        }
+        Self::charge(&self.account_bytes, change);
     }
 
     /// Startup load only.
-    #[allow(unused_variables)]
     pub(crate) fn insert_loaded_component(
         &self,
         system: String,
         component_id: ComponentId,
         entry: CachedComponentState,
     ) {
-        todo!("insert loaded component")
+        let mut change = entry.bytes() as isize;
+        if let Some(old) = self
+            .write()
+            .components
+            .entry(system)
+            .or_default()
+            .insert(component_id, entry)
+        {
+            change -= old.bytes() as isize;
+        }
+        Self::charge(&self.component_bytes, change);
+    }
+
+    /// Adds a signed change to an unsigned running total. Two's-complement wrapping makes a
+    /// negative change a subtraction.
+    fn charge(total: &AtomicUsize, change: isize) {
+        total.fetch_add(change as usize, Ordering::Relaxed);
     }
 }
 
 impl FoldSink for EntityCache {
-    #[allow(unused_variables)]
+    /// Applies the whole block under the write lock, in an order where new components exist
+    /// before their first attributes arrive. Not folded: `new_tokens`, `component_tvl`,
+    /// `dci_update` — those stay database-served.
+    ///
+    /// No check can fail today. Any future check goes before the first mutation, so a replay of
+    /// the same block converges.
     fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        // Under the write lock, apply the whole block in an order where new components exist
-        // before their first attributes arrive:
-        //
-        // 1. `new_protocol_components` — create entries.
-        // 2. `state_deltas` — apply where not older than the entry.
-        // 3. `component_balances` — apply.
-        // 4. `deleted_protocol_components` — remove entries.
-        // 5. `account_deltas` — apply per value, tagged with this block's timestamp; a `Creation`
-        //    delta for an unknown address creates the entry, any other change for an unknown
-        //    address is skipped (partial data must never create an entry).
-        // 6. `account_balances` — apply.
-        //
-        // Not folded in phase 1: `new_tokens`, `component_tvl`, `dci_update` — DB-served.
-        //
-        // An error means the block was not applied: the window keeps it and the process stops.
-        // Fail before mutating, so a replay of the same block converges.
-        todo!("fold one block")
+        let at = block.block.ts;
+        let system = block.extractor.as_str();
+        let mut guard = self.write();
+        let state: &mut CacheState = &mut guard;
+        let mut account_change = 0isize;
+        let mut component_change = 0isize;
+
+        let family = state
+            .components
+            .entry(system.to_string())
+            .or_default();
+        for id in block.new_protocol_components.keys() {
+            if let Entry::Vacant(e) = family.entry(id.clone()) {
+                component_change += e
+                    .insert(CachedComponentState::created(at))
+                    .bytes() as isize;
+            }
+        }
+        for (id, delta) in &block.state_deltas {
+            let Some(entry) = family.get_mut(id) else {
+                trace!(system, id, "State delta for an unknown component skipped");
+                continue;
+            };
+            let before = entry.bytes();
+            entry.fold(delta, at);
+            component_change += entry.bytes() as isize - before as isize;
+        }
+        for (id, balances) in &block.component_balances {
+            let Some(entry) = family.get_mut(id) else {
+                trace!(system, id, "Balances for an unknown component skipped");
+                continue;
+            };
+            let before = entry.bytes();
+            entry.fold_balances(balances, at);
+            component_change += entry.bytes() as isize - before as isize;
+        }
+        for id in block.deleted_protocol_components.keys() {
+            if let Some(entry) = family.remove(id) {
+                component_change -= entry.bytes() as isize;
+            }
+        }
+
+        for (address, delta) in &block.account_deltas {
+            if delta.change_type() == ChangeType::Deletion {
+                if let Some(entry) = state.accounts.remove(address) {
+                    account_change -= entry.bytes() as isize;
+                }
+                continue;
+            }
+            match state.accounts.get_mut(address) {
+                Some(entry) => {
+                    let before = entry.bytes();
+                    entry.fold(delta, at);
+                    account_change += entry.bytes() as isize - before as isize;
+                }
+                // A creation carries the whole initial state; anything else is partial data
+                // and must never create an entry.
+                None if delta.is_creation() => {
+                    let entry = CachedAccount::from_creation(delta, at);
+                    account_change += entry.bytes() as isize;
+                    state
+                        .accounts
+                        .insert(address.clone(), entry);
+                }
+                None => trace!(%address, "Change for an unknown account skipped"),
+            }
+        }
+        for (address, balances) in &block.account_balances {
+            let Some(entry) = state.accounts.get_mut(address) else {
+                trace!(%address, "Balances for an unknown account skipped");
+                continue;
+            };
+            let before = entry.bytes();
+            entry.fold_balances(balances, at);
+            account_change += entry.bytes() as isize - before as isize;
+        }
+
+        Self::charge(&self.account_bytes, account_change);
+        Self::charge(&self.component_bytes, component_change);
+        Ok(())
     }
 }
 
@@ -578,6 +685,10 @@ mod test {
 
     fn update(address: &Bytes, slots: HashMap<Bytes, Option<Bytes>>) -> AccountDelta {
         AccountDelta::new(Chain::Ethereum, address.clone(), slots, None, None, ChangeType::Update)
+    }
+
+    fn deletion(address: &Bytes) -> AccountDelta {
+        AccountDelta::deleted(&Chain::Ethereum, address)
     }
 
     fn component(id: &str) -> ProtocolComponent {
@@ -766,6 +877,301 @@ mod test {
         assert_eq!(cached.updated_at(), ts(6));
     }
 
+    fn msg(n: u64) -> BlockAggregatedChanges {
+        testing::aggregated_changes(EXTRACTOR, n, n, Some(n))
+    }
+
+    fn with_component(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.new_protocol_components
+            .insert(id.to_string(), component(id));
+        m
+    }
+
+    fn with_state_delta(mut m: BlockAggregatedChanges, id: &str, x: u64) -> BlockAggregatedChanges {
+        m.state_deltas
+            .insert(id.to_string(), testing::state_delta(id, x));
+        m
+    }
+
+    fn with_component_balance(
+        mut m: BlockAggregatedChanges,
+        id: &str,
+        token: &Bytes,
+        amount: u64,
+    ) -> BlockAggregatedChanges {
+        m.component_balances
+            .entry(id.to_string())
+            .or_default()
+            .insert(token.clone(), component_balance(id, token, amount));
+        m
+    }
+
+    fn with_deleted_component(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.deleted_protocol_components
+            .insert(id.to_string(), component(id));
+        m
+    }
+
+    fn with_account_delta(
+        mut m: BlockAggregatedChanges,
+        delta: AccountDelta,
+    ) -> BlockAggregatedChanges {
+        m.account_deltas
+            .insert(delta.address.clone(), delta);
+        m
+    }
+
+    fn with_account_balance(
+        mut m: BlockAggregatedChanges,
+        address: &Bytes,
+        token: &Bytes,
+        amount: u64,
+    ) -> BlockAggregatedChanges {
+        m.account_balances
+            .entry(address.clone())
+            .or_default()
+            .insert(token.clone(), account_balance(address, token, amount));
+        m
+    }
+
+    fn cached_account(cache: &EntityCache, address: &Bytes) -> Option<Account> {
+        cache
+            .read()
+            .accounts
+            .get(address)
+            .map(|a| a.materialize(address))
+    }
+
+    fn cached_component(cache: &EntityCache, id: &str) -> Option<ProtocolComponentState> {
+        cache
+            .read()
+            .components
+            .get(EXTRACTOR)
+            .and_then(|m| m.get(id))
+            .map(|c| c.materialize(id))
+    }
+
+    #[test]
+    fn fold_creates_components_before_their_first_attributes() {
+        let cache = EntityCache::new();
+        let block = with_component_balance(
+            with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+            "c1",
+            &addr(9),
+            5,
+        );
+
+        cache.fold(&block).unwrap();
+
+        let state = cached_component(&cache, "c1").unwrap();
+        assert_eq!(state.attributes["x"], Bytes::from(1u64));
+        assert_eq!(state.balances[&addr(9)], Bytes::from(5u64));
+    }
+
+    #[test]
+    fn fold_skips_changes_for_unknown_entities() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let block = with_account_balance(
+            with_account_delta(
+                with_component_balance(with_state_delta(msg(1), "ghost", 1), "ghost", &addr(9), 5),
+                update(&address, fixtures::optional_slots([(1, 1)])),
+            ),
+            &address,
+            &addr(9),
+            7,
+        );
+
+        cache.fold(&block).unwrap();
+
+        assert!(cached_component(&cache, "ghost").is_none());
+        assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn fold_creation_creates_a_complete_account() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let delta = creation(&address, [(1, 1), (2, 2)], 10, "0x6000");
+
+        cache
+            .fold(&with_account_balance(
+                with_account_delta(msg(1), delta.clone()),
+                &address,
+                &addr(9),
+                7,
+            ))
+            .unwrap();
+
+        let mut expected = delta.into_account_without_tx();
+        expected
+            .token_balances
+            .insert(addr(9), account_balance(&address, &addr(9), 7));
+        assert_eq!(cached_account(&cache, &address), Some(expected));
+    }
+
+    #[test]
+    fn fold_removes_deleted_components_and_accounts() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_component(msg(1), "c1"),
+                creation(&address, [], 0, "0x"),
+            ))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(with_deleted_component(msg(2), "c1"), deletion(&address)))
+            .unwrap();
+
+        assert!(cached_component(&cache, "c1").is_none());
+        assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn folding_the_same_block_twice_changes_nothing() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_component(msg(1), "c1"),
+                creation(&address, [(1, 1)], 10, "0x6000"),
+            ))
+            .unwrap();
+        let block = with_account_delta(
+            with_state_delta(msg(2), "c1", 2),
+            update(&address, fixtures::optional_slots([(1, 11), (2, 2)])),
+        );
+
+        cache.fold(&block).unwrap();
+        let account_once = cached_account(&cache, &address);
+        let component_once = cached_component(&cache, "c1");
+        let bytes_once = cache
+            .account_bytes
+            .load(Ordering::Relaxed);
+        cache.fold(&block).unwrap();
+
+        assert_eq!(cached_account(&cache, &address), account_once);
+        assert_eq!(cached_component(&cache, "c1"), component_once);
+        assert_eq!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed),
+            bytes_once
+        );
+    }
+
+    #[test]
+    fn two_extractors_folding_the_same_account_keep_both_values() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1), (2, 2)], 0, "0x")))
+            .unwrap();
+        let ahead =
+            with_account_delta(msg(5), update(&address, fixtures::optional_slots([(1, 15)])));
+        let mut behind = testing::aggregated_changes("other", 3, 3, Some(3));
+        behind = with_account_delta(
+            behind,
+            update(&address, fixtures::optional_slots([(1, 13), (2, 23)])),
+        );
+
+        cache.fold(&ahead).unwrap();
+        cache.fold(&behind).unwrap();
+
+        let slots = cached_account(&cache, &address)
+            .unwrap()
+            .slots;
+        assert_eq!(
+            slots,
+            fixtures::slots([(1, 15), (2, 23)]),
+            "slot 1 keeps block 5, slot 2 takes block 3"
+        );
+    }
+
+    #[test]
+    fn folding_matches_the_delta_path() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let token = addr(9);
+        let slot2 = fixtures::slots([(2, 2)])
+            .into_keys()
+            .next()
+            .unwrap();
+        let blocks = vec![
+            with_component_balance(
+                with_state_delta(
+                    with_component(
+                        with_account_delta(
+                            msg(1),
+                            creation(&address, [(1, 1), (2, 2)], 10, "0x6000"),
+                        ),
+                        "c1",
+                    ),
+                    "c1",
+                    1,
+                ),
+                "c1",
+                &token,
+                5,
+            ),
+            with_state_delta(
+                with_account_balance(
+                    with_account_delta(
+                        msg(2),
+                        update(&address, fixtures::optional_slots([(1, 11), (3, 3)])),
+                    ),
+                    &address,
+                    &token,
+                    7,
+                ),
+                "c1",
+                2,
+            ),
+            with_component_balance(
+                with_account_delta(msg(3), update(&address, HashMap::from([(slot2, None)]))),
+                "c1",
+                &token,
+                6,
+            ),
+        ];
+
+        for block in &blocks {
+            cache.fold(block).unwrap();
+        }
+
+        let mut expected_account: Option<Account> = None;
+        let mut expected_state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+        for block in &blocks {
+            if let Some(delta) = block.account_deltas.get(&address) {
+                let account =
+                    expected_account.get_or_insert_with(|| delta.clone().into_account_without_tx());
+                account.apply_delta(delta).unwrap();
+            }
+            if let Some(balances) = block.account_balances.get(&address) {
+                let account = expected_account.as_mut().unwrap();
+                for (token, balance) in balances {
+                    account
+                        .token_balances
+                        .insert(token.clone(), balance.clone());
+                }
+            }
+            if let Some(delta) = block.state_deltas.get("c1") {
+                expected_state
+                    .apply_state_delta(delta)
+                    .unwrap();
+            }
+            if let Some(balances) = block.component_balances.get("c1") {
+                expected_state
+                    .apply_balance_delta(balances)
+                    .unwrap();
+            }
+        }
+        assert_eq!(cached_account(&cache, &address), expected_account);
+        assert_eq!(cached_component(&cache, "c1"), Some(expected_state));
+    }
+
     #[test]
     fn entry_bytes_follow_writes() {
         let address = addr(1);
@@ -786,5 +1192,52 @@ mod test {
         let before = cached.bytes();
         cached.fold(&update(&address, fixtures::optional_slots([(3, 4)])), ts(3));
         assert_eq!(cached.bytes(), before, "a same-size replacement is free");
+    }
+
+    #[test]
+    fn family_totals_return_to_zero_after_deletion() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+                creation(&address, [(1, 1)], 10, "0x6000"),
+            ))
+            .unwrap();
+        cache
+            .fold(&with_account_delta(
+                with_component_balance(msg(2), "c1", &addr(9), 5),
+                update(&address, fixtures::optional_slots([(2, 2)])),
+            ))
+            .unwrap();
+        assert!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed) >
+                0
+        );
+        assert!(
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed) >
+                0
+        );
+
+        cache
+            .fold(&with_account_delta(with_deleted_component(msg(3), "c1"), deletion(&address)))
+            .unwrap();
+
+        assert_eq!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
     }
 }
