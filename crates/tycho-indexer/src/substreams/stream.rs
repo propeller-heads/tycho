@@ -11,7 +11,7 @@ use futures03::{Stream, StreamExt};
 use metrics::{counter, gauge};
 use once_cell::sync::Lazy;
 use prost::Message as ProstMessage;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tokio_retry::strategy::ExponentialBackoff;
 use tracing::{error, info, trace, warn};
 
@@ -50,6 +50,33 @@ impl SubstreamsStream {
         extractor_id: String,
         partial_blocks: bool,
     ) -> Self {
+        Self::with_idle_timeout(
+            endpoint,
+            cursor,
+            package,
+            output_module_name,
+            start_block,
+            end_block,
+            final_blocks_only,
+            extractor_id,
+            partial_blocks,
+            STREAM_IDLE_TIMEOUT,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_idle_timeout(
+        endpoint: Arc<SubstreamsEndpoint>,
+        cursor: Option<String>,
+        package: Option<Package>,
+        output_module_name: String,
+        start_block: i64,
+        end_block: u64,
+        final_blocks_only: bool,
+        extractor_id: String,
+        partial_blocks: bool,
+        idle_timeout: Duration,
+    ) -> Self {
         SubstreamsStream {
             stream: Box::pin(stream_blocks(
                 endpoint,
@@ -61,10 +88,20 @@ impl SubstreamsStream {
                 final_blocks_only,
                 extractor_id,
                 partial_blocks,
+                idle_timeout,
             )),
         }
     }
 }
+
+/// Longest silence tolerated from the endpoint before the connection is dropped and redialled.
+///
+/// A live stream sends a progress message every `progress_messages_interval_ms` (30s), so any
+/// healthy connection speaks at least that often regardless of block time or backfill state.
+/// Waiting for the transport to notice instead can take minutes: a gRPC stream whose server
+/// stopped writing without closing surfaces no error until a keepalive or the peer's TCP stack
+/// gives up, and until then the extractor sits in `substreams.next()` with a stale head.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 static DEFAULT_BACKOFF: Lazy<ExponentialBackoff> =
     Lazy::new(|| ExponentialBackoff::from_millis(500).max_delay(Duration::from_secs(45)));
@@ -118,6 +155,7 @@ fn stream_blocks(
     final_blocks_only: bool,
     extractor_id: String,
     partial_blocks: bool,
+    idle_timeout: Duration,
 ) -> impl Stream<Item = Result<BlockResponse, Error>> {
     let mut latest_cursor = cursor.unwrap_or_default();
     let mut latest_block = start_block_num as u64;
@@ -156,7 +194,19 @@ fn stream_blocks(
 
             match result {
                 Ok(stream) => {
-                    for await response in stream {
+                    let mut stream = Box::pin(stream);
+                    loop {
+                        let response = match timeout(idle_timeout, stream.next()).await {
+                            Ok(Some(response)) => response,
+                            Ok(None) => break,
+                            Err(_) => {
+                                warn!(?idle_timeout, "Endpoint went silent, reconnecting");
+                                counter!("substreams_failure", "extractor" => extractor_id.clone(), "cause" => "idle_timeout").increment(1);
+                                wait_for_next_retry(&mut backoff, &mut retry_count, &extractor_id).await?;
+                                continue 'retry_loop;
+                            }
+                        };
+
                         match process_substreams_response(response).await {
                             BlockProcessedResult::BlockScopedData(block_scoped_data) => {
                                 if let Some(block) = block_scoped_data.clock.clone() {
@@ -362,11 +412,18 @@ mod tests {
     use crate::substreams::mock::{start_scripted_mock_substreams, MockResponse};
 
     async fn stream_against(script: Vec<MockResponse>) -> (SubstreamsStream, MockRequests) {
+        stream_against_with_idle_timeout(script, STREAM_IDLE_TIMEOUT).await
+    }
+
+    async fn stream_against_with_idle_timeout(
+        script: Vec<MockResponse>,
+        idle_timeout: Duration,
+    ) -> (SubstreamsStream, MockRequests) {
         let (captured, addr) = start_scripted_mock_substreams(script).await;
         let endpoint = SubstreamsEndpoint::new(format!("http://{addr}"), Some("token".to_string()))
             .await
             .expect("endpoint");
-        let stream = SubstreamsStream::new(
+        let stream = SubstreamsStream::with_idle_timeout(
             Arc::new(endpoint),
             None,
             None,
@@ -376,6 +433,7 @@ mod tests {
             false,
             "test_extractor".to_string(),
             false,
+            idle_timeout,
         );
         (stream, captured)
     }
@@ -426,6 +484,36 @@ mod tests {
 
         let requests = captured.lock().unwrap();
         assert_eq!(requests.len(), 2, "the stream should have reconnected once");
+        assert_eq!(
+            requests[1].start_cursor, "cursor-1",
+            "the reconnect should resume from the last cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_silent_endpoint_reconnects_from_last_cursor() {
+        let (mut stream, captured) = stream_against_with_idle_timeout(
+            vec![MockResponse::BlockThenStall { cursor: "cursor-1".to_string() }, MockResponse::Ok],
+            Duration::from_millis(100),
+        )
+        .await;
+
+        let block = stream
+            .next()
+            .await
+            .expect("stream should yield a block")
+            .expect("first block should not error");
+        assert!(matches!(block, BlockResponse::New(_)));
+
+        let ended = stream
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .expect("a silent endpoint must be reconnected, not surfaced as an error");
+        assert!(matches!(ended, BlockResponse::Ended));
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the silent stream should have been redialled once");
         assert_eq!(
             requests[1].start_cursor, "cursor-1",
             "the reconnect should resume from the last cursor"
