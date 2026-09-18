@@ -144,6 +144,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         IUniswapV3StaticQuoter uniswapV3StaticQuoter_
     ) {
         poolManager = poolManager_;
+        // Zero is the documented way to deploy without Fluid on this chain.
+        // slither-disable-next-line missing-zero-check
         fluidLiquidity = fluidLiquidity_;
         uniswapV3StaticQuoter = uniswapV3StaticQuoter_;
     }
