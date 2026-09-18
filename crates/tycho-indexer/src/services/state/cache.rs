@@ -31,6 +31,7 @@ use std::{
 
 use chrono::NaiveDateTime;
 use deepsize::{Context, DeepSizeOf};
+use tracing::trace;
 use tycho_common::{
     keccak256,
     models::{
@@ -385,26 +386,48 @@ impl EntityCache {
     }
 }
 
+impl CacheState {
+    /// Applies one block's component changes for `system`, in an order where a new component
+    /// exists before its first attributes arrive.
+    fn fold_components(&mut self, system: &str, block: &BlockAggregatedChanges, at: NaiveDateTime) {
+        let family = self
+            .components
+            .entry(system.to_string())
+            .or_default();
+        for id in block.new_protocol_components.keys() {
+            family
+                .entry(id.clone())
+                .or_insert_with(|| CachedComponentState::created(at));
+        }
+        for (id, delta) in &block.state_deltas {
+            match family.get_mut(id) {
+                Some(entry) => entry.fold(delta, at),
+                None => trace!(system, %id, "State delta for an unknown component skipped"),
+            }
+        }
+        for (id, balances) in &block.component_balances {
+            match family.get_mut(id) {
+                Some(entry) => entry.fold_balances(balances, at),
+                None => trace!(system, %id, "Balances for an unknown component skipped"),
+            }
+        }
+        for id in block.deleted_protocol_components.keys() {
+            family.remove(id);
+        }
+    }
+}
+
 impl FoldSink for EntityCache {
-    #[allow(unused_variables)]
+    /// Applies the whole block under the write lock. Not folded: `new_tokens`, `component_tvl`,
+    /// `dci_update` — those stay database-served.
+    ///
+    /// No check can fail today. Any future check goes before the first mutation, so a replay of
+    /// the same block converges.
     fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        // Under the write lock, apply the whole block in an order where new components exist
-        // before their first attributes arrive:
-        //
-        // 1. `new_protocol_components` — create entries.
-        // 2. `state_deltas` — apply where not older than the entry.
-        // 3. `component_balances` — apply.
-        // 4. `deleted_protocol_components` — remove entries.
-        // 5. `account_deltas` — apply per value, tagged with this block's timestamp; a `Creation`
-        //    delta for an unknown address creates the entry, any other change for an unknown
-        //    address is skipped (partial data must never create an entry).
-        // 6. `account_balances` — apply.
-        //
-        // Not folded in phase 1: `new_tokens`, `component_tvl`, `dci_update` — DB-served.
-        //
-        // An error means the block was not applied: the window keeps it and the process stops.
-        // Fail before mutating, so a replay of the same block converges.
-        todo!("fold one block")
+        let at = block.block.ts;
+        let mut state = self.write();
+        state.fold_components(&block.extractor, block, at);
+        Ok(())
     }
 }
 
@@ -412,7 +435,7 @@ impl FoldSink for EntityCache {
 mod test {
     use std::str::FromStr;
 
-    use tycho_common::models::ChangeType;
+    use tycho_common::models::{protocol::ProtocolComponent, ChangeType};
 
     use super::*;
     use crate::{extractor::models::fixtures, testing};
@@ -504,6 +527,56 @@ mod test {
 
     fn update(address: &Bytes, slots: HashMap<Bytes, Option<Bytes>>) -> AccountDelta {
         AccountDelta::new(Chain::Ethereum, address.clone(), slots, None, None, ChangeType::Update)
+    }
+
+    fn msg(n: u64) -> BlockAggregatedChanges {
+        testing::aggregated_changes(EXTRACTOR, n, n, Some(n))
+    }
+
+    fn component(id: &str) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            EXTRACTOR,
+            "pool",
+            Chain::Ethereum,
+            vec![],
+            vec![],
+            HashMap::new(),
+            ChangeType::Creation,
+            Bytes::default(),
+            ts(1),
+        )
+    }
+
+    fn with_component(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.new_protocol_components
+            .insert(id.to_string(), component(id));
+        m
+    }
+
+    fn with_state_delta(mut m: BlockAggregatedChanges, id: &str, x: u64) -> BlockAggregatedChanges {
+        m.state_deltas
+            .insert(id.to_string(), testing::state_delta(id, x));
+        m
+    }
+
+    fn with_component_balance(
+        mut m: BlockAggregatedChanges,
+        id: &str,
+        token: &Bytes,
+        amount: u64,
+    ) -> BlockAggregatedChanges {
+        m.component_balances
+            .entry(id.to_string())
+            .or_default()
+            .insert(token.clone(), component_balance(id, token, amount));
+        m
+    }
+
+    fn with_deleted_component(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.deleted_protocol_components
+            .insert(id.to_string(), component(id));
+        m
     }
 
     fn component_balance(id: &str, token: &Bytes, amount: u64) -> ComponentBalance {
@@ -736,5 +809,57 @@ mod test {
             .read()
             .components
             .contains_key("other"));
+    }
+
+    #[test]
+    fn fold_creates_components_before_their_first_attributes() {
+        let cache = EntityCache::new();
+        let block = with_component_balance(
+            with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+            "c1",
+            &addr(9),
+            5,
+        );
+
+        cache.fold(&block).unwrap();
+
+        let state = cached_component(&cache, "c1").unwrap();
+        assert_eq!(state.attributes["x"], Bytes::from(1u64));
+        assert_eq!(state.balances[&addr(9)], Bytes::from(5u64));
+    }
+
+    #[test]
+    fn fold_skips_changes_for_an_unknown_component() {
+        let cache = EntityCache::new();
+        let block =
+            with_component_balance(with_state_delta(msg(1), "ghost", 1), "ghost", &addr(9), 5);
+
+        cache.fold(&block).unwrap();
+
+        assert!(cached_component(&cache, "ghost").is_none());
+    }
+
+    #[test]
+    fn fold_removes_deleted_components_and_skips_replayed_blocks() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
+            .unwrap();
+
+        cache
+            .fold(&with_state_delta(msg(1), "c1", 1))
+            .unwrap();
+        assert_eq!(
+            cached_component(&cache, "c1")
+                .unwrap()
+                .attributes["x"],
+            Bytes::from(2u64),
+            "block 1 is a replay"
+        );
+
+        cache
+            .fold(&with_deleted_component(msg(3), "c1"))
+            .unwrap();
+        assert!(cached_component(&cache, "c1").is_none());
     }
 }
