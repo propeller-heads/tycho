@@ -457,10 +457,11 @@ Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
 
-Contract changes can alter the deployed runtime bytecode used by `protocol-testing`. From the
-repository root, run `./protocols/testing/scripts/update_runtime_bytecode.sh` and commit any changed
-`protocols/testing/fixtures/*.runtime.json`; CI runs the same script with `--check`. Foundry pins
-the compiler and omits the metadata hash to keep these fixtures reproducible.
+Contract changes can alter the runtime bytecode fixtures `protocol-testing` plants
+(`protocols/testing/fixtures/*.runtime.json`). `test/RuntimeBytecodeFixtures.t.sol` checks them as
+part of `forge test`; regenerate and commit them with
+`FIXTURES_WRITE=1 forge test --match-contract RuntimeBytecodeFixtures`. Foundry pins the compiler
+and omits the metadata hash to keep these fixtures reproducible.
 
 ### Rust
 
@@ -477,7 +478,7 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 ### CI
 
 - **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
-  snapshot, a Slither static-analysis job, and a runtime-bytecode-fixtures freshness check
+  snapshot (`forge test` includes the runtime bytecode fixture check), and a Slither static-analysis job
 - **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
@@ -500,8 +501,9 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
-9. Regenerate and commit runtime-bytecode fixtures with
-   `./protocols/testing/scripts/update_runtime_bytecode.sh`.
+9. List the executor in `contracts/test/RuntimeBytecodeFixtures.t.sol`, regenerate the
+   protocol-testing fixtures with `FIXTURES_WRITE=1 forge test --match-contract RuntimeBytecodeFixtures`
+   and commit `protocols/testing/fixtures/<Name>.runtime.json`.
 
 ## Security
 
