@@ -432,87 +432,6 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         }
     }
 
-    /// A chain without Uniswap V4 deploys with a zero PoolManager. The protocol
-    /// byte then quotes by reverting with its name, which `swap` counts as zero,
-    /// and running it reverts the same way instead of calling `address(0)`.
-    function testUniswapV4UnavailableWithoutPoolManager() public {
-        TychoFallbackRouter noV4 = new TychoFallbackRouter(
-            IPoolManager(address(0)),
-            FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
-        );
-        TychoFallbackRouter.Swap memory swap_ =
-            FallbackSwaps.swap(USDE_ADDR, USDT_ADDR, 100 ether, BOB);
-        bytes memory v4 = FallbackSwaps.uniswapV4(100, 1, address(0), bytes(""));
-        bytes memory unavailable = abi.encodeWithSelector(
-            TychoFallbackRouter__ProtocolUnavailable.selector,
-            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4)
-        );
-        deal(USDE_ADDR, address(noV4), 100 ether);
-
-        vm.prank(address(noV4));
-        vm.expectRevert(unavailable);
-        noV4.quoteFallback(swap_, v4);
-
-        vm.expectRevert(unavailable);
-        noV4.swap(swap_, address(pamm), v4);
-    }
-
-    /// Same for a chain without Fluid.
-    function testFluidV1UnavailableWithoutLiquidity() public {
-        TychoFallbackRouter noFluid = new TychoFallbackRouter(
-            IPoolManager(POOL_MANAGER),
-            address(0),
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
-        );
-        deal(USDC_ADDR, address(noFluid), USDC_IN);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                TychoFallbackRouter__ProtocolUnavailable.selector,
-                uint8(TychoFallbackRouter.FallbackProtocol.FluidV1)
-            )
-        );
-        noFluid.swap(
-            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
-            address(pamm),
-            FallbackSwaps.fluidV1(FLUIDV1_LIQUIDITY, true)
-        );
-    }
-
-    /// Without a static quoter a Uniswap V3 fallback quotes zero, so a pAMM
-    /// that quotes below the pool is not displaced by it -- the pAMM fills,
-    /// where the quoted deployment would have skipped it. Uniswap V3 itself
-    /// stays usable: the same deployment fills through it once the pAMM fails.
-    function testUniswapV3UnquotedWithoutStaticQuoterKeepsPropAMMFirst()
-        public
-    {
-        TychoFallbackRouter unquoted = new TychoFallbackRouter(
-            IPoolManager(address(0)),
-            address(0),
-            IUniswapV3StaticQuoter(address(0))
-        );
-        TychoFallbackRouter.Swap memory swap_ =
-            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
-        bytes memory v3 = FallbackSwaps.uniswapV3(USDC_WETH_USV3);
-
-        vm.prank(address(unquoted));
-        assertEq(unquoted.quoteFallback(swap_, v3), 0);
-
-        // 1 WETH for 10 000 USDC, below the Uniswap V3 price of roughly 3.6 WETH.
-        pamm.setPrice(USDC_ADDR, WETH_ADDR, 1e26);
-        deal(WETH_ADDR, address(pamm), 100 ether);
-        deal(USDC_ADDR, address(unquoted), USDC_IN);
-        unquoted.swap(swap_, address(pamm), v3);
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 1 ether);
-
-        // The pAMM out of inventory: the fallback fills.
-        deal(WETH_ADDR, address(pamm), 0);
-        deal(USDC_ADDR, address(unquoted), USDC_IN);
-        unquoted.swap(swap_, address(pamm), v3);
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 1 ether + V3_WETH_OUT);
-    }
-
     /// A live pAMM that quotes above the fallback fills, and the fallback is never touched.
     function testPropAMMFills() public {
         // 5 WETH for the whole 10 000 USDC, above the Uniswap V3 price of roughly 3.6 WETH, so
@@ -752,7 +671,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
         // The caller check comes before the decode, so the protocol data is irrelevant here.
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
-        router.simulateUniswapV4(swap_, "");
+        router.simulateFallback(swap_, "");
     }
 
     /// A pAMM that fills emits nothing, so counting `FallbackSwap` counts misses.
@@ -1049,6 +968,108 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     function testUnlockCallbackRejectsStranger() public {
         vm.expectRevert(TychoFallbackRouter__NotPoolManager.selector);
         router.unlockCallback(bytes(""));
+    }
+}
+
+/// @notice The deployment shapes a chain missing a singleton gets, on the mainnet fork so the
+/// zeroed slot is the only difference from `TychoFallbackRouterTest`. Split out from it because
+/// the extra `new TychoFallbackRouter` sites pushed that contract past a solc assembler limit.
+contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
+    /// `TychoFallbackRouterTest`'s block and USDC/WETH figures, so the two contracts assert the
+    /// same numbers.
+    uint256 constant FORK_BLOCK = 22_689_128;
+    uint256 constant USDC_IN = 10_000e6;
+    uint256 constant V3_WETH_OUT = 3_611_998_638_539_827_447;
+
+    function getForkBlock() internal pure override returns (uint256) {
+        return FORK_BLOCK;
+    }
+
+    /// A chain without Uniswap V4 deploys with a zero PoolManager. The protocol
+    /// byte then quotes by reverting with its name, which `swap` counts as zero,
+    /// and running it reverts the same way instead of calling `address(0)`.
+    function testUniswapV4UnavailableWithoutPoolManager() public {
+        TychoFallbackRouter noV4 = new TychoFallbackRouter(
+            IPoolManager(address(0)),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDE_ADDR, USDT_ADDR, 100 ether, BOB);
+        bytes memory v4 = FallbackSwaps.uniswapV4(100, 1, address(0), bytes(""));
+        bytes memory unavailable = abi.encodeWithSelector(
+            TychoFallbackRouter__ProtocolUnavailable.selector,
+            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4)
+        );
+        deal(USDE_ADDR, address(noV4), 100 ether);
+
+        vm.prank(address(noV4));
+        vm.expectRevert(unavailable);
+        noV4.quoteFallback(swap_, v4);
+
+        vm.expectRevert(unavailable);
+        noV4.swap(swap_, address(pamm), v4);
+    }
+
+    /// Same for a chain without Fluid.
+    function testFluidV1UnavailableWithoutLiquidity() public {
+        TychoFallbackRouter noFluid = new TychoFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
+        deal(USDC_ADDR, address(noFluid), USDC_IN);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoFallbackRouter__ProtocolUnavailable.selector,
+                uint8(TychoFallbackRouter.FallbackProtocol.FluidV1)
+            )
+        );
+        noFluid.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.fluidV1(FLUIDV1_LIQUIDITY, true)
+        );
+    }
+
+    /// Without a static quoter a Uniswap V3 fallback is quoted by simulation:
+    /// the quote is the fill, the simulation rolls back, and a pAMM quoting
+    /// below the pool is displaced exactly as it is on a quoted deployment.
+    function testUniswapV3QuotedBySimulationWithoutStaticQuoter() public {
+        TychoFallbackRouter simulated = new TychoFallbackRouter(
+            IPoolManager(address(0)),
+            address(0),
+            IUniswapV3StaticQuoter(address(0))
+        );
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
+        bytes memory v3 = FallbackSwaps.uniswapV3(USDC_WETH_USV3);
+        deal(USDC_ADDR, address(simulated), USDC_IN);
+
+        vm.prank(address(simulated));
+        assertEq(simulated.quoteFallback(swap_, v3), V3_WETH_OUT);
+        // The simulation rolled back.
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(simulated)), USDC_IN);
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 0);
+
+        // 1 WETH for 10 000 USDC, below the Uniswap V3 price of roughly 3.6 WETH.
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, 1e26);
+        deal(WETH_ADDR, address(pamm), 100 ether);
+
+        vm.expectEmit(address(simulated));
+        emit TychoFallbackRouter.FallbackSwap(
+            address(pamm),
+            USDC_ADDR,
+            WETH_ADDR,
+            USDC_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        simulated.swap(swap_, address(pamm), v3);
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
     }
 }
 

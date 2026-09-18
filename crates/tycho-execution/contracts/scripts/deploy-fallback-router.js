@@ -9,7 +9,7 @@ const {deployCreate2} = require("./utils");
 // an executor argument, so it lives under `fallback_router` in the
 // protocol-specific config. A chain without one deploys with address(0) there:
 // the protocol then reverts TychoFallbackRouter__ProtocolUnavailable, or for
-// the quoter, Uniswap V3 fallbacks go unquoted and the pAMM keeps first place.
+// the quoter, Uniswap V3 fallbacks are quoted by simulation.
 //
 // The FallbackExecutor is deployed separately by deploy-executors.js: add a
 // `fallback` entry with the address this script prints to
@@ -47,7 +47,7 @@ async function main() {
     console.log(
         `- uniswapV3StaticQuoter: ${describe(
             staticQuoter,
-            "Uniswap V3 unquoted"
+            "Uniswap V3 quoted by simulation"
         )}`
     );
 

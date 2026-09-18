@@ -42,7 +42,7 @@ error TychoFallbackRouter__NoOutput();
 error TychoFallbackRouter__NotPoolManager();
 error TychoFallbackRouter__NotSelf();
 error TychoFallbackRouter__ProtocolUnavailable(uint8 protocol);
-/// @notice Not a failure: carries the amount `simulateUniswapV4` measured, so the swap it ran
+/// @notice Not a failure: carries the amount `simulateFallback` measured, so the swap it ran
 /// rolls back.
 error TychoFallbackRouter__SimulatedAmountOut(uint256 amountOut);
 error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
@@ -57,8 +57,8 @@ error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 /// One build serves every chain. The per-chain singletons it calls (Uniswap V4's PoolManager,
 /// Fluid's liquidity layer, the Uniswap V3 static quoter) are constructor immutables that a chain
 /// without them deploys as `address(0)`: a protocol whose singleton is missing reverts
-/// `ProtocolUnavailable`, and Uniswap V3 without a quoter goes unquoted. Every other protocol is
-/// addressed per swap.
+/// `ProtocolUnavailable`, and Uniswap V3 without a quoter is quoted by simulation instead. Every
+/// other protocol is addressed per swap.
 ///
 /// Holds no funds between transactions. A balance that does end up here (Curve rounding dust, a
 /// mistaken transfer) is claimable by anyone through `swap` and is considered lost, which is also
@@ -118,7 +118,7 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// @notice Where `dexCallback` pays a Fluid dex, or `address(0)` on a chain without Fluid.
     address public immutable fluidLiquidity;
     /// @notice Prices a Uniswap V3 fallback without running it, or `address(0)` on a chain
-    /// without one, where a Uniswap V3 fallback quotes zero and the pAMM keeps first place.
+    /// without one, where a Uniswap V3 fallback is quoted by simulation.
     IUniswapV3StaticQuoter public immutable uniswapV3StaticQuoter;
 
     /// @notice `protocol` filled instead of the pAMM, for `reason`. Absence of this event on a
@@ -136,8 +136,8 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
 
     /// @param poolManager_ Uniswap V4's PoolManager; `address(0)` disables the protocol.
     /// @param fluidLiquidity_ Fluid's liquidity layer; `address(0)` disables the protocol.
-    /// @param uniswapV3StaticQuoter_ The Uniswap V3 static quoter; `address(0)` leaves Uniswap
-    /// V3 fallbacks unquoted.
+    /// @param uniswapV3StaticQuoter_ The Uniswap V3 static quoter; `address(0)` quotes Uniswap
+    /// V3 fallbacks by simulation.
     constructor(
         IPoolManager poolManager_,
         address fluidLiquidity_,
@@ -248,21 +248,14 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
                 _decodeUniswapV2(protocolData);
             return _quoteUniswapV2(swap_, pair, feeBps);
         } else if (protocol == FallbackProtocol.UniswapV3) {
-            // Without a static quoter the pool cannot be priced in a view call, so the leg
-            // goes unquoted and the pAMM keeps first place.
+            // Without a static quoter the pool cannot be priced in a view call.
             if (address(uniswapV3StaticQuoter) == address(0)) {
-                return 0;
+                return _quoteBySimulation(swap_, fallbackSwap);
             }
             return _quoteUniswapV3(swap_, protocolData);
         } else if (protocol == FallbackProtocol.UniswapV4) {
-            // Uniswap V4 has no quote function, so the amount comes off a reverted swap.
-            try this.simulateUniswapV4(swap_, protocolData) {
-                return 0;
-            } catch (bytes memory revertData) {
-                return _amountOutFromRevert(
-                    revertData, TychoFallbackRouter__SimulatedAmountOut.selector
-                );
-            }
+            // Uniswap V4 has no quote function.
+            return _quoteBySimulation(swap_, fallbackSwap);
         } else if (protocol == FallbackProtocol.Curve) {
             return _quoteCurve(swap_, protocolData);
         } else if (protocol == FallbackProtocol.FluidV1) {
@@ -274,17 +267,32 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         }
     }
 
-    /// @notice Runs the Uniswap V4 swap, then reverts `TychoFallbackRouter__SimulatedAmountOut`
-    /// with the amount it delivered so the swap rolls back. External only so `quoteFallback` can
+    /// @notice Runs the fallback, then reverts `TychoFallbackRouter__SimulatedAmountOut` with
+    /// the amount it delivered so the swap rolls back. External only so `quoteFallback` can
     /// try/catch it.
-    function simulateUniswapV4(Swap calldata swap_, bytes calldata protocolData)
+    function simulateFallback(Swap calldata swap_, bytes calldata fallbackSwap)
         external
     {
         _requireSelf();
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
-        _swapUniswapV4(swap_, protocolData);
+        _executeFallback(swap_, fallbackSwap);
         revert TychoFallbackRouter__SimulatedAmountOut(IERC20(swap_.tokenOut)
                     .balanceOf(swap_.receiver) - balanceBefore);
+    }
+
+    /// @dev The amount a real run of the fallback delivers, taken off `simulateFallback`'s
+    /// revert. Costs the fallback's own gas, so it is only for protocols with no cheaper quote.
+    function _quoteBySimulation(
+        Swap calldata swap_,
+        bytes calldata fallbackSwap
+    ) internal returns (uint256 amountOut) {
+        try this.simulateFallback(swap_, fallbackSwap) {
+            return 0;
+        } catch (bytes memory revertData) {
+            return _amountOutFromRevert(
+                revertData, TychoFallbackRouter__SimulatedAmountOut.selector
+            );
+        }
     }
 
     /// @dev Same arguments as `_swapUniswapV3`, priced by the static quoter's own tick walk

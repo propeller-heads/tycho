@@ -177,10 +177,10 @@ never picks a protocol itself -- the encoder decides which fallback to use and s
 from the pair's reserves, Uniswap V3 asks the static quoter (Eden Network's `view` reimplementation of the tick walk,
 `uniswapV3StaticQuoter` immutable, `IUniswapV3StaticQuoter`), Curve asks `get_dy`, Fluid asks the dex to price a
 swap paid to `0xdEaD`, which reverts `FluidDexSwapResult(amountOut)` before moving any token, Aerodrome V1 asks the
-pool's `getAmountOut`. Uniswap V4 has no quote function, so `simulateUniswapV4` runs the real swap and reverts
-`TychoFallbackRouter__SimulatedAmountOut` with the receiver's balance diff, rolling it back. On a chain without a
-static quoter a Uniswap V3 fallback quotes zero, so the pAMM keeps first place there; deploy Eden's quoter to change
-that. The pAMM quote is a low-level call whose return data counts only when it
+pool's `getAmountOut`. Uniswap V4 has no quote function, so `simulateFallback` runs the real swap and reverts
+`TychoFallbackRouter__SimulatedAmountOut` with the receiver's balance diff, rolling it back; Uniswap V3 on a chain
+without a static quoter is simulated the same way, at the cost of a real swap's gas per quote, so deploying Eden's
+quoter there is the cheaper option. The pAMM quote is a low-level call whose return data counts only when it
 is at least 32 bytes; the fallback quote runs in the self-only external `quoteFallback` under try/catch. A fallback
 quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero, and equal quotes keep
 the pAMM. A pAMM that quotes zero skips the fallback quote and its own swap, so the fallback runs straight away. The
@@ -249,7 +249,7 @@ Constraints:
   (the PoolManager, the liquidity layer, the static quoter); all three are constructor immutables and any may be
   `address(0)`. A zero PoolManager or liquidity layer makes that protocol byte revert
   `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
-  on execution); a zero quoter leaves Uniswap V3 unquoted. Every other protocol is addressed per swap, so no chain
+  on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
 - `scripts/deploy-fallback-router.js` deploys the contract through the CREATE2 factory, reading `poolManager` and
   `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
