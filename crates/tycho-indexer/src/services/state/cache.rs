@@ -6,8 +6,8 @@
 //!   account, so every cached value carries the time it was last written — the writing block's
 //!   timestamp, the same unit the database's `valid_from` versioning uses. A newer write always
 //!   wins; re-applying an equal-time change is a no-op because delta values are absolute.
-//! - **Component states** (protocol state), keyed by `(protocol system, component id)`. Exactly one
-//!   extractor writes each protocol system, in order, so one write time per entry is enough.
+//! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
+//!   one extractor writes each protocol system, in order, so one write time per entry is enough.
 //!
 //! Tags compare with "not older" (>=), never "strictly newer": consecutive blocks can share a
 //! timestamp on fast chains, and a strict comparison would silently drop the second block.
@@ -26,7 +26,7 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
-    sync::{RwLock, RwLockReadGuard},
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use chrono::NaiveDateTime;
@@ -337,8 +337,9 @@ pub(crate) struct EntityCache {
 /// The maps behind the lock.
 pub(crate) struct CacheState {
     pub(crate) accounts: HashMap<Address, CachedAccount>,
-    pub(crate) components: HashMap<(String, ComponentId), CachedComponentState>,
-    // Memory accounting (running byte total, reconciled periodically) attaches here.
+    /// Component states by protocol system, then component id. The system is the extractor name:
+    /// the RPC resolves one window per protocol system by extractor name, so both are one string.
+    pub(crate) components: HashMap<String, HashMap<ComponentId, CachedComponentState>>,
 }
 
 impl EntityCache {
@@ -356,21 +357,31 @@ impl EntityCache {
             .expect("entity cache lock poisoned")
     }
 
+    fn write(&self) -> RwLockWriteGuard<'_, CacheState> {
+        self.state
+            .write()
+            .expect("entity cache lock poisoned")
+    }
+
     /// Startup load only: runs before the extractors start, so nothing else is writing.
-    #[allow(unused_variables)]
     pub(crate) fn insert_loaded_account(&self, address: Address, entry: CachedAccount) {
-        todo!("insert loaded account")
+        self.write()
+            .accounts
+            .insert(address, entry);
     }
 
     /// Startup load only.
-    #[allow(unused_variables)]
     pub(crate) fn insert_loaded_component(
         &self,
         system: String,
         component_id: ComponentId,
         entry: CachedComponentState,
     ) {
-        todo!("insert loaded component")
+        self.write()
+            .components
+            .entry(system)
+            .or_default()
+            .insert(component_id, entry);
     }
 }
 
@@ -406,8 +417,27 @@ mod test {
     use super::*;
     use crate::{extractor::models::fixtures, testing};
 
+    const EXTRACTOR: &str = "ex";
+
     fn ts(n: u64) -> NaiveDateTime {
         testing::block(n).ts
+    }
+
+    fn cached_account(cache: &EntityCache, address: &Bytes) -> Option<Account> {
+        cache
+            .read()
+            .accounts
+            .get(address)
+            .map(|a| a.materialize(address))
+    }
+
+    fn cached_component(cache: &EntityCache, id: &str) -> Option<ProtocolComponentState> {
+        cache
+            .read()
+            .components
+            .get(EXTRACTOR)
+            .and_then(|m| m.get(id))
+            .map(|c| c.materialize(id))
     }
 
     fn addr(n: u64) -> Bytes {
@@ -681,5 +711,30 @@ mod test {
         assert_eq!(state.attributes, HashMap::from([("y".to_string(), Bytes::from(3u64))]));
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), ts(6));
+    }
+
+    #[test]
+    fn loaded_entries_read_back_by_address_and_by_system_and_id() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let loaded = account(&address);
+        let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+
+        cache.insert_loaded_account(
+            address.clone(),
+            CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, ts(1))),
+        );
+        cache.insert_loaded_component(
+            EXTRACTOR.to_string(),
+            "c1".to_string(),
+            CachedComponentState::from_snapshot(state.clone(), ts(1)),
+        );
+
+        assert_eq!(cached_account(&cache, &address), Some(loaded));
+        assert_eq!(cached_component(&cache, "c1"), Some(state));
+        assert!(!cache
+            .read()
+            .components
+            .contains_key("other"));
     }
 }
