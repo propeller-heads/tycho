@@ -345,6 +345,7 @@ diesel::table! {
         inserted_ts -> Timestamptz,
         modified_ts -> Timestamptz,
         quality -> Int4,
+        metadata_pending -> Bool,
     }
 }
 

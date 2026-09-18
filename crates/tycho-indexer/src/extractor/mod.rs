@@ -45,6 +45,7 @@ pub mod reorg_buffer;
 pub mod runner;
 pub mod supervisor;
 pub mod token_analysis_cron;
+pub mod token_metadata_recovery;
 mod u256_num;
 
 #[cfg(test)]

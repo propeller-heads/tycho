@@ -444,12 +444,26 @@ where
             balances
         };
 
-        // collect token decimals and prices to calculate tvl in the next step
-        // most of this data should be in the cache.
+        // Prices are denominated in raw token units, so token decimals play no part here. A
+        // pending token is excluded regardless: its identity is unfinished, and a price written
+        // for it by the external price feed may have been derived from the placeholder row.
         let addresses = balances
             .values()
             .flat_map(|b| b.clone().into_keys())
             .collect::<Vec<_>>();
+        let pending: HashSet<&Bytes> = self
+            .protocol_cache
+            .get_tokens(&addresses)
+            .await?
+            .iter()
+            .zip(addresses.iter())
+            .filter(|(token, _)| {
+                token
+                    .as_ref()
+                    .is_some_and(|t| !t.metadata_status.is_ready())
+            })
+            .map(|(_, address)| address)
+            .collect();
 
         let prices = self
             .protocol_cache
@@ -474,6 +488,9 @@ where
                 let component_tvl: f64 = bal
                     .iter()
                     .filter_map(|(addr, bal)| {
+                        if pending.contains(addr) {
+                            return None;
+                        }
                         let price = *prices.get(addr)?;
                         let tvl = bal.balance_float / price;
                         Some(tvl)
@@ -658,6 +675,15 @@ where
             .flat_map(|pc| pc.tokens.clone().into_iter())
             .collect::<Vec<_>>();
 
+        // The pre-processor deduplicates again; this pass exists so the cache lookup, the
+        // `new_tokens_count` span field and `token_enrichment_unknown_tokens` count unique
+        // addresses rather than pool memberships.
+        let mut seen = HashSet::new();
+        let new_token_addresses: Vec<_> = new_token_addresses
+            .into_iter()
+            .filter(|address| seen.insert(address.clone()))
+            .collect();
+
         // Separate between known and unkown tokens
         let is_token_known = self
             .protocol_cache
@@ -733,19 +759,26 @@ where
             .map(|t| (t.address.clone(), t));
 
         tracing::Span::current().record("new_tokens_count", unknown_tokens.len());
+        histogram!("token_enrichment_unknown_tokens", "chain" => self.chain.to_string(), "extractor" => self.name.clone())
+            .record(unknown_tokens.len() as f64);
         if !unknown_tokens.is_empty() {
             debug!(?unknown_tokens, block_number = msg.block.number, "NewTokens");
         }
 
-        let new_tokens: HashMap<Address, Token> = self
+        let enrichment_started = std::time::Instant::now();
+        let fetched = self
             .token_pre_processor
             .get_tokens(unknown_tokens, Arc::new(tf), BlockTag::Number(msg.block.number))
-            .await
+            .await;
+        histogram!("token_enrichment_seconds", "chain" => self.chain.to_string(), "extractor" => self.name.clone())
+            .record(enrichment_started.elapsed().as_secs_f64());
+        counter!("token_metadata_deferred", "chain" => self.chain.to_string(), "extractor" => self.name.clone())
+            .increment(fetched.iter().filter(|token| !token.metadata_status.is_ready()).count() as u64);
+        Ok(fetched
             .into_iter()
             .map(|t| (t.address.clone(), t))
             .chain(existing_tokens)
-            .collect();
-        Ok(new_tokens)
+            .collect())
     }
 
     /// Process a full block
@@ -2247,6 +2280,7 @@ mod test {
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
+    use rstest::rstest;
     use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
 
     use super::*;
@@ -2898,8 +2932,12 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    #[rstest]
+    #[case::all_ready(false, 66.39849612683253)]
+    // Token 2 pending: only token 1 counts, whatever price row the feed wrote for token 2.
+    #[case::second_token_pending(true, 11_304_207_639.4e18 / 344101538937875300000000000.0)]
     #[test_log::test(tokio::test)]
-    async fn test_handle_tvl_changes() {
+    async fn test_handle_tvl_changes(#[case] second_pending: bool, #[case] exp_tvl: f64) {
         let mut msg = BlockAggregatedChanges {
             component_balances: HashMap::from([(
                 "comp1".to_string(),
@@ -2972,15 +3010,22 @@ mod test {
                     Chain::Ethereum,
                     100,
                 ),
-                Token::new(
-                    &Bytes::from("0x0000000000000000000000000000000000000002"),
-                    "USDC",
-                    6,
-                    0,
-                    &[],
-                    Chain::Ethereum,
-                    100,
-                ),
+                if second_pending {
+                    Token::pending(
+                        &Bytes::from("0x0000000000000000000000000000000000000002"),
+                        Chain::Ethereum,
+                    )
+                } else {
+                    Token::new(
+                        &Bytes::from("0x0000000000000000000000000000000000000002"),
+                        "USDC",
+                        6,
+                        0,
+                        &[],
+                        Chain::Ethereum,
+                        100,
+                    )
+                },
             ])
             .await
             .expect("adding tokens failed");
@@ -3022,8 +3067,6 @@ mod test {
         )
         .await
         .expect("extractor init failed");
-
-        let exp_tvl = 66.39849612683253;
 
         extractor
             .handle_tvl_changes(&mut msg)

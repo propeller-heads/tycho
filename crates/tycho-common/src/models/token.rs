@@ -17,8 +17,38 @@ pub type TransferCost = u64;
 /// Tax related to a token transfer. Should be given in Basis Points (1/100th of a percent)
 pub type TransferTax = u64;
 
+/// Whether token metadata and transfer analysis have finished. Readiness is independent of
+/// quality: a completed analysis can classify a token as bad, while an RPC timeout cannot.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Deserialize,
+    Serialize,
+    Eq,
+    PartialEq,
+    Hash,
+    DeepSizeOf,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenMetadataStatus {
+    #[default]
+    Ready,
+    Pending,
+}
+
+impl TokenMetadataStatus {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, DeepSizeOf)]
 pub struct Token {
+    #[serde(default, skip_serializing_if = "TokenMetadataStatus::is_ready")]
+    pub metadata_status: TokenMetadataStatus,
     pub address: Bytes,
     pub symbol: String,
     pub decimals: u32,
@@ -46,6 +76,7 @@ impl Token {
         quality: u32,
     ) -> Self {
         Self {
+            metadata_status: TokenMetadataStatus::Ready,
             address: address.clone(),
             symbol: symbol.to_string(),
             decimals,
@@ -53,6 +84,14 @@ impl Token {
             gas: gas.to_owned(),
             chain,
             quality,
+        }
+    }
+
+    /// An unresolved token identity. Its numeric fields must not be used until enrichment finishes.
+    pub fn pending(address: &Bytes, chain: Chain) -> Self {
+        Self {
+            metadata_status: TokenMetadataStatus::Pending,
+            ..Self::new(address, &address.to_string(), 0, 0, &[], chain, 0)
         }
     }
 
@@ -107,6 +146,7 @@ impl From<Arc<Token>> for Address {
 impl From<ResponseToken> for Token {
     fn from(value: ResponseToken) -> Self {
         Self {
+            metadata_status: value.metadata_status,
             chain: value.chain.into(),
             address: value.address,
             symbol: value.symbol,
@@ -252,6 +292,36 @@ mod tests {
         );
 
         assert_eq!(usdc.one(), BigUint::from(1000000u64));
+    }
+
+    #[test]
+    fn metadata_readiness_is_backward_compatible_and_survives_dto_conversion() {
+        let address = Bytes::from("0x01");
+        let ready = Token::new(&address, "TEST", 6, 0, &[], Chain::Ethereum, 100);
+        let legacy = serde_json::to_value(&ready).unwrap();
+        assert!(legacy.get("metadata_status").is_none());
+        assert!(serde_json::from_value::<Token>(legacy)
+            .unwrap()
+            .metadata_status
+            .is_ready());
+
+        let pending = Token::pending(&address, Chain::Ethereum);
+        let dto = ResponseToken::from(pending);
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["metadata_status"], "pending");
+        let mut legacy_dto = json.clone();
+        legacy_dto
+            .as_object_mut()
+            .unwrap()
+            .remove("metadata_status");
+        assert!(serde_json::from_value::<ResponseToken>(legacy_dto)
+            .unwrap()
+            .metadata_status
+            .is_ready());
+        let restored: Token = serde_json::from_value::<ResponseToken>(json)
+            .unwrap()
+            .into();
+        assert_eq!(restored.metadata_status, TokenMetadataStatus::Pending);
     }
 
     #[tokio::test]

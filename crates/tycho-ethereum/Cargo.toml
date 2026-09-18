@@ -43,6 +43,7 @@ pretty_assertions.workspace = true
 mockito.workspace = true
 rstest.workspace = true
 tracing-test = "0.2.5"
+tracing-subscriber = { workspace = true, features = ["registry"] }
 
 [[example]]
 name = "run-analysis"
