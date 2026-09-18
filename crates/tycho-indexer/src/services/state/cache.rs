@@ -24,11 +24,14 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
+    hash::Hash,
+    mem::size_of,
     sync::{RwLock, RwLockReadGuard},
 };
 
 use chrono::NaiveDateTime;
+use deepsize::{Context, DeepSizeOf};
 use tycho_common::{
     models::{
         blockchain::BlockAggregatedChanges,
@@ -43,7 +46,73 @@ use tycho_common::{
 use super::window::FoldSink;
 
 /// A cached value together with the time it was last written (the writing block's timestamp).
-type Tagged<T> = (T, NaiveDateTime);
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Tagged<T>(pub(crate) T, pub(crate) NaiveDateTime);
+
+// Manual impl as `NaiveDateTime` does not implement `DeepSizeOf`.
+impl<T: DeepSizeOf> DeepSizeOf for Tagged<T> {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.0.deep_size_of_children(context)
+    }
+}
+
+/// Writes `value` at `at` unless `slot` holds a newer value. Returns the change in bytes.
+fn overwrite<V: DeepSizeOf>(slot: &mut Tagged<V>, value: V, at: NaiveDateTime) -> isize {
+    if at < slot.1 {
+        return 0;
+    }
+    let change = value.deep_size_of() as isize - slot.0.deep_size_of() as isize;
+    *slot = Tagged(value, at);
+    change
+}
+
+/// [`overwrite`] for a map entry; a missing key is inserted. Returns the change in bytes, counting
+/// key and tag for a new entry.
+fn write<K, V>(map: &mut HashMap<K, Tagged<V>>, key: K, value: V, at: NaiveDateTime) -> isize
+where
+    K: Eq + Hash + DeepSizeOf,
+    V: DeepSizeOf,
+{
+    match map.entry(key) {
+        Entry::Occupied(mut e) => overwrite(e.get_mut(), value, at),
+        Entry::Vacant(e) => {
+            let added = e.key().deep_size_of() + value.deep_size_of() + size_of::<NaiveDateTime>();
+            e.insert(Tagged(value, at));
+            added as isize
+        }
+    }
+}
+
+/// Inserts or replaces an untagged value. Returns the change in bytes.
+fn replace<K, V>(map: &mut HashMap<K, V>, key: K, value: V) -> isize
+where
+    K: Eq + Hash + DeepSizeOf,
+    V: DeepSizeOf,
+{
+    match map.entry(key) {
+        Entry::Occupied(mut e) => {
+            let change = value.deep_size_of() as isize - e.get().deep_size_of() as isize;
+            e.insert(value);
+            change
+        }
+        Entry::Vacant(e) => {
+            let added = e.key().deep_size_of() + value.deep_size_of();
+            e.insert(value);
+            added as isize
+        }
+    }
+}
+
+/// Removes `key`. Returns the bytes it held, 0 when absent.
+fn remove<K, V>(map: &mut HashMap<K, V>, key: &K) -> usize
+where
+    K: Eq + Hash + DeepSizeOf,
+    V: DeepSizeOf,
+{
+    map.remove_entry(key)
+        .map(|(k, v)| k.deep_size_of() + v.deep_size_of())
+        .unwrap_or(0)
+}
 
 /// Cached state of one contract account.
 ///
