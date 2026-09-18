@@ -381,6 +381,7 @@ impl DeltaWindow {
     }
 }
 
+// TODO: merge impl blocks back together once code is consumed and no longer dead
 #[allow(dead_code)] // consumed by the state service, ENG-6293
 impl DeltaWindow {
     /// The oldest block still held in the window, if any.

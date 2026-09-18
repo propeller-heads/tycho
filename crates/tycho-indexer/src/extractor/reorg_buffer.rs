@@ -58,6 +58,9 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
     }
 }
 
+// TODO: rename ReorgBuffer. `DeltaWindow` also keeps committed blocks here for serving, so this is
+// a contiguous chain segment with revert purge, not a buffer of blocks awaiting persistence.
+
 /// Buffer that holds blocks awaiting persistence to the database so extractors can batch commits
 /// and efficiently handle chain reorganisations (reorg) without requiring database rollbacks.
 ///
