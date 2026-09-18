@@ -172,12 +172,15 @@ pub(super) fn messages(
                             Ok(Message::Text(text)) => {
                                 match serde_json::from_str::<TitanPriceLevelMessage>(text.as_str())
                                 {
-                                    // A parsed frame proves the connection is healthy: reset
-                                    // both the reconnect backoff and the idle timeout.
+                                    // A parsed frame proves the connection is healthy: reset the
+                                    // reconnect backoff. The idle window restarts only once the
+                                    // consumer resumes the stream after the yield, so it measures
+                                    // the time spent waiting on the socket, not the time the
+                                    // consumer spends between polls.
                                     Ok(message) => {
                                         attempt = 0;
-                                        last_parsed = Instant::now();
                                         yield message;
+                                        last_parsed = Instant::now();
                                     }
                                     // Unparseable frame: log and keep the connection.
                                     Err(e) => {
@@ -485,6 +488,26 @@ mod tests {
         });
         assert_eq!(connections, 2);
         assert_eq!(counter_value(&snapshot, RECONNECTS, &[("reason", "closed")]), 1);
+    }
+
+    /// The idle timeout measures upstream silence, not the consumer's pace: a consumer that
+    /// pauses for longer than the timeout finds the same connection when it resumes.
+    #[test]
+    fn slow_consumer_does_not_trigger_the_idle_timeout() {
+        let (connections, snapshot) = record_async(async {
+            let fake =
+                FakeTitan::spawn(frame_then_repeat(frame(), frame(), Duration::from_millis(20)))
+                    .await;
+            let stream = messages(fake.url(), fast_settings());
+            tokio::pin!(stream);
+            next_frame(&mut stream).await;
+            // Three idle timeouts pass without a poll.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            next_frame(&mut stream).await;
+            fake.connections.load(Ordering::SeqCst)
+        });
+        assert_eq!(connections, 1, "reconnected while the consumer was not polling");
+        assert_eq!(counter_value(&snapshot, RECONNECTS, &[("reason", "idle_timeout")]), 0);
     }
 
     #[tokio::test]
