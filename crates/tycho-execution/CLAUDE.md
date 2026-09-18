@@ -176,9 +176,11 @@ never picks a protocol itself -- the encoder decides which fallback to use and s
 **Quotes.** The pAMM quote is `IPropAMM.quote`. The fallback quote depends on the protocol: Uniswap V2 is computed
 from the pair's reserves, Uniswap V3 asks the static quoter (Eden Network's `view` reimplementation of the tick walk,
 `uniswapV3StaticQuoter` immutable, `IUniswapV3StaticQuoter`), Curve asks `get_dy`, Fluid asks the dex to price a
-swap paid to `0xdEaD`, which reverts `FluidDexSwapResult(amountOut)` before moving any token. Uniswap V4 has no quote
-function, so `simulateUniswapV4` runs the real swap and reverts `TychoFallbackRouter__SimulatedAmountOut` with the
-receiver's balance diff, rolling it back. The pAMM quote is a low-level call whose return data counts only when it
+swap paid to `0xdEaD`, which reverts `FluidDexSwapResult(amountOut)` before moving any token, Aerodrome V1 asks the
+pool's `getAmountOut`. Uniswap V4 has no quote function, so `simulateFallback` runs the real swap and reverts
+`TychoFallbackRouter__SimulatedAmountOut` with the receiver's balance diff, rolling it back; Uniswap V3 on a chain
+without a static quoter is simulated the same way, at the cost of a real swap's gas per quote, so deploying Eden's
+quoter there is the cheaper option. The pAMM quote is a low-level call whose return data counts only when it
 is at least 32 bytes; the fallback quote runs in the self-only external `quoteFallback` under try/catch. A fallback
 quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero, and equal quotes keep
 the pAMM. A pAMM that quotes zero skips the fallback quote and its own swap, so the fallback runs straight away. The
@@ -210,6 +212,7 @@ bare address, so no length prefix is needed to find where the fallback starts. T
 | 2 | Uniswap V4 | `[fee: 3][tickSpacing: 3][hook: 20][hookData: rest]` |
 | 3 | Curve | `[pool: 20][poolType: 1][i: 1][j: 1]` |
 | 4 | Fluid V1 | `[dex: 20][zero2one: 1]` |
+| 5 | Aerodrome V1 | `[pool: 20]` |
 
 `feeBps` above 30 reverts `TychoFallbackRouter__InvalidUniswapV2Fee`. The fee is per-call here so that one
 protocol byte serves fee-divergent V2 forks; `UniswapV2Executor` takes the same number as a deploy-time immutable and needs one
@@ -218,13 +221,16 @@ deployment per fork.
 The protocol data always occupies the tail of the swap data, so any protocol can be variable-length. Uniswap V4 is the only
 one that is today.
 
+Aerodrome V1 is Solidly-style: the pool prices the trade itself through `getAmountOut`, fee and stable curve included,
+so it cannot share byte 0's constant-fee V2 formula and has its own byte.
+
 Byte 1 (Uniswap V3) serves every V3-style fork, not just canonical Uniswap V3. A V3 pool pulls its input through a
 callback whose name it picks itself, and forks rename it (`pancakeV3SwapCallback`, `algebraSwapCallback`). The router
 answers all of them through a catch-all `fallback` -- the same selector-agnostic trick `TychoRouterV3.fallback` uses --
 guarded by the transient callback context so only the pool the swap called can be paid. So the solver may map any V3
 fork to byte 1.
 
-Swap direction for Uniswap V2/V3/V4 comes from the sort order of `tokenIn` and `tokenOut`, so it is not encoded. Fluid's
+Swap direction for Uniswap V2/V3/V4 and Aerodrome V1 comes from the sort order of `tokenIn` and `tokenOut`, so it is not encoded. Fluid's
 `zero2one` is the dex's own token order, which is not the address sort order, so it is. A `zero2one` that contradicts
 the leg reverts either `TychoFallbackRouter__CallbackTokenMismatch`, when the dex asks `dexCallback` for the other
 token, or `FluidDexError`, when the dex prices `amountIn` against the other side's reserves first.
@@ -239,10 +245,18 @@ Constraints:
   to rescue. The TychoRouter's route-level `minAmountOut` is the price check, so the caller must set it low enough for
   the fallback to clear.
 - **Uniswap V4 routes are single-pool.** A route names one pool, never a path.
-- `scripts/deploy-fallback-router.js` deploys the contract through the CREATE2 factory. It reads `poolManager` and
-  `fluidLiquidity` from `config/executor_deployments.json` (`uniswap_v4` and `fluid_v1`) and the Uniswap V3 static
-  quoter from `config/protocol_specific_addresses.json` (`fallback_router.uniswap_v3_static_quoter`), so a network
-  missing any of the three fails there. Deployed on Ethereum only.
+- **One build serves every chain.** Only Uniswap V4, Fluid V1 and the Uniswap V3 quote call a per-chain singleton
+  (the PoolManager, the liquidity layer, the static quoter); all three are constructor immutables and any may be
+  `address(0)`. A zero PoolManager or liquidity layer makes that protocol byte revert
+  `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
+  on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
+  needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
+- `scripts/deploy-fallback-router.js` deploys the contract through the CREATE2 factory, reading `poolManager` and
+  `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
+  static quoter from `fallback_router.uniswap_v3_static_quoter` in `config/protocol_specific_addresses.json`, zeroing
+  whichever is missing. The `FallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
+  `fallback` entry with the printed router address to `executor_deployments.json` and list `fallback` under the
+  chain. Not deployed anywhere yet.
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
@@ -380,10 +394,20 @@ whitelisted on the PropAMMRouter may use the prefix.
 fallback" above), which replaces the PropAMMRouter path: any pAMM qualifies, and the solver picks
 the fallback protocol per swap instead of the router owning one Uniswap V3 mapping. It resolves the
 same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
-one of Uniswap V2/V3/V4, Curve, or Fluid V1 with its pool parameters — travels as JSON in the
+one of Uniswap V2/V3/V4, Curve, Fluid V1 or Aerodrome V1 with its pool parameters — travels as JSON in the
 swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
-static attribute. No `fallback` entry ships in the executor configs until the FallbackExecutor is
-deployed.
+static attribute. The public `FallbackProtocol` enum (`swap_encoder::FallbackProtocol`) is the
+list other projects import: `from_protocol_system` maps a Tycho protocol name to the variant it
+encodes as (`UNISWAP_V2_FORKS`, `UNISWAP_V3_FORKS` and the Slipstreams deployments resolve to
+their base variant, `vm:curve` to Curve), `supported_on(chain)` says whether the chain's
+`TychoFallbackRouter` can run it, derived from `executor_addresses.json` -- Uniswap V4 and
+Fluid V1 need the chain to have that executor, since that is what the deploy script keys their
+singletons on -- and `user_data_name` is the tag to write. The encoder rejects a protocol the
+chain's deployment cannot run with an `InvalidInput` error instead of letting it revert on
+chain. The encoder builds on any chain; the `fallback` section of
+`protocol_specific_addresses.json` is optional and only carries the Angstrom hook to reject on
+chains that have one. No `fallback` entry ships in the executor configs until the
+FallbackExecutor is deployed.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 

@@ -2,20 +2,8 @@
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
+import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../TransferManager.sol";
-
-interface IAerodromeV1Pool {
-    function getAmountOut(uint256 amountIn, address tokenIn)
-        external
-        view
-        returns (uint256);
-    function swap(
-        uint256 amount0Out,
-        uint256 amount1Out,
-        address to,
-        bytes calldata data
-    ) external;
-}
 
 error AerodromeV1Executor__InvalidDataLength();
 

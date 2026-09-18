@@ -4,6 +4,8 @@ import "../TychoRouterTestSetup.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {MockPropAMM} from "./PropAMM.t.sol";
+import {AerodromeV1TestBase} from "./AerodromeV1.t.sol";
+import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
     FallbackExecutor,
@@ -12,12 +14,12 @@ import {
 } from "../../src/executors/FallbackExecutor.sol";
 import {
     TychoFallbackRouter,
-    TychoFallbackRouter__AddressZero,
     TychoFallbackRouter__CallbackTokenMismatch,
     TychoFallbackRouter__InvalidSwapLength,
     TychoFallbackRouter__InvalidCallback,
     TychoFallbackRouter__InvalidUniswapV2Fee,
     TychoFallbackRouter__NotPoolManager,
+    TychoFallbackRouter__ProtocolUnavailable,
     TychoFallbackRouter__UnknownProtocol,
     TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
@@ -92,6 +94,12 @@ library FallbackSwaps {
     {
         return abi.encodePacked(
             uint8(TychoFallbackRouter.FallbackProtocol.FluidV1), dex, zero2one
+        );
+    }
+
+    function aerodromeV1(address pool) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            uint8(TychoFallbackRouter.FallbackProtocol.AerodromeV1), pool
         );
     }
 }
@@ -326,6 +334,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         assertEq(uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4), 2);
         assertEq(uint8(TychoFallbackRouter.FallbackProtocol.Curve), 3);
         assertEq(uint8(TychoFallbackRouter.FallbackProtocol.FluidV1), 4);
+        assertEq(uint8(TychoFallbackRouter.FallbackProtocol.AerodromeV1), 5);
     }
 
     /// 30 bps is the highest accepted fee; 31 reverts naming the value. The
@@ -373,12 +382,13 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     function testProtocolDataLengthGuards() public {
         deal(USDC_ADDR, address(router), USDC_IN);
 
-        bytes[] memory entries = new bytes[](5);
+        bytes[] memory entries = new bytes[](6);
         entries[0] = FallbackSwaps.uniswapV2(USDC_WETH_USV2, 30);
         entries[1] = FallbackSwaps.uniswapV3(USDC_WETH_USV3);
         entries[2] = FallbackSwaps.uniswapV4(100, 1, address(0), bytes(""));
         entries[3] = FallbackSwaps.curve(TRIPOOL, 1, 0, 1);
         entries[4] = FallbackSwaps.fluidV1(FLUIDV1_LIQUIDITY, true);
+        entries[5] = FallbackSwaps.aerodromeV1(USDC_WETH_USV2);
 
         TychoFallbackRouter.Swap memory swap_ =
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
@@ -420,33 +430,6 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         for (uint256 i = 0; i < out.length; i++) {
             out[i] = data[i];
         }
-    }
-
-    function testConstructorRejectsZeroPoolManager() public {
-        vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(
-            IPoolManager(address(0)),
-            FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
-        );
-    }
-
-    function testConstructorRejectsZeroFluidLiquidity() public {
-        vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(
-            IPoolManager(POOL_MANAGER),
-            address(0),
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
-        );
-    }
-
-    function testConstructorRejectsZeroStaticQuoter() public {
-        vm.expectRevert(TychoFallbackRouter__AddressZero.selector);
-        new TychoFallbackRouter(
-            IPoolManager(POOL_MANAGER),
-            FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(address(0))
-        );
     }
 
     /// A live pAMM that quotes above the fallback fills, and the fallback is never touched.
@@ -688,7 +671,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
         // The caller check comes before the decode, so the protocol data is irrelevant here.
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
-        router.simulateUniswapV4(swap_, "");
+        router.simulateFallback(swap_, "");
     }
 
     /// A pAMM that fills emits nothing, so counting `FallbackSwap` counts misses.
@@ -988,6 +971,108 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
     }
 }
 
+/// @notice The deployment shapes a chain missing a singleton gets, on the mainnet fork so the
+/// zeroed slot is the only difference from `TychoFallbackRouterTest`. Split out from it because
+/// the extra `new TychoFallbackRouter` sites pushed that contract past a solc assembler limit.
+contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
+    /// `TychoFallbackRouterTest`'s block and USDC/WETH figures, so the two contracts assert the
+    /// same numbers.
+    uint256 constant FORK_BLOCK = 22_689_128;
+    uint256 constant USDC_IN = 10_000e6;
+    uint256 constant V3_WETH_OUT = 3_611_998_638_539_827_447;
+
+    function getForkBlock() internal pure override returns (uint256) {
+        return FORK_BLOCK;
+    }
+
+    /// A chain without Uniswap V4 deploys with a zero PoolManager. The protocol
+    /// byte then quotes by reverting with its name, which `swap` counts as zero,
+    /// and running it reverts the same way instead of calling `address(0)`.
+    function testUniswapV4UnavailableWithoutPoolManager() public {
+        TychoFallbackRouter noV4 = new TychoFallbackRouter(
+            IPoolManager(address(0)),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDE_ADDR, USDT_ADDR, 100 ether, BOB);
+        bytes memory v4 = FallbackSwaps.uniswapV4(100, 1, address(0), bytes(""));
+        bytes memory unavailable = abi.encodeWithSelector(
+            TychoFallbackRouter__ProtocolUnavailable.selector,
+            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV4)
+        );
+        deal(USDE_ADDR, address(noV4), 100 ether);
+
+        vm.prank(address(noV4));
+        vm.expectRevert(unavailable);
+        noV4.quoteFallback(swap_, v4);
+
+        vm.expectRevert(unavailable);
+        noV4.swap(swap_, address(pamm), v4);
+    }
+
+    /// Same for a chain without Fluid.
+    function testFluidV1UnavailableWithoutLiquidity() public {
+        TychoFallbackRouter noFluid = new TychoFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
+        deal(USDC_ADDR, address(noFluid), USDC_IN);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoFallbackRouter__ProtocolUnavailable.selector,
+                uint8(TychoFallbackRouter.FallbackProtocol.FluidV1)
+            )
+        );
+        noFluid.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
+            address(pamm),
+            FallbackSwaps.fluidV1(FLUIDV1_LIQUIDITY, true)
+        );
+    }
+
+    /// Without a static quoter a Uniswap V3 fallback is quoted by simulation:
+    /// the quote is the fill, the simulation rolls back, and a pAMM quoting
+    /// below the pool is displaced exactly as it is on a quoted deployment.
+    function testUniswapV3QuotedBySimulationWithoutStaticQuoter() public {
+        TychoFallbackRouter simulated = new TychoFallbackRouter(
+            IPoolManager(address(0)),
+            address(0),
+            IUniswapV3StaticQuoter(address(0))
+        );
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB);
+        bytes memory v3 = FallbackSwaps.uniswapV3(USDC_WETH_USV3);
+        deal(USDC_ADDR, address(simulated), USDC_IN);
+
+        vm.prank(address(simulated));
+        assertEq(simulated.quoteFallback(swap_, v3), V3_WETH_OUT);
+        // The simulation rolled back.
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(simulated)), USDC_IN);
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 0);
+
+        // 1 WETH for 10 000 USDC, below the Uniswap V3 price of roughly 3.6 WETH.
+        pamm.setPrice(USDC_ADDR, WETH_ADDR, 1e26);
+        deal(WETH_ADDR, address(pamm), 100 ether);
+
+        vm.expectEmit(address(simulated));
+        emit TychoFallbackRouter.FallbackSwap(
+            address(pamm),
+            USDC_ADDR,
+            WETH_ADDR,
+            USDC_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        simulated.swap(swap_, address(pamm), v3);
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
+    }
+}
+
 /// @notice Fluid pulls `tokenIn` through `dexCallback`.
 contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
     address constant FLUID_DEX = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
@@ -1095,6 +1180,140 @@ contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
             FallbackSwaps.swap(SUSDE_ADDR, USDT_ADDR, amountIn, BOB),
             address(pamm),
             FallbackSwaps.fluidV1(FLUID_DEX, false)
+        );
+    }
+}
+
+/// @notice Aerodrome V1 lives on Base, where neither Fluid nor the static quoter does, so this
+/// is also the deployment shape a chain missing singletons gets: those slots zeroed.
+contract TychoFallbackRouterAerodromeTest is
+    TychoFallbackRouterTestBase,
+    AerodromeV1TestBase
+{
+    /// Uniswap V4's PoolManager on Base, from `executor_deployments.json`.
+    address constant BASE_POOL_MANAGER =
+        0x498581fF718922c3f8e6A244956aF099B2652b2b;
+
+    /// The block `AerodromeV1.t.sol` forks at, where both pools hold liquidity.
+    uint256 constant FORK_BLOCK = 44_682_102;
+
+    function getForkBlock() internal pure override returns (uint256) {
+        return FORK_BLOCK;
+    }
+
+    function setUp() public override {
+        vm.createSelectFork(vm.rpcUrl("base"), getForkBlock());
+        router = new TychoFallbackRouter(
+            IPoolManager(BASE_POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(address(0))
+        );
+        pamm = new MockPropAMM();
+    }
+
+    /// The pool's own quote is the fill: Solidly pools price their fee and
+    /// curve themselves, which is why they are not byte 0.
+    function testAerodromeV1QuoteMatchesFill() public {
+        uint256 amountIn = 0.01 ether;
+        uint256 expectedOut = IAerodromeV1Pool(AERODROME_V1_VOLATILE_POOL)
+            .getAmountOut(amountIn, AERODROME_V1_TBTC);
+        assertGt(expectedOut, 0);
+
+        assertEq(
+            _quoteFallback(
+                FallbackSwaps.swap(
+                    AERODROME_V1_TBTC, AERODROME_V1_USDBC, amountIn, BOB
+                ),
+                FallbackSwaps.aerodromeV1(AERODROME_V1_VOLATILE_POOL)
+            ),
+            expectedOut
+        );
+    }
+
+    /// tBTC sorts below USDbC, so this is the `zeroForOne` `pair.swap` order.
+    function testFallsBackToAerodromeV1() public {
+        uint256 amountIn = 0.01 ether;
+        uint256 expectedOut = IAerodromeV1Pool(AERODROME_V1_VOLATILE_POOL)
+            .getAmountOut(amountIn, AERODROME_V1_TBTC);
+        deal(AERODROME_V1_TBTC, address(router), amountIn);
+
+        _expectFallbackSwap(
+            AERODROME_V1_TBTC,
+            AERODROME_V1_USDBC,
+            amountIn,
+            TychoFallbackRouter.FallbackProtocol.AerodromeV1,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        router.swap(
+            FallbackSwaps.swap(
+                AERODROME_V1_TBTC, AERODROME_V1_USDBC, amountIn, BOB
+            ),
+            address(pamm),
+            FallbackSwaps.aerodromeV1(AERODROME_V1_VOLATILE_POOL)
+        );
+
+        assertGt(expectedOut, 0);
+        assertEq(IERC20(AERODROME_V1_USDBC).balanceOf(BOB), expectedOut);
+        _assertRouterDrained(AERODROME_V1_TBTC, AERODROME_V1_USDBC);
+    }
+
+    /// Reverse direction: the `!zeroForOne` `pair.swap` argument order.
+    function testFallsBackToAerodromeV1Reverse() public {
+        uint256 amountIn = 10e6;
+        uint256 expectedOut = IAerodromeV1Pool(AERODROME_V1_VOLATILE_POOL)
+            .getAmountOut(amountIn, AERODROME_V1_USDBC);
+        deal(AERODROME_V1_USDBC, address(router), amountIn);
+
+        router.swap(
+            FallbackSwaps.swap(
+                AERODROME_V1_USDBC, AERODROME_V1_TBTC, amountIn, BOB
+            ),
+            address(pamm),
+            FallbackSwaps.aerodromeV1(AERODROME_V1_VOLATILE_POOL)
+        );
+
+        assertGt(expectedOut, 0);
+        assertEq(IERC20(AERODROME_V1_TBTC).balanceOf(BOB), expectedOut);
+        _assertRouterDrained(AERODROME_V1_USDBC, AERODROME_V1_TBTC);
+    }
+
+    /// A stable pool prices on Solidly's x³y + xy³ curve, which `getAmountOut`
+    /// hides behind the same interface as the volatile pool.
+    function testFallsBackToAerodromeV1StablePool() public {
+        uint256 amountIn = 10 ether;
+        uint256 expectedOut = IAerodromeV1Pool(AERODROME_V1_STABLE_POOL)
+            .getAmountOut(amountIn, AERODROME_V1_DOLA);
+        deal(AERODROME_V1_DOLA, address(router), amountIn);
+
+        router.swap(
+            FallbackSwaps.swap(
+                AERODROME_V1_DOLA, AERODROME_V1_USDBC, amountIn, BOB
+            ),
+            address(pamm),
+            FallbackSwaps.aerodromeV1(AERODROME_V1_STABLE_POOL)
+        );
+
+        assertGt(expectedOut, 0);
+        assertEq(IERC20(AERODROME_V1_USDBC).balanceOf(BOB), expectedOut);
+        _assertRouterDrained(AERODROME_V1_DOLA, AERODROME_V1_USDBC);
+    }
+
+    /// Base has no Fluid, so its deployment zeroes the slot and byte 4 reverts.
+    function testFluidV1UnavailableOnBase() public {
+        deal(AERODROME_V1_USDBC, address(router), 10e6);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoFallbackRouter__ProtocolUnavailable.selector,
+                uint8(TychoFallbackRouter.FallbackProtocol.FluidV1)
+            )
+        );
+        router.swap(
+            FallbackSwaps.swap(
+                AERODROME_V1_USDBC, AERODROME_V1_TBTC, 10e6, BOB
+            ),
+            address(pamm),
+            FallbackSwaps.fluidV1(AERODROME_V1_VOLATILE_POOL, true)
         );
     }
 }
