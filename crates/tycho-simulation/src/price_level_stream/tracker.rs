@@ -220,11 +220,6 @@ impl FreshnessTracker {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn set_router_venues_for_test(&mut self, venues: HashSet<Bytes>) {
-        self.router_venues = venues;
-    }
-
     /// Applies a whitelist read. A failed read keeps the last known set. A successful read that
     /// changes a served venue's family removes that venue's components now; the next accepted
     /// frame carrying them re-adds them under the new family.
@@ -632,11 +627,18 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use rstest::rstest;
+
     use super::{
         super::{
             config::DEFAULT_AUTO_DETECTED_GAS_COST,
             fallback_router::{FetchVenuesError, WhitelistRead},
             state::QUOTE_TTL,
+            telemetry::{
+                recorded::{counter_value, gauge_value, record_async},
+                FRAMES_ACCEPTED, FRAMES_REJECTED, LAST_SEEN, SERVED_COMPONENTS, SERVING_STATE,
+                STALE_REMOVALS, UNREGISTERED_PAMM_ENTRIES, WHITELISTED_VENUES,
+            },
             test_support::*,
         },
         *,
@@ -645,8 +647,11 @@ mod tests {
     /// 2026-09-05 16:09:18 UTC, the first frame of the live capture.
     const BASE_WALL_NANOS: u64 = 1_788_624_558_000_000_000;
 
-    /// A test clock: wall and monotonic time both start at zero offset from a fixed base. Tests
-    /// must only ever ask for non-decreasing seconds, mirroring a monotonic clock.
+    /// A second registered venue, for tests where only one of two served venues changes.
+    const OTHER_PAMM: &str = "0x71e790dd841c8a9061487cb3e78c288e75ce0b3d";
+
+    /// A test clock whose wall and monotonic time advance together: `at(s)` is `s` seconds after
+    /// the start. Tests must pass non-decreasing seconds, as a monotonic clock would give.
     struct Clock {
         start: Instant,
     }
@@ -664,20 +669,43 @@ mod tests {
         }
     }
 
-    fn tracker() -> FreshnessTracker {
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
+    /// A tracker serving the registered `configs` with auto-detection off.
+    fn tracker_serving(
+        configs: Vec<PriceLevelStreamConfig>,
+        fallback_router: bool,
+    ) -> FreshnessTracker {
         FreshnessTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
+            configs
+                .into_iter()
+                .map(|config| (config.address.clone(), config))
+                .collect(),
             HashSet::new(),
             tokens(),
             false,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
             DEFAULT_STALE_AFTER,
-            false,
+            fallback_router,
+        )
+    }
+
+    fn tracker_with(fallback_router: bool) -> FreshnessTracker {
+        tracker_serving(vec![fermiswap()], fallback_router)
+    }
+
+    fn tracker() -> FreshnessTracker {
+        tracker_with(false)
+    }
+
+    fn tracker_awaiting_whitelist() -> FreshnessTracker {
+        tracker_with(true)
+    }
+
+    fn read_ok(addresses: &[&str]) -> WhitelistRead {
+        WhitelistRead::Ok(
+            addresses
+                .iter()
+                .map(|address| Bytes::from_str(address).unwrap())
+                .collect(),
         )
     }
 
@@ -735,11 +763,11 @@ mod tests {
             .downcast_ref::<PriceLevelStreamState>()
             .expect("price level state")
             .quotable_until
-            .expect("guard set")
+            .expect("quotable_until set")
     }
 
     #[test]
-    fn first_snapshot_emits_new_pair_with_both_directions() {
+    fn first_frame_emits_new_pair_with_both_directions() {
         let clock = Clock::new();
         let mut tracker = tracker();
         let Update {
@@ -786,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_snapshot_is_not_a_new_pair() {
+    fn repeated_frame_is_not_a_new_pair() {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
@@ -823,30 +851,28 @@ mod tests {
         assert!(update.new_pairs.is_empty());
     }
 
-    #[test]
-    fn data_exactly_stale_after_old_is_rejected() {
+    /// Judged at t=24, a frame built at t=0 is exactly `stale_after` old and already stale; one
+    /// built a second later is accepted.
+    #[rstest]
+    #[case::at_the_limit(0, false)]
+    #[case::inside_the_limit(1, true)]
+    fn frame_age_at_the_stale_after_limit(#[case] built_at: u64, #[case] accepted: bool) {
         let clock = Clock::new();
         let mut tracker = tracker();
-        // Built at t=0, judged at t=24: exactly the window, already stale.
-        assert!(tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(24))
-            .is_none());
-        // One second younger is accepted.
-        assert!(tracker
-            .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(24))
-            .is_some());
+        let update = tracker.on_frame(message_at(100, built_at, wbtc_usdc_pairs()), clock.at(24));
+        assert_eq!(update.is_some(), accepted);
     }
 
-    #[test]
-    fn frame_from_the_future_is_rejected() {
+    /// Judged at t=0, a frame stamped 13 s ahead lies beyond the one-slot skew; 12 s ahead is
+    /// accepted.
+    #[rstest]
+    #[case::beyond_the_limit(13, false)]
+    #[case::at_the_limit(12, true)]
+    fn frame_timestamp_at_the_future_skew_limit(#[case] built_at: u64, #[case] accepted: bool) {
         let clock = Clock::new();
         let mut tracker = tracker();
-        assert!(tracker
-            .on_frame(message_at(100, 13, wbtc_usdc_pairs()), clock.at(0))
-            .is_none());
-        assert!(tracker
-            .on_frame(message_at(100, 12, wbtc_usdc_pairs()), clock.at(0))
-            .is_some());
+        let update = tracker.on_frame(message_at(100, built_at, wbtc_usdc_pairs()), clock.at(0));
+        assert_eq!(update.is_some(), accepted);
     }
 
     #[test]
@@ -895,7 +921,7 @@ mod tests {
         assert!(tracker
             .on_frame(message_at(u64::MAX / 2, 1, wbtc_usdc_pairs()), clock.at(1))
             .is_none());
-        // The tracker is not frozen: a plausible block is still accepted afterwards.
+        // A plausible block is still accepted afterwards.
         assert!(tracker
             .on_frame(message_at(101, 2, wbtc_usdc_pairs()), clock.at(2))
             .is_some());
@@ -915,26 +941,8 @@ mod tests {
     }
 
     #[test]
-    fn first_frame_skips_the_block_checks() {
-        let clock = Clock::new();
-        let mut tracker = tracker();
-        assert!(tracker
-            .on_frame(message_at(25_912_232, 0, wbtc_usdc_pairs()), clock.at(0))
-            .is_some());
-    }
-
-    #[test]
     fn rejections_are_counted_by_reason() {
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::telemetry::{
-            recorded::{counter_value, snapshot_map},
-            FRAMES_ACCEPTED, FRAMES_REJECTED,
-        };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
+        let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
             tracker.on_frame(message_at(100, 5, wbtc_usdc_pairs()), clock.at(5));
@@ -945,7 +953,6 @@ mod tests {
             tracker.on_frame(message_at(99, 6, wbtc_usdc_pairs()), clock.at(29)); // block_regression
             tracker.on_frame(message_at(200, 6, wbtc_usdc_pairs()), clock.at(29)); // block_jump
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(counter_value(&snapshot, FRAMES_ACCEPTED, &[]), 1);
         for reason in ["too_old", "in_future", "out_of_order", "block_regression", "block_jump"] {
             assert_eq!(
@@ -957,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_guard_is_one_block_after_the_frame_was_built() {
+    fn quotable_until_is_one_block_after_the_frame_was_built() {
         let clock = Clock::new();
         let mut tracker = tracker();
         // Built at t=7, accepted at t=9: the data is 2 s old, so 10 s of quotability remain.
@@ -971,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_guard_never_exceeds_one_block_for_a_future_stamped_frame() {
+    fn quotable_until_never_exceeds_one_block_for_a_future_stamped_frame() {
         let clock = Clock::new();
         let mut tracker = tracker();
         // Maximum accepted skew: stamped 12 s ahead of the local clock.
@@ -985,7 +992,7 @@ mod tests {
     fn frame_older_than_one_block_yields_an_unquotable_state() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        // 15 s old: inside the 24 s window, past the 12 s quote guard.
+        // 15 s old: inside the 24 s window, past `QUOTE_TTL`.
         let update = tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(15))
             .expect("update expected");
@@ -1038,27 +1045,31 @@ mod tests {
     }
 
     #[test]
-    fn component_expires_at_its_own_deadline_and_is_re_added_by_the_next_frame() {
+    fn stale_deadline_fired_a_second_early_removes_nothing() {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
-        assert_eq!(
-            tracker
-                .stale_deadline()
-                .expect("serving"),
-            clock.at(24).monotonic
-        );
 
-        // One second early: nothing due.
         assert!(tracker
             .on_stale_deadline(clock.at(23))
             .is_none());
+        assert!(tracker.stale_deadline().is_some());
+    }
+
+    #[test]
+    fn component_turns_stale_at_its_deadline() {
+        let clock = Clock::new();
+        let mut tracker = tracker();
+        tracker
+            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .expect("update expected");
 
         let update = tracker
             .on_stale_deadline(clock.at(24))
             .expect("removal expected");
+
         assert!(update.states.is_empty());
         assert!(update.new_pairs.is_empty());
         assert_eq!(update.removed_pairs.len(), 1);
@@ -1068,15 +1079,39 @@ mod tests {
         assert_eq!(update.block_number_or_timestamp, 100);
         assert!(update.is_partial);
         assert!(tracker.stale_deadline().is_none());
+    }
 
-        // Firing again with nothing served emits nothing.
+    #[test]
+    fn stale_deadline_fired_with_nothing_served_removes_nothing() {
+        let clock = Clock::new();
+        let mut tracker = tracker();
+        tracker
+            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .expect("update expected");
+        tracker
+            .on_stale_deadline(clock.at(24))
+            .expect("removal expected");
+
         assert!(tracker
             .on_stale_deadline(clock.at(25))
             .is_none());
+    }
+
+    #[test]
+    fn fresh_frame_after_the_stale_removal_re_adds_the_component() {
+        let clock = Clock::new();
+        let mut tracker = tracker();
+        tracker
+            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .expect("update expected");
+        tracker
+            .on_stale_deadline(clock.at(24))
+            .expect("removal expected");
 
         let update = tracker
             .on_frame(message_at(102, 26, wbtc_usdc_pairs()), clock.at(26))
             .expect("update expected");
+
         assert!(update
             .new_pairs
             .contains_key(&expected_id()));
@@ -1085,16 +1120,7 @@ mod tests {
 
     #[test]
     fn stale_removal_is_counted_per_venue() {
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::telemetry::{
-            recorded::{counter_value, snapshot_map},
-            STALE_REMOVALS,
-        };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
+        let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
             tracker
@@ -1104,7 +1130,6 @@ mod tests {
                 .on_stale_deadline(clock.at(24))
                 .expect("removal expected");
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &[("venue", "fermiswap")]), 1);
     }
 
@@ -1144,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_pair_expires_alone_while_the_rest_stays_served() {
+    fn omitted_pair_turns_stale_alone_while_the_rest_stays_served() {
         let clock = Clock::new();
         let mut tracker = tracker();
         let both = vec![
@@ -1181,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn components_from_one_frame_expire_together() {
+    fn components_from_one_frame_turn_stale_together() {
         let clock = Clock::new();
         let mut tracker = tracker();
         let both = vec![
@@ -1224,27 +1249,28 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_first_block_recovers_after_expiry() {
+    fn implausible_first_block_is_forgotten_at_stale_removal() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        // A fresh first frame with an absurd block becomes the frontier.
+        // A fresh first frame skips the block checks, so an implausible block becomes
+        // `newest_block`.
         tracker
             .on_frame(message_at(u64::MAX / 2, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
-        // Sane frames regress below it and are rejected for the whole window.
+        // Plausible frames regress below it and are rejected for the whole window.
         for second in 1..=23 {
             assert!(tracker
                 .on_frame(message_at(100, second, wbtc_usdc_pairs()), clock.at(second))
                 .is_none());
         }
-        // Expiry clears the served set and resets the frontier.
+        // The stale removal clears the served set and resets `newest_block`.
         let removal = tracker
             .on_stale_deadline(clock.at(24))
             .expect("removal expected");
         assert_eq!(removal.removed_pairs.len(), 1);
         assert_eq!(removal.block_number_or_timestamp, u64::MAX / 2);
-        // The next sane frame is accepted as a first frame again, and nothing from the
-        // poisoned frame survives: the pair comes back as new.
+        // The next plausible frame is accepted as a first frame again, and nothing from the
+        // implausible frame survives: the pair comes back as new.
         let update = tracker
             .on_frame(message_at(100, 25, wbtc_usdc_pairs()), clock.at(25))
             .expect("update expected");
@@ -1255,11 +1281,11 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_block_during_whitelist_wait_does_not_wedge_the_tracker() {
+    fn implausible_block_during_whitelist_wait() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        // Accepted, but nothing is served while the whitelist is unknown, so the absurd block
-        // must not survive as the frontier.
+        // Accepted, but nothing is served while the whitelist is unknown, so the implausible
+        // block must not survive as `newest_block`.
         assert!(tracker
             .on_frame(message_at(u64::MAX / 2, 0, wbtc_usdc_pairs()), clock.at(0))
             .is_none());
@@ -1280,11 +1306,11 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_block_on_a_frame_serving_nothing_does_not_wedge_the_tracker() {
+    fn implausible_block_on_a_frame_serving_nothing() {
         let clock = Clock::new();
         let mut tracker = tracker();
         // Fresh enough to be accepted, but its only pair prices an unknown token, so the frame
-        // serves nothing and its absurd block must not survive as the frontier.
+        // serves nothing and its implausible block must not survive as `newest_block`.
         let unknown = vec![pair_levels(
             "0x1111111111111111111111111111111111111111",
             USDC,
@@ -1352,33 +1378,23 @@ mod tests {
     }
 
     #[test]
-    fn served_components_are_gauged_per_venue_from_zero() {
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::telemetry::{
-            recorded::{gauge_value, snapshot_map},
-            LAST_SEEN, SERVED_COMPONENTS, SERVING_STATE,
-        };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
+    fn new_tracker_gauges_every_registered_venue_at_zero() {
+        let ((), snapshot) = record_async(async {
             let tracker = tracker();
             drop(tracker);
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
         assert_eq!(gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]), 0.0);
         assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
+    }
 
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
+    #[test]
+    fn accepted_frame_gauges_its_venue_as_served() {
+        let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
             tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0));
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 1.0);
         assert_eq!(
             gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]),
@@ -1388,17 +1404,21 @@ mod tests {
     }
 
     #[test]
+    fn stale_removal_gauges_its_venue_back_to_zero() {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker = tracker();
+            tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0));
+            tracker.on_stale_deadline(clock.at(24));
+        });
+        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
+    }
+
+    #[test]
     fn unregistered_pamm_produces_no_update_without_auto_detection() {
         let clock = Clock::new();
-        let mut tracker = FreshnessTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
+        let mut tracker = tracker_serving(vec![], false);
         assert!(tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .is_none());
@@ -1446,7 +1466,7 @@ mod tests {
             .expect("price level state");
         assert_eq!(state.gas_cost, BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
 
-        // The synthesized config is cached: the next snapshot is not a new pair again.
+        // The synthesized config is cached: the next frame is not a new pair again.
         let update = tracker
             .on_frame(message(101, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
@@ -1481,21 +1501,10 @@ mod tests {
     #[test]
     fn whitelisted_venue_is_served_under_the_fallback_family() {
         let clock = Clock::new();
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        let mut tracker = FreshnessTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
-        tracker.set_router_venues_for_test(HashSet::from([Bytes::from_str(PAMM).unwrap()]));
+        let mut tracker = tracker();
+        assert!(tracker
+            .on_whitelist_read(read_ok(&[PAMM]))
+            .is_none());
 
         let update = tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
@@ -1522,7 +1531,9 @@ mod tests {
             DEFAULT_STALE_AFTER,
             false,
         );
-        tracker.set_router_venues_for_test(HashSet::from([Bytes::from_str(PAMM).unwrap()]));
+        assert!(tracker
+            .on_whitelist_read(read_ok(&[PAMM]))
+            .is_none());
 
         let update = tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
@@ -1538,55 +1549,16 @@ mod tests {
     #[test]
     fn unwhitelisted_venue_keeps_the_direct_family() {
         let clock = Clock::new();
-        let other_venue =
-            Bytes::from_str("0x71e790dd841c8a9061487cb3e78c288e75ce0b3d").expect("valid address");
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        let mut tracker = FreshnessTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
-        tracker.set_router_venues_for_test(HashSet::from([other_venue]));
+        let mut tracker = tracker();
+        assert!(tracker
+            .on_whitelist_read(read_ok(&[OTHER_PAMM]))
+            .is_none());
 
         let update = tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
 
         assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
-    }
-
-    fn read_ok(addresses: &[&str]) -> WhitelistRead {
-        WhitelistRead::Ok(
-            addresses
-                .iter()
-                .map(|address| Bytes::from_str(address).unwrap())
-                .collect(),
-        )
-    }
-
-    fn tracker_awaiting_whitelist() -> FreshnessTracker {
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        FreshnessTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            true,
-        )
     }
 
     #[test]
@@ -1654,6 +1626,8 @@ mod tests {
             update.removed_pairs[&expected_id()].protocol_system,
             "propammfallback:fermiswap"
         );
+        assert_eq!(update.block_number_or_timestamp, 100);
+        assert!(update.is_partial);
         assert!(tracker.stale_deadline().is_none());
 
         let update = tracker
@@ -1661,6 +1635,50 @@ mod tests {
             .expect("update expected");
         assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
         assert!(update.removed_pairs.is_empty());
+    }
+
+    /// Two served venues; only FermiSwap changes whitelist membership, in either direction. Only
+    /// its component is removed and the other venue keeps the stream serving.
+    #[rstest]
+    #[case::fallback_to_direct(&[PAMM], &[], "propammfallback:fermiswap")]
+    #[case::direct_to_fallback(&[OTHER_PAMM], &[OTHER_PAMM, PAMM], "pricelevelstream:fermiswap")]
+    fn family_change_of_one_venue_removes_only_its_components(
+        #[case] whitelist_before: &[&str],
+        #[case] whitelist_after: &[&str],
+        #[case] old_family: &str,
+    ) {
+        let clock = Clock::new();
+        let other = PriceLevelStreamConfig::new(
+            "othervenue",
+            Bytes::from_str(OTHER_PAMM).unwrap(),
+            BigUint::from(120_000u64),
+        );
+        let mut tracker = tracker_serving(vec![fermiswap(), other], true);
+        tracker.on_whitelist_read(read_ok(whitelist_before));
+        let frame = TitanPriceLevelMessage {
+            block_number: 100,
+            timestamp: BASE_WALL_NANOS,
+            pamms: vec![
+                TitanPammLevels { pamm: Bytes::from_str(PAMM).unwrap(), pairs: wbtc_usdc_pairs() },
+                TitanPammLevels {
+                    pamm: Bytes::from_str(OTHER_PAMM).unwrap(),
+                    pairs: wbtc_usdc_pairs(),
+                },
+            ],
+        };
+        let served = tracker
+            .on_frame(frame, clock.at(0))
+            .expect("update expected");
+        assert_eq!(served.new_pairs.len(), 2);
+
+        let update = tracker
+            .on_whitelist_read(read_ok(whitelist_after))
+            .expect("removal expected");
+
+        assert_eq!(update.removed_pairs.len(), 1);
+        assert_eq!(update.removed_pairs[&expected_id()].protocol_system, old_family);
+        assert_eq!(update.block_number_or_timestamp, 100);
+        assert!(tracker.stale_deadline().is_some());
     }
 
     #[test]
@@ -1678,53 +1696,22 @@ mod tests {
 
     #[test]
     fn whitelist_read_gauges_the_venue_count() {
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::telemetry::{
-            recorded::{gauge_value, snapshot_map},
-            WHITELISTED_VENUES,
-        };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
+        let ((), snapshot) = record_async(async {
             let mut tracker = tracker_awaiting_whitelist();
             tracker.on_whitelist_read(read_ok(&[PAMM]));
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(gauge_value(&snapshot, WHITELISTED_VENUES, &[]), 1.0);
     }
 
     #[test]
-    fn unregistered_venues_are_counted_without_labels_and_logged_boundedly() {
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::telemetry::{
-            recorded::{counter_value, snapshot_map},
-            UNREGISTERED_PAMM_ENTRIES,
-        };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let logged = metrics::with_local_recorder(&recorder, || {
+    fn unregistered_venues_counter_and_log_cap() {
+        let (logged, snapshot) = record_async(async {
             let clock = Clock::new();
-            let mut tracker = FreshnessTracker::new(
-                HashMap::new(),
-                HashSet::new(),
-                tokens(),
-                false,
-                BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-                DEFAULT_STALE_AFTER,
-                false,
-            );
+            let mut tracker = tracker_serving(vec![], false);
             // 70 distinct unregistered addresses, each seen twice.
             for round in 0..2u64 {
                 for index in 0..70u64 {
-                    let address = Bytes::from(
-                        format!("{index:040x}")
-                            .as_bytes()
-                            .to_vec(),
-                    );
+                    let address = Bytes::from_str(&format!("0x{index:040x}")).unwrap();
                     let frame = TitanPriceLevelMessage {
                         block_number: 100,
                         timestamp: BASE_WALL_NANOS + (round * 70 + index) * 1_000,
@@ -1735,7 +1722,6 @@ mod tests {
             }
             tracker.logged_unregistered.len()
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(counter_value(&snapshot, UNREGISTERED_PAMM_ENTRIES, &[]), 140);
         assert_eq!(logged, MAX_UNREGISTERED_LOGGED);
     }

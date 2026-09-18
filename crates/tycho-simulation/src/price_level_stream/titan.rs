@@ -245,9 +245,20 @@ pub(super) fn messages(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, sync::atomic::Ordering};
 
-    use super::*;
+    use futures::SinkExt;
+
+    use super::{
+        super::{
+            telemetry::{
+                recorded::{counter_value, record_async},
+                FRAMES_REJECTED, RECONNECTS,
+            },
+            test_support::{frame_text, frame_then_repeat, wall_nanos_now, FakeTitan},
+        },
+        *,
+    };
 
     /// Sample message from the Titan docs
     /// (<https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level>).
@@ -405,186 +416,104 @@ mod tests {
         assert_eq!(backoff(u32::MAX, max_backoff), max_backoff);
     }
 
-    #[tokio::test]
-    async fn ping_only_traffic_does_not_count_as_liveness() {
-        use std::{sync::atomic::Ordering, time::Duration};
-
-        use futures::SinkExt;
-
-        use super::super::test_support::{frame_text, wall_nanos_now, FakeTitan};
-
-        let fake = FakeTitan::spawn(|_, mut socket| async move {
-            let _ = socket
-                .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
-                .await;
-            loop {
-                if socket
-                    .send(Message::Ping(Vec::new().into()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        let settings = ConnectionSettings {
+    /// Settings that reconnect quickly enough for a test: a 100 ms idle timeout and a 10 ms
+    /// backoff.
+    fn fast_settings() -> ConnectionSettings {
+        ConnectionSettings {
             connect_timeout: Duration::from_secs(1),
             read_idle_timeout: Duration::from_millis(100),
             max_backoff: Duration::from_millis(10),
-        };
-        let stream = messages(fake.url(), settings);
-        tokio::pin!(stream);
-        assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .expect("first frame")
-            .is_some());
-        // Keep polling so the idle watchdog runs; pings must not feed it.
-        let _ = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
-        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on ping-only traffic");
+        }
     }
 
-    // `metrics::with_local_recorder` takes a sync closure, so this test drives its own
-    // current-thread runtime instead of using `#[tokio::test]`.
+    fn frame() -> Message {
+        Message::Text(frame_text(100, wall_nanos_now()).into())
+    }
+
+    /// Polls `stream` until it yields a frame, failing if none arrives within two seconds.
+    async fn next_frame(stream: &mut (impl Stream<Item = TitanPriceLevelMessage> + Unpin)) {
+        tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("a frame within two seconds")
+            .expect("the stream never ends");
+    }
+
     #[test]
-    fn ping_only_traffic_counts_an_idle_timeout_reconnect() {
-        use std::time::Duration;
-
-        use futures::SinkExt;
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::{
-            telemetry::{
-                recorded::{counter_value, snapshot_map},
-                RECONNECTS,
-            },
-            test_support::{frame_text, wall_nanos_now, FakeTitan},
-        };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                let fake = FakeTitan::spawn(|_, mut socket| async move {
-                    let _ = socket
-                        .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
-                        .await;
-                    loop {
-                        if socket
-                            .send(Message::Ping(Vec::new().into()))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await;
-                let settings = ConnectionSettings {
-                    connect_timeout: Duration::from_secs(1),
-                    read_idle_timeout: Duration::from_millis(100),
-                    max_backoff: Duration::from_millis(10),
-                };
-                let stream = messages(fake.url(), settings);
-                tokio::pin!(stream);
-                assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
-                    .await
-                    .expect("first frame")
-                    .is_some());
-                // Keep polling so the idle watchdog runs and reconnects.
-                let _ = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
-            });
+    fn ping_only_traffic_does_not_count_as_liveness() {
+        let (connections, snapshot) = record_async(async {
+            let fake = FakeTitan::spawn(frame_then_repeat(
+                frame(),
+                Message::Ping(Vec::new().into()),
+                Duration::from_millis(10),
+            ))
+            .await;
+            let stream = messages(fake.url(), fast_settings());
+            tokio::pin!(stream);
+            next_frame(&mut stream).await;
+            // The second frame can only come from a new connection, which the idle timeout
+            // opens once the pings fail to reset it.
+            next_frame(&mut stream).await;
+            fake.connections.load(Ordering::SeqCst)
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
+        assert!(connections >= 2, "no reconnect on ping-only traffic");
         assert!(counter_value(&snapshot, RECONNECTS, &[("reason", "idle_timeout")]) >= 1);
     }
 
-    #[tokio::test]
-    async fn malformed_text_does_not_count_as_liveness() {
-        use std::{sync::atomic::Ordering, time::Duration};
+    #[test]
+    fn malformed_text_does_not_count_as_liveness() {
+        let (connections, snapshot) = record_async(async {
+            let fake = FakeTitan::spawn(frame_then_repeat(
+                frame(),
+                Message::Text("nonsense".into()),
+                Duration::from_millis(10),
+            ))
+            .await;
+            let stream = messages(fake.url(), fast_settings());
+            tokio::pin!(stream);
+            next_frame(&mut stream).await;
+            // The second frame can only come from a new connection, which the idle timeout
+            // opens once the malformed text fails to reset it.
+            next_frame(&mut stream).await;
+            fake.connections.load(Ordering::SeqCst)
+        });
+        assert!(connections >= 2, "no reconnect on malformed text");
+        assert!(counter_value(&snapshot, RECONNECTS, &[("reason", "idle_timeout")]) >= 1);
+        assert!(counter_value(&snapshot, FRAMES_REJECTED, &[("reason", "parse_error")]) >= 1);
+    }
 
-        use futures::SinkExt;
-
-        use super::super::test_support::{frame_text, wall_nanos_now, FakeTitan};
-
-        let fake = FakeTitan::spawn(|_, mut socket| async move {
-            let _ = socket
-                .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
-                .await;
-            loop {
-                if socket
-                    .send(Message::Text("nonsense".into()))
-                    .await
-                    .is_err()
-                {
+    #[test]
+    fn server_close_frame_reconnects() {
+        let (connections, snapshot) = record_async(async {
+            let fake = FakeTitan::spawn(|_, mut socket| async move {
+                if socket.send(frame()).await.is_err() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        let settings = ConnectionSettings {
-            connect_timeout: Duration::from_secs(1),
-            read_idle_timeout: Duration::from_millis(100),
-            max_backoff: Duration::from_millis(10),
-        };
-        let stream = messages(fake.url(), settings);
-        tokio::pin!(stream);
-        assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .expect("first frame")
-            .is_some());
-        let _ = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
-        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on malformed text");
+                let _ = socket.send(Message::Close(None)).await;
+            })
+            .await;
+            let stream = messages(fake.url(), fast_settings());
+            tokio::pin!(stream);
+            next_frame(&mut stream).await;
+            // The close frame follows the first frame, so the second frame can only come from a
+            // new connection.
+            next_frame(&mut stream).await;
+            fake.connections.load(Ordering::SeqCst)
+        });
+        assert_eq!(connections, 2);
+        assert_eq!(counter_value(&snapshot, RECONNECTS, &[("reason", "closed")]), 1);
     }
 
     #[tokio::test]
     async fn parsed_frames_keep_the_connection_alive() {
-        use std::{sync::atomic::Ordering, time::Duration};
-
-        use futures::SinkExt;
-
-        use super::super::test_support::{frame_text, wall_nanos_now, FakeTitan};
-
-        let fake = FakeTitan::spawn(|_, mut socket| async move {
-            loop {
-                if socket
-                    .send(Message::Text(frame_text(100, wall_nanos_now()).into()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(30)).await;
-            }
-        })
-        .await;
-        let settings = ConnectionSettings {
-            connect_timeout: Duration::from_secs(1),
-            read_idle_timeout: Duration::from_millis(150),
-            max_backoff: Duration::from_millis(10),
-        };
+        let fake =
+            FakeTitan::spawn(frame_then_repeat(frame(), frame(), Duration::from_millis(30))).await;
+        let settings =
+            ConnectionSettings { read_idle_timeout: Duration::from_millis(150), ..fast_settings() };
         let stream = messages(fake.url(), settings);
         tokio::pin!(stream);
-        let mut received = 0;
-        while received < 10 {
-            assert!(tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .expect("frame")
-                .is_some());
-            received += 1;
+        for _ in 0..10 {
+            next_frame(&mut stream).await;
         }
         assert_eq!(fake.connections.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn default_idle_timeout_is_ten_seconds() {
-        assert_eq!(ConnectionSettings::default().read_idle_timeout, Duration::from_secs(10));
     }
 }

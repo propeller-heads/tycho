@@ -9,19 +9,22 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures::future::BoxFuture;
+use futures::{future::BoxFuture, SinkExt};
+use num_bigint::BigUint;
 use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
-use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
 };
+
+use super::config::PriceLevelStreamConfig;
 
 /// The FermiSwapper router, one of the default venues.
 pub(super) const PAMM: &str = "0x5979458912f80b96d30d4220af8e2e4925a33320";
@@ -119,7 +122,44 @@ pub(super) fn wall_nanos_now() -> u64 {
             .expect("after epoch")
             .as_nanos(),
     )
-    .expect("fits")
+    .expect("unix nanoseconds fit in u64")
+}
+
+/// The FermiSwap venue at [`PAMM`], registered under the protocol name `fermiswap`.
+pub(super) fn fermiswap() -> PriceLevelStreamConfig {
+    PriceLevelStreamConfig::new(
+        "fermiswap",
+        Bytes::from_str(PAMM).unwrap(),
+        BigUint::from(120_000u64),
+    )
+}
+
+/// A [`FakeTitan`] handler that sends `first` once, then `repeat` every `interval` until the
+/// socket closes.
+pub(super) fn frame_then_repeat(
+    first: Message,
+    repeat: Message,
+    interval: Duration,
+) -> impl Fn(usize, FakeConnection) -> BoxFuture<'static, ()> + Send + Sync + 'static {
+    move |_, mut socket| {
+        let first = first.clone();
+        let repeat = repeat.clone();
+        Box::pin(async move {
+            if socket.send(first).await.is_err() {
+                return;
+            }
+            loop {
+                if socket
+                    .send(repeat.clone())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
 }
 
 /// A valid frame carrying the FermiSwap WBTC/USDC ladder in both directions.

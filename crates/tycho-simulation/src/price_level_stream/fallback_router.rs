@@ -157,9 +157,24 @@ pub async fn fetch_fallback_router_venues(rpc_url: &str) -> Result<Vec<Bytes>, F
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{
+        collections::VecDeque,
+        str::FromStr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
 
-    use super::*;
+    use futures::StreamExt;
+
+    use super::{
+        super::telemetry::{
+            recorded::{counter_value, record_async},
+            WHITELIST_READS,
+        },
+        *,
+    };
 
     #[tokio::test]
     #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
@@ -195,16 +210,8 @@ mod tests {
         assert!(source.contains(&address), "PropAMMFallbackExecutor.sol does not use {address}");
     }
 
-    #[tokio::test]
-    async fn reader_retries_failures_and_refreshes_after_success() {
-        use std::{
-            collections::VecDeque,
-            sync::{Arc, Mutex},
-            time::Duration,
-        };
-
-        use futures::StreamExt;
-
+    #[test]
+    fn reader_retries_failures_and_refreshes_after_success() {
         type ScriptQueue = Arc<Mutex<VecDeque<Result<Vec<Bytes>, FetchVenuesError>>>>;
 
         let venue = Bytes::from_str("0x5979458912f80b96d30d4220af8e2e4925a33320").unwrap();
@@ -214,50 +221,41 @@ mod tests {
             Ok(vec![venue.clone()]),
             Ok(vec![]),
         ])));
-        let fetch = {
-            let script = script.clone();
-            move || {
-                let next = script
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or_else(|| Ok(vec![]));
-                async move { next }
-            }
+        let fetch = move || {
+            let next = script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(vec![]));
+            async move { next }
         };
-        let reader = whitelist_reader(
-            fetch,
-            Duration::from_secs(1),
-            Duration::from_millis(5),
-            Duration::from_millis(20),
-        );
-        tokio::pin!(reader);
+        let ((), snapshot) = record_async(async {
+            let reader = whitelist_reader(
+                fetch,
+                Duration::from_secs(1),
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            );
+            tokio::pin!(reader);
 
-        assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
-        assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
-        match reader.next().await {
-            Some(WhitelistRead::Ok(venues)) => assert_eq!(venues.len(), 1),
-            other => panic!("expected a successful read, got {other:?}"),
-        }
-        // Refreshed after the interval.
-        match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-            Ok(Some(WhitelistRead::Ok(venues))) => assert!(venues.is_empty()),
-            other => panic!("expected a refresh, got {other:?}"),
-        }
+            assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
+            assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
+            match reader.next().await {
+                Some(WhitelistRead::Ok(venues)) => assert_eq!(venues.len(), 1),
+                other => panic!("expected a successful read, got {other:?}"),
+            }
+            // The reader reads again after `refresh_interval`.
+            match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
+                Ok(Some(WhitelistRead::Ok(venues))) => assert!(venues.is_empty()),
+                other => panic!("expected a refresh, got {other:?}"),
+            }
+        });
+        assert_eq!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]), 2);
+        assert_eq!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "ok")]), 2);
     }
 
     #[tokio::test]
     async fn reader_fails_a_read_that_never_resolves() {
-        use std::{
-            sync::{
-                atomic::{AtomicUsize, Ordering},
-                Arc,
-            },
-            time::Duration,
-        };
-
-        use futures::StreamExt;
-
         let calls = Arc::new(AtomicUsize::new(0));
         let fetch = {
             let calls = calls.clone();
@@ -286,51 +284,26 @@ mod tests {
         assert!(calls.load(Ordering::SeqCst) >= 2);
     }
 
-    // `metrics::with_local_recorder` takes a sync closure, so this test drives its own
-    // current-thread runtime instead of using `#[tokio::test]`.
     #[test]
     fn whitelist_read_failures_are_counted() {
-        use std::time::Duration;
-
-        use futures::StreamExt;
-        use metrics_util::debugging::DebuggingRecorder;
-
-        use super::super::telemetry::{
-            recorded::{counter_value, snapshot_map},
-            WHITELIST_READS,
+        let fetch = || async {
+            Err::<Vec<Bytes>, FetchVenuesError>(FetchVenuesError::Call {
+                reason: "connection refused".to_string(),
+            })
         };
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                let fetch = || async {
-                    Err::<Vec<Bytes>, FetchVenuesError>(FetchVenuesError::Call {
-                        reason: "connection refused".to_string(),
-                    })
-                };
-                let reader = whitelist_reader(
-                    fetch,
-                    Duration::from_millis(30),
-                    Duration::from_millis(5),
-                    Duration::from_secs(60),
-                );
-                tokio::pin!(reader);
-                for _ in 0..2 {
-                    match reader.next().await {
-                        Some(WhitelistRead::Failed(FetchVenuesError::Call { reason })) => {
-                            assert_eq!(reason, "connection refused");
-                        }
-                        other => panic!("expected a failed read, got {other:?}"),
-                    }
-                }
-            });
+        let ((), snapshot) = record_async(async {
+            let reader = whitelist_reader(
+                fetch,
+                Duration::from_millis(30),
+                Duration::from_millis(5),
+                Duration::from_secs(60),
+            );
+            tokio::pin!(reader);
+            for _ in 0..2 {
+                assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
+            }
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
-        assert!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]) >= 2);
+        // The reader is parked at its second `yield`, so the count is exact.
+        assert_eq!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]), 2);
     }
 }

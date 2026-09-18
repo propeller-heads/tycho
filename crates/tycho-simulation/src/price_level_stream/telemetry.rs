@@ -99,15 +99,32 @@ pub(super) fn record_unregistered_pamm() {
 /// Reads a `DebuggingRecorder` snapshot back into plain values for assertions.
 #[cfg(test)]
 pub(super) mod recorded {
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        future::Future,
+    };
 
     use metrics_util::{
-        debugging::{DebugValue, Snapshot},
+        debugging::{DebugValue, DebuggingRecorder, Snapshot},
         MetricKind,
     };
 
     pub(in super::super) type SnapshotMap =
         HashMap<(MetricKind, String, BTreeMap<String, String>), DebugValue>;
+
+    /// Runs `future` on a current-thread runtime with a `DebuggingRecorder` installed and
+    /// returns its output together with every metric it recorded. `metrics::with_local_recorder`
+    /// takes a sync closure, which is why this cannot be a `#[tokio::test]`.
+    pub(in super::super) fn record_async<T>(future: impl Future<Output = T>) -> (T, SnapshotMap) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = metrics::with_local_recorder(&recorder, || runtime.block_on(future));
+        (output, snapshot_map(snapshotter.snapshot()))
+    }
 
     pub(in super::super) fn snapshot_map(snapshot: Snapshot) -> SnapshotMap {
         snapshot
@@ -157,15 +174,13 @@ pub(super) mod recorded {
 
 #[cfg(test)]
 mod tests {
-    use metrics_util::debugging::DebuggingRecorder;
-
     use super::{recorded::*, *};
 
+    /// The metric names are the contract with dashboards and alerts, so the lookups spell them
+    /// out instead of reusing the constants the helpers emit under.
     #[test]
     fn every_helper_emits_its_named_metric() {
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
+        let ((), snapshot) = record_async(async {
             record_frame_accepted();
             record_frame_rejected("too_old");
             record_frame_rejected("too_old");
@@ -178,16 +193,60 @@ mod tests {
             record_whitelisted_venues(5);
             record_unregistered_pamm();
         });
-        let snapshot = snapshot_map(snapshotter.snapshot());
-        assert_eq!(counter_value(&snapshot, FRAMES_ACCEPTED, &[]), 1);
-        assert_eq!(counter_value(&snapshot, FRAMES_REJECTED, &[("reason", "too_old")]), 2);
-        assert_eq!(gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]), 1_700_000_000.0);
-        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 3.0);
-        assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &[("venue", "fermiswap")]), 1);
-        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 2.0);
-        assert_eq!(counter_value(&snapshot, RECONNECTS, &[("reason", "idle_timeout")]), 1);
-        assert_eq!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "ok")]), 1);
-        assert_eq!(gauge_value(&snapshot, WHITELISTED_VENUES, &[]), 5.0);
-        assert_eq!(counter_value(&snapshot, UNREGISTERED_PAMM_ENTRIES, &[]), 1);
+        assert_eq!(counter_value(&snapshot, "price_level_stream_frames_accepted_total", &[]), 1);
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "price_level_stream_frames_rejected_total",
+                &[("reason", "too_old")]
+            ),
+            2
+        );
+        assert_eq!(
+            gauge_value(
+                &snapshot,
+                "price_level_stream_last_seen_timestamp_seconds",
+                &[("venue", "fermiswap")]
+            ),
+            1_700_000_000.0
+        );
+        assert_eq!(
+            gauge_value(
+                &snapshot,
+                "price_level_stream_served_components",
+                &[("venue", "fermiswap")]
+            ),
+            3.0
+        );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "price_level_stream_stale_removals_total",
+                &[("venue", "fermiswap")]
+            ),
+            1
+        );
+        assert_eq!(gauge_value(&snapshot, "price_level_stream_serving_state", &[]), 2.0);
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "price_level_stream_reconnects_total",
+                &[("reason", "idle_timeout")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "price_level_stream_whitelist_reads_total",
+                &[("outcome", "ok")]
+            ),
+            1
+        );
+        assert_eq!(gauge_value(&snapshot, "price_level_stream_whitelisted_venues", &[]), 5.0);
+        assert_eq!(
+            counter_value(&snapshot, "price_level_stream_unregistered_pamm_entries_total", &[]),
+            1
+        );
     }
 }

@@ -312,6 +312,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use rstest::rstest;
     use tycho_common::models::Chain;
 
     use super::*;
@@ -546,28 +547,34 @@ mod tests {
         assert!(!a.eq(&b as &dyn ProtocolSim));
     }
 
-    #[test]
-    fn ensure_quotable_is_strict_at_the_boundary() {
+    #[rstest]
+    #[case::one_nanosecond_before(|until| until - Duration::from_nanos(1), true)]
+    #[case::at_quotable_until(|until| until, false)]
+    #[case::one_second_after(|until| until + Duration::from_secs(1), false)]
+    fn ensure_quotable_around_quotable_until(
+        #[case] now: fn(Instant) -> Instant,
+        #[case] quotable: bool,
+    ) {
         let until = Instant::now() + Duration::from_secs(60);
         let state = state().with_quotable_until(until);
-        assert!(state
-            .ensure_quotable(until - Duration::from_nanos(1))
-            .is_ok());
-        assert!(state.ensure_quotable(until).is_err());
-        assert!(state
-            .ensure_quotable(until + Duration::from_secs(1))
-            .is_err());
+        assert_eq!(
+            state
+                .ensure_quotable(now(until))
+                .is_ok(),
+            quotable
+        );
     }
 
     #[test]
-    fn state_without_a_guard_never_expires() {
+    fn state_without_quotable_until_never_expires() {
         let far = Instant::now() + Duration::from_secs(1_000_000);
         assert!(state().ensure_quotable(far).is_ok());
     }
 
     #[test]
     fn expired_state_refuses_every_query() {
-        // A guard set at construction time is already in the past by the time we query.
+        // `quotable_until` is set to `Instant::now()`, which has passed by the time the queries
+        // run.
         let state = state().with_quotable_until(Instant::now());
         assert!(matches!(
             state.get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc()),
@@ -584,15 +591,23 @@ mod tests {
     }
 
     #[test]
-    fn fresh_state_quotes_and_its_successor_keeps_the_guard() {
-        let until = Instant::now() + Duration::from_secs(60);
-        let state = state().with_quotable_until(until);
+    fn fresh_state_answers_every_query() {
+        let state = state().with_quotable_until(Instant::now() + Duration::from_secs(60));
+        assert!(state
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
+            .is_ok());
         assert!(state
             .spot_price(&wbtc(), &usdc())
             .is_ok());
         assert!(state
             .get_limits(wbtc().address, usdc().address)
             .is_ok());
+    }
+
+    #[test]
+    fn successor_state_keeps_quotable_until() {
+        let until = Instant::now() + Duration::from_secs(60);
+        let state = state().with_quotable_until(until);
         let result = state
             .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
             .expect("fresh state quotes");
@@ -605,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_is_never_serialized_and_deserializes_as_none() {
+    fn quotable_until_serde_round_trip() {
         let live = state().with_quotable_until(Instant::now());
         let json = serde_json::to_value(&live).unwrap();
         assert!(json
@@ -613,7 +628,7 @@ mod tests {
             .unwrap()
             .get("quotable_until")
             .is_none());
-        // A recording made after this feature therefore replays without a guard.
+        // A deserialized state has no `quotable_until`, so a recording replays without expiring.
         let replayed: PriceLevelStreamState = serde_json::from_value(json).unwrap();
         assert_eq!(replayed.quotable_until, None);
         assert!(replayed
@@ -622,9 +637,8 @@ mod tests {
     }
 
     #[test]
-    fn eq_includes_the_guard() {
+    fn eq_compares_quotable_until() {
         let until = Instant::now() + Duration::from_secs(60);
-        assert!(state().eq(&state()));
         assert!(!state().eq(&state().with_quotable_until(until)));
         assert!(state()
             .with_quotable_until(until)
