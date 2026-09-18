@@ -152,7 +152,7 @@ pub(super) fn messages(
                                 idle_secs = settings.read_idle_timeout.as_secs(),
                                 "No parsed Titan frame within idle timeout; reconnecting"
                             );
-                            telemetry::reconnect("idle_timeout");
+                            telemetry::record_reconnect("idle_timeout");
                             break;
                         }
                         let message = match timeout(remaining, ws_stream.next()).await {
@@ -160,7 +160,7 @@ pub(super) fn messages(
                             // Stream ended: the server hung up without sending a close frame.
                             Ok(None) => {
                                 warn!("Titan price level stream ended; reconnecting");
-                                telemetry::reconnect("ended");
+                                telemetry::record_reconnect("ended");
                                 break;
                             }
                             // No traffic within the idle window: assume a stalled socket.
@@ -169,7 +169,7 @@ pub(super) fn messages(
                                     idle_secs = settings.read_idle_timeout.as_secs(),
                                     "No parsed Titan frame within idle timeout; reconnecting"
                                 );
-                                telemetry::reconnect("idle_timeout");
+                                telemetry::record_reconnect("idle_timeout");
                                 break;
                             }
                         };
@@ -188,7 +188,7 @@ pub(super) fn messages(
                                     // Unparseable frame: log and keep the connection.
                                     Err(e) => {
                                         warn!(error = %e, "Failed to parse Titan price level message");
-                                        telemetry::frame_rejected("parse_error");
+                                        telemetry::record_frame_rejected("parse_error");
                                     }
                                 }
                             }
@@ -208,14 +208,14 @@ pub(super) fn messages(
                             // Server initiated a graceful close — reconnect.
                             Ok(Message::Close(frame)) => {
                                 warn!(?frame, "Titan price level stream closed by server; reconnecting");
-                                telemetry::reconnect("closed");
+                                telemetry::record_reconnect("closed");
                                 break;
                             }
                             // Transport/protocol error (broken pipe, invalid frame, ...) —
                             // reconnect.
                             Err(e) => {
                                 warn!(error = %e, "Titan price level stream read error; reconnecting");
-                                telemetry::reconnect("read_error");
+                                telemetry::record_reconnect("read_error");
                                 break;
                             }
                         }
@@ -224,7 +224,7 @@ pub(super) fn messages(
                 // Connection refused / TLS error — fall through to backoff and retry.
                 Ok(Err(e)) => {
                     warn!(error = %e, "Failed to connect to Titan price level stream; retrying");
-                    telemetry::reconnect("connect_failed");
+                    telemetry::record_reconnect("connect_failed");
                 }
                 // Handshake did not complete within the timeout — retry after backoff.
                 Err(_elapsed) => {
@@ -232,7 +232,7 @@ pub(super) fn messages(
                         timeout_secs = settings.connect_timeout.as_secs(),
                         "Titan price level connect timed out; retrying"
                     );
-                    telemetry::reconnect("connect_timeout");
+                    telemetry::record_reconnect("connect_timeout");
                 }
             }
 
@@ -457,7 +457,7 @@ mod tests {
 
         use super::super::{
             telemetry::{
-                test_support::{counter_value, snapshot_map},
+                recorded::{counter_value, snapshot_map},
                 RECONNECTS,
             },
             test_support::{frame_text, wall_nanos_now, FakeTitan},

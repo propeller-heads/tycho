@@ -15,12 +15,11 @@ use super::{
         DEFAULT_AUTO_DETECTED_GAS_COST,
     },
     fallback_router::{
-        fetch_fallback_router_venues, router_venues_reader, RouterVenuesRead,
-        WHITELIST_READ_TIMEOUT,
+        fetch_fallback_router_venues, whitelist_reader, WhitelistRead, WHITELIST_READ_TIMEOUT,
     },
-    telemetry::{self, SourceState},
+    telemetry::{self, ServingState},
     titan::{self, ConnectionSettings, TITAN_PRICE_LEVEL_URL},
-    tracker::{Now, SnapshotTracker, DEFAULT_STALE_AFTER},
+    tracker::{FreshnessTracker, Now, DEFAULT_STALE_AFTER},
 };
 use crate::protocol::models::Update;
 
@@ -322,9 +321,9 @@ impl PriceLevelStreamBuilder {
                  fallback_router_rpc_url, or opt out with without_fallback_router. No pAMM will \
                  be served"
             );
-            telemetry::source_state(SourceState::AwaitingWhitelist);
+            telemetry::record_serving_state(ServingState::AwaitingWhitelist);
         }
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             registry,
             denied,
             tokens,
@@ -343,7 +342,7 @@ impl PriceLevelStreamBuilder {
                     let rpc_url = rpc_url.clone();
                     async move { fetch_fallback_router_venues(&rpc_url).await }
                 };
-                Box::pin(router_venues_reader(
+                Box::pin(whitelist_reader(
                     fetch,
                     WHITELIST_READ_TIMEOUT,
                     max_backoff,
@@ -360,7 +359,7 @@ impl PriceLevelStreamBuilder {
                     () = sleep_until_deadline, if deadline.is_some() => {
                         tracker.on_stale_deadline(Now::current())
                     }
-                    read = next_whitelist_read(&mut whitelist) => tracker.on_router_venues(read),
+                    read = next_whitelist_read(&mut whitelist) => tracker.on_whitelist_read(read),
                 };
                 if let Some(update) = update {
                     yield update;
@@ -370,11 +369,11 @@ impl PriceLevelStreamBuilder {
     }
 }
 
-type WhitelistReader = Pin<Box<dyn Stream<Item = RouterVenuesRead> + Send>>;
+type WhitelistReader = Pin<Box<dyn Stream<Item = WhitelistRead> + Send>>;
 
 /// The next whitelist read, or a future that never resolves when the whitelist is not read at
 /// all, so the `select!` arm simply never fires.
-async fn next_whitelist_read(reader: &mut Option<WhitelistReader>) -> RouterVenuesRead {
+async fn next_whitelist_read(reader: &mut Option<WhitelistReader>) -> WhitelistRead {
     let Some(reader) = reader else {
         return std::future::pending().await;
     };
@@ -910,7 +909,7 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{counter_value, snapshot_map},
+            recorded::{counter_value, snapshot_map},
             WHITELIST_READS,
         };
 
@@ -968,8 +967,8 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{gauge_value, snapshot_map},
-            SOURCE_STATE,
+            recorded::{gauge_value, snapshot_map},
+            SERVING_STATE,
         };
 
         let recorder = DebuggingRecorder::new();
@@ -995,7 +994,7 @@ mod tests {
             });
         });
         let snapshot = snapshot_map(snapshotter.snapshot());
-        assert_eq!(gauge_value(&snapshot, SOURCE_STATE, &[]), 0.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 0.0);
     }
 
     #[test]

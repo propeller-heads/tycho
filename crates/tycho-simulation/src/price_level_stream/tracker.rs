@@ -15,7 +15,7 @@ use tycho_common::{
 
 use super::{
     config::PriceLevelStreamConfig,
-    fallback_router::RouterVenuesRead,
+    fallback_router::WhitelistRead,
     state::{PriceLevelStreamQuote, PriceLevelStreamState, QUOTE_TTL},
     stream::PAMM_ADDRESS_ATTRIBUTE,
     telemetry,
@@ -55,7 +55,7 @@ pub(super) struct Now {
     pub wall_nanos: u64,
     /// Monotonic clock; drives every deadline, so a wall-clock jump cannot expire or freeze
     /// anything.
-    pub instant: Instant,
+    pub monotonic: Instant,
 }
 
 impl Now {
@@ -74,7 +74,7 @@ impl Now {
                 0
             }
         };
-        Self { wall_nanos, instant: Instant::now() }
+        Self { wall_nanos, monotonic: Instant::now() }
     }
 }
 
@@ -106,18 +106,18 @@ impl Rejection {
 }
 
 /// A component the stream currently vouches for.
-struct Served {
+struct ServedComponent {
     component: ProtocolComponent,
     /// The venue name, for logs and metric labels.
-    venue: String,
+    venue_name: String,
     /// The venue address, for whitelist membership checks.
-    address: Bytes,
+    venue_address: Bytes,
     /// The instant this component's data turns `stale_after` old.
-    deadline: Instant,
+    stale_at: Instant,
 }
 
 /// What the stream can currently vouch for.
-enum Source {
+enum ServingState {
     /// The PropAMMRouter whitelist has not been read yet: the family of every component is
     /// unknown, so frames are validated but nothing is emitted.
     AwaitingWhitelist,
@@ -128,12 +128,12 @@ enum Source {
     Serving { deadline: Instant },
 }
 
-impl Source {
-    fn telemetry_state(&self) -> telemetry::SourceState {
+impl ServingState {
+    fn telemetry_state(&self) -> telemetry::ServingState {
         match self {
-            Source::AwaitingWhitelist => telemetry::SourceState::AwaitingWhitelist,
-            Source::Unserved => telemetry::SourceState::Unserved,
-            Source::Serving { deadline: _ } => telemetry::SourceState::Serving,
+            ServingState::AwaitingWhitelist => telemetry::ServingState::AwaitingWhitelist,
+            ServingState::Unserved => telemetry::ServingState::Unserved,
+            ServingState::Serving { deadline: _ } => telemetry::ServingState::Serving,
         }
     }
 }
@@ -142,7 +142,7 @@ impl Source {
 /// a frame omits is presumed still fresh until its own deadline lapses in
 /// [`on_stale_deadline`](Self::on_stale_deadline). There is no diff-based removal — omission from
 /// a single frame never removes anything by itself.
-pub(super) struct SnapshotTracker {
+pub(super) struct FreshnessTracker {
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
     /// Venues excluded from auto-detection. The builder keeps this disjoint from the registry:
     /// denying removes any registration and registering removes any denial.
@@ -157,15 +157,15 @@ pub(super) struct SnapshotTracker {
     /// execute through Titan's PropAMMRouter instead of the venue directly.
     router_venues: HashSet<Bytes>,
     /// The components currently served, keyed by component id.
-    served: HashMap<String, Served>,
+    served: HashMap<String, ServedComponent>,
     /// What the stream can currently vouch for; drives [`Self::stale_deadline`] and the
     /// per-venue gauges.
-    source: Source,
+    serving_state: ServingState,
     /// The data freshness window; see [`DEFAULT_STALE_AFTER`].
     stale_after: Duration,
     /// The `timestamp` of the newest accepted frame. Frames older than it are out of order;
     /// equal ones are re-emissions within a build round and accepted. Never reset.
-    newest_timestamp: u64,
+    newest_timestamp_nanos: u64,
     /// The block of the newest accepted frame. Later frames may not regress below it, nor jump
     /// further ahead than the elapsed time explains. Reset with `last_accepted`.
     newest_block: u64,
@@ -178,10 +178,10 @@ pub(super) struct SnapshotTracker {
     /// rest at DEBUG, and the counter carries the rate.
     rejecting: bool,
     /// Unregistered venue addresses already logged, at most [`MAX_UNREGISTERED_LOGGED`].
-    seen_unregistered: HashSet<Bytes>,
+    logged_unregistered: HashSet<Bytes>,
 }
 
-impl SnapshotTracker {
+impl FreshnessTracker {
     pub(super) fn new(
         registry: HashMap<Bytes, PriceLevelStreamConfig>,
         denied: HashSet<Bytes>,
@@ -191,13 +191,14 @@ impl SnapshotTracker {
         stale_after: Duration,
         fallback_router: bool,
     ) -> Self {
-        let source = if fallback_router { Source::AwaitingWhitelist } else { Source::Unserved };
-        telemetry::source_state(source.telemetry_state());
+        let serving_state =
+            if fallback_router { ServingState::AwaitingWhitelist } else { ServingState::Unserved };
+        telemetry::record_serving_state(serving_state.telemetry_state());
         // Pre-initialise every per-venue series so a venue that never appears is a visible
         // zero, not a missing series.
         for config in registry.values() {
-            telemetry::served_components(&config.protocol, 0);
-            telemetry::last_seen(&config.protocol, 0);
+            telemetry::record_served_components(&config.protocol, 0);
+            telemetry::record_last_seen(&config.protocol, 0);
         }
         Self {
             registry,
@@ -207,13 +208,13 @@ impl SnapshotTracker {
             auto_detected_gas_cost,
             router_venues: HashSet::new(),
             served: HashMap::new(),
-            source,
+            serving_state,
             stale_after,
-            newest_timestamp: 0,
+            newest_timestamp_nanos: 0,
             newest_block: 0,
             last_accepted: None,
             rejecting: false,
-            seen_unregistered: HashSet::new(),
+            logged_unregistered: HashSet::new(),
         }
     }
 
@@ -225,23 +226,23 @@ impl SnapshotTracker {
     /// Applies a whitelist read. A failed read keeps the last known set (the reader already
     /// logged it). A successful read that changes a served venue's family removes that venue's
     /// components now; the next accepted frame carrying them re-adds them under the new family.
-    pub(super) fn on_router_venues(&mut self, read: RouterVenuesRead) -> Option<Update> {
+    pub(super) fn on_whitelist_read(&mut self, read: WhitelistRead) -> Option<Update> {
         let venues = match read {
-            RouterVenuesRead::Failed(error) => {
+            WhitelistRead::Failed(error) => {
                 tracing::debug!(error = %error, "Whitelist read failed; whitelist unchanged");
                 return None;
             }
-            RouterVenuesRead::Ok(venues) => venues,
+            WhitelistRead::Ok(venues) => venues,
         };
-        telemetry::whitelisted_venues(venues.len());
-        if let Source::AwaitingWhitelist = self.source {
+        telemetry::record_whitelisted_venues(venues.len());
+        if let ServingState::AwaitingWhitelist = self.serving_state {
             self.router_venues = venues;
             tracing::info!(
                 venues = self.router_venues.len(),
                 "PropAMMRouter venue whitelist read; serving pAMMs from the next frame"
             );
-            self.source = Source::Unserved;
-            telemetry::source_state(self.source.telemetry_state());
+            self.serving_state = ServingState::Unserved;
+            telemetry::record_serving_state(self.serving_state.telemetry_state());
             return None;
         }
         let moved: Vec<String> = self
@@ -249,8 +250,8 @@ impl SnapshotTracker {
             .iter()
             .filter(|(_, served)| {
                 self.router_venues
-                    .contains(&served.address) !=
-                    venues.contains(&served.address)
+                    .contains(&served.venue_address) !=
+                    venues.contains(&served.venue_address)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -264,22 +265,22 @@ impl SnapshotTracker {
                 continue;
             };
             tracing::info!(
-                venue = %served.venue,
+                venue = %served.venue_name,
                 "pAMM changed PropAMMRouter whitelist membership; re-adding it under its new \
                  family on the next frame"
             );
             removed.insert(id, served.component);
         }
-        // Build the update off the still-current frontier before `refresh_source` may reset it
-        // (it does, once nothing is left served) — mirrors `on_stale_deadline`.
+        // Build the update off the still-current frontier before `refresh_serving_state` may reset
+        // it (it does, once nothing is left served) — mirrors `on_stale_deadline`.
         let update = self.removal_update(removed);
-        self.refresh_source();
+        self.refresh_serving_state();
         Some(update)
     }
 
     /// Checks a frame against the freshness and ordering rules, returning its age when it is
     /// acceptable.
-    fn accept(&self, frame: &TitanPriceLevelMessage, now: Now) -> Result<Duration, Rejection> {
+    fn check_frame(&self, frame: &TitanPriceLevelMessage, now: Now) -> Result<Duration, Rejection> {
         let frame_age = Duration::from_nanos(
             now.wall_nanos
                 .saturating_sub(frame.timestamp),
@@ -293,7 +294,7 @@ impl SnapshotTracker {
         {
             return Err(Rejection::InFuture);
         }
-        if frame.timestamp < self.newest_timestamp {
+        if frame.timestamp < self.newest_timestamp_nanos {
             return Err(Rejection::OutOfOrder);
         }
         let Some(last_accepted) = self.last_accepted else {
@@ -303,7 +304,7 @@ impl SnapshotTracker {
             return Err(Rejection::BlockRegression);
         }
         let elapsed_slots = now
-            .instant
+            .monotonic
             .saturating_duration_since(last_accepted)
             .as_secs() /
             SECONDS_PER_SLOT;
@@ -321,29 +322,29 @@ impl SnapshotTracker {
     /// [`Rejection`]), the whitelist has not been read yet, or the frame carries nothing
     /// relevant.
     pub(super) fn on_frame(&mut self, frame: TitanPriceLevelMessage, now: Now) -> Option<Update> {
-        let frame_age = match self.accept(&frame, now) {
+        let frame_age = match self.check_frame(&frame, now) {
             Ok(frame_age) => frame_age,
             Err(rejection) => {
                 self.log_rejection(rejection, &frame);
-                telemetry::frame_rejected(rejection.as_str());
+                telemetry::record_frame_rejected(rejection.as_str());
                 return None;
             }
         };
         self.rejecting = false;
-        telemetry::frame_accepted();
-        self.newest_timestamp = frame.timestamp;
+        telemetry::record_frame_accepted();
+        self.newest_timestamp_nanos = frame.timestamp;
         self.newest_block = frame.block_number;
-        self.last_accepted = Some(now.instant);
+        self.last_accepted = Some(now.monotonic);
 
-        if let Source::AwaitingWhitelist = self.source {
-            self.refresh_source();
+        if let ServingState::AwaitingWhitelist = self.serving_state {
+            self.refresh_serving_state();
             return None;
         }
 
-        let deadline = now.instant +
+        let deadline = now.monotonic +
             self.stale_after
                 .saturating_sub(frame_age);
-        let quotable_until = now.instant + QUOTE_TTL.saturating_sub(frame_age);
+        let quotable_until = now.monotonic + QUOTE_TTL.saturating_sub(frame_age);
         let frame_unix_seconds = frame.timestamp / NANOS_PER_SECOND;
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         let mut new_pairs = HashMap::new();
@@ -352,7 +353,7 @@ impl SnapshotTracker {
             let Some(config) = self.resolve_config(&pamm) else {
                 continue;
             };
-            telemetry::last_seen(&config.protocol, frame_unix_seconds);
+            telemetry::record_last_seen(&config.protocol, frame_unix_seconds);
 
             for ((token0, token1), (quotes_0_to_1, quotes_1_to_0)) in self.merge_pairs(pairs) {
                 let id = component_id(&config.address, &token0, &token1);
@@ -386,17 +387,17 @@ impl SnapshotTracker {
                 states.insert(id_string.clone(), Box::new(state));
                 self.served.insert(
                     id_string,
-                    Served {
+                    ServedComponent {
                         component,
-                        venue: config.protocol.clone(),
-                        address: config.address.clone(),
-                        deadline,
+                        venue_name: config.protocol.clone(),
+                        venue_address: config.address.clone(),
+                        stale_at: deadline,
                     },
                 );
             }
         }
 
-        self.refresh_source();
+        self.refresh_serving_state();
         if states.is_empty() {
             return None;
         }
@@ -413,9 +414,9 @@ impl SnapshotTracker {
             return None;
         }
         if !self.auto_detect {
-            telemetry::unregistered_pamm();
-            if self.seen_unregistered.len() < MAX_UNREGISTERED_LOGGED &&
-                self.seen_unregistered
+            telemetry::record_unregistered_pamm();
+            if self.logged_unregistered.len() < MAX_UNREGISTERED_LOGGED &&
+                self.logged_unregistered
                     .insert(pamm.clone())
             {
                 tracing::info!(
@@ -430,8 +431,8 @@ impl SnapshotTracker {
             pamm.clone(),
             self.auto_detected_gas_cost.clone(),
         );
-        telemetry::served_components(&config.protocol, 0);
-        telemetry::last_seen(&config.protocol, 0);
+        telemetry::record_served_components(&config.protocol, 0);
+        telemetry::record_last_seen(&config.protocol, 0);
         self.registry
             .insert(pamm.clone(), config.clone());
         Some(config)
@@ -477,7 +478,7 @@ impl SnapshotTracker {
         let due: Vec<String> = self
             .served
             .iter()
-            .filter(|(_, served)| served.deadline <= now.instant)
+            .filter(|(_, served)| served.stale_at <= now.monotonic)
             .map(|(id, _)| id.clone())
             .collect();
         if due.is_empty() {
@@ -489,8 +490,8 @@ impl SnapshotTracker {
             let Some(served) = self.served.remove(&id) else {
                 continue;
             };
-            telemetry::stale_removal(&served.venue);
-            venues.insert(served.venue);
+            telemetry::record_stale_removal(&served.venue_name);
+            venues.insert(served.venue_name);
             removed.insert(id, served.component);
         }
         let component_ids: Vec<&String> = removed.keys().collect();
@@ -501,19 +502,19 @@ impl SnapshotTracker {
             stale_after_secs = self.stale_after.as_secs(),
             "Removing price level components: no fresh frame carried them within the window"
         );
-        // Build the update off the still-current frontier before `refresh_source` may reset it
-        // (it does, once nothing is left served) — a removal always reports the block it was
-        // last known fresh at, never the reset value.
+        // Build the update off the still-current frontier before `refresh_serving_state` may reset
+        // it (it does, once nothing is left served) — a removal always reports the block it
+        // was last known fresh at, never the reset value.
         let update = self.removal_update(removed);
-        self.refresh_source();
+        self.refresh_serving_state();
         Some(update)
     }
 
     /// The instant the earliest served component turns stale, if anything is served.
     pub(super) fn stale_deadline(&self) -> Option<Instant> {
-        match self.source {
-            Source::Serving { deadline } => Some(deadline),
-            Source::AwaitingWhitelist | Source::Unserved => None,
+        match self.serving_state {
+            ServingState::Serving { deadline } => Some(deadline),
+            ServingState::AwaitingWhitelist | ServingState::Unserved => None,
         }
     }
 
@@ -523,34 +524,34 @@ impl SnapshotTracker {
             .set_removed_pairs(removed)
     }
 
-    /// Recomputes the source state and the per-venue gauges from the served set. The block
+    /// Recomputes the serving state and the per-venue gauges from the served set. The block
     /// frontier is reset whenever nothing is served — after the last served component expired,
     /// after a frame that carried nothing this tracker can build, and on every frame accepted
     /// while the whitelist is still awaited — so one absurd block can never outlive the window
     /// it was served for. The whitelist wait itself is left only by a successful read, never by
     /// the served set.
-    fn refresh_source(&mut self) {
-        let awaiting_whitelist = match self.source {
-            Source::AwaitingWhitelist => true,
-            Source::Unserved | Source::Serving { deadline: _ } => false,
+    fn refresh_serving_state(&mut self) {
+        let awaiting_whitelist = match self.serving_state {
+            ServingState::AwaitingWhitelist => true,
+            ServingState::Unserved | ServingState::Serving { deadline: _ } => false,
         };
         let served_state = match self
             .served
             .values()
-            .map(|served| served.deadline)
+            .map(|served| served.stale_at)
             .min()
         {
-            Some(deadline) => Source::Serving { deadline },
+            Some(deadline) => ServingState::Serving { deadline },
             None => {
                 self.newest_block = 0;
                 self.last_accepted = None;
-                Source::Unserved
+                ServingState::Unserved
             }
         };
         if !awaiting_whitelist {
-            self.source = served_state;
+            self.serving_state = served_state;
         }
-        telemetry::source_state(self.source.telemetry_state());
+        telemetry::record_serving_state(self.serving_state.telemetry_state());
         let mut per_venue: HashMap<&str, usize> = self
             .registry
             .values()
@@ -558,11 +559,11 @@ impl SnapshotTracker {
             .collect();
         for served in self.served.values() {
             *per_venue
-                .entry(served.venue.as_str())
+                .entry(served.venue_name.as_str())
                 .or_default() += 1;
         }
         for (venue, count) in per_venue {
-            telemetry::served_components(venue, count);
+            telemetry::record_served_components(venue, count);
         }
     }
 
@@ -583,7 +584,7 @@ impl SnapshotTracker {
             block_number = frame.block_number,
             timestamp = frame.timestamp,
             newest_block = self.newest_block,
-            newest_timestamp = self.newest_timestamp,
+            newest_timestamp_nanos = self.newest_timestamp_nanos,
             "Rejecting price level frame; further rejections logged at debug until a frame is \
              accepted"
         );
@@ -629,7 +630,7 @@ mod tests {
     use super::{
         super::{
             config::DEFAULT_AUTO_DETECTED_GAS_COST,
-            fallback_router::{FetchVenuesError, RouterVenuesRead},
+            fallback_router::{FetchVenuesError, WhitelistRead},
             state::QUOTE_TTL,
             test_support::*,
         },
@@ -653,18 +654,18 @@ mod tests {
         fn at(&self, seconds: u64) -> Now {
             Now {
                 wall_nanos: BASE_WALL_NANOS + seconds * NANOS_PER_SECOND,
-                instant: self.start + Duration::from_secs(seconds),
+                monotonic: self.start + Duration::from_secs(seconds),
             }
         }
     }
 
-    fn tracker() -> SnapshotTracker {
+    fn tracker() -> FreshnessTracker {
         let config = PriceLevelStreamConfig::new(
             "fermiswap",
             Bytes::from_str(PAMM).unwrap(),
             BigUint::from(120_000u64),
         );
-        SnapshotTracker::new(
+        FreshnessTracker::new(
             HashMap::from([(config.address.clone(), config)]),
             HashSet::new(),
             tokens(),
@@ -922,7 +923,7 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{counter_value, snapshot_map},
+            recorded::{counter_value, snapshot_map},
             FRAMES_ACCEPTED, FRAMES_REJECTED,
         };
 
@@ -960,7 +961,7 @@ mod tests {
             .expect("update expected");
         assert_eq!(
             quotable_until(&update),
-            clock.at(9).instant + (QUOTE_TTL - Duration::from_secs(2))
+            clock.at(9).monotonic + (QUOTE_TTL - Duration::from_secs(2))
         );
     }
 
@@ -972,7 +973,7 @@ mod tests {
         let update = tracker
             .on_frame(message_at(100, 12, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
-        assert_eq!(quotable_until(&update), clock.at(0).instant + QUOTE_TTL);
+        assert_eq!(quotable_until(&update), clock.at(0).monotonic + QUOTE_TTL);
     }
 
     #[test]
@@ -983,12 +984,12 @@ mod tests {
         let update = tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(15))
             .expect("update expected");
-        assert_eq!(quotable_until(&update), clock.at(15).instant);
+        assert_eq!(quotable_until(&update), clock.at(15).monotonic);
         assert_eq!(
             tracker
                 .stale_deadline()
                 .expect("serving"),
-            clock.at(24).instant
+            clock.at(24).monotonic
         );
     }
 
@@ -1042,7 +1043,7 @@ mod tests {
             tracker
                 .stale_deadline()
                 .expect("serving"),
-            clock.at(24).instant
+            clock.at(24).monotonic
         );
 
         // One second early: nothing due.
@@ -1082,7 +1083,7 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{counter_value, snapshot_map},
+            recorded::{counter_value, snapshot_map},
             STALE_REMOVALS,
         };
 
@@ -1099,7 +1100,7 @@ mod tests {
                 .expect("removal expected");
         });
         let snapshot = snapshot_map(snapshotter.snapshot());
-        assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &[("pamm", "fermiswap")]), 1);
+        assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &[("venue", "fermiswap")]), 1);
     }
 
     #[test]
@@ -1114,7 +1115,7 @@ mod tests {
             tracker
                 .stale_deadline()
                 .expect("serving"),
-            clock.at(24).instant
+            clock.at(24).monotonic
         );
     }
 
@@ -1133,7 +1134,7 @@ mod tests {
             tracker
                 .stale_deadline()
                 .expect("serving"),
-            clock.at(24).instant
+            clock.at(24).monotonic
         );
     }
 
@@ -1170,7 +1171,7 @@ mod tests {
             tracker
                 .stale_deadline()
                 .expect("serving"),
-            clock.at(47).instant
+            clock.at(47).monotonic
         );
     }
 
@@ -1259,7 +1260,7 @@ mod tests {
             .is_none());
 
         assert!(tracker
-            .on_router_venues(read_ok(&[PAMM]))
+            .on_whitelist_read(read_ok(&[PAMM]))
             .is_none());
 
         // The first frame that can be served is judged as a first frame, not against the block
@@ -1350,8 +1351,8 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{gauge_value, snapshot_map},
-            LAST_SEEN, SERVED_COMPONENTS, SOURCE_STATE,
+            recorded::{gauge_value, snapshot_map},
+            LAST_SEEN, SERVED_COMPONENTS, SERVING_STATE,
         };
 
         let recorder = DebuggingRecorder::new();
@@ -1361,9 +1362,9 @@ mod tests {
             drop(tracker);
         });
         let snapshot = snapshot_map(snapshotter.snapshot());
-        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("pamm", "fermiswap")]), 0.0);
-        assert_eq!(gauge_value(&snapshot, LAST_SEEN, &[("pamm", "fermiswap")]), 0.0);
-        assert_eq!(gauge_value(&snapshot, SOURCE_STATE, &[]), 1.0);
+        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
+        assert_eq!(gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]), 0.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -1373,18 +1374,18 @@ mod tests {
             tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0));
         });
         let snapshot = snapshot_map(snapshotter.snapshot());
-        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("pamm", "fermiswap")]), 1.0);
+        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 1.0);
         assert_eq!(
-            gauge_value(&snapshot, LAST_SEEN, &[("pamm", "fermiswap")]),
+            gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]),
             (BASE_WALL_NANOS / NANOS_PER_SECOND) as f64
         );
-        assert_eq!(gauge_value(&snapshot, SOURCE_STATE, &[]), 2.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 2.0);
     }
 
     #[test]
     fn unregistered_pamm_produces_no_update_without_auto_detection() {
         let clock = Clock::new();
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::new(),
             HashSet::new(),
             tokens(),
@@ -1402,7 +1403,7 @@ mod tests {
     fn denied_pamm_is_not_auto_detected() {
         let clock = Clock::new();
         let denied = HashSet::from([Bytes::from_str(PAMM).unwrap()]);
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::new(),
             denied,
             tokens(),
@@ -1419,7 +1420,7 @@ mod tests {
     #[test]
     fn auto_detected_pamm_is_served_under_its_address() {
         let clock = Clock::new();
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::new(),
             HashSet::new(),
             tokens(),
@@ -1450,7 +1451,7 @@ mod tests {
     #[test]
     fn auto_detected_gas_cost_override_applies() {
         let clock = Clock::new();
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::new(),
             HashSet::new(),
             tokens(),
@@ -1480,7 +1481,7 @@ mod tests {
             Bytes::from_str(PAMM).unwrap(),
             BigUint::from(120_000u64),
         );
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::from([(config.address.clone(), config)]),
             HashSet::new(),
             tokens(),
@@ -1507,7 +1508,7 @@ mod tests {
     #[test]
     fn auto_detected_whitelisted_venue_is_served_under_the_fallback_family() {
         let clock = Clock::new();
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::new(),
             HashSet::new(),
             tokens(),
@@ -1539,7 +1540,7 @@ mod tests {
             Bytes::from_str(PAMM).unwrap(),
             BigUint::from(120_000u64),
         );
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(
             HashMap::from([(config.address.clone(), config)]),
             HashSet::new(),
             tokens(),
@@ -1557,8 +1558,8 @@ mod tests {
         assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
     }
 
-    fn read_ok(addresses: &[&str]) -> RouterVenuesRead {
-        RouterVenuesRead::Ok(
+    fn read_ok(addresses: &[&str]) -> WhitelistRead {
+        WhitelistRead::Ok(
             addresses
                 .iter()
                 .map(|address| Bytes::from_str(address).unwrap())
@@ -1566,13 +1567,13 @@ mod tests {
         )
     }
 
-    fn tracker_awaiting_whitelist() -> SnapshotTracker {
+    fn tracker_awaiting_whitelist() -> FreshnessTracker {
         let config = PriceLevelStreamConfig::new(
             "fermiswap",
             Bytes::from_str(PAMM).unwrap(),
             BigUint::from(120_000u64),
         );
-        SnapshotTracker::new(
+        FreshnessTracker::new(
             HashMap::from([(config.address.clone(), config)]),
             HashSet::new(),
             tokens(),
@@ -1593,7 +1594,7 @@ mod tests {
         assert!(tracker.stale_deadline().is_none());
 
         assert!(tracker
-            .on_router_venues(read_ok(&[PAMM]))
+            .on_whitelist_read(read_ok(&[PAMM]))
             .is_none());
         let update = tracker
             .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1))
@@ -1605,9 +1606,9 @@ mod tests {
     fn failed_whitelist_read_keeps_the_previous_set() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_router_venues(read_ok(&[PAMM]));
+        tracker.on_whitelist_read(read_ok(&[PAMM]));
         assert!(tracker
-            .on_router_venues(RouterVenuesRead::Failed(FetchVenuesError::Call {
+            .on_whitelist_read(WhitelistRead::Failed(FetchVenuesError::Call {
                 reason: "boom".to_string(),
             }))
             .is_none());
@@ -1621,7 +1622,7 @@ mod tests {
     fn failed_first_read_keeps_waiting() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_router_venues(RouterVenuesRead::Failed(FetchVenuesError::Call {
+        tracker.on_whitelist_read(WhitelistRead::Failed(FetchVenuesError::Call {
             reason: "boom".to_string(),
         }));
         assert!(tracker
@@ -1633,14 +1634,14 @@ mod tests {
     fn family_change_removes_now_and_re_adds_under_the_new_family() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_router_venues(read_ok(&[PAMM]));
+        tracker.on_whitelist_read(read_ok(&[PAMM]));
         tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
 
         // The venue gets de-whitelisted.
         let update = tracker
-            .on_router_venues(read_ok(&[]))
+            .on_whitelist_read(read_ok(&[]))
             .expect("removal expected");
         assert!(update.states.is_empty());
         assert!(update.new_pairs.is_empty());
@@ -1661,12 +1662,12 @@ mod tests {
     fn unchanged_whitelist_emits_nothing() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_router_venues(read_ok(&[PAMM]));
+        tracker.on_whitelist_read(read_ok(&[PAMM]));
         tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
         assert!(tracker
-            .on_router_venues(read_ok(&[PAMM]))
+            .on_whitelist_read(read_ok(&[PAMM]))
             .is_none());
     }
 
@@ -1675,7 +1676,7 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{gauge_value, snapshot_map},
+            recorded::{gauge_value, snapshot_map},
             WHITELISTED_VENUES,
         };
 
@@ -1683,7 +1684,7 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
             let mut tracker = tracker_awaiting_whitelist();
-            tracker.on_router_venues(read_ok(&[PAMM]));
+            tracker.on_whitelist_read(read_ok(&[PAMM]));
         });
         let snapshot = snapshot_map(snapshotter.snapshot());
         assert_eq!(gauge_value(&snapshot, WHITELISTED_VENUES, &[]), 1.0);
@@ -1694,15 +1695,15 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{counter_value, snapshot_map},
-            UNREGISTERED_PAMM_FRAMES,
+            recorded::{counter_value, snapshot_map},
+            UNREGISTERED_PAMM_ENTRIES,
         };
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let logged = metrics::with_local_recorder(&recorder, || {
             let clock = Clock::new();
-            let mut tracker = SnapshotTracker::new(
+            let mut tracker = FreshnessTracker::new(
                 HashMap::new(),
                 HashSet::new(),
                 tokens(),
@@ -1727,10 +1728,10 @@ mod tests {
                     tracker.on_frame(frame, clock.at(1));
                 }
             }
-            tracker.seen_unregistered.len()
+            tracker.logged_unregistered.len()
         });
         let snapshot = snapshot_map(snapshotter.snapshot());
-        assert_eq!(counter_value(&snapshot, UNREGISTERED_PAMM_FRAMES, &[]), 140);
+        assert_eq!(counter_value(&snapshot, UNREGISTERED_PAMM_ENTRIES, &[]), 140);
         assert_eq!(logged, MAX_UNREGISTERED_LOGGED);
     }
 

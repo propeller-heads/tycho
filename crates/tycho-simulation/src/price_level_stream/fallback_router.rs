@@ -62,7 +62,7 @@ pub enum FetchVenuesError {
 
 /// The outcome of one whitelist read, as delivered to the tracker.
 #[derive(Debug)]
-pub(super) enum RouterVenuesRead {
+pub(super) enum WhitelistRead {
     Ok(HashSet<Bytes>),
     Failed(FetchVenuesError),
 }
@@ -77,12 +77,12 @@ pub(super) const WHITELIST_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// (`2^attempt` seconds, capped at `max_backoff`); successes are repeated every
 /// `refresh_interval`. Never ends. Logs one WARN per failure; consumers of the outcomes should
 /// not log them again.
-pub(super) fn router_venues_reader<F, Fut>(
+pub(super) fn whitelist_reader<F, Fut>(
     fetch: F,
     read_timeout: Duration,
     max_backoff: Duration,
     refresh_interval: Duration,
-) -> impl Stream<Item = RouterVenuesRead> + Send
+) -> impl Stream<Item = WhitelistRead> + Send
 where
     F: Fn() -> Fut + Send + 'static,
     Fut: Future<Output = Result<Vec<Bytes>, FetchVenuesError>> + Send,
@@ -97,14 +97,14 @@ where
             match outcome {
                 Ok(venues) => {
                     attempt = 0;
-                    telemetry::whitelist_read("ok");
+                    telemetry::record_whitelist_read("ok");
                     let venues: HashSet<Bytes> = venues.into_iter().collect();
-                    yield RouterVenuesRead::Ok(venues);
+                    yield WhitelistRead::Ok(venues);
                     sleep(refresh_interval).await;
                 }
                 Err(error) => {
                     attempt = attempt.saturating_add(1);
-                    telemetry::whitelist_read("error");
+                    telemetry::record_whitelist_read("error");
                     let delay = backoff(attempt, max_backoff);
                     tracing::warn!(
                         error = %error,
@@ -112,7 +112,7 @@ where
                         retry_secs = delay.as_secs_f64(),
                         "PropAMMRouter whitelist read failed; retrying"
                     );
-                    yield RouterVenuesRead::Failed(error);
+                    yield WhitelistRead::Failed(error);
                     sleep(delay).await;
                 }
             }
@@ -122,7 +122,7 @@ where
 
 /// Reads the router's whitelisted pAMM venues via `eth_call` on the node at `rpc_url`.
 ///
-/// Read at startup with retries and refreshed periodically by `router_venues_reader`, each
+/// Read at startup with retries and refreshed periodically by `whitelist_reader`, each
 /// read bounded by `WHITELIST_READ_TIMEOUT`. The whitelist is governance-gated and changes
 /// rarely, and renaming a running component's protocol system would churn every consumer's
 /// component set.
@@ -228,7 +228,7 @@ mod tests {
                 async move { next }
             }
         };
-        let reader = router_venues_reader(
+        let reader = whitelist_reader(
             fetch,
             Duration::from_secs(1),
             Duration::from_millis(5),
@@ -236,15 +236,15 @@ mod tests {
         );
         tokio::pin!(reader);
 
-        assert!(matches!(reader.next().await, Some(RouterVenuesRead::Failed(_))));
-        assert!(matches!(reader.next().await, Some(RouterVenuesRead::Failed(_))));
+        assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
+        assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
         match reader.next().await {
-            Some(RouterVenuesRead::Ok(venues)) => assert_eq!(venues.len(), 1),
+            Some(WhitelistRead::Ok(venues)) => assert_eq!(venues.len(), 1),
             other => panic!("expected a successful read, got {other:?}"),
         }
         // Refreshed after the interval.
         match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-            Ok(Some(RouterVenuesRead::Ok(venues))) => assert!(venues.is_empty()),
+            Ok(Some(WhitelistRead::Ok(venues))) => assert!(venues.is_empty()),
             other => panic!("expected a refresh, got {other:?}"),
         }
     }
@@ -269,7 +269,7 @@ mod tests {
                 std::future::pending::<Result<Vec<Bytes>, FetchVenuesError>>()
             }
         };
-        let reader = router_venues_reader(
+        let reader = whitelist_reader(
             fetch,
             Duration::from_millis(30),
             Duration::from_millis(5),
@@ -280,7 +280,7 @@ mod tests {
         // Two consecutive timeouts prove the read is bounded and retried.
         for _ in 0..2 {
             match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-                Ok(Some(RouterVenuesRead::Failed(FetchVenuesError::Timeout { after }))) => {
+                Ok(Some(WhitelistRead::Failed(FetchVenuesError::Timeout { after }))) => {
                     assert_eq!(after, Duration::from_millis(30));
                 }
                 other => panic!("expected a timeout, got {other:?}"),
@@ -299,7 +299,7 @@ mod tests {
         use metrics_util::debugging::DebuggingRecorder;
 
         use super::super::telemetry::{
-            test_support::{counter_value, snapshot_map},
+            recorded::{counter_value, snapshot_map},
             WHITELIST_READS,
         };
 
@@ -316,7 +316,7 @@ mod tests {
                         reason: "connection refused".to_string(),
                     })
                 };
-                let reader = router_venues_reader(
+                let reader = whitelist_reader(
                     fetch,
                     Duration::from_millis(30),
                     Duration::from_millis(5),
@@ -325,7 +325,7 @@ mod tests {
                 tokio::pin!(reader);
                 for _ in 0..2 {
                     match reader.next().await {
-                        Some(RouterVenuesRead::Failed(FetchVenuesError::Call { reason })) => {
+                        Some(WhitelistRead::Failed(FetchVenuesError::Call { reason })) => {
                             assert_eq!(reason, "connection refused");
                         }
                         other => panic!("expected a failed read, got {other:?}"),
