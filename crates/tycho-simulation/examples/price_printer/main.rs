@@ -175,7 +175,8 @@ async fn main() {
                 .with_known_pamms()
                 .auto_detect(true)
                 .with_tokens(all_tokens.clone())
-                .build();
+                .build()
+                .expect("Failed building price level stream");
             let price_level_tx = tick_tx.clone();
             stream_tasks.push(tokio::spawn(async move {
                 tokio::pin!(price_level_stream);
