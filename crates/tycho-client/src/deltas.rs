@@ -181,11 +181,23 @@ pub trait DeltasClient {
 /// Dropping the handle shuts the task down the same way [`DeltasClient::close`] does, so a
 /// caller that loses it — an early return, a finished `select!` — closes the connection instead
 /// of detaching it. Awaiting the handle yields the task's result.
+#[must_use = "the connection is closed as soon as this handle is dropped"]
 pub struct ConnectionHandle {
     task: JoinHandle<Result<(), DeltasError>>,
     cmd_tx: Sender<()>,
     dead: Arc<AtomicBool>,
     conn_notify: Arc<Notify>,
+}
+
+impl ConnectionHandle {
+    /// Stops the websocket task immediately, for a connection no caller will ever own.
+    ///
+    /// Unlike dropping the handle, this does not wait for the task to reach the point where it
+    /// reads its command channel: a task sleeping between reconnection attempts would otherwise
+    /// reconnect once more before it stops.
+    fn abort(self) {
+        self.task.abort();
+    }
 }
 
 impl Future for ConnectionHandle {
@@ -1080,14 +1092,20 @@ impl DeltasClient for WsDeltasClient {
 
         self.conn_notify.notified().await;
 
+        let handle = ConnectionHandle {
+            task: jh,
+            cmd_tx: handle_cmd_tx,
+            dead: Arc::clone(&self.dead),
+            conn_notify: Arc::clone(&self.conn_notify),
+        };
+
+        // Not being connected does not mean the task has stopped: it clears `inner` every time it
+        // loses the connection and retries. Returning the error without stopping it would leave a
+        // task that reconnects and then holds a connection no caller can ever close.
         if self.is_connected().await {
-            Ok(ConnectionHandle {
-                task: jh,
-                cmd_tx: handle_cmd_tx,
-                dead: Arc::clone(&self.dead),
-                conn_notify: Arc::clone(&self.conn_notify),
-            })
+            Ok(handle)
         } else {
+            handle.abort();
             Err(DeltasError::NotConnected)
         }
     }
@@ -1776,6 +1794,48 @@ mod tests {
         .await
         .expect("subscribe on a closed client must fail fast");
         assert!(subscription_res.is_err());
+    }
+
+    /// Guard that reports when the future owning it is dropped, so a test can tell a cancelled
+    /// task from one that is merely still running.
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// `connect` aborts the task when it returns an error, because nothing will own that task.
+    /// Signalling the command channel is not enough: a task between reconnection attempts does
+    /// not read it until after it has connected once more, which is the connection that leaks.
+    #[test_log::test(tokio::test)]
+    async fn test_connection_handle_abort_cancels_the_task() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        let task = tokio::spawn(async move {
+            let _guard = DropFlag(flag);
+            // Never reads the command channel, like a task sleeping between reconnects.
+            std::future::pending::<Result<(), DeltasError>>().await
+        });
+        tokio::task::yield_now().await;
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let handle = ConnectionHandle {
+            task,
+            cmd_tx,
+            dead: Arc::new(AtomicBool::new(false)),
+            conn_notify: Arc::new(Notify::new()),
+        };
+
+        handle.abort();
+
+        for _ in 0..100 {
+            if cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("abort() left the task running");
     }
 
     /// Holding the handle keeps the connection open; only its drop closes the socket.
