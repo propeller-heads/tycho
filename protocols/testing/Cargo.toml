@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+chrono           = { workspace = true }
 glob             = "0.3.0"
 miette           = { version = "7.6.0", features = ["fancy"] }
 tracing          = { workspace = true }

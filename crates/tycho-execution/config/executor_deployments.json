@@ -118,6 +118,7 @@
       "args": ["0x4200000000000000000000000000000000000006"]
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "baibai": { "contract": "BaibaiExecutor", "args": ["0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa"] },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []

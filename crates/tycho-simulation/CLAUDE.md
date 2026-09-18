@@ -22,7 +22,7 @@ for any protocol indexed by Tycho.
 - **`evm/protocol/`**: Protocol implementations
   - **Native** (`uniswap_v2/`, `uniswap_v3/`, `uniswap_v4/`, `ekubo/`, `ekubo_v3/`, `cowamm/`,
     `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`, `pancakeswap_v2/`,
-    `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
+    `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `baibai/`, `native_wrapper/`, `sky/`, `etherfi/`,
     `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols

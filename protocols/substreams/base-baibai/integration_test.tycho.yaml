@@ -1,0 +1,18 @@
+substreams_yaml_path: ./base-baibai.yaml
+protocol_system: baibai
+protocol_type_names:
+  - baibai_pool
+module_name: map_protocol_changes
+# Generic balance validation treats component IDs as token-holding addresses.
+# BaiBai's composite component holds liquidity in its separate custodian.
+skip_balance_check: true
+tests:
+  - name: curve_book_v3
+    start_block: 50895895
+    stop_block: 51191196
+    expected_components:
+      - id: "0x98c1d9e102eb2806d902b13186bdc7892ac4ffba4200000000000000000000000000000000000006"
+        tokens:
+          - "0x4200000000000000000000000000000000000006"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        creation_tx: "0x9415e76fda4cb82bb41690da2eb670eec1fa53ac93d31f1b2171d9d06a8450af"

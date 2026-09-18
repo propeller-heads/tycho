@@ -370,6 +370,9 @@ impl TestRunner {
             .map(|p| p.to_str().unwrap());
 
         let mut decoder_context = DecoderContext::new().vm_traces(self.vm_simulation_traces);
+        decoder_context.caller = tycho_execution::encoding::evm::get_router_address(&chain)
+            .ok()
+            .cloned();
         if let Some(vm_adapter_path) = adapter_contract_path_str {
             decoder_context = decoder_context.vm_adapter_path(vm_adapter_path);
         }
@@ -960,6 +963,9 @@ impl TestRunner {
             ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
 
         let mut decoder_context = DecoderContext::new().vm_traces(vm_simulation_traces);
+        decoder_context.caller = tycho_execution::encoding::evm::get_router_address(&self.chain)
+            .ok()
+            .cloned();
         if let Some(vm_adapter_path) = adapter_contract_path.as_ref() {
             if let Some(path_str) = vm_adapter_path.to_str() {
                 decoder_context = decoder_context.vm_adapter_path(path_str);
