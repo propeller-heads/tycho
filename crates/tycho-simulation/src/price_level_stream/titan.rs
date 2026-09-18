@@ -20,7 +20,10 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 use tycho_common::Bytes;
 
-use super::telemetry;
+use super::{
+    backoff,
+    telemetry::{self, ReconnectReason, RejectReason},
+};
 
 /// Default Titan pAMM price level WebSocket endpoint. Titan serves the same stream from other
 /// regions as well; see <https://docs.titanbuilder.xyz/propamms/takers>.
@@ -39,7 +42,8 @@ pub(super) struct ConnectionSettings {
     /// the 24 s `stale_after` default removes any component. Pings, binary frames, and
     /// unparsable text do not reset the gap.
     pub read_idle_timeout: Duration,
-    /// Cap on the exponential reconnect backoff (`2^attempt` seconds, at most this).
+    /// Cap on the exponential reconnect backoff (`2^attempt` seconds, at most this). The same
+    /// cap bounds the retry backoff of the PropAMMRouter whitelist read.
     pub max_backoff: Duration,
 }
 
@@ -51,16 +55,6 @@ impl Default for ConnectionSettings {
             max_backoff: Duration::from_secs(32),
         }
     }
-}
-
-/// The reconnect backoff after `attempt` consecutive failures: `2^attempt` seconds, capped at
-/// `max_backoff`.
-pub(super) fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
-    let exponential = 2u64
-        .checked_pow(attempt)
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::MAX);
-    exponential.min(max_backoff)
 }
 
 /// A parsed price level stream frame: the quote ladders of every pAMM Titan simulated in one
@@ -160,7 +154,7 @@ pub(super) fn messages(
                             // Stream ended: the server hung up without sending a close frame.
                             Some(None) => {
                                 warn!("Titan price level stream ended; reconnecting");
-                                telemetry::record_reconnect("ended");
+                                telemetry::record_reconnect(ReconnectReason::Ended);
                                 break;
                             }
                             // No parsed frame within the idle window: assume a stalled socket.
@@ -169,7 +163,7 @@ pub(super) fn messages(
                                     idle_secs = settings.read_idle_timeout.as_secs(),
                                     "No parsed Titan frame within idle timeout; reconnecting"
                                 );
-                                telemetry::record_reconnect("idle_timeout");
+                                telemetry::record_reconnect(ReconnectReason::IdleTimeout);
                                 break;
                             }
                         };
@@ -188,7 +182,7 @@ pub(super) fn messages(
                                     // Unparseable frame: log and keep the connection.
                                     Err(e) => {
                                         warn!(error = %e, "Failed to parse Titan price level message");
-                                        telemetry::record_frame_rejected("parse_error");
+                                        telemetry::record_frame_rejected(RejectReason::ParseError);
                                     }
                                 }
                             }
@@ -208,14 +202,14 @@ pub(super) fn messages(
                             // Server initiated a graceful close — reconnect.
                             Ok(Message::Close(frame)) => {
                                 warn!(?frame, "Titan price level stream closed by server; reconnecting");
-                                telemetry::record_reconnect("closed");
+                                telemetry::record_reconnect(ReconnectReason::Closed);
                                 break;
                             }
                             // Transport/protocol error (broken pipe, invalid frame, ...) —
                             // reconnect.
                             Err(e) => {
                                 warn!(error = %e, "Titan price level stream read error; reconnecting");
-                                telemetry::record_reconnect("read_error");
+                                telemetry::record_reconnect(ReconnectReason::ReadError);
                                 break;
                             }
                         }
@@ -224,7 +218,7 @@ pub(super) fn messages(
                 // Connection refused / TLS error — fall through to backoff and retry.
                 Ok(Err(e)) => {
                     warn!(error = %e, "Failed to connect to Titan price level stream; retrying");
-                    telemetry::record_reconnect("connect_failed");
+                    telemetry::record_reconnect(ReconnectReason::ConnectFailed);
                 }
                 // Handshake did not complete within the timeout — retry after backoff.
                 Err(_elapsed) => {
@@ -232,7 +226,7 @@ pub(super) fn messages(
                         timeout_secs = settings.connect_timeout.as_secs(),
                         "Titan price level connect timed out; retrying"
                     );
-                    telemetry::record_reconnect("connect_timeout");
+                    telemetry::record_reconnect(ReconnectReason::ConnectTimeout);
                 }
             }
 
@@ -404,17 +398,6 @@ mod tests {
             })
             .expect("fermiswap present");
         assert_eq!(fermiswap.pairs.len(), 12);
-    }
-
-    #[test]
-    fn backoff_grows_exponentially_up_to_the_cap() {
-        let max_backoff = ConnectionSettings::default().max_backoff;
-        assert_eq!(backoff(1, max_backoff), Duration::from_secs(2));
-        assert_eq!(backoff(4, max_backoff), Duration::from_secs(16));
-        assert_eq!(backoff(5, max_backoff), max_backoff);
-        assert_eq!(backoff(100, max_backoff), max_backoff);
-        // Exponent overflow must saturate to the cap rather than panic.
-        assert_eq!(backoff(u32::MAX, max_backoff), max_backoff);
     }
 
     /// Settings that reconnect quickly enough for a test: a 100 ms idle timeout and a 10 ms

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_stream::stream;
@@ -15,11 +15,11 @@ use super::{
         DEFAULT_AUTO_DETECTED_GAS_COST,
     },
     fallback_router::{
-        fetch_fallback_router_venues, whitelist_reader, WhitelistRead, WHITELIST_READ_TIMEOUT,
+        fetch_fallback_router_venues, whitelist_reader, WhitelistReaderSettings,
+        WHITELIST_READ_TIMEOUT,
     },
-    telemetry::{self, ServingState},
     titan::{self, ConnectionSettings, TITAN_PRICE_LEVEL_URL},
-    tracker::{FreshnessTracker, Now, DEFAULT_STALE_AFTER},
+    tracker::{FreshnessTracker, Now, TrackerSettings, Whitelist, DEFAULT_STALE_AFTER},
 };
 use crate::protocol::models::Update;
 
@@ -29,6 +29,52 @@ pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 /// How often the PropAMMRouter whitelist is re-read by default. It is governance-gated and
 /// changes rarely; ten minutes bounds how long a de-whitelisted venue keeps its old family.
 pub(super) const DEFAULT_WHITELIST_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
+
+/// The longest [`stale_after`](PriceLevelStreamBuilder::stale_after) a stream can be built
+/// with. Quotes target the block being built, so serving a ladder for longer than this is never
+/// intended, and deadlines that far ahead stay representable on the monotonic clock.
+pub const MAX_STALE_AFTER: Duration = Duration::from_secs(3600);
+
+/// Why [`PriceLevelStreamBuilder::build`] refused to open the stream.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PriceLevelStreamBuildError {
+    /// The fallback router is on, so the PropAMMRouter whitelist must be read, but no node URL
+    /// was set through
+    /// [`fallback_router_rpc_url`](PriceLevelStreamBuilder::fallback_router_rpc_url) or
+    /// `RPC_URL`.
+    #[error(
+        "no node URL to read the PropAMMRouter whitelist from: set RPC_URL, call \
+         fallback_router_rpc_url, or opt out with without_fallback_router"
+    )]
+    MissingFallbackRouterRpcUrl,
+    /// The node URL for the whitelist read does not parse.
+    #[error("invalid node URL {url:?} for the PropAMMRouter whitelist: {reason}")]
+    InvalidFallbackRouterRpcUrl {
+        /// The URL that failed to parse.
+        url: String,
+        /// The parse error.
+        reason: String,
+    },
+    /// [`stale_after`](PriceLevelStreamBuilder::stale_after) is zero or longer than
+    /// [`MAX_STALE_AFTER`].
+    #[error("stale_after must be longer than zero and at most {MAX_STALE_AFTER:?}, got {given:?}")]
+    StaleAfterOutOfRange {
+        /// The value the builder was given.
+        given: Duration,
+    },
+}
+
+/// Where [`PriceLevelStreamBuilder::build`] reads the PropAMMRouter whitelist from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WhitelistSource {
+    /// Not read at all: every venue stays on the direct family.
+    Disabled,
+    /// The node at this URL.
+    Url(String),
+    /// The node at `RPC_URL` from the environment or `.env`.
+    Env,
+}
 
 /// Builds a stream of [`Update`]s from the Titan pAMM price level WebSocket.
 ///
@@ -52,19 +98,15 @@ pub struct PriceLevelStreamBuilder {
     auto_detect: bool,
     auto_detected_gas_cost: Option<BigUint>,
     connection: ConnectionSettings,
-    /// Whether [`build`](Self::build) reads the PropAMMRouter whitelist and serves the venues on
-    /// it under the `propammfallback:` family.
-    fallback_router: bool,
+    /// See [`without_fallback_router`](Self::without_fallback_router) and
+    /// [`fallback_router_rpc_url`](Self::fallback_router_rpc_url).
+    whitelist_source: WhitelistSource,
     /// See [`stale_after`](Self::stale_after).
     stale_after: Duration,
     /// See [`whitelist_refresh_interval`](Self::whitelist_refresh_interval).
     whitelist_refresh_interval: Duration,
-    /// See [`fallback_router_rpc_url`](Self::fallback_router_rpc_url).
-    fallback_router_rpc_url: Option<String>,
-    /// Whether [`build`](Self::build) falls back to `RPC_URL` from the environment (or `.env`)
-    /// when [`fallback_router_rpc_url`](Self::fallback_router_rpc_url) is unset. Only tests turn
-    /// this off, so they can run the missing-URL path without changing the process environment.
-    env_rpc_url: bool,
+    /// See [`without_quote_guard`](Self::without_quote_guard).
+    quote_guard: bool,
 }
 
 impl Default for PriceLevelStreamBuilder {
@@ -77,11 +119,10 @@ impl Default for PriceLevelStreamBuilder {
             auto_detect: false,
             auto_detected_gas_cost: None,
             connection: ConnectionSettings::default(),
-            fallback_router: true,
+            whitelist_source: WhitelistSource::Env,
             stale_after: DEFAULT_STALE_AFTER,
             whitelist_refresh_interval: DEFAULT_WHITELIST_REFRESH_INTERVAL,
-            fallback_router_rpc_url: None,
-            env_rpc_url: true,
+            quote_guard: true,
         }
     }
 }
@@ -133,14 +174,16 @@ impl PriceLevelStreamBuilder {
     /// Overrides the longest gap between parsed Titan frames tolerated before the connection is
     /// treated as dead and re-established (default: 10s). Titan pushes one frame per second and
     /// sends no keepalives, so a multi-second silence means a stalled or half-open connection.
-    /// Control frames and unparsable text do not reset this timeout.
+    /// Control frames and unparsable text do not reset this timeout, and neither does the time
+    /// the consumer spends between polls: the gap is measured while the stream waits on the
+    /// socket.
     pub fn read_idle_timeout(mut self, timeout: Duration) -> Self {
         self.connection.read_idle_timeout = timeout;
         self
     }
 
-    /// Overrides the cap on the exponential reconnect backoff of `2^attempt` seconds
-    /// (default: 32s).
+    /// Overrides the cap on the exponential backoff of `2^attempt` seconds (default: 32s) that
+    /// spaces both Titan reconnects and retries of the PropAMMRouter whitelist read.
     pub fn max_backoff(mut self, max_backoff: Duration) -> Self {
         self.connection.max_backoff = max_backoff;
         self
@@ -210,9 +253,10 @@ impl PriceLevelStreamBuilder {
     /// By default [`build`](Self::build) emits venues on Titan's PropAMMRouter whitelist under
     /// `propammfallback:{name}` instead, so tycho-execution routes their swaps through the
     /// router. Opt out when the direct call is what you want to measure or execute, or to skip
-    /// the whitelist read at startup.
+    /// the whitelist read at startup. Between this and
+    /// [`fallback_router_rpc_url`](Self::fallback_router_rpc_url), the later call wins.
     pub fn without_fallback_router(mut self) -> Self {
-        self.fallback_router = false;
+        self.whitelist_source = WhitelistSource::Disabled;
         self
     }
 
@@ -220,7 +264,11 @@ impl PriceLevelStreamBuilder {
     /// it (default: 24s, two slots). A component no accepted frame has carried for this long
     /// turns stale and is emitted in `removed_pairs`; the next accepted frame carrying it
     /// re-adds it in `new_pairs`. Frames whose `timestamp` is this old or older are rejected.
-    /// Independent of this setting, a state refuses to quote once its frame is one slot old.
+    /// Independent of this setting, a state refuses to quote once its frame is one slot old
+    /// (see [`without_quote_guard`](Self::without_quote_guard)).
+    ///
+    /// Must be longer than zero and at most [`MAX_STALE_AFTER`]; [`build`](Self::build) fails
+    /// otherwise.
     pub fn stale_after(mut self, duration: Duration) -> Self {
         self.stale_after = duration;
         self
@@ -234,18 +282,28 @@ impl PriceLevelStreamBuilder {
         self
     }
 
-    /// Sets the node URL the PropAMMRouter whitelist is read from, taking precedence over
-    /// `RPC_URL` from the environment or `.env`. Consumers that already hold a node URL should
-    /// pass it here, so that the family their swaps execute under does not depend on the process
-    /// environment.
+    /// Sets the node URL the PropAMMRouter whitelist is read from, instead of `RPC_URL` from
+    /// the environment or `.env`. Consumers that already hold a node URL should pass it here,
+    /// so that the family their swaps execute under does not depend on the process environment.
+    /// Between this and [`without_fallback_router`](Self::without_fallback_router), the later
+    /// call wins.
     pub fn fallback_router_rpc_url(mut self, url: impl Into<String>) -> Self {
-        self.fallback_router_rpc_url = Some(url.into());
+        self.whitelist_source = WhitelistSource::Url(url.into());
         self
     }
 
-    #[cfg(test)]
-    fn without_env_rpc_url(mut self) -> Self {
-        self.env_rpc_url = false;
+    /// Emits states that never refuse to quote.
+    ///
+    /// By default every emitted state refuses `spot_price`, `get_amount_out` and `get_limits`
+    /// once its frame is one slot ([`QUOTE_TTL`](super::state::QUOTE_TTL)) old: Titan quotes
+    /// the block being built, and a venue rejects a fill against an older ladder as stale, so
+    /// such a quote is not executable. Opt out only for a consumer that quotes a state more
+    /// than one slot after it arrived by design — a batch simulator, a validation harness — and
+    /// that accepts a quote the venue may no longer fill. The component still turns stale and
+    /// is removed after [`stale_after`](Self::stale_after), which then becomes the only bound
+    /// on how old a quoted ladder can be. Never disable it on a live router.
+    pub fn without_quote_guard(mut self) -> Self {
+        self.quote_guard = false;
         self
     }
 
@@ -268,51 +326,62 @@ impl PriceLevelStreamBuilder {
     /// With the fallback router enabled (the default), nothing is emitted until the
     /// PropAMMRouter whitelist has been read from the node at
     /// [`fallback_router_rpc_url`](Self::fallback_router_rpc_url) or `RPC_URL`; each read is
-    /// bounded by a timeout, retried with backoff, and refreshed periodically. Without a node URL
-    /// an error is logged and nothing is ever served. See the [module documentation](super) for
-    /// the full contract.
-    pub fn build(self) -> impl Stream<Item = Update> + Send {
-        let whitelist = self.node_url().map(|rpc_url| {
-            let fetch = move || {
-                let rpc_url = rpc_url.clone();
-                async move { fetch_fallback_router_venues(&rpc_url).await }
-            };
-            Box::pin(whitelist_reader(
-                fetch,
-                WHITELIST_READ_TIMEOUT,
-                self.connection.max_backoff,
-                self.whitelist_refresh_interval,
-            )) as WhitelistReader
-        });
+    /// bounded by a timeout, retried with backoff, and refreshed periodically. See the
+    /// [module documentation](super) for the full contract.
+    ///
+    /// # Errors
+    ///
+    /// With the fallback router enabled, fails with
+    /// [`MissingFallbackRouterRpcUrl`](PriceLevelStreamBuildError::MissingFallbackRouterRpcUrl)
+    /// when no node URL is configured and with
+    /// [`InvalidFallbackRouterRpcUrl`](PriceLevelStreamBuildError::InvalidFallbackRouterRpcUrl)
+    /// when the configured one does not parse; a node that is reachable but does not answer is
+    /// retried instead. Fails with
+    /// [`StaleAfterOutOfRange`](PriceLevelStreamBuildError::StaleAfterOutOfRange) when
+    /// [`stale_after`](Self::stale_after) is zero or longer than [`MAX_STALE_AFTER`].
+    pub fn build(self) -> Result<impl Stream<Item = Update> + Send, PriceLevelStreamBuildError> {
+        let whitelist = self.whitelist_reader(rpc_url_from_env)?;
         self.build_with_whitelist(whitelist)
     }
 
-    /// The node URL the whitelist is read from, or `None` when the fallback router is off or no
-    /// URL is configured.
-    fn node_url(&self) -> Option<String> {
-        match (self.fallback_router, &self.fallback_router_rpc_url) {
-            (false, Some(_)) => {
-                tracing::debug!(
-                    "fallback_router_rpc_url is set but the fallback router is disabled; \
-                     ignoring it"
-                );
-                None
+    /// The whitelist reader for the configured source, or a stream that never yields when the
+    /// fallback router is off. `env_rpc_url` resolves `RPC_URL` when the source is the
+    /// environment.
+    fn whitelist_reader(
+        &self,
+        env_rpc_url: impl FnOnce() -> Option<String>,
+    ) -> Result<WhitelistReader, PriceLevelStreamBuildError> {
+        let rpc_url = match &self.whitelist_source {
+            WhitelistSource::Disabled => return Ok(Box::pin(tokio_stream::pending())),
+            WhitelistSource::Url(url) => url.clone(),
+            WhitelistSource::Env => {
+                env_rpc_url().ok_or(PriceLevelStreamBuildError::MissingFallbackRouterRpcUrl)?
             }
-            (false, None) => None,
-            (true, Some(explicit)) => Some(explicit.clone()),
-            (true, None) => self
-                .env_rpc_url
-                .then(rpc_url_from_env)
-                .flatten(),
+        };
+        if let Err(e) = rpc_url.parse::<reqwest::Url>() {
+            return Err(PriceLevelStreamBuildError::InvalidFallbackRouterRpcUrl {
+                url: rpc_url,
+                reason: e.to_string(),
+            });
         }
+        let fetch = move || {
+            let rpc_url = rpc_url.clone();
+            async move { fetch_fallback_router_venues(&rpc_url).await }
+        };
+        let settings = WhitelistReaderSettings {
+            read_timeout: WHITELIST_READ_TIMEOUT,
+            max_backoff: self.connection.max_backoff,
+            refresh_interval: self.whitelist_refresh_interval,
+        };
+        Ok(Box::pin(whitelist_reader(fetch, settings)))
     }
 
     /// Opens the stream (see [`build`](Self::build)) with `whitelist` as the source of whitelist
-    /// reads. With the fallback router enabled and no reader, nothing is ever served.
+    /// reads.
     fn build_with_whitelist(
         self,
-        mut whitelist: Option<WhitelistReader>,
-    ) -> impl Stream<Item = Update> + Send {
+        mut whitelist: WhitelistReader,
+    ) -> Result<impl Stream<Item = Update> + Send, PriceLevelStreamBuildError> {
         let Self {
             registry,
             denied,
@@ -321,12 +390,14 @@ impl PriceLevelStreamBuilder {
             auto_detect,
             auto_detected_gas_cost,
             connection,
-            fallback_router,
+            whitelist_source,
             stale_after,
             whitelist_refresh_interval: _,
-            fallback_router_rpc_url: _,
-            env_rpc_url: _,
+            quote_guard,
         } = self;
+        if stale_after.is_zero() || stale_after > MAX_STALE_AFTER {
+            return Err(PriceLevelStreamBuildError::StaleAfterOutOfRange { given: stale_after });
+        }
         if registry.is_empty() && !auto_detect {
             tracing::warn!(
                 "No pAMMs registered and auto-detection is off; the stream will never produce \
@@ -342,25 +413,22 @@ impl PriceLevelStreamBuilder {
         let url = url.unwrap_or_else(|| TITAN_PRICE_LEVEL_URL.to_string());
         let auto_detected_gas_cost =
             auto_detected_gas_cost.unwrap_or_else(|| BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
-        if fallback_router && whitelist.is_none() {
-            tracing::error!(
-                "No node URL to read the PropAMMRouter whitelist from: set RPC_URL, call \
-                 fallback_router_rpc_url, or opt out with without_fallback_router. No pAMM will \
-                 be served"
-            );
-            telemetry::record_serving_state(ServingState::AwaitingWhitelist);
-        }
-        let mut tracker = FreshnessTracker::new(
+        let whitelist_mode = match whitelist_source {
+            WhitelistSource::Disabled => Whitelist::NotUsed,
+            WhitelistSource::Url(_) | WhitelistSource::Env => Whitelist::Awaited,
+        };
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
             registry,
             denied,
             tokens,
             auto_detect,
             auto_detected_gas_cost,
             stale_after,
-            fallback_router,
-        );
+            whitelist: whitelist_mode,
+            quote_guard,
+        });
 
-        stream! {
+        Ok(stream! {
             let frames = titan::messages(url, connection);
             tokio::pin!(frames);
             loop {
@@ -371,31 +439,19 @@ impl PriceLevelStreamBuilder {
                 let update = tokio::select! {
                     Some(frame) = frames.next() => tracker.on_frame(frame, Now::current()),
                     () = sleep_until_deadline, if deadline.is_some() => {
-                        tracker.on_stale_deadline(Now::current())
+                        tracker.on_stale_deadline(Instant::now())
                     }
-                    read = next_whitelist_read(&mut whitelist) => tracker.on_whitelist_read(read),
+                    Some(venues) = whitelist.next() => tracker.on_whitelist_read(venues),
                 };
                 if let Some(update) = update {
                     yield update;
                 }
             }
-        }
+        })
     }
 }
 
-type WhitelistReader = Pin<Box<dyn Stream<Item = WhitelistRead> + Send>>;
-
-/// Returns the next whitelist read. Never resolves when `reader` is `None` or has ended, so its
-/// `select!` arm never fires.
-async fn next_whitelist_read(reader: &mut Option<WhitelistReader>) -> WhitelistRead {
-    let Some(reader) = reader else {
-        return std::future::pending().await;
-    };
-    match reader.next().await {
-        Some(read) => read,
-        None => std::future::pending().await,
-    }
-}
+type WhitelistReader = Pin<Box<dyn Stream<Item = HashSet<Bytes>> + Send>>;
 
 /// The node URL the whitelist is read from: `RPC_URL` from the environment, falling back to
 /// `.env`.
@@ -428,6 +484,7 @@ mod tests {
         super::{
             config::{default_denied_pamms, PriceLevelStreamConfig},
             fallback_router::FetchVenuesError,
+            state::PriceLevelStreamState,
             telemetry::{
                 recorded::{counter_value, gauge_value, record_async},
                 RECONNECTS, SERVING_STATE, WHITELIST_READS,
@@ -534,14 +591,41 @@ mod tests {
         }
     }
 
-    /// The PropAMMRouter path is the default; `without_fallback_router` is the way off it.
+    /// The PropAMMRouter path through `RPC_URL` is the default; `without_fallback_router` is
+    /// the way off it and `fallback_router_rpc_url` names the node explicitly. The later call
+    /// wins between the two.
     #[test]
-    fn fallback_router_is_on_unless_opted_out() {
-        assert!(PriceLevelStreamBuilder::new().fallback_router);
+    fn whitelist_source_follows_the_last_call() {
+        assert_eq!(PriceLevelStreamBuilder::new().whitelist_source, WhitelistSource::Env);
+        assert_eq!(
+            PriceLevelStreamBuilder::new()
+                .without_fallback_router()
+                .whitelist_source,
+            WhitelistSource::Disabled
+        );
+        assert_eq!(
+            PriceLevelStreamBuilder::new()
+                .without_fallback_router()
+                .fallback_router_rpc_url("http://node")
+                .whitelist_source,
+            WhitelistSource::Url("http://node".to_string())
+        );
+        assert_eq!(
+            PriceLevelStreamBuilder::new()
+                .fallback_router_rpc_url("http://node")
+                .without_fallback_router()
+                .whitelist_source,
+            WhitelistSource::Disabled
+        );
+    }
+
+    #[test]
+    fn quote_guard_is_on_unless_opted_out() {
+        assert!(PriceLevelStreamBuilder::new().quote_guard);
         assert!(
             !PriceLevelStreamBuilder::new()
-                .without_fallback_router()
-                .fallback_router
+                .without_quote_guard()
+                .quote_guard
         );
     }
 
@@ -661,7 +745,9 @@ mod tests {
     #[tokio::test]
     async fn silence_past_stale_after_removes_every_served_component() {
         let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
-        let stream = fast_builder(&fake).build();
+        let stream = fast_builder(&fake)
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -686,7 +772,9 @@ mod tests {
             let _ = socket.close(None).await;
         })
         .await;
-        let stream = fast_builder(&fake).build();
+        let stream = fast_builder(&fake)
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -706,7 +794,9 @@ mod tests {
                 let _ = socket.close(None).await;
             })
             .await;
-            let stream = fast_builder(&fake).build();
+            let stream = fast_builder(&fake)
+                .build()
+                .expect("build");
             tokio::pin!(stream);
 
             expect_first_update(&mut stream).await;
@@ -733,7 +823,8 @@ mod tests {
                 .await;
         let stream = fast_builder(&fake)
             .read_idle_timeout(Duration::from_secs(5))
-            .build();
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -756,7 +847,9 @@ mod tests {
             Duration::from_millis(10),
         ))
         .await;
-        let stream = fast_builder(&fake).build();
+        let stream = fast_builder(&fake)
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -776,7 +869,9 @@ mod tests {
             Duration::from_millis(10),
         ))
         .await;
-        let stream = fast_builder(&fake).build();
+        let stream = fast_builder(&fake)
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -801,7 +896,8 @@ mod tests {
         .await;
         let stream = fast_builder(&fake)
             .read_idle_timeout(Duration::from_secs(5))
-            .build();
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -823,7 +919,8 @@ mod tests {
         let fake = FakeTitan::spawn(fresh_frame_every(Duration::from_millis(50))).await;
         let stream = fast_builder(&fake)
             .stale_after(Duration::from_secs(24))
-            .build();
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -838,7 +935,9 @@ mod tests {
     #[tokio::test]
     async fn no_connection_before_first_poll() {
         let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
-        let stream = fast_builder(&fake).build();
+        let stream = fast_builder(&fake)
+            .build()
+            .expect("build");
         tokio::pin!(stream);
 
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -871,7 +970,8 @@ mod tests {
         let mut stream = Box::pin(
             fast_builder(&fake)
                 .read_idle_timeout(Duration::from_secs(5))
-                .build(),
+                .build()
+                .expect("build"),
         );
         expect_first_update(&mut stream.as_mut()).await;
 
@@ -886,18 +986,19 @@ mod tests {
     async fn successful_whitelist_read_serves_the_venue_under_propammfallback() {
         let fake = FakeTitan::spawn(fresh_frame_every(Duration::from_millis(50))).await;
         let fetch = || async { Ok::<_, FetchVenuesError>(vec![Bytes::from_str(PAMM).unwrap()]) };
-        let reader = Box::pin(whitelist_reader(
-            fetch,
-            WHITELIST_READ_TIMEOUT,
-            Duration::from_millis(20),
-            Duration::from_secs(60),
-        )) as WhitelistReader;
+        let settings = WhitelistReaderSettings {
+            read_timeout: WHITELIST_READ_TIMEOUT,
+            max_backoff: Duration::from_millis(20),
+            refresh_interval: Duration::from_secs(60),
+        };
+        let reader = Box::pin(whitelist_reader(fetch, settings)) as WhitelistReader;
         let stream = PriceLevelStreamBuilder::new()
             .endpoint(fake.url())
             .add_pamm(fermiswap())
             .with_tokens(tokens())
             .connect_timeout(Duration::from_secs(1))
-            .build_with_whitelist(Some(reader));
+            .build_with_whitelist(reader)
+            .expect("build");
         tokio::pin!(stream);
 
         let first = expect_first_update(&mut stream).await;
@@ -922,7 +1023,8 @@ mod tests {
                 .with_tokens(tokens())
                 .connect_timeout(Duration::from_secs(1))
                 .max_backoff(Duration::from_millis(20))
-                .build();
+                .build()
+                .expect("build");
             tokio::pin!(stream);
             assert!(next_within(&mut stream, Duration::from_millis(700))
                 .await
@@ -937,25 +1039,80 @@ mod tests {
             counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]) >= 1,
             "no whitelist read failed"
         );
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 0.0, "not awaiting the whitelist");
     }
 
     #[test]
-    fn missing_node_url_serves_nothing_and_reports_awaiting_whitelist() {
-        let ((), snapshot) = record_async(async {
-            let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
-            let stream = PriceLevelStreamBuilder::new()
-                .endpoint(fake.url())
-                .without_env_rpc_url()
+    fn missing_node_url_fails_to_build() {
+        let builder = PriceLevelStreamBuilder::new()
+            .add_pamm(fermiswap())
+            .with_tokens(tokens());
+        match builder.whitelist_reader(|| None) {
+            Err(PriceLevelStreamBuildError::MissingFallbackRouterRpcUrl) => {}
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("built a whitelist reader without a node URL"),
+        }
+    }
+
+    #[test]
+    fn invalid_node_url_fails_to_build() {
+        let result = PriceLevelStreamBuilder::new()
+            .fallback_router_rpc_url("not a url")
+            .add_pamm(fermiswap())
+            .with_tokens(tokens())
+            .build();
+        match result {
+            Err(PriceLevelStreamBuildError::InvalidFallbackRouterRpcUrl { url, reason: _ }) => {
+                assert_eq!(url, "not a url");
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("built with an unparsable node URL"),
+        }
+    }
+
+    #[test]
+    fn stale_after_outside_its_range_fails_to_build() {
+        for given in [Duration::ZERO, MAX_STALE_AFTER + Duration::from_secs(1), Duration::MAX] {
+            let result = PriceLevelStreamBuilder::new()
+                .without_fallback_router()
                 .add_pamm(fermiswap())
                 .with_tokens(tokens())
-                .connect_timeout(Duration::from_secs(1))
+                .stale_after(given)
                 .build();
-            tokio::pin!(stream);
-            assert!(next_within(&mut stream, Duration::from_millis(500))
-                .await
-                .is_none());
-        });
+            match result {
+                Err(PriceLevelStreamBuildError::StaleAfterOutOfRange { given: reported }) => {
+                    assert_eq!(reported, given);
+                }
+                Err(other) => panic!("unexpected error for {given:?}: {other}"),
+                Ok(_) => panic!("built with stale_after {given:?}"),
+            }
+        }
+        assert!(PriceLevelStreamBuilder::new()
+            .without_fallback_router()
+            .stale_after(MAX_STALE_AFTER)
+            .build()
+            .is_ok());
+    }
 
-        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 0.0);
+    #[tokio::test]
+    async fn without_quote_guard_emits_states_that_never_expire() {
+        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let stream = fast_builder(&fake)
+            .without_quote_guard()
+            .build()
+            .expect("build");
+        tokio::pin!(stream);
+
+        let first = expect_first_update(&mut stream).await;
+
+        let state = first
+            .states
+            .values()
+            .next()
+            .expect("one state")
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert!(state.quotable_until().is_none());
     }
 }

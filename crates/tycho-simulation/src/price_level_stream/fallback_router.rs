@@ -19,7 +19,10 @@ use futures::Stream;
 use tokio::time::{sleep, timeout};
 use tycho_common::Bytes;
 
-use super::{telemetry, titan::backoff};
+use super::{
+    backoff,
+    telemetry::{self, ReadOutcome},
+};
 
 /// Titan's PropAMMRouter deployment on Ethereum mainnet: written by LambdaClass, behind a UUPS
 /// proxy so upgrades keep the address.
@@ -60,33 +63,35 @@ pub enum FetchVenuesError {
     },
 }
 
-/// The outcome of one whitelist read.
-#[derive(Debug)]
-pub(super) enum WhitelistRead {
-    Ok(HashSet<Bytes>),
-    Failed(FetchVenuesError),
-}
-
-/// Longest a single whitelist read may take. A read that takes longer fails with
-/// `FetchVenuesError::Timeout` and is retried, so a node that accepts the connection and never
-/// answers cannot block the first read or a refresh forever.
+/// The default [`WhitelistReaderSettings::read_timeout`].
 pub(super) const WHITELIST_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Reads the whitelist through `fetch` in a loop and yields the outcome of every read. A read
-/// that takes longer than `read_timeout` fails. After a failure the reader waits `2^attempt`
-/// seconds, capped at `max_backoff`, and reads again; after a success it waits
-/// `refresh_interval` and reads again. The stream never ends. The reader logs one WARN per
-/// failure.
+/// The timings of a [`whitelist_reader`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct WhitelistReaderSettings {
+    /// Longest a single read may take. A slower read fails with `FetchVenuesError::Timeout` and
+    /// is retried, so a node that accepts the connection and never answers cannot block the first
+    /// read or a refresh forever.
+    pub read_timeout: Duration,
+    /// Cap on the `2^attempt` seconds backoff between a failed read and its retry.
+    pub max_backoff: Duration,
+    /// How long after a successful read the next one starts.
+    pub refresh_interval: Duration,
+}
+
+/// Reads the whitelist through `fetch` in a loop and yields every successful read. A failed or
+/// slow read (see [`WhitelistReaderSettings`]) is logged once at WARN, counted, and retried after
+/// a backoff; nothing is yielded until a read succeeds, so a consumer only ever sees whitelists.
+/// The stream never ends.
 pub(super) fn whitelist_reader<F, Fut>(
     fetch: F,
-    read_timeout: Duration,
-    max_backoff: Duration,
-    refresh_interval: Duration,
-) -> impl Stream<Item = WhitelistRead> + Send
+    settings: WhitelistReaderSettings,
+) -> impl Stream<Item = HashSet<Bytes>> + Send
 where
     F: Fn() -> Fut + Send + 'static,
     Fut: Future<Output = Result<Vec<Bytes>, FetchVenuesError>> + Send,
 {
+    let WhitelistReaderSettings { read_timeout, max_backoff, refresh_interval } = settings;
     stream! {
         let mut attempt: u32 = 0;
         loop {
@@ -96,14 +101,14 @@ where
             match outcome {
                 Ok(venues) => {
                     attempt = 0;
-                    telemetry::record_whitelist_read("ok");
+                    telemetry::record_whitelist_read(ReadOutcome::Ok);
                     let venues: HashSet<Bytes> = venues.into_iter().collect();
-                    yield WhitelistRead::Ok(venues);
+                    yield venues;
                     sleep(refresh_interval).await;
                 }
                 Err(error) => {
                     attempt = attempt.saturating_add(1);
-                    telemetry::record_whitelist_read("error");
+                    telemetry::record_whitelist_read(ReadOutcome::Error);
                     let delay = backoff(attempt, max_backoff);
                     tracing::warn!(
                         error = %error,
@@ -111,7 +116,6 @@ where
                         retry_secs = delay.as_secs_f64(),
                         "PropAMMRouter whitelist read failed; retrying"
                     );
-                    yield WhitelistRead::Failed(error);
                     sleep(delay).await;
                 }
             }
@@ -209,6 +213,15 @@ mod tests {
         assert!(source.contains(&address), "PropAMMFallbackExecutor.sol does not use {address}");
     }
 
+    /// Settings that retry and refresh quickly enough for a test.
+    fn fast_settings() -> WhitelistReaderSettings {
+        WhitelistReaderSettings {
+            read_timeout: Duration::from_secs(1),
+            max_backoff: Duration::from_millis(5),
+            refresh_interval: Duration::from_millis(20),
+        }
+    }
+
     #[test]
     fn reader_retries_failures_and_refreshes_after_success() {
         type ScriptQueue = Arc<Mutex<VecDeque<Result<Vec<Bytes>, FetchVenuesError>>>>;
@@ -229,23 +242,16 @@ mod tests {
             async move { next }
         };
         let ((), snapshot) = record_async(async {
-            let reader = whitelist_reader(
-                fetch,
-                Duration::from_secs(1),
-                Duration::from_millis(5),
-                Duration::from_millis(20),
-            );
+            let reader = whitelist_reader(fetch, fast_settings());
             tokio::pin!(reader);
 
-            assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
-            assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
-            match reader.next().await {
-                Some(WhitelistRead::Ok(venues)) => assert_eq!(venues.len(), 1),
-                other => panic!("expected a successful read, got {other:?}"),
-            }
+            // The two failures are retried without yielding; the first item is the first
+            // successful read.
+            let venues = reader.next().await.expect("never ends");
+            assert_eq!(venues, HashSet::from([venue]));
             // The reader reads again after `refresh_interval`.
             match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-                Ok(Some(WhitelistRead::Ok(venues))) => assert!(venues.is_empty()),
+                Ok(Some(venues)) => assert!(venues.is_empty()),
                 other => panic!("expected a refresh, got {other:?}"),
             }
         });
@@ -253,8 +259,8 @@ mod tests {
         assert_eq!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "ok")]), 2);
     }
 
-    #[tokio::test]
-    async fn reader_fails_a_read_that_never_resolves() {
+    #[test]
+    fn reader_fails_a_read_that_never_resolves() {
         let calls = Arc::new(AtomicUsize::new(0));
         let fetch = {
             let calls = calls.clone();
@@ -263,46 +269,52 @@ mod tests {
                 std::future::pending::<Result<Vec<Bytes>, FetchVenuesError>>()
             }
         };
-        let reader = whitelist_reader(
-            fetch,
-            Duration::from_millis(30),
-            Duration::from_millis(5),
-            Duration::from_secs(60),
-        );
-        tokio::pin!(reader);
-
-        // Two consecutive timeouts prove the read is bounded and retried.
-        for _ in 0..2 {
-            match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-                Ok(Some(WhitelistRead::Failed(FetchVenuesError::Timeout { after }))) => {
-                    assert_eq!(after, Duration::from_millis(30));
-                }
-                other => panic!("expected a timeout, got {other:?}"),
-            }
-        }
+        let ((), snapshot) = record_async(async {
+            let settings = WhitelistReaderSettings {
+                read_timeout: Duration::from_millis(30),
+                refresh_interval: Duration::from_secs(60),
+                ..fast_settings()
+            };
+            let reader = whitelist_reader(fetch, settings);
+            tokio::pin!(reader);
+            // Every read times out, so nothing is ever yielded.
+            assert!(tokio::time::timeout(Duration::from_millis(300), reader.next())
+                .await
+                .is_err());
+        });
+        // Two or more calls prove the read is bounded and retried.
         assert!(calls.load(Ordering::SeqCst) >= 2);
+        assert!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]) >= 2);
     }
 
     #[test]
-    fn whitelist_read_failures_are_counted() {
-        let fetch = || async {
-            Err::<Vec<Bytes>, FetchVenuesError>(FetchVenuesError::Call {
-                reason: "connection refused".to_string(),
-            })
+    fn failed_reads_are_counted_and_never_yielded() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetch = {
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<Vec<Bytes>, FetchVenuesError>(FetchVenuesError::Call {
+                        reason: "connection refused".to_string(),
+                    })
+                }
+            }
         };
         let ((), snapshot) = record_async(async {
-            let reader = whitelist_reader(
-                fetch,
-                Duration::from_millis(30),
-                Duration::from_millis(5),
-                Duration::from_secs(60),
-            );
+            let reader = whitelist_reader(fetch, fast_settings());
             tokio::pin!(reader);
-            for _ in 0..2 {
-                assert!(matches!(reader.next().await, Some(WhitelistRead::Failed(_))));
-            }
+            assert!(tokio::time::timeout(Duration::from_millis(100), reader.next())
+                .await
+                .is_err());
         });
-        // The reader is parked at its second `yield`, so the count is exact.
-        assert_eq!(counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]), 2);
+        // Each failed call is counted before the reader sleeps, and the timeout can only
+        // interrupt the sleep, so the count matches the calls exactly.
+        let calls = calls.load(Ordering::SeqCst);
+        assert!(calls >= 2, "only {calls} read attempts");
+        assert_eq!(
+            counter_value(&snapshot, WHITELIST_READS, &[("outcome", "error")]),
+            calls as u64
+        );
     }
 }

@@ -15,28 +15,25 @@ use tycho_common::{
 
 use super::{
     config::PriceLevelStreamConfig,
-    fallback_router::WhitelistRead,
     state::{PriceLevelStreamQuote, PriceLevelStreamState, QUOTE_TTL},
     stream::PAMM_ADDRESS_ATTRIBUTE,
-    telemetry,
+    telemetry::{self, RejectReason},
     titan::{TitanPairLevels, TitanPammLevels, TitanPriceLevel, TitanPriceLevelMessage},
+    SLOT,
 };
 use crate::protocol::models::{ProtocolComponent, Update};
 
 /// How long a component stays served after the last accepted frame that carried it: two slots.
 /// Titan streams at 1 Hz and its frames arrive within about 3 s of being built, so 24 s absorbs
 /// jitter and still removes a silent component within two blocks.
-pub(super) const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(24);
+pub(super) const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(2 * SLOT.as_secs());
 
 pub(super) const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 /// Furthest a frame's `timestamp` may lie ahead of the local wall clock: one slot. Titan's
 /// frames were observed at least 120 ms behind the local clock; anything ahead of it by more
 /// than clock skew is implausible.
-const MAX_FUTURE_SKEW_NANOS: u64 = 12 * NANOS_PER_SECOND;
-
-/// Post-merge Ethereum slot duration in seconds.
-const SECONDS_PER_SLOT: u64 = 12;
+const MAX_FUTURE_SKEW_NANOS: u64 = SLOT.as_secs() * NANOS_PER_SECOND;
 
 /// Extra blocks a frame may jump beyond one block per elapsed slot. Titan builds at chain head + 1
 /// and sometimes + 2, so a frame right after a block boundary may jump by two.
@@ -47,7 +44,7 @@ const BLOCK_JUMP_SLACK: u64 = 2;
 /// memory, and no address becomes a metric label.
 const MAX_UNREGISTERED_LOGGED: usize = 64;
 
-/// The wall-clock and monotonic time at which the tracker handles a frame or a deadline.
+/// The wall-clock and monotonic time at which the tracker handles a frame.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Now {
     /// Wall clock, nanoseconds since the Unix epoch. Only ever compared against Titan's
@@ -80,34 +77,6 @@ impl Now {
     }
 }
 
-/// Why the tracker rejected a parsed frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Rejection {
-    /// Built `stale_after` ago or earlier.
-    TooOld,
-    /// Built more than one slot ahead of the local clock.
-    InFuture,
-    /// Older than the newest accepted frame.
-    OutOfOrder,
-    /// Targets a block below the newest accepted one.
-    BlockRegression,
-    /// Targets a block above the newest accepted block by more than one block per elapsed 12 s
-    /// plus [`BLOCK_JUMP_SLACK`].
-    BlockJump,
-}
-
-impl Rejection {
-    fn as_str(self) -> &'static str {
-        match self {
-            Rejection::TooOld => "too_old",
-            Rejection::InFuture => "in_future",
-            Rejection::OutOfOrder => "out_of_order",
-            Rejection::BlockRegression => "block_regression",
-            Rejection::BlockJump => "block_jump",
-        }
-    }
-}
-
 /// A component the stream currently serves.
 struct ServedComponent {
     component: ProtocolComponent,
@@ -119,7 +88,17 @@ struct ServedComponent {
     stale_at: Instant,
 }
 
+/// The newest accepted frame while something is served. A later frame may not target a block
+/// below `block`, nor one above it by more than one block per slot elapsed since `accepted_at`
+/// plus [`BLOCK_JUMP_SLACK`].
+#[derive(Clone, Copy, Debug)]
+struct Frontier {
+    block: u64,
+    accepted_at: Instant,
+}
+
 /// The stream's serving state.
+#[derive(Clone, Copy)]
 enum ServingState {
     /// The PropAMMRouter whitelist has not been read yet: the family of every component is
     /// unknown, so frames are validated but nothing is emitted.
@@ -127,18 +106,49 @@ enum ServingState {
     /// Whitelist known (or not needed) and nothing served: at start, and whenever the last
     /// served component turned stale.
     Unserved,
-    /// At least one component is served; `deadline` is the earliest component deadline.
-    Serving { deadline: Instant },
+    /// At least one component is served. `deadline` is the earliest `stale_at` among them and
+    /// `frontier` the newest accepted frame. Both exist only in this state, so a frame accepted
+    /// while nothing is served never binds the block checks of a later frame.
+    Serving { deadline: Instant, frontier: Frontier },
 }
 
 impl ServingState {
-    fn telemetry_state(&self) -> telemetry::ServingState {
+    fn telemetry_state(self) -> telemetry::ServingState {
         match self {
             ServingState::AwaitingWhitelist => telemetry::ServingState::AwaitingWhitelist,
             ServingState::Unserved => telemetry::ServingState::Unserved,
-            ServingState::Serving { deadline: _ } => telemetry::ServingState::Serving,
+            ServingState::Serving { deadline: _, frontier: _ } => telemetry::ServingState::Serving,
         }
     }
+}
+
+/// How the tracker learns the PropAMMRouter whitelist.
+pub(super) enum Whitelist {
+    /// Delivered later through [`FreshnessTracker::on_whitelist_read`]; nothing is served until
+    /// then.
+    Awaited,
+    /// Never read: every venue stays on the direct family.
+    NotUsed,
+}
+
+/// What a [`FreshnessTracker`] is built from.
+pub(super) struct TrackerSettings {
+    pub registry: HashMap<Bytes, PriceLevelStreamConfig>,
+    /// Venues excluded from auto-detection. Disjoint from `registry`: the builder keeps denying
+    /// and registering the same address from overlapping.
+    pub denied: HashSet<Bytes>,
+    pub tokens: HashMap<Bytes, Token>,
+    /// Whether frames from pAMMs absent from the registry get an address-named configuration
+    /// synthesized (and cached in the registry) instead of being skipped.
+    pub auto_detect: bool,
+    /// The per-swap gas cost synthesized auto-detected configurations are served with.
+    pub auto_detected_gas_cost: BigUint,
+    /// How long a component stays served after the last accepted frame that carried it; see
+    /// [`DEFAULT_STALE_AFTER`].
+    pub stale_after: Duration,
+    pub whitelist: Whitelist,
+    /// Whether every emitted state refuses to quote once its frame is [`QUOTE_TTL`] old.
+    pub quote_guard: bool,
 }
 
 /// Turns Titan frames into [`Update`]s. A frame only adds or refreshes components: a component (or
@@ -146,36 +156,23 @@ impl ServingState {
 /// [`on_stale_deadline`](Self::on_stale_deadline).
 pub(super) struct FreshnessTracker {
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
-    /// Venues excluded from auto-detection. The builder keeps this disjoint from the registry:
-    /// denying removes any registration and registering removes any denial.
     denied: HashSet<Bytes>,
     tokens: HashMap<Bytes, Token>,
-    /// Whether frames from pAMMs absent from the registry get an address-named configuration
-    /// synthesized (and cached in the registry) instead of being skipped.
     auto_detect: bool,
-    /// The per-swap gas cost synthesized auto-detected configurations are served with.
     auto_detected_gas_cost: BigUint,
+    stale_after: Duration,
+    quote_guard: bool,
     /// Venues whose components are emitted under the `propammfallback:` family, so their swaps
     /// execute through Titan's PropAMMRouter instead of the venue directly.
     router_venues: HashSet<Bytes>,
     /// The components currently served, keyed by component id.
     served: HashMap<String, ServedComponent>,
-    /// The stream's serving state; drives [`Self::stale_deadline`] and the per-venue gauges.
+    /// The stream's serving state; holds the block frontier and drives
+    /// [`Self::stale_deadline`] and the per-venue gauges.
     serving_state: ServingState,
-    /// How long a component stays served after the last accepted frame that carried it; see
-    /// [`DEFAULT_STALE_AFTER`].
-    stale_after: Duration,
     /// The `timestamp` of the newest accepted frame. Frames older than it are out of order;
     /// equal ones are re-emissions within a build round and accepted. Never reset.
     newest_timestamp_nanos: u64,
-    /// The block of the newest accepted frame. Later frames may not regress below it, nor jump
-    /// more than one block per elapsed slot plus 2. Reset with `last_accepted`.
-    newest_block: u64,
-    /// When the newest frame was accepted; `None` whenever nothing is served, which skips the
-    /// block checks for the next frame. It is set only while the stream serves something: a
-    /// frame that serves nothing — because the whitelist is still awaited, or because it carries
-    /// nothing this tracker can build — resets it immediately.
-    last_accepted: Option<Instant>,
     /// Whether the last frame was rejected. The first rejection of a streak logs at WARN and the
     /// rest at DEBUG; `price_level_stream_frames_rejected_total` counts every rejection.
     rejecting: bool,
@@ -184,17 +181,21 @@ pub(super) struct FreshnessTracker {
 }
 
 impl FreshnessTracker {
-    pub(super) fn new(
-        registry: HashMap<Bytes, PriceLevelStreamConfig>,
-        denied: HashSet<Bytes>,
-        tokens: HashMap<Bytes, Token>,
-        auto_detect: bool,
-        auto_detected_gas_cost: BigUint,
-        stale_after: Duration,
-        fallback_router: bool,
-    ) -> Self {
-        let serving_state =
-            if fallback_router { ServingState::AwaitingWhitelist } else { ServingState::Unserved };
+    pub(super) fn new(settings: TrackerSettings) -> Self {
+        let TrackerSettings {
+            registry,
+            denied,
+            tokens,
+            auto_detect,
+            auto_detected_gas_cost,
+            stale_after,
+            whitelist,
+            quote_guard,
+        } = settings;
+        let serving_state = match whitelist {
+            Whitelist::Awaited => ServingState::AwaitingWhitelist,
+            Whitelist::NotUsed => ServingState::Unserved,
+        };
         telemetry::record_serving_state(serving_state.telemetry_state());
         // Pre-initialise every per-venue series so a venue that never appears is a visible
         // zero, not a missing series.
@@ -208,40 +209,38 @@ impl FreshnessTracker {
             tokens,
             auto_detect,
             auto_detected_gas_cost,
+            stale_after,
+            quote_guard,
             router_venues: HashSet::new(),
             served: HashMap::new(),
             serving_state,
-            stale_after,
             newest_timestamp_nanos: 0,
-            newest_block: 0,
-            last_accepted: None,
             rejecting: false,
             logged_unregistered: HashSet::new(),
         }
     }
 
-    /// Applies a whitelist read. A failed read keeps the last known set. A successful read that
-    /// changes a served venue's family removes that venue's components now; the next accepted
-    /// frame carrying them re-adds them under the new family.
-    pub(super) fn on_whitelist_read(&mut self, read: WhitelistRead) -> Option<Update> {
-        let venues = match read {
-            WhitelistRead::Failed(error) => {
-                tracing::debug!(error = %error, "Whitelist read failed; whitelist unchanged");
+    /// Applies a successful whitelist read. The first read starts serving from the next frame. A
+    /// later read that changes a served venue's family removes that venue's components now; the
+    /// next accepted frame carrying them re-adds them under the new family.
+    pub(super) fn on_whitelist_read(&mut self, venues: HashSet<Bytes>) -> Option<Update> {
+        telemetry::record_whitelisted_venues(venues.len());
+        let frontier = match self.serving_state {
+            ServingState::AwaitingWhitelist => {
+                self.router_venues = venues;
+                tracing::info!(
+                    venues = self.router_venues.len(),
+                    "PropAMMRouter venue whitelist read; serving pAMMs from the next frame"
+                );
+                self.set_serving_state(ServingState::Unserved);
                 return None;
             }
-            WhitelistRead::Ok(venues) => venues,
+            ServingState::Unserved => {
+                self.router_venues = venues;
+                return None;
+            }
+            ServingState::Serving { deadline: _, frontier } => frontier,
         };
-        telemetry::record_whitelisted_venues(venues.len());
-        if let ServingState::AwaitingWhitelist = self.serving_state {
-            self.router_venues = venues;
-            tracing::info!(
-                venues = self.router_venues.len(),
-                "PropAMMRouter venue whitelist read; serving pAMMs from the next frame"
-            );
-            self.serving_state = ServingState::Unserved;
-            telemetry::record_serving_state(self.serving_state.telemetry_state());
-            return None;
-        }
         let previous = std::mem::replace(&mut self.router_venues, venues);
         let mut removed = HashMap::new();
         for (id, served) in self.served.extract_if(|_, served| {
@@ -259,151 +258,152 @@ impl FreshnessTracker {
         if removed.is_empty() {
             return None;
         }
-        // Build the update before `refresh_serving_state`, which resets `newest_block` to 0 once
-        // nothing is served: the removal must carry the newest accepted block.
-        let update = self.removal_update(removed);
-        self.refresh_serving_state();
+        let update = removal_update(frontier.block, removed);
+        self.settle(frontier);
         Some(update)
     }
 
     /// Returns the frame's age if the frame passes the timestamp and block checks, or the
-    /// [`Rejection`] that names the first failed check.
-    fn check_frame(&self, frame: &TitanPriceLevelMessage, now: Now) -> Result<Duration, Rejection> {
+    /// [`RejectReason`] that names the first failed check. The block checks bind only while
+    /// something is served.
+    fn check_frame(
+        &self,
+        frame: &TitanPriceLevelMessage,
+        now: Now,
+    ) -> Result<Duration, RejectReason> {
         let frame_age = Duration::from_nanos(
             now.wall_nanos
                 .saturating_sub(frame.timestamp),
         );
         if frame_age >= self.stale_after {
-            return Err(Rejection::TooOld);
+            return Err(RejectReason::TooOld);
         }
         if frame.timestamp >
             now.wall_nanos
                 .saturating_add(MAX_FUTURE_SKEW_NANOS)
         {
-            return Err(Rejection::InFuture);
+            return Err(RejectReason::InFuture);
         }
         if frame.timestamp < self.newest_timestamp_nanos {
-            return Err(Rejection::OutOfOrder);
+            return Err(RejectReason::OutOfOrder);
         }
-        let Some(last_accepted) = self.last_accepted else {
+        let ServingState::Serving { deadline: _, frontier } = self.serving_state else {
             return Ok(frame_age);
         };
-        if frame.block_number < self.newest_block {
-            return Err(Rejection::BlockRegression);
+        if frame.block_number < frontier.block {
+            return Err(RejectReason::BlockRegression);
         }
         let elapsed_slots = now
             .monotonic
-            .saturating_duration_since(last_accepted)
+            .saturating_duration_since(frontier.accepted_at)
             .as_secs() /
-            SECONDS_PER_SLOT;
-        let allowed = self
-            .newest_block
+            SLOT.as_secs();
+        let allowed = frontier
+            .block
             .saturating_add(elapsed_slots)
             .saturating_add(BLOCK_JUMP_SLACK);
         if frame.block_number > allowed {
-            return Err(Rejection::BlockJump);
+            return Err(RejectReason::BlockJump);
         }
         Ok(frame_age)
     }
 
     /// Processes one frame into an [`Update`], or `None` if the frame is rejected (see
-    /// [`Rejection`]), the whitelist has not been read yet, or the frame carries no served pAMM
-    /// with a pair of known tokens.
+    /// [`RejectReason`]), the whitelist has not been read yet, or the frame carries no served
+    /// pAMM with a pair of known tokens.
     pub(super) fn on_frame(&mut self, frame: TitanPriceLevelMessage, now: Now) -> Option<Update> {
         let frame_age = match self.check_frame(&frame, now) {
             Ok(frame_age) => frame_age,
-            Err(rejection) => {
-                self.log_rejection(rejection, &frame);
-                telemetry::record_frame_rejected(rejection.as_str());
+            Err(reason) => {
+                self.log_rejection(reason, &frame);
+                telemetry::record_frame_rejected(reason);
                 return None;
             }
         };
         self.rejecting = false;
         telemetry::record_frame_accepted();
+        telemetry::record_frame_age(frame_age);
         self.newest_timestamp_nanos = frame.timestamp;
-        self.newest_block = frame.block_number;
-        self.last_accepted = Some(now.monotonic);
 
         if let ServingState::AwaitingWhitelist = self.serving_state {
-            self.refresh_serving_state();
             return None;
         }
 
-        let deadline = now.monotonic +
+        let stale_at = now.monotonic +
             self.stale_after
                 .saturating_sub(frame_age);
         // `QUOTE_TTL` counts from the frame's wire `timestamp` and is enforced on the monotonic
         // clock; it does not depend on whether the ladder's content changed, because quiet
         // venues repeat a ladder for minutes.
-        let quotable_until = now.monotonic + QUOTE_TTL.saturating_sub(frame_age);
+        let quotable_until = self
+            .quote_guard
+            .then(|| now.monotonic + QUOTE_TTL.saturating_sub(frame_age));
         let frame_unix_seconds = frame.timestamp / NANOS_PER_SECOND;
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         let mut new_pairs = HashMap::new();
 
         for TitanPammLevels { pamm, pairs } in frame.pamms {
-            let Some(config) = self.resolve_config(&pamm) else {
+            self.admit(&pamm);
+            let Some(config) = self.registry.get(&pamm) else {
                 continue;
             };
             telemetry::record_last_seen(&config.protocol, frame_unix_seconds);
 
-            for ((token0, token1), (quotes_0_to_1, quotes_1_to_0)) in self.merge_pairs(pairs) {
+            for ((token0, token1), (quotes_0_to_1, quotes_1_to_0)) in
+                merge_pairs(&self.tokens, pairs)
+            {
                 let id = component_id(&config.address, &token0, &token1);
                 let id_string = id.to_string();
-                let component = match self.served.get(&id_string) {
-                    Some(served) => served.component.clone(),
+                match self.served.get_mut(&id_string) {
+                    Some(served) => served.stale_at = stale_at,
                     None => {
                         let via_router = self
                             .router_venues
                             .contains(&config.address);
-                        let component = build_component(
-                            &self.tokens,
-                            &config,
-                            id,
-                            &token0,
-                            &token1,
-                            via_router,
-                        );
+                        let component =
+                            build_component(&self.tokens, config, id, &token0, &token1, via_router);
                         new_pairs.insert(id_string.clone(), component.clone());
-                        component
+                        self.served.insert(
+                            id_string.clone(),
+                            ServedComponent {
+                                component,
+                                venue_name: config.protocol.clone(),
+                                venue_address: config.address.clone(),
+                                stale_at,
+                            },
+                        );
                     }
-                };
-                let state = PriceLevelStreamState::new(
+                }
+                let mut state = PriceLevelStreamState::new(
                     token0,
                     token1,
                     quotes_0_to_1,
                     quotes_1_to_0,
                     config.gas_cost.clone(),
-                )
-                .with_quotable_until(quotable_until);
-                states.insert(id_string.clone(), Box::new(state));
-                self.served.insert(
-                    id_string,
-                    ServedComponent {
-                        component,
-                        venue_name: config.protocol.clone(),
-                        venue_address: config.address.clone(),
-                        stale_at: deadline,
-                    },
                 );
+                if let Some(until) = quotable_until {
+                    state = state.with_quotable_until(until);
+                }
+                states.insert(id_string, Box::new(state));
             }
         }
 
-        self.refresh_serving_state();
+        self.settle(Frontier { block: frame.block_number, accepted_at: now.monotonic });
         if states.is_empty() {
             return None;
         }
         Some(Update::new(frame.block_number, states, new_pairs).set_is_partial(true))
     }
 
-    /// The configuration a streamed venue is served under. `None` when the venue is denied, or
-    /// unregistered while auto-detection is off. An auto-detected venue is added to the registry.
-    fn resolve_config(&mut self, pamm: &Bytes) -> Option<PriceLevelStreamConfig> {
-        if let Some(config) = self.registry.get(pamm) {
-            return Some(config.clone());
+    /// Registers an auto-detected venue on first sight. A denied venue, or an unregistered one
+    /// while auto-detection is off, stays out of the registry.
+    fn admit(&mut self, pamm: &Bytes) {
+        if self.registry.contains_key(pamm) {
+            return;
         }
         if self.denied.contains(pamm) {
             tracing::debug!(%pamm, "Skipping denied pAMM");
-            return None;
+            return;
         }
         if !self.auto_detect {
             telemetry::record_unregistered_pamm();
@@ -416,7 +416,7 @@ impl FreshnessTracker {
                     "Skipping unregistered pAMM; register it via add_pamm to serve it"
                 );
             }
-            return None;
+            return;
         }
         tracing::info!(%pamm, "Serving auto-detected pAMM");
         let config = PriceLevelStreamConfig::auto_detected(
@@ -426,52 +426,19 @@ impl FreshnessTracker {
         telemetry::record_served_components(&config.protocol, 0);
         telemetry::record_last_seen(&config.protocol, 0);
         self.registry
-            .insert(pamm.clone(), config.clone());
-        Some(config)
-    }
-
-    /// Merges the frame's per-direction ladders into one entry per unordered token pair,
-    /// skipping pairs with unknown tokens. A direction the frame does not carry yields an empty
-    /// ladder, so that direction cannot be quoted.
-    fn merge_pairs(
-        &self,
-        pairs: Vec<TitanPairLevels>,
-    ) -> HashMap<(Bytes, Bytes), (Vec<PriceLevelStreamQuote>, Vec<PriceLevelStreamQuote>)> {
-        let mut merged: HashMap<(Bytes, Bytes), (Vec<_>, Vec<_>)> = HashMap::new();
-        for TitanPairLevels { token_in, token_out, order_book } in pairs {
-            if !self.tokens.contains_key(&token_in) || !self.tokens.contains_key(&token_out) {
-                tracing::debug!(%token_in, %token_out, "Skipping pair with unknown token");
-                continue;
-            }
-            let sells_token0 = token_in < token_out;
-            let key = if sells_token0 {
-                (token_in.clone(), token_out.clone())
-            } else {
-                (token_out.clone(), token_in.clone())
-            };
-            let quotes = order_book
-                .into_iter()
-                .map(|TitanPriceLevel { amount_in, amount_out }| {
-                    PriceLevelStreamQuote::new(amount_in, amount_out)
-                })
-                .collect();
-            let entry = merged.entry(key).or_default();
-            if sells_token0 {
-                entry.0 = quotes;
-            } else {
-                entry.1 = quotes;
-            }
-        }
-        merged
+            .insert(pamm.clone(), config);
     }
 
     /// Removes every served component whose deadline has passed, as one [`Update`].
-    pub(super) fn on_stale_deadline(&mut self, now: Now) -> Option<Update> {
+    pub(super) fn on_stale_deadline(&mut self, now: Instant) -> Option<Update> {
+        let ServingState::Serving { deadline: _, frontier } = self.serving_state else {
+            return None;
+        };
         let mut removed = HashMap::new();
         let mut venues = BTreeSet::new();
         for (id, served) in self
             .served
-            .extract_if(|_, served| served.stale_at <= now.monotonic)
+            .extract_if(|_, served| served.stale_at <= now)
         {
             telemetry::record_stale_removal(&served.venue_name);
             venues.insert(served.venue_name);
@@ -488,55 +455,34 @@ impl FreshnessTracker {
             stale_after_secs = self.stale_after.as_secs(),
             "Removing price level components: no accepted frame carried them within stale_after"
         );
-        // Build the update before `refresh_serving_state`, which resets `newest_block` to 0 once
-        // nothing is served: the removal must carry the newest accepted block.
-        let update = self.removal_update(removed);
-        self.refresh_serving_state();
+        let update = removal_update(frontier.block, removed);
+        self.settle(frontier);
         Some(update)
     }
 
     /// The instant the earliest served component turns stale, if anything is served.
     pub(super) fn stale_deadline(&self) -> Option<Instant> {
         match self.serving_state {
-            ServingState::Serving { deadline } => Some(deadline),
+            ServingState::Serving { deadline, frontier: _ } => Some(deadline),
             ServingState::AwaitingWhitelist | ServingState::Unserved => None,
         }
     }
 
-    fn removal_update(&self, removed: HashMap<String, ProtocolComponent>) -> Update {
-        Update::new(self.newest_block, HashMap::new(), HashMap::new())
-            .set_is_partial(true)
-            .set_removed_pairs(removed)
-    }
-
-    /// Recomputes the serving state and the per-venue gauges from the served set. When nothing is
-    /// served it also resets `newest_block` and `last_accepted`, so the next frame skips the block
-    /// checks. This happens after the last stale removal, after a frame whose pairs were all
-    /// skipped, and on every frame accepted while the whitelist is awaited. A frame with an
-    /// implausible block therefore cannot cause rejections for longer than `stale_after`. Only
-    /// [`on_whitelist_read`](Self::on_whitelist_read) leaves `AwaitingWhitelist`.
-    fn refresh_serving_state(&mut self) {
-        let awaiting_whitelist = match self.serving_state {
-            ServingState::AwaitingWhitelist => true,
-            ServingState::Unserved | ServingState::Serving { deadline: _ } => false,
-        };
-        let served_state = match self
+    /// Recomputes the serving state from the served set, with `frontier` as the newest accepted
+    /// frame, and records the serving-state and per-venue gauges. Nothing served means
+    /// `Unserved`, which forgets the frontier: the next frame is judged as a first frame, so a
+    /// frame with an implausible block cannot cause rejections for longer than `stale_after`.
+    /// Never called while the whitelist is awaited.
+    fn settle(&mut self, frontier: Frontier) {
+        let deadline = self
             .served
             .values()
             .map(|served| served.stale_at)
-            .min()
-        {
-            Some(deadline) => ServingState::Serving { deadline },
-            None => {
-                self.newest_block = 0;
-                self.last_accepted = None;
-                ServingState::Unserved
-            }
-        };
-        if !awaiting_whitelist {
-            self.serving_state = served_state;
-        }
-        telemetry::record_serving_state(self.serving_state.telemetry_state());
+            .min();
+        self.set_serving_state(match deadline {
+            Some(deadline) => ServingState::Serving { deadline, frontier },
+            None => ServingState::Unserved,
+        });
         let mut per_venue: HashMap<&str, usize> = self
             .registry
             .values()
@@ -552,11 +498,16 @@ impl FreshnessTracker {
         }
     }
 
+    fn set_serving_state(&mut self, state: ServingState) {
+        self.serving_state = state;
+        telemetry::record_serving_state(state.telemetry_state());
+    }
+
     /// Logs the first rejected frame of a streak at WARN and the rest at DEBUG.
-    fn log_rejection(&mut self, rejection: Rejection, frame: &TitanPriceLevelMessage) {
+    fn log_rejection(&mut self, reason: RejectReason, frame: &TitanPriceLevelMessage) {
         if self.rejecting {
             tracing::debug!(
-                reason = rejection.as_str(),
+                reason = reason.as_str(),
                 block_number = frame.block_number,
                 timestamp = frame.timestamp,
                 "Rejecting price level frame"
@@ -564,16 +515,63 @@ impl FreshnessTracker {
             return;
         }
         self.rejecting = true;
+        let newest_block = match self.serving_state {
+            ServingState::Serving { deadline: _, frontier } => Some(frontier.block),
+            ServingState::AwaitingWhitelist | ServingState::Unserved => None,
+        };
         tracing::warn!(
-            reason = rejection.as_str(),
+            reason = reason.as_str(),
             block_number = frame.block_number,
             timestamp = frame.timestamp,
-            newest_block = self.newest_block,
+            newest_block = ?newest_block,
             newest_timestamp_nanos = self.newest_timestamp_nanos,
             "Rejecting price level frame; further rejections logged at debug until a frame is \
              accepted"
         );
     }
+}
+
+/// Merges the frame's per-direction ladders into one entry per unordered token pair, skipping
+/// pairs with a token missing from `tokens`. A direction the frame does not carry yields an empty
+/// ladder, so that direction cannot be quoted.
+fn merge_pairs(
+    tokens: &HashMap<Bytes, Token>,
+    pairs: Vec<TitanPairLevels>,
+) -> HashMap<(Bytes, Bytes), (Vec<PriceLevelStreamQuote>, Vec<PriceLevelStreamQuote>)> {
+    let mut merged: HashMap<(Bytes, Bytes), (Vec<_>, Vec<_>)> = HashMap::new();
+    for TitanPairLevels { token_in, token_out, order_book } in pairs {
+        if !tokens.contains_key(&token_in) || !tokens.contains_key(&token_out) {
+            tracing::debug!(%token_in, %token_out, "Skipping pair with unknown token");
+            continue;
+        }
+        let sells_token0 = token_in < token_out;
+        let key = if sells_token0 {
+            (token_in.clone(), token_out.clone())
+        } else {
+            (token_out.clone(), token_in.clone())
+        };
+        let quotes = order_book
+            .into_iter()
+            .map(|TitanPriceLevel { amount_in, amount_out }| {
+                PriceLevelStreamQuote::new(amount_in, amount_out)
+            })
+            .collect();
+        let entry = merged.entry(key).or_default();
+        if sells_token0 {
+            entry.0 = quotes;
+        } else {
+            entry.1 = quotes;
+        }
+    }
+    merged
+}
+
+/// A removal-only update stamped with `block`, the newest accepted block, so it orders after
+/// every update the removed components were served in.
+fn removal_update(block: u64, removed: HashMap<String, ProtocolComponent>) -> Update {
+    Update::new(block, HashMap::new(), HashMap::new())
+        .set_is_partial(true)
+        .set_removed_pairs(removed)
 }
 
 fn build_component(
@@ -617,12 +615,11 @@ mod tests {
     use super::{
         super::{
             config::DEFAULT_AUTO_DETECTED_GAS_COST,
-            fallback_router::{FetchVenuesError, WhitelistRead},
             state::QUOTE_TTL,
             telemetry::{
-                recorded::{counter_value, gauge_value, record_async},
-                FRAMES_ACCEPTED, FRAMES_REJECTED, LAST_SEEN, SERVED_COMPONENTS, SERVING_STATE,
-                STALE_REMOVALS, UNREGISTERED_PAMM_ENTRIES, WHITELISTED_VENUES,
+                recorded::{counter_value, gauge_value, histogram_values, record_async},
+                FRAMES_ACCEPTED, FRAMES_REJECTED, FRAME_AGE, LAST_SEEN, SERVED_COMPONENTS,
+                SERVING_STATE, STALE_REMOVALS, UNREGISTERED_PAMM_ENTRIES, WHITELISTED_VENUES,
             },
             test_support::*,
         },
@@ -654,44 +651,45 @@ mod tests {
         }
     }
 
-    /// A tracker serving the registered `configs` with auto-detection off.
-    fn tracker_serving(
-        configs: Vec<PriceLevelStreamConfig>,
-        fallback_router: bool,
-    ) -> FreshnessTracker {
-        FreshnessTracker::new(
-            configs
+    /// Settings serving the registered `configs` with the defaults, auto-detection off and no
+    /// whitelist.
+    fn settings(configs: Vec<PriceLevelStreamConfig>) -> TrackerSettings {
+        TrackerSettings {
+            registry: configs
                 .into_iter()
                 .map(|config| (config.address.clone(), config))
                 .collect(),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            fallback_router,
-        )
+            denied: HashSet::new(),
+            tokens: tokens(),
+            auto_detect: false,
+            auto_detected_gas_cost: BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
+            stale_after: DEFAULT_STALE_AFTER,
+            whitelist: Whitelist::NotUsed,
+            quote_guard: true,
+        }
     }
 
-    fn tracker_with(fallback_router: bool) -> FreshnessTracker {
-        tracker_serving(vec![fermiswap()], fallback_router)
+    /// A tracker serving the registered `configs` with auto-detection off.
+    fn tracker_serving(
+        configs: Vec<PriceLevelStreamConfig>,
+        whitelist: Whitelist,
+    ) -> FreshnessTracker {
+        FreshnessTracker::new(TrackerSettings { whitelist, ..settings(configs) })
     }
 
     fn tracker() -> FreshnessTracker {
-        tracker_with(false)
+        tracker_serving(vec![fermiswap()], Whitelist::NotUsed)
     }
 
     fn tracker_awaiting_whitelist() -> FreshnessTracker {
-        tracker_with(true)
+        tracker_serving(vec![fermiswap()], Whitelist::Awaited)
     }
 
-    fn read_ok(addresses: &[&str]) -> WhitelistRead {
-        WhitelistRead::Ok(
-            addresses
-                .iter()
-                .map(|address| Bytes::from_str(address).unwrap())
-                .collect(),
-        )
+    fn venues(addresses: &[&str]) -> HashSet<Bytes> {
+        addresses
+            .iter()
+            .map(|address| Bytes::from_str(address).unwrap())
+            .collect()
     }
 
     fn level(amount_in: u64, amount_out: u64) -> TitanPriceLevel {
@@ -742,12 +740,16 @@ mod tests {
         format!("{PAMM}{}{}", &WBTC[2..], &USDC[2..])
     }
 
-    fn quotable_until(update: &Update) -> Instant {
+    fn state_of(update: &Update) -> &PriceLevelStreamState {
         update.states[&expected_id()]
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
             .expect("price level state")
-            .quotable_until
+    }
+
+    fn quotable_until(update: &Update) -> Instant {
+        state_of(update)
+            .quotable_until()
             .expect("quotable_until set")
     }
 
@@ -779,23 +781,17 @@ mod tests {
             Bytes::from_str(PAMM).unwrap()
         );
 
-        let PriceLevelStreamState {
-            token0,
-            token1,
-            quotes_0_to_1,
-            quotes_1_to_0,
-            gas_cost,
-            quotable_until: _,
-        } = states[&id]
+        let state = states[&id]
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
             .expect("price level state");
-        assert_eq!(token0, &Bytes::from_str(WBTC).unwrap());
-        assert_eq!(token1, &Bytes::from_str(USDC).unwrap());
-        assert_eq!(quotes_0_to_1.len(), 1);
-        assert_eq!(quotes_1_to_0.len(), 1);
-        assert_eq!(quotes_0_to_1[0].amount_in, BigUint::from(100_000_000u64));
-        assert_eq!(gas_cost, &BigUint::from(120_000u64));
+        assert_eq!(state.token0, Bytes::from_str(WBTC).unwrap());
+        assert_eq!(state.token1, Bytes::from_str(USDC).unwrap());
+        assert_eq!(state.quotes_0_to_1.len(), 1);
+        assert_eq!(state.quotes_1_to_0.len(), 1);
+        assert_eq!(state.quotes_0_to_1[0].amount_in, BigUint::from(100_000_000u64));
+        assert_eq!(state.gas_cost, BigUint::from(120_000u64));
+        assert!(state.quotable_until().is_some());
     }
 
     #[test]
@@ -949,6 +945,42 @@ mod tests {
     }
 
     #[test]
+    fn accepted_frame_records_its_age() {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker = tracker();
+            // Built at t=7, accepted at t=9: 2 s old.
+            tracker.on_frame(message_at(100, 7, wbtc_usdc_pairs()), clock.at(9));
+            // Rejected frames record no age.
+            tracker.on_frame(message_at(100, 6, wbtc_usdc_pairs()), clock.at(9));
+        });
+        assert_eq!(histogram_values(&snapshot, FRAME_AGE, &[]), vec![2.0]);
+    }
+
+    #[test]
+    fn quote_guard_off_emits_states_that_never_expire() {
+        let clock = Clock::new();
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
+            quote_guard: false,
+            ..settings(vec![fermiswap()])
+        });
+        // 15 s old: past `QUOTE_TTL`, so the guard alone would refuse every quote.
+        let update = tracker
+            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(15))
+            .expect("update expected");
+        assert!(state_of(&update)
+            .quotable_until()
+            .is_none());
+        // The component still turns stale on its own deadline.
+        assert_eq!(
+            tracker
+                .stale_deadline()
+                .expect("serving"),
+            clock.at(24).monotonic
+        );
+    }
+
+    #[test]
     fn quotable_until_is_one_block_after_the_frame_was_built() {
         let clock = Clock::new();
         let mut tracker = tracker();
@@ -1038,7 +1070,7 @@ mod tests {
             .expect("update expected");
 
         assert!(tracker
-            .on_stale_deadline(clock.at(23))
+            .on_stale_deadline(clock.at(23).monotonic)
             .is_none());
         assert!(tracker.stale_deadline().is_some());
     }
@@ -1052,7 +1084,7 @@ mod tests {
             .expect("update expected");
 
         let update = tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
 
         assert!(update.states.is_empty());
@@ -1074,11 +1106,11 @@ mod tests {
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
         tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
 
         assert!(tracker
-            .on_stale_deadline(clock.at(25))
+            .on_stale_deadline(clock.at(25).monotonic)
             .is_none());
     }
 
@@ -1090,7 +1122,7 @@ mod tests {
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
         tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
 
         let update = tracker
@@ -1112,7 +1144,7 @@ mod tests {
                 .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
                 .expect("update expected");
             tracker
-                .on_stale_deadline(clock.at(24))
+                .on_stale_deadline(clock.at(24).monotonic)
                 .expect("removal expected");
         });
         assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &[("venue", "fermiswap")]), 1);
@@ -1175,7 +1207,7 @@ mod tests {
             tracker.on_frame(message_at(100 + second / 12, second, weth_usdc), clock.at(second));
         }
         let update = tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
         assert_eq!(update.removed_pairs.len(), 1);
         assert!(update
@@ -1202,7 +1234,7 @@ mod tests {
             .on_frame(message_at(100, 0, both), clock.at(0))
             .expect("update expected");
         let update = tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
         assert_eq!(update.removed_pairs.len(), 2);
     }
@@ -1250,7 +1282,7 @@ mod tests {
         }
         // The stale removal clears the served set and resets `newest_block`.
         let removal = tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
         assert_eq!(removal.removed_pairs.len(), 1);
         assert_eq!(removal.block_number_or_timestamp, u64::MAX / 2);
@@ -1276,7 +1308,7 @@ mod tests {
             .is_none());
 
         assert!(tracker
-            .on_whitelist_read(read_ok(&[PAMM]))
+            .on_whitelist_read(venues(&[PAMM]))
             .is_none());
 
         // The first frame that can be served is judged as a first frame, not against the block
@@ -1326,7 +1358,7 @@ mod tests {
             .on_frame(message_at(100, 0, both), clock.at(0))
             .expect("update expected");
         tracker
-            .on_stale_deadline(clock.at(24))
+            .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
         // After the outage only WETH/USDC comes back: WBTC/USDC stays absent.
         let weth_usdc =
@@ -1394,7 +1426,7 @@ mod tests {
             let clock = Clock::new();
             let mut tracker = tracker();
             tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0));
-            tracker.on_stale_deadline(clock.at(24));
+            tracker.on_stale_deadline(clock.at(24).monotonic);
         });
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
         assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
@@ -1403,7 +1435,7 @@ mod tests {
     #[test]
     fn unregistered_pamm_produces_no_update_without_auto_detection() {
         let clock = Clock::new();
-        let mut tracker = tracker_serving(vec![], false);
+        let mut tracker = tracker_serving(vec![], Whitelist::NotUsed);
         assert!(tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .is_none());
@@ -1413,15 +1445,11 @@ mod tests {
     fn denied_pamm_is_not_auto_detected() {
         let clock = Clock::new();
         let denied = HashSet::from([Bytes::from_str(PAMM).unwrap()]);
-        let mut tracker = FreshnessTracker::new(
-            HashMap::new(),
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
             denied,
-            tokens(),
-            true,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
+            auto_detect: true,
+            ..settings(vec![])
+        });
         assert!(tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .is_none());
@@ -1430,15 +1458,8 @@ mod tests {
     #[test]
     fn auto_detected_pamm_is_served_under_its_address() {
         let clock = Clock::new();
-        let mut tracker = FreshnessTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            true,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
+        let mut tracker =
+            FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
         let update = tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
@@ -1461,15 +1482,11 @@ mod tests {
     #[test]
     fn auto_detected_gas_cost_override_applies() {
         let clock = Clock::new();
-        let mut tracker = FreshnessTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            true,
-            BigUint::from(42_000u64),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
+            auto_detect: true,
+            auto_detected_gas_cost: BigUint::from(42_000u64),
+            ..settings(vec![])
+        });
         let update = tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
@@ -1488,7 +1505,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         assert!(tracker
-            .on_whitelist_read(read_ok(&[PAMM]))
+            .on_whitelist_read(venues(&[PAMM]))
             .is_none());
 
         let update = tracker
@@ -1507,17 +1524,10 @@ mod tests {
     #[test]
     fn auto_detected_whitelisted_venue_is_served_under_the_fallback_family() {
         let clock = Clock::new();
-        let mut tracker = FreshnessTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            true,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            DEFAULT_STALE_AFTER,
-            false,
-        );
+        let mut tracker =
+            FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
         assert!(tracker
-            .on_whitelist_read(read_ok(&[PAMM]))
+            .on_whitelist_read(venues(&[PAMM]))
             .is_none());
 
         let update = tracker
@@ -1536,7 +1546,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         assert!(tracker
-            .on_whitelist_read(read_ok(&[OTHER_PAMM]))
+            .on_whitelist_read(venues(&[OTHER_PAMM]))
             .is_none());
 
         let update = tracker
@@ -1556,7 +1566,7 @@ mod tests {
         assert!(tracker.stale_deadline().is_none());
 
         assert!(tracker
-            .on_whitelist_read(read_ok(&[PAMM]))
+            .on_whitelist_read(venues(&[PAMM]))
             .is_none());
         let update = tracker
             .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1))
@@ -1564,15 +1574,15 @@ mod tests {
         assert_eq!(update.new_pairs[&expected_id()].protocol_system, "propammfallback:fermiswap");
     }
 
+    /// A whitelist read while nothing is served only replaces the set: the next frame serves
+    /// under the family the new set gives.
     #[test]
-    fn failed_whitelist_read_keeps_the_previous_set() {
+    fn whitelist_read_while_unserved_applies_to_the_next_frame() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(read_ok(&[PAMM]));
+        tracker.on_whitelist_read(venues(&[]));
         assert!(tracker
-            .on_whitelist_read(WhitelistRead::Failed(FetchVenuesError::Call {
-                reason: "boom".to_string(),
-            }))
+            .on_whitelist_read(venues(&[PAMM]))
             .is_none());
         let update = tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
@@ -1581,29 +1591,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_first_read_keeps_waiting() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(WhitelistRead::Failed(FetchVenuesError::Call {
-            reason: "boom".to_string(),
-        }));
-        assert!(tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
-            .is_none());
-    }
-
-    #[test]
     fn family_change_removes_now_and_re_adds_under_the_new_family() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(read_ok(&[PAMM]));
+        tracker.on_whitelist_read(venues(&[PAMM]));
         tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
 
         // The venue gets de-whitelisted.
         let update = tracker
-            .on_whitelist_read(read_ok(&[]))
+            .on_whitelist_read(venues(&[]))
             .expect("removal expected");
         assert!(update.states.is_empty());
         assert!(update.new_pairs.is_empty());
@@ -1638,8 +1636,8 @@ mod tests {
             Bytes::from_str(OTHER_PAMM).unwrap(),
             BigUint::from(120_000u64),
         );
-        let mut tracker = tracker_serving(vec![fermiswap(), other], true);
-        tracker.on_whitelist_read(read_ok(whitelist_before));
+        let mut tracker = tracker_serving(vec![fermiswap(), other], Whitelist::Awaited);
+        tracker.on_whitelist_read(venues(whitelist_before));
         let frame = TitanPriceLevelMessage {
             block_number: 100,
             timestamp: BASE_WALL_NANOS,
@@ -1657,7 +1655,7 @@ mod tests {
         assert_eq!(served.new_pairs.len(), 2);
 
         let update = tracker
-            .on_whitelist_read(read_ok(whitelist_after))
+            .on_whitelist_read(venues(whitelist_after))
             .expect("removal expected");
 
         assert_eq!(update.removed_pairs.len(), 1);
@@ -1670,12 +1668,12 @@ mod tests {
     fn unchanged_whitelist_emits_nothing() {
         let clock = Clock::new();
         let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(read_ok(&[PAMM]));
+        tracker.on_whitelist_read(venues(&[PAMM]));
         tracker
             .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
             .expect("update expected");
         assert!(tracker
-            .on_whitelist_read(read_ok(&[PAMM]))
+            .on_whitelist_read(venues(&[PAMM]))
             .is_none());
     }
 
@@ -1683,7 +1681,7 @@ mod tests {
     fn whitelist_read_gauges_the_venue_count() {
         let ((), snapshot) = record_async(async {
             let mut tracker = tracker_awaiting_whitelist();
-            tracker.on_whitelist_read(read_ok(&[PAMM]));
+            tracker.on_whitelist_read(venues(&[PAMM]));
         });
         assert_eq!(gauge_value(&snapshot, WHITELISTED_VENUES, &[]), 1.0);
     }
@@ -1692,7 +1690,7 @@ mod tests {
     fn unregistered_venues_counter_and_log_cap() {
         let (logged, snapshot) = record_async(async {
             let clock = Clock::new();
-            let mut tracker = tracker_serving(vec![], false);
+            let mut tracker = tracker_serving(vec![], Whitelist::NotUsed);
             // 70 distinct unregistered addresses, each seen twice.
             for round in 0..2u64 {
                 for index in 0..70u64 {

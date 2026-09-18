@@ -1,20 +1,21 @@
 //! Metrics of the price level stream, emitted through the `metrics` facade. A consumer that
 //! installs a `metrics` recorder receives them with no further setup; without a recorder every
-//! call is a no-op. Label values are registered venue names or fixed enumerations, never values
-//! from the wire, with one exception: an auto-detected venue is named by its address, so its
-//! `venue` label carries the address the frame named it by.
+//! call is a no-op. Label values are registered venue names or the enumerations below, never
+//! values from the wire, with one exception: an auto-detected venue is named by its address, so
+//! its `venue` label carries the address the frame named it by.
 
-use metrics::{counter, gauge};
+use std::time::Duration;
+
+use metrics::{counter, gauge, histogram};
 
 /// Counter, no labels. Incremented once per frame the tracker accepts.
 pub(super) const FRAMES_ACCEPTED: &str = "price_level_stream_frames_accepted_total";
-/// Counter, label `reason`. Incremented once per frame the stream drops. `reason` is one of
-/// `parse_error` (the text did not parse as a frame), `too_old` (wire `timestamp` older than
-/// `stale_after`), `in_future` (wire `timestamp` more than one slot ahead of the wall clock),
-/// `out_of_order` (wire `timestamp` older than the newest accepted frame's), `block_regression`
-/// (block below the newest accepted block) or `block_jump` (block jumps more than one block per
-/// elapsed slot plus 2).
+/// Counter, label `reason`, one of [`RejectReason`]. Incremented once per frame the stream drops.
 pub(super) const FRAMES_REJECTED: &str = "price_level_stream_frames_rejected_total";
+/// Histogram, no labels. The age of every accepted frame at acceptance, in seconds: the local
+/// wall clock minus the frame's wire `timestamp`. It measures Titan's lag plus delivery delay;
+/// a frame older than one slot yields states that refuse to quote.
+pub(super) const FRAME_AGE: &str = "price_level_stream_frame_age_seconds";
 /// Gauge, label `venue`. The wire `timestamp` of the newest accepted frame that carried the
 /// venue, in seconds since the Unix epoch; 0 until the first such frame. `venue` is the
 /// registered venue name, or the address of an auto-detected venue.
@@ -28,15 +29,11 @@ pub(super) const STALE_REMOVALS: &str = "price_level_stream_stale_removals_total
 /// Gauge, no labels. The stream's serving state as a [`ServingState`] number: 0 = awaiting the
 /// whitelist, 1 = unserved, 2 = serving.
 pub(super) const SERVING_STATE: &str = "price_level_stream_serving_state";
-/// Counter, label `reason`. Incremented once per Titan connection the stream gives up on, or
-/// fails to establish, before backing off. `reason` is one of `idle_timeout` (no parsed frame
-/// within the idle timeout), `ended` (the server hung up without a close frame), `closed` (the
-/// server sent a close frame), `read_error` (transport or protocol error), `connect_failed`
-/// (connection refused or TLS error) or `connect_timeout` (the handshake did not complete
-/// within the connect timeout).
+/// Counter, label `reason`, one of [`ReconnectReason`]. Incremented once per Titan connection
+/// the stream gives up on, or fails to establish, before backing off.
 pub(super) const RECONNECTS: &str = "price_level_stream_reconnects_total";
-/// Counter, label `outcome`. Incremented once per PropAMMRouter whitelist read. `outcome` is
-/// `ok` or `error` (a failed or timed-out `eth_call`).
+/// Counter, label `outcome`, one of [`ReadOutcome`]. Incremented once per PropAMMRouter
+/// whitelist read.
 pub(super) const WHITELIST_READS: &str = "price_level_stream_whitelist_reads_total";
 /// Gauge, no labels. The number of venues on the whitelist as of the last successful read.
 pub(super) const WHITELISTED_VENUES: &str = "price_level_stream_whitelisted_venues";
@@ -44,6 +41,85 @@ pub(super) const WHITELISTED_VENUES: &str = "price_level_stream_whitelisted_venu
 /// which is neither registered nor denied while auto-detection is off.
 pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
     "price_level_stream_unregistered_pamm_entries_total";
+
+/// The `reason` label of [`FRAMES_REJECTED`]: why the stream dropped a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RejectReason {
+    /// The text did not parse as a frame.
+    ParseError,
+    /// The wire `timestamp` is `stale_after` old or older.
+    TooOld,
+    /// The wire `timestamp` is more than one slot ahead of the local wall clock.
+    InFuture,
+    /// The wire `timestamp` is older than the newest accepted frame's.
+    OutOfOrder,
+    /// The block is below the newest accepted block.
+    BlockRegression,
+    /// The block is above the newest accepted block by more than one block per elapsed slot
+    /// plus 2.
+    BlockJump,
+}
+
+impl RejectReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            RejectReason::ParseError => "parse_error",
+            RejectReason::TooOld => "too_old",
+            RejectReason::InFuture => "in_future",
+            RejectReason::OutOfOrder => "out_of_order",
+            RejectReason::BlockRegression => "block_regression",
+            RejectReason::BlockJump => "block_jump",
+        }
+    }
+}
+
+/// The `reason` label of [`RECONNECTS`]: why the stream gave up on a Titan connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReconnectReason {
+    /// No frame parsed within the idle timeout.
+    IdleTimeout,
+    /// The server hung up without a close frame.
+    Ended,
+    /// The server sent a close frame.
+    Closed,
+    /// A transport or protocol error.
+    ReadError,
+    /// The connection was refused, or the TLS handshake failed.
+    ConnectFailed,
+    /// The handshake did not complete within the connect timeout.
+    ConnectTimeout,
+}
+
+impl ReconnectReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            ReconnectReason::IdleTimeout => "idle_timeout",
+            ReconnectReason::Ended => "ended",
+            ReconnectReason::Closed => "closed",
+            ReconnectReason::ReadError => "read_error",
+            ReconnectReason::ConnectFailed => "connect_failed",
+            ReconnectReason::ConnectTimeout => "connect_timeout",
+        }
+    }
+}
+
+/// The `outcome` label of [`WHITELIST_READS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReadOutcome {
+    /// The read returned a whitelist.
+    Ok,
+    /// The `eth_call` failed, returned undecodable data, or timed out.
+    Error,
+}
+
+impl ReadOutcome {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            ReadOutcome::Ok => "ok",
+            ReadOutcome::Error => "error",
+        }
+    }
+}
 
 /// The stream's serving state, exported as the numeric value of `SERVING_STATE`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,8 +136,12 @@ pub(super) fn record_frame_accepted() {
     counter!(FRAMES_ACCEPTED).increment(1);
 }
 
-pub(super) fn record_frame_rejected(reason: &'static str) {
-    counter!(FRAMES_REJECTED, "reason" => reason).increment(1);
+pub(super) fn record_frame_rejected(reason: RejectReason) {
+    counter!(FRAMES_REJECTED, "reason" => reason.as_str()).increment(1);
+}
+
+pub(super) fn record_frame_age(age: Duration) {
+    histogram!(FRAME_AGE).record(age.as_secs_f64());
 }
 
 pub(super) fn record_last_seen(venue: &str, unix_seconds: u64) {
@@ -80,12 +160,12 @@ pub(super) fn record_serving_state(state: ServingState) {
     gauge!(SERVING_STATE).set(state as u8 as f64);
 }
 
-pub(super) fn record_reconnect(reason: &'static str) {
-    counter!(RECONNECTS, "reason" => reason).increment(1);
+pub(super) fn record_reconnect(reason: ReconnectReason) {
+    counter!(RECONNECTS, "reason" => reason.as_str()).increment(1);
 }
 
-pub(super) fn record_whitelist_read(outcome: &'static str) {
-    counter!(WHITELIST_READS, "outcome" => outcome).increment(1);
+pub(super) fn record_whitelist_read(outcome: ReadOutcome) {
+    counter!(WHITELIST_READS, "outcome" => outcome.as_str()).increment(1);
 }
 
 pub(super) fn record_whitelisted_venues(count: usize) {
@@ -170,6 +250,22 @@ pub(super) mod recorded {
             Some(DebugValue::Counter(_)) | Some(DebugValue::Histogram(_)) | None => f64::NAN,
         }
     }
+
+    /// Every value recorded on the histogram, in recording order; empty when nothing was
+    /// recorded.
+    pub(in super::super) fn histogram_values(
+        snapshot: &SnapshotMap,
+        name: &str,
+        label_pairs: &[(&str, &str)],
+    ) -> Vec<f64> {
+        match snapshot.get(&(MetricKind::Histogram, name.to_string(), labels(label_pairs))) {
+            Some(DebugValue::Histogram(values)) => values
+                .iter()
+                .map(|value| value.into_inner())
+                .collect(),
+            Some(DebugValue::Counter(_)) | Some(DebugValue::Gauge(_)) | None => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -182,14 +278,15 @@ mod tests {
     fn every_helper_emits_its_named_metric() {
         let ((), snapshot) = record_async(async {
             record_frame_accepted();
-            record_frame_rejected("too_old");
-            record_frame_rejected("too_old");
+            record_frame_rejected(RejectReason::TooOld);
+            record_frame_rejected(RejectReason::TooOld);
+            record_frame_age(Duration::from_millis(250));
             record_last_seen("fermiswap", 1_700_000_000);
             record_served_components("fermiswap", 3);
             record_stale_removal("fermiswap");
             record_serving_state(ServingState::Serving);
-            record_reconnect("idle_timeout");
-            record_whitelist_read("ok");
+            record_reconnect(ReconnectReason::IdleTimeout);
+            record_whitelist_read(ReadOutcome::Ok);
             record_whitelisted_venues(5);
             record_unregistered_pamm();
         });
@@ -201,6 +298,10 @@ mod tests {
                 &[("reason", "too_old")]
             ),
             2
+        );
+        assert_eq!(
+            histogram_values(&snapshot, "price_level_stream_frame_age_seconds", &[]),
+            vec![0.25]
         );
         assert_eq!(
             gauge_value(
@@ -248,5 +349,36 @@ mod tests {
             counter_value(&snapshot, "price_level_stream_unregistered_pamm_entries_total", &[]),
             1
         );
+    }
+
+    /// Dashboards match on the label strings, so every variant maps to a distinct one.
+    #[test]
+    fn label_values_are_distinct() {
+        let reject: Vec<&str> = [
+            RejectReason::ParseError,
+            RejectReason::TooOld,
+            RejectReason::InFuture,
+            RejectReason::OutOfOrder,
+            RejectReason::BlockRegression,
+            RejectReason::BlockJump,
+        ]
+        .into_iter()
+        .map(RejectReason::as_str)
+        .collect();
+        let reconnect: Vec<&str> = [
+            ReconnectReason::IdleTimeout,
+            ReconnectReason::Ended,
+            ReconnectReason::Closed,
+            ReconnectReason::ReadError,
+            ReconnectReason::ConnectFailed,
+            ReconnectReason::ConnectTimeout,
+        ]
+        .into_iter()
+        .map(ReconnectReason::as_str)
+        .collect();
+        for values in [reject, reconnect, vec!["ok", "error"]] {
+            let distinct: std::collections::HashSet<&str> = values.iter().copied().collect();
+            assert_eq!(distinct.len(), values.len(), "{values:?}");
+        }
     }
 }

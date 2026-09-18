@@ -4,7 +4,7 @@ use std::{
 };
 
 use futures::StreamExt;
-use miette::miette;
+use miette::{miette, IntoDiagnostic};
 use rand::prelude::IteratorRandom;
 use tokio::{sync::mpsc::Sender, task::JoinHandle};
 use tracing::{info, warn};
@@ -71,7 +71,8 @@ impl PriceLevelStreamProcessor {
             .with_known_pamms()
             .auto_detect(true)
             .with_tokens(all_tokens.clone())
-            .build();
+            .build()
+            .into_diagnostic()?;
 
         let mut emitter = SampledEmitter::new(self.sample_size, self.block_interval);
         let stale_threshold = self.stale_threshold;

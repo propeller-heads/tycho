@@ -20,7 +20,7 @@ use tycho_common::{
 /// How long the ladders of one frame stay quotable: one slot. Titan quotes the pending block, so
 /// a ladder older than that is not fillable directly (the venue reverts `StaleUpdate`) and must
 /// not be priced.
-pub const QUOTE_TTL: Duration = Duration::from_secs(12);
+pub const QUOTE_TTL: Duration = super::SLOT;
 
 /// A single price level: the total `amount_out` a swap of exactly `amount_in` would deliver.
 ///
@@ -53,9 +53,11 @@ pub struct PriceLevelStreamState {
     pub gas_cost: BigUint,
     /// Monotonic instant from which this state refuses every query. `None` means the state never
     /// expires. The field is never serialized and deserializes as `None`, so a replayed
-    /// recording always quotes.
+    /// recording always quotes. Only [`with_quotable_until`](Self::with_quotable_until) sets it,
+    /// and equality ignores it: two states carrying the same ladders compare equal whichever
+    /// frames they came from.
     #[serde(skip)]
-    pub quotable_until: Option<Instant>,
+    quotable_until: Option<Instant>,
 }
 
 impl PriceLevelStreamState {
@@ -81,6 +83,12 @@ impl PriceLevelStreamState {
     pub fn with_quotable_until(mut self, until: Instant) -> Self {
         self.quotable_until = Some(until);
         self
+    }
+
+    /// The monotonic instant from which this state refuses every query, or `None` if it never
+    /// expires.
+    pub fn quotable_until(&self) -> Option<Instant> {
+        self.quotable_until
     }
 
     /// Returns a `RecoverableError` once `now` reaches `quotable_until`. A state without
@@ -288,19 +296,27 @@ impl ProtocolSim for PriceLevelStreamState {
         self
     }
 
+    /// Equal when the pair, both ladders and the gas cost match. `quotable_until` is left out:
+    /// it is per-process metadata that never survives serialization, and a consumer that skips
+    /// a state because it equals the one it holds keeps quoting on the older guard.
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         other
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
             .is_some_and(|other| {
-                let Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost, quotable_until } =
-                    other;
+                let Self {
+                    token0,
+                    token1,
+                    quotes_0_to_1,
+                    quotes_1_to_0,
+                    gas_cost,
+                    quotable_until: _,
+                } = other;
                 &self.token0 == token0 &&
                     &self.token1 == token1 &&
                     &self.quotes_0_to_1 == quotes_0_to_1 &&
                     &self.quotes_1_to_0 == quotes_1_to_0 &&
-                    &self.gas_cost == gas_cost &&
-                    &self.quotable_until == quotable_until
+                    &self.gas_cost == gas_cost
             })
     }
 }
@@ -636,12 +652,13 @@ mod tests {
             .is_ok());
     }
 
+    /// Two frames carrying the same ladders yield equal states, whatever their guards.
     #[test]
-    fn eq_compares_quotable_until() {
+    fn eq_ignores_quotable_until() {
         let until = Instant::now() + Duration::from_secs(60);
-        assert!(!state().eq(&state().with_quotable_until(until)));
+        assert!(state().eq(&state().with_quotable_until(until)));
         assert!(state()
             .with_quotable_until(until)
-            .eq(&state().with_quotable_until(until)));
+            .eq(&state().with_quotable_until(until + Duration::from_secs(1))));
     }
 }

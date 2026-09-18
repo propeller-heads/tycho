@@ -23,7 +23,9 @@
 //! - Every emitted state also refuses to quote once its frame's `timestamp` is one slot
 //!   ([`QUOTE_TTL`](state::QUOTE_TTL)) old, so a ladder cannot be quoted past the block it targeted
 //!   even before the removal arrives. The deadline is an `Instant` of this process and is never
-//!   serialized.
+//!   serialized. A consumer that quotes a state more than one slot after it arrived by design can
+//!   opt out with [`without_quote_guard`](stream::PriceLevelStreamBuilder::without_quote_guard);
+//!   the removal after `stale_after` still applies.
 //!
 //! Recovery is per component: a frame carrying a pair re-adds that pair, nothing more, and a
 //! frame carrying one direction re-adds the pair with the other direction unquotable.
@@ -47,10 +49,11 @@
 //! `RPC_URL`, each read bounded by a timeout, retried with backoff until it succeeds, and
 //! re-read every
 //! [`whitelist_refresh_interval`](stream::PriceLevelStreamBuilder::whitelist_refresh_interval).
-//! Nothing is served until the first read succeeds, and without a node URL nothing is ever
-//! served, so a misconfigured deployment never silently serves whitelisted venues under the
-//! direct family, which has no Uniswap V3 fallback. A venue whose membership changes is removed
-//! at once and re-added under its new family by the next frame carrying it.
+//! Nothing is served until the first read succeeds, and
+//! [`build`](stream::PriceLevelStreamBuilder::build) fails without a node URL or with one that
+//! does not parse, so a misconfigured deployment never silently serves whitelisted venues under
+//! the direct family, which has no Uniswap V3 fallback. A venue whose membership changes is
+//! removed at once and re-added under its new family by the next frame carrying it.
 //! [`without_fallback_router`](stream::PriceLevelStreamBuilder::without_fallback_router) skips
 //! the read and keeps every venue on the direct path unconditionally.
 //!
@@ -64,13 +67,16 @@
 //! # Observability
 //!
 //! The stream emits `price_level_stream_*` metrics through the `metrics` facade (frames
-//! accepted and rejected by reason, last seen timestamp and served components per registered
-//! venue, stale removals, serving state, reconnects, whitelist reads); a consumer that installs
-//! a `metrics` recorder receives them with no further setup. Per-venue series start at zero for
-//! every registered venue, and no label ever carries a value from the wire, except the venue
-//! address itself when a pAMM is served under auto-detection.
+//! accepted and rejected by reason, the age of every accepted frame, last seen timestamp and
+//! served components per registered venue, stale removals, serving state, reconnects, whitelist
+//! reads); a consumer that installs a `metrics` recorder receives them with no further setup.
+//! Per-venue series start at zero for every registered venue, and no label ever carries a value
+//! from the wire, except the venue address itself when a pAMM is served under auto-detection.
 //!
 //! Label values and gauge encodings, for dashboards and alerts:
+//! - `price_level_stream_frame_age_seconds`: a histogram of the wall-clock age of every accepted
+//!   frame at acceptance. Titan's lag plus delivery delay; above one slot the frame's states
+//!   refuse to quote.
 //! - `price_level_stream_frames_rejected_total{reason}`: `parse_error`, `too_old`, `in_future`,
 //!   `out_of_order`, `block_regression`, `block_jump`.
 //! - `price_level_stream_reconnects_total{reason}`: `idle_timeout`, `ended`, `closed`,
@@ -89,6 +95,8 @@
 //! auto-detection — provide token metadata, and consume the resulting stream of
 //! [`Update`](crate::protocol::models::Update)s.
 
+use std::time::Duration;
+
 pub mod config;
 pub mod fallback_router;
 pub mod state;
@@ -98,3 +106,32 @@ mod telemetry;
 mod test_support;
 mod titan;
 mod tracker;
+
+/// The post-merge Ethereum slot. Every freshness window of the stream is a multiple of it.
+const SLOT: Duration = Duration::from_secs(12);
+
+/// The delay before the retry after `attempt` consecutive failures: `2^attempt` seconds, capped
+/// at `max_backoff`. Shared by the Titan reconnect and the whitelist read retry.
+fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
+    let exponential = 2u64
+        .checked_pow(attempt)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::MAX);
+    exponential.min(max_backoff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_exponentially_up_to_the_cap() {
+        let max_backoff = Duration::from_secs(32);
+        assert_eq!(backoff(1, max_backoff), Duration::from_secs(2));
+        assert_eq!(backoff(4, max_backoff), Duration::from_secs(16));
+        assert_eq!(backoff(5, max_backoff), max_backoff);
+        assert_eq!(backoff(100, max_backoff), max_backoff);
+        // Exponent overflow must saturate to the cap rather than panic.
+        assert_eq!(backoff(u32::MAX, max_backoff), max_backoff);
+    }
+}
