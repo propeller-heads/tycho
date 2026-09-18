@@ -182,11 +182,7 @@ impl EntityCache {
 
 impl FoldSink for EntityCache {
     #[allow(unused_variables)]
-    fn apply_folded(
-        &self,
-        extractor: &str,
-        block: &BlockAggregatedChanges,
-    ) -> Result<(), StorageError> {
+    fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
         // Under the write lock, apply the whole block in an order where new components exist
         // before their first attributes arrive:
         //
