@@ -46,6 +46,7 @@ services/
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
+    cache.rs                EntityCache — long-lived tagged entity store the windows fold into (not wired yet, ENG-6305)
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
