@@ -323,9 +323,19 @@ where
     pub fn block_at(&self, number: u64) -> Option<&B> {
         let first = self.oldest()?.block().number;
         let index = usize::try_from(number.checked_sub(first)?).ok()?;
-        self.block_messages
-            .get(index)
-            .filter(|b| b.block().number == number)
+        let msg = self.block_messages.get(index)?;
+        let found = msg.block().number;
+        if found != number {
+            error!(
+                number,
+                found,
+                first,
+                len = self.block_messages.len(),
+                "ReorgBuffer is not contiguous: index lookup landed on a different block"
+            );
+            return None;
+        }
+        Some(msg)
     }
 
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
