@@ -32,6 +32,7 @@ use std::{
 use chrono::NaiveDateTime;
 use deepsize::{Context, DeepSizeOf};
 use tycho_common::{
+    keccak256,
     models::{
         blockchain::BlockAggregatedChanges,
         contract::{Account, AccountBalance, AccountDelta},
@@ -40,6 +41,7 @@ use tycho_common::{
         TxHash,
     },
     storage::StorageError,
+    Bytes,
 };
 
 use super::window::FoldSink;
@@ -77,11 +79,21 @@ fn write<K: Eq + Hash, V>(map: &mut HashMap<K, Tagged<V>>, key: K, value: V, at:
     }
 }
 
+/// Write times of one loaded account's values, each its row's `valid_from`.
+#[derive(Debug, Clone)]
+pub(crate) struct AccountTags {
+    pub slots: HashMap<StoreKey, NaiveDateTime>,
+    pub native_balance: NaiveDateTime,
+    pub code: NaiveDateTime,
+    pub token_balances: HashMap<Address, NaiveDateTime>,
+}
+
 /// Cached state of one contract account.
 ///
 /// Every value carries the time it was last written, so writes from different extractors (which
 /// run at different points of the chain) can never regress a value: newer wins, equal-time
 /// re-application is a no-op.
+#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
 pub(crate) struct CachedAccount {
     chain: Chain,
     title: String,
@@ -98,33 +110,106 @@ pub(crate) struct CachedAccount {
 }
 
 impl CachedAccount {
-    /// Builds an entry from the startup snapshot. Each value's tag is its row's `valid_from`
-    /// timestamp, taken as-is — the cache versions by time exactly like the database does.
-    #[allow(unused_variables)]
-    fn from_snapshot(filled: &Account, value_times: &HashMap<StoreKey, NaiveDateTime>) -> Self {
-        todo!("build entry from snapshot")
+    /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
+    /// have a tag in `tags`; a missing tag is a loader bug and panics.
+    pub(crate) fn from_snapshot(account: Account, tags: AccountTags) -> Self {
+        let slots = account
+            .slots
+            .into_iter()
+            .map(|(key, value)| {
+                let at = tags.slots[&key];
+                (key, Tagged(value, at))
+            })
+            .collect();
+        let token_balances = account
+            .token_balances
+            .into_iter()
+            .map(|(token, balance)| {
+                let at = tags.token_balances[&token];
+                (token, Tagged(balance, at))
+            })
+            .collect();
+        Self {
+            chain: account.chain,
+            title: account.title,
+            slots,
+            native_balance: Tagged(account.native_balance, tags.native_balance),
+            token_balances,
+            code: Tagged(account.code, tags.code),
+            code_hash: account.code_hash,
+            balance_modify_tx: account.balance_modify_tx,
+            code_modify_tx: account.code_modify_tx,
+            creation_tx: account.creation_tx,
+        }
     }
 
-    /// Builds an entry from a `Creation` delta folded at time `at` — after startup, the only way
-    /// a new contract enters the cache. Creation deltas carry the whole initial tracked state.
-    #[allow(unused_variables)]
-    fn from_creation(delta: &AccountDelta, at: NaiveDateTime) -> Self {
-        todo!("build entry from creation delta")
-    }
-
-    /// Applies one folded delta; every changed value gets the block's timestamp as its tag.
-    #[allow(unused_variables)]
-    fn fold(&mut self, delta: &AccountDelta, at: NaiveDateTime) {
-        // Deleted slots become the zero value (as in `Account::apply_delta`). A delta that
-        // carries code also refreshes `code_hash` — `Account::apply_delta` does not maintain
-        // that field, so don't reuse it blindly.
-        todo!("apply folded delta")
+    /// Builds an entry from a `Creation` delta folded at `at` — after startup, the only way a new
+    /// contract enters the cache. Fields the delta does not carry take the values
+    /// [`AccountDelta::into_account_without_tx`] uses, so both paths build the same account.
+    pub(crate) fn from_creation(delta: &AccountDelta, at: NaiveDateTime) -> Self {
+        let code = delta.code().clone().unwrap_or_default();
+        Self {
+            chain: delta.chain,
+            title: format!("{:#020x}", delta.address),
+            slots: delta
+                .slots
+                .iter()
+                .map(|(key, value)| (key.clone(), Tagged(value.clone().unwrap_or_default(), at)))
+                .collect(),
+            native_balance: Tagged(
+                delta
+                    .balance
+                    .clone()
+                    .unwrap_or_default(),
+                at,
+            ),
+            token_balances: HashMap::new(),
+            code_hash: keccak256(&code).into(),
+            code: Tagged(code, at),
+            balance_modify_tx: Bytes::from("0x00"),
+            code_modify_tx: Bytes::from("0x00"),
+            creation_tx: None,
+        }
     }
 
     /// Materializes the cached state as an [`Account`] for response assembly.
-    #[allow(unused_variables)]
-    fn materialize(&self, address: &Address) -> Account {
-        todo!("assemble account")
+    pub(crate) fn materialize(&self, address: &Address) -> Account {
+        Account::new(
+            self.chain,
+            address.clone(),
+            self.title.clone(),
+            self.slots
+                .iter()
+                .map(|(k, Tagged(v, _))| (k.clone(), v.clone()))
+                .collect(),
+            self.native_balance.0.clone(),
+            self.token_balances
+                .iter()
+                .map(|(k, Tagged(v, _))| (k.clone(), v.clone()))
+                .collect(),
+            self.code.0.clone(),
+            self.code_hash.clone(),
+            self.balance_modify_tx.clone(),
+            self.code_modify_tx.clone(),
+            self.creation_tx.clone(),
+        )
+    }
+
+    /// Tagged storage slots, for readers that apply only window changes newer than a value.
+    pub(crate) fn slots(&self) -> &HashMap<StoreKey, Tagged<StoreVal>> {
+        &self.slots
+    }
+
+    pub(crate) fn native_balance(&self) -> &Tagged<Balance> {
+        &self.native_balance
+    }
+
+    pub(crate) fn token_balances(&self) -> &HashMap<Address, Tagged<AccountBalance>> {
+        &self.token_balances
+    }
+
+    pub(crate) fn code(&self) -> &Tagged<Code> {
+        &self.code
     }
 }
 
@@ -237,11 +322,77 @@ impl FoldSink for EntityCache {
 
 #[cfg(test)]
 mod test {
+    use std::str::FromStr;
+
+    use tycho_common::models::ChangeType;
+
     use super::*;
-    use crate::testing;
+    use crate::{extractor::models::fixtures, testing};
 
     fn ts(n: u64) -> NaiveDateTime {
         testing::block(n).ts
+    }
+
+    fn addr(n: u64) -> Bytes {
+        Bytes::from(n).lpad(20, 0)
+    }
+
+    fn code(hex: &str) -> Bytes {
+        Bytes::from_str(hex).unwrap()
+    }
+
+    fn account_balance(account: &Bytes, token: &Bytes, amount: u64) -> AccountBalance {
+        AccountBalance::new(account.clone(), token.clone(), Bytes::from(amount), Bytes::default())
+    }
+
+    fn account(address: &Bytes) -> Account {
+        let bytecode = code("0x6000");
+        Account::new(
+            Chain::Ethereum,
+            address.clone(),
+            "acc".to_string(),
+            fixtures::slots([(1, 1), (2, 2)]),
+            Bytes::from(10u64),
+            HashMap::from([(addr(9), account_balance(address, &addr(9), 3))]),
+            bytecode.clone(),
+            keccak256(&bytecode).into(),
+            Bytes::from("0x01"),
+            Bytes::from("0x02"),
+            Some(Bytes::from("0x03")),
+        )
+    }
+
+    fn tags(account: &Account, at: NaiveDateTime) -> AccountTags {
+        AccountTags {
+            slots: account
+                .slots
+                .keys()
+                .map(|k| (k.clone(), at))
+                .collect(),
+            native_balance: at,
+            code: at,
+            token_balances: account
+                .token_balances
+                .keys()
+                .map(|k| (k.clone(), at))
+                .collect(),
+        }
+    }
+
+    fn creation(
+        address: &Bytes,
+        slots: impl IntoIterator<Item = (u64, u64)>,
+        balance: u64,
+        bytecode: &str,
+    ) -> AccountDelta {
+        AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots(slots),
+            Some(Bytes::from(balance)),
+            Some(code(bytecode)),
+            ChangeType::Creation,
+        )
     }
 
     #[test]
@@ -272,5 +423,31 @@ mod test {
 
         assert_eq!(map["a"], Tagged(1, ts(3)));
         assert_eq!(map["b"], Tagged(9, ts(1)));
+    }
+
+    #[test]
+    fn account_snapshot_round_trips() {
+        let address = addr(1);
+        let loaded = account(&address);
+
+        let cached = CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, ts(1)));
+
+        assert_eq!(cached.materialize(&address), loaded);
+        let key1 = fixtures::slots([(1, 1)])
+            .into_keys()
+            .next()
+            .unwrap();
+        assert_eq!(cached.slots()[&key1].1, ts(1));
+    }
+
+    #[test]
+    fn creation_builds_the_account_the_delta_path_builds() {
+        let address = addr(1);
+        let delta = creation(&address, [(1, 1)], 10, "0x6000");
+
+        let cached = CachedAccount::from_creation(&delta, ts(1));
+
+        assert_eq!(cached.materialize(&address), delta.into_account_without_tx());
+        assert_eq!(cached.code().1, ts(1));
     }
 }
