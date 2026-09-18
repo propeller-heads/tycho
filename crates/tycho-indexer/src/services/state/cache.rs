@@ -1,0 +1,1390 @@
+//! Long-lived in-memory entity state.
+//!
+//! Two entity families are cached:
+//!
+//! - **Accounts** (contract state), keyed by address. Several extractors can write the same
+//!   account, so every cached value carries the time it was last written — the writing block's
+//!   timestamp, the same unit the database's `valid_from` versioning uses. A newer write always
+//!   wins; re-applying an equal-time change is a no-op because delta values are absolute.
+//! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
+//!   one extractor writes each protocol system, in order, so one write time per entry is enough.
+//!
+//! Tags compare with "not older" (>=), never "strictly newer": consecutive blocks can share a
+//! timestamp on fast chains, and a strict comparison would silently drop the second block.
+//!
+//! The cache is written from exactly two places: the startup load, which runs before the
+//! extractors start, and the folds coming out of the block windows. It never reads the database,
+//! and it never evicts — an entity missing from the cache does not exist.
+//!
+//! Reads and folds take turns behind one read-write lock: a fold takes the write side and
+//! applies one whole block atomically, reads take the read side. Folds are expected to take well
+//! under a millisecond, so blocking is acceptable and a reader never observes half a block.
+//!
+//! # Memory
+//!
+//! There is no cap and no eviction: an entry the cache drops could never be reloaded, so the
+//! protection is visibility. Every entry keeps a running byte count, the cache keeps per-family
+//! totals, and a reporter publishes `entity_cache_size_bytes` and `entity_cache_entries` per
+//! family. A periodic full walk replaces the running totals, so capacity slack the counts miss
+//! never accumulates.
+
+// Not yet constructed by production code; wired into the loader and the pump in follow-ups.
+#![allow(dead_code)]
+
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    hash::Hash,
+    mem::size_of,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    },
+    time::Duration,
+};
+
+use chrono::NaiveDateTime;
+use deepsize::{Context, DeepSizeOf};
+use metrics::gauge;
+use tracing::{info, trace};
+use tycho_common::{
+    keccak256,
+    models::{
+        blockchain::BlockAggregatedChanges,
+        contract::{Account, AccountBalance, AccountDelta},
+        protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
+        Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId, StoreKey,
+        StoreVal, TxHash,
+    },
+    storage::StorageError,
+    Bytes,
+};
+
+use super::window::FoldSink;
+
+/// A cached value together with the time it was last written (the writing block's timestamp).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Tagged<T>(pub(crate) T, pub(crate) NaiveDateTime);
+
+// Manual impl as `NaiveDateTime` does not implement `DeepSizeOf`.
+impl<T: DeepSizeOf> DeepSizeOf for Tagged<T> {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.0.deep_size_of_children(context)
+    }
+}
+
+/// Writes `value` at `at` unless `slot` holds a newer value. Returns the change in bytes.
+fn overwrite<V: DeepSizeOf>(slot: &mut Tagged<V>, value: V, at: NaiveDateTime) -> isize {
+    if at < slot.1 {
+        return 0;
+    }
+    let change = value.deep_size_of() as isize - slot.0.deep_size_of() as isize;
+    *slot = Tagged(value, at);
+    change
+}
+
+/// [`overwrite`] for a map entry; a missing key is inserted. Returns the change in bytes, counting
+/// key and tag for a new entry.
+fn write<K, V>(map: &mut HashMap<K, Tagged<V>>, key: K, value: V, at: NaiveDateTime) -> isize
+where
+    K: Eq + Hash + DeepSizeOf,
+    V: DeepSizeOf,
+{
+    match map.entry(key) {
+        Entry::Occupied(mut e) => overwrite(e.get_mut(), value, at),
+        Entry::Vacant(e) => {
+            let added = e.key().deep_size_of() + value.deep_size_of() + size_of::<NaiveDateTime>();
+            e.insert(Tagged(value, at));
+            added as isize
+        }
+    }
+}
+
+/// Inserts or replaces an untagged value. Returns the change in bytes.
+fn replace<K, V>(map: &mut HashMap<K, V>, key: K, value: V) -> isize
+where
+    K: Eq + Hash + DeepSizeOf,
+    V: DeepSizeOf,
+{
+    match map.entry(key) {
+        Entry::Occupied(mut e) => {
+            let change = value.deep_size_of() as isize - e.get().deep_size_of() as isize;
+            e.insert(value);
+            change
+        }
+        Entry::Vacant(e) => {
+            let added = e.key().deep_size_of() + value.deep_size_of();
+            e.insert(value);
+            added as isize
+        }
+    }
+}
+
+/// Removes `key`. Returns the bytes it held, 0 when absent.
+fn remove<K, V>(map: &mut HashMap<K, V>, key: &K) -> usize
+where
+    K: Eq + Hash + DeepSizeOf,
+    V: DeepSizeOf,
+{
+    map.remove_entry(key)
+        .map(|(k, v)| k.deep_size_of() + v.deep_size_of())
+        .unwrap_or(0)
+}
+
+/// Write times of one loaded account's values, each its row's `valid_from`.
+#[derive(Debug, Clone)]
+pub(crate) struct AccountTags {
+    pub slots: HashMap<StoreKey, NaiveDateTime>,
+    pub native_balance: NaiveDateTime,
+    pub code: NaiveDateTime,
+    pub token_balances: HashMap<Address, NaiveDateTime>,
+}
+
+/// Cached state of one contract account.
+///
+/// Every value carries the time it was last written, so writes from different extractors (which
+/// run at different points of the chain) can never regress a value: newer wins, equal-time
+/// re-application is a no-op.
+#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
+pub(crate) struct CachedAccount {
+    chain: Chain,
+    title: String,
+    slots: HashMap<StoreKey, Tagged<StoreVal>>,
+    native_balance: Tagged<Balance>,
+    token_balances: HashMap<Address, Tagged<AccountBalance>>,
+    code: Tagged<Code>,
+    /// Kept in sync when a fold carries code.
+    code_hash: CodeHash,
+    /// Transaction references come from the startup load only — folds don't carry them.
+    balance_modify_tx: TxHash,
+    code_modify_tx: TxHash,
+    creation_tx: Option<TxHash>,
+    /// Running size of this entry, maintained by every write. See [`CachedAccount::bytes`].
+    bytes: usize,
+}
+
+impl CachedAccount {
+    /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
+    /// have a tag in `tags`; a missing tag is a loader bug and panics.
+    pub(crate) fn from_snapshot(account: Account, tags: AccountTags) -> Self {
+        let slots = account
+            .slots
+            .into_iter()
+            .map(|(key, value)| {
+                let at = tags.slots[&key];
+                (key, Tagged(value, at))
+            })
+            .collect();
+        let token_balances = account
+            .token_balances
+            .into_iter()
+            .map(|(token, balance)| {
+                let at = tags.token_balances[&token];
+                (token, Tagged(balance, at))
+            })
+            .collect();
+        Self::sized(Self {
+            chain: account.chain,
+            title: account.title,
+            slots,
+            native_balance: Tagged(account.native_balance, tags.native_balance),
+            token_balances,
+            code: Tagged(account.code, tags.code),
+            code_hash: account.code_hash,
+            balance_modify_tx: account.balance_modify_tx,
+            code_modify_tx: account.code_modify_tx,
+            creation_tx: account.creation_tx,
+            bytes: 0,
+        })
+    }
+
+    /// Builds an entry from a `Creation` delta folded at `at` — after startup, the only way a new
+    /// contract enters the cache. Fields the delta does not carry take the values
+    /// [`AccountDelta::into_account_without_tx`] uses, so both paths build the same account.
+    pub(crate) fn from_creation(delta: &AccountDelta, at: NaiveDateTime) -> Self {
+        let code = delta.code().clone().unwrap_or_default();
+        Self::sized(Self {
+            chain: delta.chain,
+            title: format!("{:#020x}", delta.address),
+            slots: delta
+                .slots
+                .iter()
+                .map(|(key, value)| (key.clone(), Tagged(value.clone().unwrap_or_default(), at)))
+                .collect(),
+            native_balance: Tagged(
+                delta
+                    .balance
+                    .clone()
+                    .unwrap_or_default(),
+                at,
+            ),
+            token_balances: HashMap::new(),
+            code_hash: keccak256(&code).into(),
+            code: Tagged(code, at),
+            balance_modify_tx: Bytes::from("0x00"),
+            code_modify_tx: Bytes::from("0x00"),
+            creation_tx: None,
+            bytes: 0,
+        })
+    }
+
+    fn sized(mut entry: Self) -> Self {
+        entry.bytes = entry.deep_size_of();
+        entry
+    }
+
+    /// Applies one folded delta; every changed value gets `at` as its tag, values with a newer tag
+    /// stay. A deleted slot becomes the zero value, as in [`Account::apply_delta`]. A delta that
+    /// carries code also refreshes `code_hash`.
+    pub(crate) fn fold(&mut self, delta: &AccountDelta, at: NaiveDateTime) {
+        let mut change = 0isize;
+        for (key, value) in &delta.slots {
+            change += write(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), at);
+        }
+        if let Some(balance) = &delta.balance {
+            change += overwrite(&mut self.native_balance, balance.clone(), at);
+        }
+        if let Some(code) = delta.code() {
+            if at >= self.code.1 {
+                self.code_hash = keccak256(code).into();
+            }
+            change += overwrite(&mut self.code, code.clone(), at);
+        }
+        self.charge(change);
+    }
+
+    /// Applies folded token balances under the same tag rule as [`CachedAccount::fold`].
+    pub(crate) fn fold_balances(
+        &mut self,
+        balances: &HashMap<Address, AccountBalance>,
+        at: NaiveDateTime,
+    ) {
+        let mut change = 0isize;
+        for (token, balance) in balances {
+            change += write(&mut self.token_balances, token.clone(), balance.clone(), at);
+        }
+        self.charge(change);
+    }
+
+    /// Materializes the cached state as an [`Account`] for response assembly.
+    pub(crate) fn materialize(&self, address: &Address) -> Account {
+        Account::new(
+            self.chain,
+            address.clone(),
+            self.title.clone(),
+            self.slots
+                .iter()
+                .map(|(k, v)| (k.clone(), v.0.clone()))
+                .collect(),
+            self.native_balance.0.clone(),
+            self.token_balances
+                .iter()
+                .map(|(k, v)| (k.clone(), v.0.clone()))
+                .collect(),
+            self.code.0.clone(),
+            self.code_hash.clone(),
+            self.balance_modify_tx.clone(),
+            self.code_modify_tx.clone(),
+            self.creation_tx.clone(),
+        )
+    }
+
+    /// Tagged storage slots, for readers that apply only window changes newer than a value.
+    pub(crate) fn slots(&self) -> &HashMap<StoreKey, Tagged<StoreVal>> {
+        &self.slots
+    }
+
+    pub(crate) fn native_balance(&self) -> &Tagged<Balance> {
+        &self.native_balance
+    }
+
+    pub(crate) fn token_balances(&self) -> &HashMap<Address, Tagged<AccountBalance>> {
+        &self.token_balances
+    }
+
+    pub(crate) fn code(&self) -> &Tagged<Code> {
+        &self.code
+    }
+
+    /// Bytes this entry accounts for: its inline size plus the heap behind every value, kept
+    /// current by each write. Map capacity slack is not counted; the periodic recount covers it.
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn charge(&mut self, change: isize) {
+        self.bytes = self
+            .bytes
+            .checked_add_signed(change)
+            .expect("entry size underflow");
+    }
+}
+
+/// Cached state of one protocol component.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CachedComponentState {
+    attributes: HashMap<AttrStoreKey, StoreVal>,
+    balances: HashMap<Address, Balance>,
+    /// One write time covers the whole entry: a single extractor writes each protocol system,
+    /// in order.
+    updated_at: NaiveDateTime,
+    /// Running size of this entry, maintained by every write.
+    bytes: usize,
+}
+
+// Manual impl as `NaiveDateTime` does not implement `DeepSizeOf`.
+impl DeepSizeOf for CachedComponentState {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.attributes
+            .deep_size_of_children(context) +
+            self.balances
+                .deep_size_of_children(context)
+    }
+}
+
+impl CachedComponentState {
+    /// Builds an entry from the startup snapshot, tagged with its newest `valid_from`.
+    pub(crate) fn from_snapshot(state: ProtocolComponentState, at: NaiveDateTime) -> Self {
+        Self::sized(Self {
+            attributes: state.attributes,
+            balances: state.balances,
+            updated_at: at,
+            bytes: 0,
+        })
+    }
+
+    /// An entry for a component created at `at`, before its first attributes arrive.
+    pub(crate) fn created(at: NaiveDateTime) -> Self {
+        Self::sized(Self {
+            attributes: HashMap::new(),
+            balances: HashMap::new(),
+            updated_at: at,
+            bytes: 0,
+        })
+    }
+
+    fn sized(mut entry: Self) -> Self {
+        entry.bytes = entry.deep_size_of();
+        entry
+    }
+
+    /// Applies one folded state delta unless the entry is newer than `at`. Updates apply first,
+    /// then deletions, like [`ProtocolComponentState::apply_state_delta`].
+    pub(crate) fn fold(&mut self, delta: &ProtocolComponentStateDelta, at: NaiveDateTime) {
+        if !self.accepts(at) {
+            return;
+        }
+        let mut change = 0isize;
+        for (key, value) in &delta.updated_attributes {
+            change += replace(&mut self.attributes, key.clone(), value.clone());
+        }
+        for key in &delta.deleted_attributes {
+            change -= remove(&mut self.attributes, key) as isize;
+        }
+        self.charge(change);
+    }
+
+    /// Applies folded balances unless the entry is newer than `at`.
+    pub(crate) fn fold_balances(
+        &mut self,
+        balances: &HashMap<Bytes, ComponentBalance>,
+        at: NaiveDateTime,
+    ) {
+        if !self.accepts(at) {
+            return;
+        }
+        let mut change = 0isize;
+        for (token, balance) in balances {
+            change += replace(&mut self.balances, token.clone(), balance.balance.clone());
+        }
+        self.charge(change);
+    }
+
+    /// The single writer folds in order, so an older block is a replay: skip it. Otherwise the
+    /// entry moves to `at`.
+    fn accepts(&mut self, at: NaiveDateTime) -> bool {
+        if at < self.updated_at {
+            return false;
+        }
+        self.updated_at = at;
+        true
+    }
+
+    /// Materializes the cached state for response assembly.
+    pub(crate) fn materialize(&self, component_id: &str) -> ProtocolComponentState {
+        ProtocolComponentState::new(component_id, self.attributes.clone(), self.balances.clone())
+    }
+
+    /// Time of the last write, for readers that apply only newer window changes.
+    pub(crate) fn updated_at(&self) -> NaiveDateTime {
+        self.updated_at
+    }
+
+    /// See [`CachedAccount::bytes`].
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn charge(&mut self, change: isize) {
+        self.bytes = self
+            .bytes
+            .checked_add_signed(change)
+            .expect("entry size underflow");
+    }
+}
+
+/// The long-lived entity store. See the module doc for the data model and locking.
+pub(crate) struct EntityCache {
+    /// Folds take the write side and apply one whole block atomically; reads take the read
+    /// side. Folds are fast, so waiting is fine and a reader never sees half a block.
+    state: RwLock<CacheState>,
+    /// Running byte totals per family. Every write adjusts them under the write lock;
+    /// [`EntityCache::reconcile`] replaces them. They live outside the lock so the reporter reads
+    /// them without waiting on a fold.
+    account_bytes: AtomicUsize,
+    component_bytes: AtomicUsize,
+}
+
+/// The maps behind the lock.
+pub(crate) struct CacheState {
+    pub(crate) accounts: HashMap<Address, CachedAccount>,
+    /// Component states by protocol system, then component id. The system is the extractor name:
+    /// the RPC resolves one window per protocol system by extractor name, so both are one string.
+    pub(crate) components: HashMap<String, HashMap<ComponentId, CachedComponentState>>,
+}
+
+impl EntityCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
+            account_bytes: AtomicUsize::new(0),
+            component_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    /// Read access for response assembly. Folds wait until the guard is dropped — hold it only
+    /// long enough to copy out what the response needs.
+    pub(crate) fn read(&self) -> RwLockReadGuard<'_, CacheState> {
+        self.state
+            .read()
+            .expect("entity cache lock poisoned")
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, CacheState> {
+        self.state
+            .write()
+            .expect("entity cache lock poisoned")
+    }
+
+    /// Startup load only: runs before the extractors start, so nothing else is writing.
+    pub(crate) fn insert_loaded_account(&self, address: Address, entry: CachedAccount) {
+        let mut change = entry.bytes() as isize;
+        if let Some(old) = self
+            .write()
+            .accounts
+            .insert(address, entry)
+        {
+            change -= old.bytes() as isize;
+        }
+        Self::charge(&self.account_bytes, change);
+    }
+
+    /// Startup load only.
+    pub(crate) fn insert_loaded_component(
+        &self,
+        system: String,
+        component_id: ComponentId,
+        entry: CachedComponentState,
+    ) {
+        let mut change = entry.bytes() as isize;
+        if let Some(old) = self
+            .write()
+            .components
+            .entry(system)
+            .or_default()
+            .insert(component_id, entry)
+        {
+            change -= old.bytes() as isize;
+        }
+        Self::charge(&self.component_bytes, change);
+    }
+
+    /// Adds a signed change to an unsigned running total. Two's-complement wrapping makes a
+    /// negative change a subtraction.
+    fn charge(total: &AtomicUsize, change: isize) {
+        total.fetch_add(change as usize, Ordering::Relaxed);
+    }
+}
+
+impl FoldSink for EntityCache {
+    /// Applies the whole block under the write lock, in an order where new components exist
+    /// before their first attributes arrive. Not folded: `new_tokens`, `component_tvl`,
+    /// `dci_update` — those stay database-served.
+    ///
+    /// No check can fail today. Any future check goes before the first mutation, so a replay of
+    /// the same block converges.
+    fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
+        let at = block.block.ts;
+        let system = block.extractor.as_str();
+        let mut guard = self.write();
+        let state: &mut CacheState = &mut guard;
+        let mut account_change = 0isize;
+        let mut component_change = 0isize;
+
+        let family = state
+            .components
+            .entry(system.to_string())
+            .or_default();
+        for id in block.new_protocol_components.keys() {
+            if let Entry::Vacant(e) = family.entry(id.clone()) {
+                component_change += e
+                    .insert(CachedComponentState::created(at))
+                    .bytes() as isize;
+            }
+        }
+        for (id, delta) in &block.state_deltas {
+            let Some(entry) = family.get_mut(id) else {
+                trace!(system, id, "State delta for an unknown component skipped");
+                continue;
+            };
+            let before = entry.bytes();
+            entry.fold(delta, at);
+            component_change += entry.bytes() as isize - before as isize;
+        }
+        for (id, balances) in &block.component_balances {
+            let Some(entry) = family.get_mut(id) else {
+                trace!(system, id, "Balances for an unknown component skipped");
+                continue;
+            };
+            let before = entry.bytes();
+            entry.fold_balances(balances, at);
+            component_change += entry.bytes() as isize - before as isize;
+        }
+        for id in block.deleted_protocol_components.keys() {
+            if let Some(entry) = family.remove(id) {
+                component_change -= entry.bytes() as isize;
+            }
+        }
+
+        for (address, delta) in &block.account_deltas {
+            if delta.change_type() == ChangeType::Deletion {
+                if let Some(entry) = state.accounts.remove(address) {
+                    account_change -= entry.bytes() as isize;
+                }
+                continue;
+            }
+            match state.accounts.get_mut(address) {
+                Some(entry) => {
+                    let before = entry.bytes();
+                    entry.fold(delta, at);
+                    account_change += entry.bytes() as isize - before as isize;
+                }
+                // A creation carries the whole initial state; anything else is partial data
+                // and must never create an entry.
+                None if delta.is_creation() => {
+                    let entry = CachedAccount::from_creation(delta, at);
+                    account_change += entry.bytes() as isize;
+                    state
+                        .accounts
+                        .insert(address.clone(), entry);
+                }
+                None => trace!(%address, "Change for an unknown account skipped"),
+            }
+        }
+        for (address, balances) in &block.account_balances {
+            let Some(entry) = state.accounts.get_mut(address) else {
+                trace!(%address, "Balances for an unknown account skipped");
+                continue;
+            };
+            let before = entry.bytes();
+            entry.fold_balances(balances, at);
+            account_change += entry.bytes() as isize - before as isize;
+        }
+
+        Self::charge(&self.account_bytes, account_change);
+        Self::charge(&self.component_bytes, component_change);
+        Ok(())
+    }
+}
+
+/// How often the reporter publishes the gauges. Same cadence as `pending_deltas_buffer_size`.
+const REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Reports between full recounts. A recount walks every value under the read lock, so folds wait
+/// for it; on a mainnet-sized cache (~3.5 GiB) that is on the order of a second.
+const RECONCILE_EVERY: u32 = 10;
+
+impl EntityCache {
+    /// Publishes entry counts and running byte totals per family.
+    pub(crate) fn report(&self) {
+        let state = self.read();
+        let components: usize = state
+            .components
+            .values()
+            .map(HashMap::len)
+            .sum();
+        gauge!("entity_cache_entries", "family" => "accounts").set(state.accounts.len() as f64);
+        gauge!("entity_cache_entries", "family" => "components").set(components as f64);
+        gauge!("entity_cache_size_bytes", "family" => "accounts").set(
+            self.account_bytes
+                .load(Ordering::Relaxed) as f64,
+        );
+        gauge!("entity_cache_size_bytes", "family" => "components").set(
+            self.component_bytes
+                .load(Ordering::Relaxed) as f64,
+        );
+    }
+
+    /// Recounts every entry and replaces the running totals. Holds the read lock for the walk,
+    /// so no fold changes the totals meanwhile. Returns `(accounts, components)` in bytes.
+    pub(crate) fn reconcile(&self) -> (usize, usize) {
+        let state = self.read();
+        let accounts = state.accounts.deep_size_of();
+        let components = state.components.deep_size_of();
+        let running_accounts = self
+            .account_bytes
+            .swap(accounts, Ordering::Relaxed);
+        let running_components = self
+            .component_bytes
+            .swap(components, Ordering::Relaxed);
+        info!(accounts, running_accounts, components, running_components, "Entity cache recounted");
+        (accounts, components)
+    }
+
+    /// Reports every [`REPORT_INTERVAL`] and recounts every [`RECONCILE_EVERY`] reports.
+    pub(crate) async fn run_reporter(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(REPORT_INTERVAL);
+        let mut reports = 0u32;
+        loop {
+            tick.tick().await;
+            reports += 1;
+            if reports.is_multiple_of(RECONCILE_EVERY) {
+                self.reconcile();
+            }
+            self.report();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+
+    use tycho_common::models::{protocol::ProtocolComponent, ChangeType};
+
+    use super::*;
+    use crate::{extractor::models::fixtures, testing};
+
+    const EXTRACTOR: &str = "ex";
+
+    fn ts(n: u64) -> NaiveDateTime {
+        testing::block(n).ts
+    }
+
+    fn addr(n: u64) -> Bytes {
+        Bytes::from(n).lpad(20, 0)
+    }
+
+    fn code(hex: &str) -> Bytes {
+        Bytes::from_str(hex).unwrap()
+    }
+
+    fn account_balance(account: &Bytes, token: &Bytes, amount: u64) -> AccountBalance {
+        AccountBalance::new(account.clone(), token.clone(), Bytes::from(amount), Bytes::default())
+    }
+
+    fn component_balance(id: &str, token: &Bytes, amount: u64) -> ComponentBalance {
+        ComponentBalance {
+            token: token.clone(),
+            balance: Bytes::from(amount),
+            balance_float: amount as f64,
+            modify_tx: Bytes::default(),
+            component_id: id.to_string(),
+        }
+    }
+
+    fn account(address: &Bytes) -> Account {
+        let bytecode = code("0x6000");
+        Account::new(
+            Chain::Ethereum,
+            address.clone(),
+            "acc".to_string(),
+            fixtures::slots([(1, 1), (2, 2)]),
+            Bytes::from(10u64),
+            HashMap::from([(addr(9), account_balance(address, &addr(9), 3))]),
+            bytecode.clone(),
+            keccak256(&bytecode).into(),
+            Bytes::from("0x01"),
+            Bytes::from("0x02"),
+            Some(Bytes::from("0x03")),
+        )
+    }
+
+    fn tags(account: &Account, at: NaiveDateTime) -> AccountTags {
+        AccountTags {
+            slots: account
+                .slots
+                .keys()
+                .map(|k| (k.clone(), at))
+                .collect(),
+            native_balance: at,
+            code: at,
+            token_balances: account
+                .token_balances
+                .keys()
+                .map(|k| (k.clone(), at))
+                .collect(),
+        }
+    }
+
+    fn creation(
+        address: &Bytes,
+        slots: impl IntoIterator<Item = (u64, u64)>,
+        balance: u64,
+        bytecode: &str,
+    ) -> AccountDelta {
+        AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots(slots),
+            Some(Bytes::from(balance)),
+            Some(code(bytecode)),
+            ChangeType::Creation,
+        )
+    }
+
+    fn update(address: &Bytes, slots: HashMap<Bytes, Option<Bytes>>) -> AccountDelta {
+        AccountDelta::new(Chain::Ethereum, address.clone(), slots, None, None, ChangeType::Update)
+    }
+
+    fn deletion(address: &Bytes) -> AccountDelta {
+        AccountDelta::deleted(&Chain::Ethereum, address)
+    }
+
+    fn component(id: &str) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            EXTRACTOR,
+            "pool",
+            Chain::Ethereum,
+            vec![],
+            vec![],
+            HashMap::new(),
+            ChangeType::Creation,
+            Bytes::default(),
+            ts(1),
+        )
+    }
+
+    #[test]
+    fn account_snapshot_round_trips() {
+        let address = addr(1);
+        let loaded = account(&address);
+
+        let cached = CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, ts(1)));
+
+        assert_eq!(cached.materialize(&address), loaded);
+        let key1 = fixtures::slots([(1, 1)])
+            .into_keys()
+            .next()
+            .unwrap();
+        assert_eq!(cached.slots()[&key1].1, ts(1));
+    }
+
+    #[test]
+    fn component_snapshot_round_trips() {
+        let loaded = ProtocolComponentState::new(
+            "c1",
+            HashMap::from([("x".to_string(), Bytes::from(1u64))]),
+            HashMap::from([(addr(9), Bytes::from(5u64))]),
+        );
+
+        let cached = CachedComponentState::from_snapshot(loaded.clone(), ts(3));
+
+        assert_eq!(cached.materialize("c1"), loaded);
+        assert_eq!(cached.updated_at(), ts(3));
+    }
+
+    #[test]
+    fn creation_builds_the_account_the_delta_path_builds() {
+        let address = addr(1);
+        let delta = creation(&address, [(1, 1)], 10, "0x6000");
+
+        let cached = CachedAccount::from_creation(&delta, ts(1));
+
+        assert_eq!(cached.materialize(&address), delta.into_account_without_tx());
+    }
+
+    #[test]
+    fn account_fold_keeps_newer_values_per_slot() {
+        let address = addr(1);
+        let loaded = account(&address);
+        let mut cached = CachedAccount::from_snapshot(loaded, tags(&account(&address), ts(5)));
+
+        cached.fold(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), ts(3));
+
+        let slots = cached.materialize(&address).slots;
+        assert_eq!(
+            slots,
+            fixtures::slots([(1, 1), (2, 2), (3, 3)]),
+            "older slot 1 kept, new slot 3 added"
+        );
+        let key3 = fixtures::slots([(3, 3)])
+            .into_keys()
+            .next()
+            .unwrap();
+        assert_eq!(cached.slots()[&key3].1, ts(3));
+    }
+
+    #[test]
+    fn account_fold_applies_an_equal_time_write() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_snapshot(account(&address), tags(&account(&address), ts(5)));
+
+        cached.fold(&update(&address, fixtures::optional_slots([(1, 11)])), ts(5));
+
+        assert_eq!(cached.materialize(&address).slots, fixtures::slots([(1, 11), (2, 2)]));
+    }
+
+    #[test]
+    fn account_fold_twice_changes_nothing() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+        let delta = update(&address, fixtures::optional_slots([(1, 11), (2, 2)]));
+
+        cached.fold(&delta, ts(2));
+        let once = cached.clone();
+        cached.fold(&delta, ts(2));
+
+        assert_eq!(cached, once);
+    }
+
+    #[test]
+    fn account_fold_zeroes_deleted_slots_and_refreshes_the_code_hash() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+        let mut delta = update(
+            &address,
+            HashMap::from([(
+                fixtures::slots([(1, 1)])
+                    .into_keys()
+                    .next()
+                    .unwrap(),
+                None,
+            )]),
+        );
+        delta.set_code(code("0x6001"));
+
+        cached.fold(&delta, ts(2));
+
+        let account = cached.materialize(&address);
+        assert_eq!(account.slots.values().next().unwrap(), &Bytes::default());
+        assert_eq!(account.code, code("0x6001"));
+        assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
+        assert_eq!(cached.code().1, ts(2));
+    }
+
+    #[test]
+    fn account_fold_balances_follow_the_tag_rule() {
+        let address = addr(1);
+        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x"), ts(5));
+
+        cached.fold_balances(
+            &HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))]),
+            ts(5),
+        );
+        cached.fold_balances(
+            &HashMap::from([(addr(9), account_balance(&address, &addr(9), 1))]),
+            ts(4),
+        );
+
+        assert_eq!(
+            cached
+                .materialize(&address)
+                .token_balances[&addr(9)]
+                .balance,
+            Bytes::from(7u64)
+        );
+    }
+
+    #[test]
+    fn component_fold_skips_an_older_block_and_removes_deleted_attributes() {
+        let mut cached = CachedComponentState::from_snapshot(
+            ProtocolComponentState::new(
+                "c1",
+                HashMap::from([("x".to_string(), Bytes::from(1u64))]),
+                HashMap::new(),
+            ),
+            ts(5),
+        );
+
+        cached.fold(&testing::state_delta("c1", 9), ts(4));
+        assert_eq!(
+            cached.materialize("c1").attributes["x"],
+            Bytes::from(1u64),
+            "older block skipped"
+        );
+
+        let mut delta = testing::state_delta("c1", 2);
+        delta
+            .updated_attributes
+            .insert("y".to_string(), Bytes::from(3u64));
+        delta
+            .deleted_attributes
+            .insert("x".to_string());
+        cached.fold(&delta, ts(5));
+        cached.fold_balances(
+            &HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))]),
+            ts(6),
+        );
+
+        let state = cached.materialize("c1");
+        assert_eq!(state.attributes, HashMap::from([("y".to_string(), Bytes::from(3u64))]));
+        assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
+        assert_eq!(cached.updated_at(), ts(6));
+    }
+
+    fn msg(n: u64) -> BlockAggregatedChanges {
+        testing::aggregated_changes(EXTRACTOR, n, n, Some(n))
+    }
+
+    fn with_component(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.new_protocol_components
+            .insert(id.to_string(), component(id));
+        m
+    }
+
+    fn with_state_delta(mut m: BlockAggregatedChanges, id: &str, x: u64) -> BlockAggregatedChanges {
+        m.state_deltas
+            .insert(id.to_string(), testing::state_delta(id, x));
+        m
+    }
+
+    fn with_component_balance(
+        mut m: BlockAggregatedChanges,
+        id: &str,
+        token: &Bytes,
+        amount: u64,
+    ) -> BlockAggregatedChanges {
+        m.component_balances
+            .entry(id.to_string())
+            .or_default()
+            .insert(token.clone(), component_balance(id, token, amount));
+        m
+    }
+
+    fn with_deleted_component(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
+        m.deleted_protocol_components
+            .insert(id.to_string(), component(id));
+        m
+    }
+
+    fn with_account_delta(
+        mut m: BlockAggregatedChanges,
+        delta: AccountDelta,
+    ) -> BlockAggregatedChanges {
+        m.account_deltas
+            .insert(delta.address.clone(), delta);
+        m
+    }
+
+    fn with_account_balance(
+        mut m: BlockAggregatedChanges,
+        address: &Bytes,
+        token: &Bytes,
+        amount: u64,
+    ) -> BlockAggregatedChanges {
+        m.account_balances
+            .entry(address.clone())
+            .or_default()
+            .insert(token.clone(), account_balance(address, token, amount));
+        m
+    }
+
+    fn cached_account(cache: &EntityCache, address: &Bytes) -> Option<Account> {
+        cache
+            .read()
+            .accounts
+            .get(address)
+            .map(|a| a.materialize(address))
+    }
+
+    fn cached_component(cache: &EntityCache, id: &str) -> Option<ProtocolComponentState> {
+        cache
+            .read()
+            .components
+            .get(EXTRACTOR)
+            .and_then(|m| m.get(id))
+            .map(|c| c.materialize(id))
+    }
+
+    #[test]
+    fn fold_creates_components_before_their_first_attributes() {
+        let cache = EntityCache::new();
+        let block = with_component_balance(
+            with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+            "c1",
+            &addr(9),
+            5,
+        );
+
+        cache.fold(&block).unwrap();
+
+        let state = cached_component(&cache, "c1").unwrap();
+        assert_eq!(state.attributes["x"], Bytes::from(1u64));
+        assert_eq!(state.balances[&addr(9)], Bytes::from(5u64));
+    }
+
+    #[test]
+    fn fold_skips_changes_for_unknown_entities() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let block = with_account_balance(
+            with_account_delta(
+                with_component_balance(with_state_delta(msg(1), "ghost", 1), "ghost", &addr(9), 5),
+                update(&address, fixtures::optional_slots([(1, 1)])),
+            ),
+            &address,
+            &addr(9),
+            7,
+        );
+
+        cache.fold(&block).unwrap();
+
+        assert!(cached_component(&cache, "ghost").is_none());
+        assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn fold_creation_creates_a_complete_account() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let delta = creation(&address, [(1, 1), (2, 2)], 10, "0x6000");
+
+        cache
+            .fold(&with_account_balance(
+                with_account_delta(msg(1), delta.clone()),
+                &address,
+                &addr(9),
+                7,
+            ))
+            .unwrap();
+
+        let mut expected = delta.into_account_without_tx();
+        expected
+            .token_balances
+            .insert(addr(9), account_balance(&address, &addr(9), 7));
+        assert_eq!(cached_account(&cache, &address), Some(expected));
+    }
+
+    #[test]
+    fn fold_removes_deleted_components_and_accounts() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_component(msg(1), "c1"),
+                creation(&address, [], 0, "0x"),
+            ))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(with_deleted_component(msg(2), "c1"), deletion(&address)))
+            .unwrap();
+
+        assert!(cached_component(&cache, "c1").is_none());
+        assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn folding_the_same_block_twice_changes_nothing() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_component(msg(1), "c1"),
+                creation(&address, [(1, 1)], 10, "0x6000"),
+            ))
+            .unwrap();
+        let block = with_account_delta(
+            with_state_delta(msg(2), "c1", 2),
+            update(&address, fixtures::optional_slots([(1, 11), (2, 2)])),
+        );
+
+        cache.fold(&block).unwrap();
+        let account_once = cached_account(&cache, &address);
+        let component_once = cached_component(&cache, "c1");
+        let bytes_once = cache
+            .account_bytes
+            .load(Ordering::Relaxed);
+        cache.fold(&block).unwrap();
+
+        assert_eq!(cached_account(&cache, &address), account_once);
+        assert_eq!(cached_component(&cache, "c1"), component_once);
+        assert_eq!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed),
+            bytes_once
+        );
+    }
+
+    #[test]
+    fn two_extractors_folding_the_same_account_keep_both_values() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1), (2, 2)], 0, "0x")))
+            .unwrap();
+        let ahead =
+            with_account_delta(msg(5), update(&address, fixtures::optional_slots([(1, 15)])));
+        let mut behind = testing::aggregated_changes("other", 3, 3, Some(3));
+        behind = with_account_delta(
+            behind,
+            update(&address, fixtures::optional_slots([(1, 13), (2, 23)])),
+        );
+
+        cache.fold(&ahead).unwrap();
+        cache.fold(&behind).unwrap();
+
+        let slots = cached_account(&cache, &address)
+            .unwrap()
+            .slots;
+        assert_eq!(
+            slots,
+            fixtures::slots([(1, 15), (2, 23)]),
+            "slot 1 keeps block 5, slot 2 takes block 3"
+        );
+    }
+
+    #[test]
+    fn folding_matches_the_delta_path() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let token = addr(9);
+        let slot2 = fixtures::slots([(2, 2)])
+            .into_keys()
+            .next()
+            .unwrap();
+        let blocks = vec![
+            with_component_balance(
+                with_state_delta(
+                    with_component(
+                        with_account_delta(
+                            msg(1),
+                            creation(&address, [(1, 1), (2, 2)], 10, "0x6000"),
+                        ),
+                        "c1",
+                    ),
+                    "c1",
+                    1,
+                ),
+                "c1",
+                &token,
+                5,
+            ),
+            with_state_delta(
+                with_account_balance(
+                    with_account_delta(
+                        msg(2),
+                        update(&address, fixtures::optional_slots([(1, 11), (3, 3)])),
+                    ),
+                    &address,
+                    &token,
+                    7,
+                ),
+                "c1",
+                2,
+            ),
+            with_component_balance(
+                with_account_delta(msg(3), update(&address, HashMap::from([(slot2, None)]))),
+                "c1",
+                &token,
+                6,
+            ),
+        ];
+
+        for block in &blocks {
+            cache.fold(block).unwrap();
+        }
+
+        let mut expected_account: Option<Account> = None;
+        let mut expected_state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+        for block in &blocks {
+            if let Some(delta) = block.account_deltas.get(&address) {
+                let account =
+                    expected_account.get_or_insert_with(|| delta.clone().into_account_without_tx());
+                account.apply_delta(delta).unwrap();
+            }
+            if let Some(balances) = block.account_balances.get(&address) {
+                let account = expected_account.as_mut().unwrap();
+                for (token, balance) in balances {
+                    account
+                        .token_balances
+                        .insert(token.clone(), balance.clone());
+                }
+            }
+            if let Some(delta) = block.state_deltas.get("c1") {
+                expected_state
+                    .apply_state_delta(delta)
+                    .unwrap();
+            }
+            if let Some(balances) = block.component_balances.get("c1") {
+                expected_state
+                    .apply_balance_delta(balances)
+                    .unwrap();
+            }
+        }
+        assert_eq!(cached_account(&cache, &address), expected_account);
+        assert_eq!(cached_component(&cache, "c1"), Some(expected_state));
+    }
+
+    #[test]
+    fn entry_bytes_follow_writes() {
+        let address = addr(1);
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+        assert_eq!(cached.bytes(), cached.deep_size_of(), "a fresh entry is measured in full");
+
+        let before = cached.bytes();
+        let (key, value) = fixtures::optional_slots([(3, 3)])
+            .into_iter()
+            .next()
+            .unwrap();
+        cached.fold(&update(&address, HashMap::from([(key.clone(), value.clone())])), ts(2));
+
+        let added = key.deep_size_of() + value.unwrap().deep_size_of() + size_of::<NaiveDateTime>();
+        assert_eq!(cached.bytes(), before + added, "a new slot adds key, value and tag");
+
+        let before = cached.bytes();
+        cached.fold(&update(&address, fixtures::optional_slots([(3, 4)])), ts(3));
+        assert_eq!(cached.bytes(), before, "a same-size replacement is free");
+    }
+
+    #[test]
+    fn family_totals_return_to_zero_after_deletion() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+                creation(&address, [(1, 1)], 10, "0x6000"),
+            ))
+            .unwrap();
+        cache
+            .fold(&with_account_delta(
+                with_component_balance(msg(2), "c1", &addr(9), 5),
+                update(&address, fixtures::optional_slots([(2, 2)])),
+            ))
+            .unwrap();
+        assert!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed) >
+                0
+        );
+        assert!(
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed) >
+                0
+        );
+
+        cache
+            .fold(&with_account_delta(with_deleted_component(msg(3), "c1"), deletion(&address)))
+            .unwrap();
+
+        assert_eq!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn reconcile_replaces_the_running_totals_with_a_full_walk() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+                creation(&address, [(1, 1), (2, 2)], 10, "0x6000"),
+            ))
+            .unwrap();
+
+        let (accounts, components) = cache.reconcile();
+
+        let state = cache.read();
+        assert_eq!(accounts, state.accounts.deep_size_of());
+        assert_eq!(components, state.components.deep_size_of());
+        assert_eq!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed),
+            accounts
+        );
+        assert_eq!(
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed),
+            components
+        );
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure; `report` is sync, so no runtime.
+    #[test]
+    fn report_publishes_gauges_per_family() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_account_delta(
+                with_component(with_component(msg(1), "c1"), "c2"),
+                creation(&addr(1), [], 0, "0x"),
+            ))
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || cache.report());
+
+        let gauges: HashMap<(String, String), f64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let family = key
+                    .key()
+                    .labels()
+                    .find(|l| l.key() == "family")?
+                    .value()
+                    .to_string();
+                let DebugValue::Gauge(v) = value else { return None };
+                Some(((key.key().name().to_string(), family), v.into_inner()))
+            })
+            .collect();
+        assert_eq!(gauges[&("entity_cache_entries".to_string(), "accounts".to_string())], 1.0);
+        assert_eq!(gauges[&("entity_cache_entries".to_string(), "components".to_string())], 2.0);
+        assert_eq!(
+            gauges[&("entity_cache_size_bytes".to_string(), "accounts".to_string())],
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed) as f64
+        );
+        assert_eq!(
+            gauges[&("entity_cache_size_bytes".to_string(), "components".to_string())],
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed) as f64
+        );
+    }
+}
