@@ -6,7 +6,8 @@ Consumer library implementing the snapshot + deltas pattern for real-time protoc
 
 ```
 rpc.rs              HTTP snapshot client — fetches protocol state at a block height
-deltas.rs           WebSocket client — streams real-time state deltas
+deltas.rs           WebSocket client — streams real-time state deltas. connect() returns a
+                    ConnectionHandle; the socket lives exactly as long as that handle (drop = close)
 stream.rs           Builder entry point — wires RPC + WS clients into a TychoStream.
                     build() eagerly loads and validates the chain registry before any network I/O
 client_metadata.rs  X-Tycho-Client-Metadata header (CLIENT_METADATA_HEADER, size caps);
