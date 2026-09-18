@@ -19,6 +19,14 @@
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
 //! under a millisecond, so blocking is acceptable and a reader never observes half a block.
+//!
+//! # Memory
+//!
+//! There is no cap and no eviction: an entry the cache drops could never be reloaded, so the
+//! protection is visibility. Every entry keeps a running byte count, the cache keeps per-family
+//! totals, and a reporter publishes `entity_cache_size_bytes` and `entity_cache_entries` per
+//! family. A periodic full walk replaces the running totals, so capacity slack the counts miss
+//! never accumulates.
 
 // Not yet constructed by production code; wired into the loader and the pump in follow-ups.
 #![allow(dead_code)]
@@ -29,13 +37,15 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
+    time::Duration,
 };
 
 use chrono::NaiveDateTime;
 use deepsize::{Context, DeepSizeOf};
-use tracing::trace;
+use metrics::gauge;
+use tracing::{info, trace};
 use tycho_common::{
     keccak256,
     models::{
@@ -593,6 +603,65 @@ impl FoldSink for EntityCache {
         Self::charge(&self.account_bytes, account_change);
         Self::charge(&self.component_bytes, component_change);
         Ok(())
+    }
+}
+
+/// How often the reporter publishes the gauges. Same cadence as `pending_deltas_buffer_size`.
+const REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Reports between full recounts. A recount walks every value under the read lock, so folds wait
+/// for it; on a mainnet-sized cache (~3.5 GiB) that is on the order of a second.
+const RECONCILE_EVERY: u32 = 10;
+
+impl EntityCache {
+    /// Publishes entry counts and running byte totals per family.
+    pub(crate) fn report(&self) {
+        let state = self.read();
+        let components: usize = state
+            .components
+            .values()
+            .map(HashMap::len)
+            .sum();
+        gauge!("entity_cache_entries", "family" => "accounts").set(state.accounts.len() as f64);
+        gauge!("entity_cache_entries", "family" => "components").set(components as f64);
+        gauge!("entity_cache_size_bytes", "family" => "accounts").set(
+            self.account_bytes
+                .load(Ordering::Relaxed) as f64,
+        );
+        gauge!("entity_cache_size_bytes", "family" => "components").set(
+            self.component_bytes
+                .load(Ordering::Relaxed) as f64,
+        );
+    }
+
+    /// Recounts every entry and replaces the running totals. Holds the read lock for the walk,
+    /// so no fold changes the totals meanwhile. Returns `(accounts, components)` in bytes.
+    pub(crate) fn reconcile(&self) -> (usize, usize) {
+        let state = self.read();
+        let accounts = state.accounts.deep_size_of();
+        let components = state.components.deep_size_of();
+        let running_accounts = self
+            .account_bytes
+            .swap(accounts, Ordering::Relaxed);
+        let running_components = self
+            .component_bytes
+            .swap(components, Ordering::Relaxed);
+        info!(accounts, running_accounts, components, running_components, "Entity cache recounted");
+        (accounts, components)
+    }
+
+    /// Reports every [`REPORT_INTERVAL`] and recounts every [`RECONCILE_EVERY`] reports.
+    pub(crate) async fn run_reporter(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(REPORT_INTERVAL);
+        let mut reports = 0u32;
+        loop {
+            tick.tick().await;
+            reports += 1;
+            if reports.is_multiple_of(RECONCILE_EVERY) {
+                self.reconcile();
+            }
+            self.report();
+        }
     }
 }
 
@@ -1238,6 +1307,84 @@ mod test {
                 .component_bytes
                 .load(Ordering::Relaxed),
             0
+        );
+    }
+
+    #[test]
+    fn reconcile_replaces_the_running_totals_with_a_full_walk() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(
+                with_state_delta(with_component(msg(1), "c1"), "c1", 1),
+                creation(&address, [(1, 1), (2, 2)], 10, "0x6000"),
+            ))
+            .unwrap();
+
+        let (accounts, components) = cache.reconcile();
+
+        let state = cache.read();
+        assert_eq!(accounts, state.accounts.deep_size_of());
+        assert_eq!(components, state.components.deep_size_of());
+        assert_eq!(
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed),
+            accounts
+        );
+        assert_eq!(
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed),
+            components
+        );
+    }
+
+    // `metrics::with_local_recorder` takes a sync closure; `report` is sync, so no runtime.
+    #[test]
+    fn report_publishes_gauges_per_family() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_account_delta(
+                with_component(with_component(msg(1), "c1"), "c2"),
+                creation(&addr(1), [], 0, "0x"),
+            ))
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || cache.report());
+
+        let gauges: HashMap<(String, String), f64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let family = key
+                    .key()
+                    .labels()
+                    .find(|l| l.key() == "family")?
+                    .value()
+                    .to_string();
+                let DebugValue::Gauge(v) = value else { return None };
+                Some(((key.key().name().to_string(), family), v.into_inner()))
+            })
+            .collect();
+        assert_eq!(gauges[&("entity_cache_entries".to_string(), "accounts".to_string())], 1.0);
+        assert_eq!(gauges[&("entity_cache_entries".to_string(), "components".to_string())], 2.0);
+        assert_eq!(
+            gauges[&("entity_cache_size_bytes".to_string(), "accounts".to_string())],
+            cache
+                .account_bytes
+                .load(Ordering::Relaxed) as f64
+        );
+        assert_eq!(
+            gauges[&("entity_cache_size_bytes".to_string(), "components".to_string())],
+            cache
+                .component_bytes
+                .load(Ordering::Relaxed) as f64
         );
     }
 }
