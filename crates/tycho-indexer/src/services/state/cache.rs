@@ -1019,4 +1019,86 @@ mod test {
             "slot 1 keeps block 5, slot 2 takes block 3"
         );
     }
+
+    #[test]
+    fn folding_matches_the_delta_path() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let token = addr(9);
+        let slot2 = fixtures::slots([(2, 2)])
+            .into_keys()
+            .next()
+            .unwrap();
+        let blocks = vec![
+            with_component_balance(
+                with_state_delta(
+                    with_component(
+                        with_account_delta(
+                            msg(1),
+                            creation(&address, [(1, 1), (2, 2)], 10, "0x6000"),
+                        ),
+                        "c1",
+                    ),
+                    "c1",
+                    1,
+                ),
+                "c1",
+                &token,
+                5,
+            ),
+            with_state_delta(
+                with_account_balance(
+                    with_account_delta(
+                        msg(2),
+                        update(&address, fixtures::optional_slots([(1, 11), (3, 3)])),
+                    ),
+                    &address,
+                    &token,
+                    7,
+                ),
+                "c1",
+                2,
+            ),
+            with_component_balance(
+                with_account_delta(msg(3), update(&address, HashMap::from([(slot2, None)]))),
+                "c1",
+                &token,
+                6,
+            ),
+        ];
+
+        for block in &blocks {
+            cache.fold(block).unwrap();
+        }
+
+        let mut expected_account: Option<Account> = None;
+        let mut expected_state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+        for block in &blocks {
+            if let Some(delta) = block.account_deltas.get(&address) {
+                let account =
+                    expected_account.get_or_insert_with(|| delta.clone().into_account_without_tx());
+                account.apply_delta(delta).unwrap();
+            }
+            if let Some(balances) = block.account_balances.get(&address) {
+                let account = expected_account.as_mut().unwrap();
+                for (token, balance) in balances {
+                    account
+                        .token_balances
+                        .insert(token.clone(), balance.clone());
+                }
+            }
+            if let Some(delta) = block.state_deltas.get("c1") {
+                expected_state
+                    .apply_state_delta(delta)
+                    .unwrap();
+            }
+            if let Some(balances) = block.component_balances.get("c1") {
+                expected_state
+                    .apply_balance_delta(balances)
+                    .unwrap();
+            }
+        }
+        assert_eq!(cached_account(&cache, &address), expected_account);
+        assert_eq!(cached_component(&cache, "c1"), Some(expected_state));
+    }
 }
