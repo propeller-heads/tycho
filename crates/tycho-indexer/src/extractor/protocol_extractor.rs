@@ -2272,14 +2272,15 @@ mod test {
 
     const EXTRACTOR_NAME: &str = "TestExtractor";
     const TEST_PROTOCOL: &str = "TestProtocol";
-    async fn create_extractor_with_batch_size(
+    async fn create_extractor_with_chain_and_batch_size(
         gw: MockExtractorGateway,
         batch_size: usize,
+        chain: Chain,
     ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
     {
         let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
         let protocol_cache = ProtocolMemoryCache::new(
-            Chain::Ethereum,
+            chain,
             chrono::Duration::seconds(900),
             Arc::new(MockGateway::new()),
         );
@@ -2291,7 +2292,7 @@ mod test {
             gw,
             batch_size,
             EXTRACTOR_NAME,
-            Chain::Ethereum,
+            chain,
             ChainState::default(),
             TEST_PROTOCOL.to_string(),
             protocol_cache,
@@ -2302,6 +2303,14 @@ mod test {
         )
         .await
         .expect("Failed to create extractor")
+    }
+
+    async fn create_extractor_with_batch_size(
+        gw: MockExtractorGateway,
+        batch_size: usize,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
+        create_extractor_with_chain_and_batch_size(gw, batch_size, Chain::Ethereum).await
     }
 
     async fn create_extractor(
@@ -2702,6 +2711,67 @@ mod test {
                 .timestamp_subsec_micros(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn arc_same_timestamp_blocks_are_broadcast_and_persisted_in_number_order() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        let persisted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let persisted_by_mock = Arc::clone(&persisted);
+        gw.expect_advance()
+            .times(2)
+            .returning(move |changes, _, _| {
+                persisted_by_mock
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+
+        let extractor = create_extractor_with_chain_and_batch_size(gw, 1, Chain::Arc).await;
+        let timestamp = pb_fixtures::pb_blocks(1).ts;
+        let mut broadcast = Vec::new();
+
+        for number in 1..=3 {
+            let mut block = pb_fixtures::pb_blocks(number);
+            block.ts = timestamp;
+            let message = extractor
+                .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                    tycho_pb::BlockChanges { block: Some(block), ..Default::default() },
+                    Some(format!("cursor@{number}").as_str()),
+                    Some(number),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.chain, Chain::Arc);
+            broadcast.push(message.block.number);
+        }
+
+        if let Some(handle) = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take()
+        {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert_eq!(broadcast, vec![1, 2, 3]);
+        assert_eq!(*persisted.lock().unwrap(), vec![1, 2]);
+        assert_eq!(extractor.get_cursor().await, "cursor@3");
     }
 
     fn token_prices() -> HashMap<Bytes, f64> {
