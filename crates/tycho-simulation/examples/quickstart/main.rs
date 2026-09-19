@@ -90,16 +90,15 @@ struct Cli {
 
 impl Cli {
     fn with_defaults(mut self) -> Self {
-        // By default, we swap a small amount of the chain's main stablecoin into its wrapped
-        // native token.
+        // By default, we swap a small amount of the chain's main stablecoin into its routable
+        // native representation, falling back to the native token when none exists.
 
         if self.buy_token.is_none() {
-            self.buy_token = Some(
-                self.chain
-                    .wrapped_native_token()
-                    .address
-                    .to_string(),
-            );
+            let buy_token = self
+                .chain
+                .routable_native_token()
+                .unwrap_or_else(|| self.chain.native_token());
+            self.buy_token = Some(buy_token.address.to_string());
         }
 
         if self.sell_token.is_none() {
