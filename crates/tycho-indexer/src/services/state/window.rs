@@ -483,6 +483,7 @@ impl DeltaWindow {
 mod test {
     use std::{ops::RangeInclusive, str::FromStr};
 
+    use chrono::NaiveDateTime;
     use rstest::rstest;
     use tycho_common::models::{Chain, ChangeType};
 
@@ -493,6 +494,14 @@ mod test {
 
     fn msg(number: u64, finalized: u64, committed: Option<u64>) -> BlockAggregatedChanges {
         testing::aggregated_changes(EXTRACTOR, number, finalized, committed)
+    }
+
+    fn arc_msg(number: u64, timestamp: NaiveDateTime) -> BlockAggregatedChanges {
+        let mut message = msg(number, 0, None);
+        message.chain = Chain::Arc;
+        message.block.chain = Chain::Arc;
+        message.block.ts = timestamp;
+        message
     }
 
     fn revert_msg(number: u64) -> BlockAggregatedChanges {
@@ -649,6 +658,38 @@ mod test {
         assert!(patch.components["c1"]
             .iter()
             .all(|c| c.delta.is_some() && c.balances.is_none()));
+    }
+
+    #[test]
+    fn arc_same_timestamp_blocks_keep_number_order_for_latest_snapshot() {
+        let timestamp = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut w = window(128, 1);
+        for number in 40..=42 {
+            put(&mut w, with_component_delta(arc_msg(number, timestamp), "c1", number)).unwrap();
+        }
+
+        let patch = w
+            .capture_patch(&["c1"], &[], None)
+            .unwrap();
+        let blocks = patch.components["c1"]
+            .iter()
+            .map(|change| change.block)
+            .collect::<Vec<_>>();
+        let latest = w.tip().unwrap();
+
+        assert_eq!(blocks, vec![40, 41, 42]);
+        assert_eq!(latest.number, 42);
+        assert_eq!(latest.chain, Chain::Arc);
+        assert_eq!(
+            w.resolve(BlockNumberOrTimestamp::Number(42)),
+            WindowResolution::InWindow(latest.clone())
+        );
+        assert_eq!(
+            w.resolve(BlockNumberOrTimestamp::Timestamp(timestamp + chrono::Duration::seconds(1))),
+            WindowResolution::InWindow(latest)
+        );
     }
 
     #[test]
