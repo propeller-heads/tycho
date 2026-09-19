@@ -145,6 +145,11 @@ pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// so a single configured executor address covers every pAMM, including auto-detected ones.
 pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 
+/// Tempest is indexed as a VM protocol but implements `IPropAMM`, so it is served by the same
+/// generic executor as the price-level-stream family. Exact key only -- there is no venue-suffixed
+/// variant, because the venue address travels in the component's `pamm_address` attribute.
+pub const TEMPEST_KEY: &str = "vm:tempest";
+
 /// Protocol system prefix for pAMM components executed through the PropAMMRouter, so a stale maker
 /// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
 /// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct

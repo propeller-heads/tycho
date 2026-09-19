@@ -31,6 +31,7 @@ members = [
     "unichain-velodrome",
     "ethereum-liquidityparty",
     "ethereum-fermiswap",
+    "ethereum-tempest",
     "ethereum-bopamm",
     "ethereum-ring-swap-v2",
     "ethereum-sky",

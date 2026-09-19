@@ -1857,6 +1857,67 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
 }
 
 #[test]
+fn test_single_encoding_strategy_tempest_weth_usdc() {
+    // WETH -> (Tempest) -> USDC
+    let token_in = weth();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: String::from("0x6b7d03b47715d0315ccb75d25300c242e26b51f5202e1a32df20f239e1d9de35"),
+            protocol_system: String::from("vm:tempest"),
+            // Tempest is served by the generic PropAMMExecutor, which reads the venue address
+            // from this attribute rather than an executor immutable.
+            static_attributes: HashMap::from([(
+                "pamm_address".to_string(),
+                Bytes::from_str("00000003f1ec2379e79f58e12ec6c4f51ee92149").unwrap(),
+            )]),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("100000000000000000").unwrap(),
+        // 0.1 WETH at the pinned fork block's lane, which prices ~1838 USDC/WETH inside its first
+        // 1bps band, then ~2% slippage for the minimum.
+        BigUint::from(183_000000u64),
+        BigUint::from(180_000000u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_tempest_weth_usdc",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
 fn test_single_encoding_strategy_fallback_usdc_weth() {
     let token_in = usdc();
     let token_out = weth();
