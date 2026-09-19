@@ -13,17 +13,18 @@ use crate::encoding::{
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
-            curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
-            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
-            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
-            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
-            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
-            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
-            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
-            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
-            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            camelot_v3::CamelotV3SwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
+            ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
+            etherfi::EtherfiSwapEncoder, fallback::FallbackSwapEncoder,
+            fermiswap::FermiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
+            hashflow::HashflowSwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
+            liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
+            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
+            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
+            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
+            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
+            uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -237,6 +238,12 @@ impl SwapEncoderRegistry {
             //      executor.
             "ramses_v3" => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            // Camelot V3 (Algebra V1.9) pools have the same `swap` entry point and settle through
+            // `algebraSwapCallback`; the dedicated encoder documents why the standard Uniswap V3
+            // executor runs them unchanged.
+            "vm:camelot_v3" => {
+                Ok(Box::new(CamelotV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
