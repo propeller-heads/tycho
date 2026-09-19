@@ -217,7 +217,7 @@ mod tests {
 
         let bebop_component = ProtocolComponent {
             id: String::from("bebop-rfq"),
-            protocol_system: String::from("rfq:bebop"),
+            protocol_system: String::from("book:bebop"),
             ..Default::default()
         };
         let bebop_state = MockRFQState {

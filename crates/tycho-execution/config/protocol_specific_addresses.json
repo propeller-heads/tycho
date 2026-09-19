@@ -10,10 +10,10 @@
       "eeth_address": "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
       "weeth_address": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
     },
-    "rfq:liquorice": {
+    "book:liquorice": {
       "balance_manager_address": "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
     },
-    "rfq:native": {
+    "book:native": {
       "router_v6": "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"
     },
     "fallback_router": {
@@ -21,19 +21,19 @@
     }
   },
   "base": {
-    "rfq:native": {
+    "book:native": {
       "router_v6": "0x9706D3fff42571305Fc201F996ADC0e768d72911"
     }
   },
   "arbitrum": {
-    "rfq:native": {
+    "book:native": {
       "router_v6": "0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"
     }
   },
   "polygon": {},
   "unichain": {},
   "bsc": {
-    "rfq:native": {
+    "book:native": {
       "router_v6": "0x1fDED89D98CBeADd96a109D28689c2638025dad3"
     }
   },

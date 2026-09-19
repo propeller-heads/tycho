@@ -1,4 +1,9 @@
-use std::{collections::HashSet, env, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    str::FromStr,
+    sync::Arc,
+};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -19,9 +24,9 @@ use alloy_chains::NamedChain;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
 use dotenv::dotenv;
+use futures::StreamExt as _;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::{
@@ -36,17 +41,19 @@ use tycho_execution::encoding::{
     models::{ClientFeeParams, EncodedSolution, Solution, Swap, UserTransferType},
 };
 use tycho_simulation::{
-    protocol::models::{ProtocolComponent, Update},
-    rfq::{
-        protocols::{
-            bebop::{client_builder::BebopClientBuilder, state::BebopState},
-            hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
-            liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
-            metric::{client_builder::MetricClientBuilder, state::MetricState},
-            native::{client_builder::NativeClientBuilder, state::NativeState},
-        },
-        stream::RFQStreamBuilder,
+    book::{
+        quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookFeedEvent, BookFeedStreams,
+        BookSnapshot,
     },
+    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    protocol::models::ProtocolComponent,
+    rfq::protocols::{
+        bebop::{self, feed::BebopFeedBuilder},
+        hashflow::{self, feed::HashflowFeedBuilder},
+        liquorice::{self, feed::LiquoriceFeedBuilder},
+        native::{self, feed::NativeFeedBuilder},
+    },
+    snapshot_feed::SnapshotFeedOutcome,
     tycho_common::models::Chain,
     utils::{get_default_url, load_all_tokens},
 };
@@ -68,13 +75,13 @@ struct Cli {
     #[arg(long, default_value_t = 10.0)]
     sell_amount: f64,
     /// The minimum TVL threshold for RFQ quotes in USD
-    #[arg(long, default_value_t = 1000.0)]
+    #[arg(long, default_value_t = 100.0)]
     tvl_threshold: f64,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
-    /// Run PAMM RFQ protocols.
-    #[arg(long, default_value_t = true)]
-    run_pamm_protocols: bool,
+    /// Disable the pAMM book feeds (Metric), keeping the RFQ venues
+    #[arg(long, default_value_t = false)]
+    disable_pamm_feeds: bool,
 }
 
 impl Cli {
@@ -137,10 +144,12 @@ async fn main() {
         (liquorice_user.is_none() || liquorice_key.is_none()) &&
         native_key.is_none()
     {
-        if cli.run_pamm_protocols {
-            println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
+        if cli.disable_pamm_feeds {
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm-feeds to run Metric on its own.");
         } else {
-            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
+            println!(
+                "No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n"
+            );
         }
     }
 
@@ -197,111 +206,145 @@ async fn main() {
         .build()
         .expect("Failed to build encoder");
 
-    // Set up RFQ client using the builder pattern
-    let mut rfq_tokens = HashSet::new();
-    rfq_tokens.insert(sell_token_address.clone());
-    rfq_tokens.insert(buy_token_address.clone());
+    // Set up the book feeds. They receive the traded tokens with their metadata and construct
+    // ready-to-simulate states directly.
+    let mut rfq_tokens = HashMap::new();
+    for address in [&sell_token_address, &buy_token_address] {
+        let token = all_tokens
+            .get(address)
+            .expect("Traded token not found in Tycho token list")
+            .clone();
+        rfq_tokens.insert(address.clone(), token);
+    }
 
-    let mut rfq_stream_builder = RFQStreamBuilder::new()
-        .set_tokens(all_tokens.clone())
-        .await;
-    if let Some(key) = bebop_key {
-        println!("Setting up Bebop RFQ client...\n");
-        let bebop_client = BebopClientBuilder::new(chain, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
-            .expect("Failed to create Bebop RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<BebopState>("bebop", Box::new(bebop_client))
+    let book_config =
+        BookFeedConfig { chain, tokens: Arc::new(rfq_tokens), min_tvl_usd: cli.tvl_threshold };
+    // The RFQ feeds price their books' TVL in these; Metric reports USD TVL itself, so it is the
+    // one venue a chain without a curated set can still serve.
+    let usd_quote_tokens = usd_stablecoins_for_chain(chain).map(Arc::new);
+    if usd_quote_tokens.is_none() {
+        println!(
+            "No curated USD stablecoins for {chain:?}: the RFQ feeds cannot price their books' \
+             TVL there and are skipped.\n"
+        );
     }
-    if let (Some(user), Some(key)) = (hashflow_user, hashflow_key) {
-        println!("Setting up Hashflow RFQ client...\n");
-        let hashflow_client = HashflowClientBuilder::new(chain, user, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .poll_time(Duration::from_secs(5))
-            .build()
-            .expect("Failed to create Hashflow RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
+
+    // Adding a feed consumes it and runs it in its own task, which holds only that provider's
+    // latest complete book. A consumer that falls behind — as this one does while the
+    // interactive prompt below is open — skips straight to the freshest book.
+    let mut feeds = BookFeedStreams::new();
+
+    if let (Some(key), Some(usd_quote_tokens)) = (bebop_key, &usd_quote_tokens) {
+        println!("Setting up Bebop feed...\n");
+        let bebop_feed =
+            BebopFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens), key)
+                .build()
+                .expect("Failed to create Bebop feed");
+        feeds
+            .add(bebop::PROTOCOL_SYSTEM, bebop_feed)
+            .expect("each provider is added once");
     }
-    if let (Some(user), Some(key)) = (liquorice_user, liquorice_key) {
-        println!("Setting up Liquorice RFQ client...\n");
-        let liquorice_client = LiquoriceClientBuilder::new(chain, user, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
-            .expect("Failed to create Liquorice RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
+
+    if let (Some(user), Some(key), Some(usd_quote_tokens)) =
+        (hashflow_user, hashflow_key, &usd_quote_tokens)
+    {
+        println!("Setting up Hashflow feed...\n");
+        let hashflow_feed =
+            HashflowFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens), user, key)
+                .build()
+                .expect("Failed to create Hashflow feed");
+        feeds
+            .add(hashflow::PROTOCOL_SYSTEM, hashflow_feed)
+            .expect("each provider is added once");
     }
-    if let Some(key) = native_key {
-        println!("Setting up Native RFQ client...\n");
-        let native_client = NativeClientBuilder::new(chain, key)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
-            .expect("Failed to create Native RFQ client");
-        rfq_stream_builder =
-            rfq_stream_builder.add_client::<NativeState>("native", Box::new(native_client))
+
+    if let (Some(user), Some(key), Some(usd_quote_tokens)) =
+        (liquorice_user, liquorice_key, &usd_quote_tokens)
+    {
+        println!("Setting up Liquorice feed...\n");
+        let liquorice_feed =
+            LiquoriceFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens), user, key)
+                .build()
+                .expect("Failed to create Liquorice feed");
+        feeds
+            .add(liquorice::PROTOCOL_SYSTEM, liquorice_feed)
+            .expect("each provider is added once");
     }
-    if cli.run_pamm_protocols {
-        println!("Setting up Metric RFQ client...\n");
-        match MetricClientBuilder::new(chain)
-            .tokens(rfq_tokens.clone())
-            .tvl_threshold(cli.tvl_threshold)
-            .build()
+
+    if let (Some(key), Some(usd_quote_tokens)) = (native_key, &usd_quote_tokens) {
+        println!("Setting up Native feed...\n");
+        match NativeFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens), key).build()
         {
-            Ok(metric_client) => {
-                rfq_stream_builder =
-                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
+            Ok(native_feed) => {
+                feeds
+                    .add(native::PROTOCOL_SYSTEM, native_feed)
+                    .expect("each provider is added once");
             }
-            Err(e) => eprintln!("Skipping Metric RFQ client: {e}"),
+            Err(e) => eprintln!("Skipping Native feed: {e}"),
         }
     }
 
-    // Start the RFQ stream in a background task
-    let (tx, mut rx) = mpsc::channel::<Update>(100);
-    tokio::spawn(rfq_stream_builder.build(tx));
+    if !cli.disable_pamm_feeds {
+        println!("Setting up Metric feed...\n");
+        match env::var("METRIC_API_KEY") {
+            Ok(api_key) => match MetricFeedBuilder::new(book_config, api_key).build() {
+                Ok(metric_feed) => {
+                    feeds
+                        .add(metric::PROTOCOL_SYSTEM, metric_feed)
+                        .expect("each provider is added once");
+                }
+                Err(e) => eprintln!("Skipping Metric feed: {e}"),
+            },
+            Err(_) => eprintln!("Skipping Metric feed: METRIC_API_KEY not set"),
+        }
+    }
+
     println!("Connected to RFQs! Streaming live price levels...\n");
 
-    // Stream quotes from RFQ stream
-    while let Some(update) = rx.recv().await {
-        // Drain any additional buffered messages to get the most recent one
-        //
-        // ⚠️Warning: This works fine only if you assume that this message is entirely
-        // representative of the current state, as done in this quickstart.
-        // You should comment out this code portion if you would like to manually track removed
-        // components.
-        let mut latest_update = update;
-        let mut drained_count = 0;
-        while let Ok(newer_update) =
-            tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await
-        {
-            if let Some(newer_update) = newer_update {
-                latest_update = newer_update;
-                drained_count += 1;
-            } else {
-                break;
+    while let Some((protocol_system, event)) = feeds.next().await {
+        let BookSnapshot { anchor, books } = match event {
+            BookFeedEvent::Published(snapshot) => snapshot,
+            BookFeedEvent::Withdrawn => {
+                eprintln!(
+                    "{protocol_system} has nothing servable, skipping it until it publishes again"
+                );
+                continue;
             }
-        }
-        if drained_count > 0 {
-            println!(
-                "Fast-forwarded through {drained_count} older RFQ updates to get latest prices"
-            );
-        }
-        let update = latest_update;
+            BookFeedEvent::Ended(SnapshotFeedOutcome::Failed(error)) => {
+                eprintln!("Book feed {protocol_system} gave up: {error}");
+                continue;
+            }
+            BookFeedEvent::Ended(SnapshotFeedOutcome::Panicked(error)) => {
+                eprintln!("Book feed {protocol_system} died of a bug: {error}");
+                continue;
+            }
+            BookFeedEvent::Ended(SnapshotFeedOutcome::RanOut) => {
+                eprintln!("Book feed {protocol_system} has nothing left to serve");
+                continue;
+            }
+        };
 
+        // `anchor` is when this process received the snapshot; `updated_at` is when the venue
+        // says it last repriced a book, for the venues that report it at all.
+        let oldest_update = books
+            .values()
+            .filter_map(|book| book.updated_at)
+            .min();
         println!(
-            "Received RFQ price levels with {} new pairs for block/timestamp {}",
-            update.states.len(),
-            update.block_number_or_timestamp
+            "Received {protocol_system} RFQ price levels with {} books at {}{}",
+            books.len(),
+            anchor.0,
+            match oldest_update {
+                Some(updated_at) => format!(", oldest priced at {updated_at}"),
+                None => ", none of them timestamped by the venue".to_string(),
+            },
         );
 
-        // Process state updates
-        for (comp_id, state) in &update.states {
-            if let Some(component) = update.new_pairs.get(comp_id) {
+        // Process the provider's complete snapshot
+        for pair in books.values() {
+            {
+                let component = &pair.component;
+                let state = &pair.state;
                 let tokens = &component.tokens;
 
                 // Check if this component trades our desired pair
@@ -468,7 +511,7 @@ async fn main() {
 
                                 let solution = create_solution(
                                     component.clone(),
-                                    Arc::from(state.clone_box()),
+                                    Arc::clone(state),
                                     sell_token.clone(),
                                     buy_token.clone(),
                                     amount_in.clone(),
@@ -640,7 +683,7 @@ async fn main() {
 
                                 let solution = create_solution(
                                     component.clone(),
-                                    Arc::from(state.clone_box()),
+                                    Arc::clone(state),
                                     sell_token.clone(),
                                     buy_token.clone(),
                                     amount_in.clone(),
@@ -742,13 +785,12 @@ async fn main() {
                         }
                     }
                 }
-            } else {
-                println!("No matching pair found in update.");
             }
         }
 
         println!("\nWaiting for more price levels... (Press Ctrl+C to exit)");
     }
+    eprintln!("All RFQ providers terminated, exiting.");
 }
 
 // Format token amounts to human-readable values

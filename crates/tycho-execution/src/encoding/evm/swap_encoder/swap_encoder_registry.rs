@@ -176,19 +176,19 @@ impl SwapEncoderRegistry {
             "vm:balancer_v3" => {
                 Ok(Box::new(BalancerV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "rfq:bebop" => {
+            "book:bebop" => {
                 Ok(Box::new(BebopSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "rfq:hashflow" => {
+            "book:hashflow" => {
                 Ok(Box::new(HashflowSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "rfq:liquorice" => {
+            "book:liquorice" => {
                 Ok(Box::new(LiquoriceSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "rfq:metric" => {
+            "book:metric" => {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "rfq:native" => {
+            "book:native" => {
                 Ok(Box::new(NativeSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "fluid_v1" => {

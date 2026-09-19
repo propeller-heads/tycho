@@ -231,7 +231,7 @@ mod test {
     fn test_encode_native_single_fails_without_protocol_data() {
         let native_component = ProtocolComponent {
             id: String::from("native-rfq"),
-            protocol_system: String::from("rfq:native"),
+            protocol_system: String::from("book:native"),
             ..Default::default()
         };
 
@@ -278,7 +278,7 @@ mod test {
 
         let native_component = ProtocolComponent {
             id: String::from("native-rfq"),
-            protocol_system: String::from("rfq:native"),
+            protocol_system: String::from("book:native"),
             ..Default::default()
         };
 
@@ -371,7 +371,7 @@ mod test {
         let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         let token_out = Bytes::from("0xc02aaa39b223fe8d0a0e5C4F27eAD9083C756Cc2");
         let swap = Swap::new(
-            ProtocolComponent { protocol_system: "rfq:native".to_string(), ..Default::default() },
+            ProtocolComponent { protocol_system: "book:native".to_string(), ..Default::default() },
             default_token(token_in.clone()),
             default_token(token_out.clone()),
             BigUint::ZERO,
@@ -416,7 +416,7 @@ mod test {
         let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         let token_out = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
         let swap = Swap::new(
-            ProtocolComponent { protocol_system: "rfq:native".to_string(), ..Default::default() },
+            ProtocolComponent { protocol_system: "book:native".to_string(), ..Default::default() },
             default_token(token_in.clone()),
             default_token(token_out.clone()),
             BigUint::ZERO,

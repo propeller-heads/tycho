@@ -58,10 +58,10 @@ pub fn optimizable_transfer_in(protocol_system: &str) -> bool {
 pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "vm:balancer_v2",
     "vm:curve",
-    "rfq:bebop",
-    "rfq:hashflow",
-    "rfq:liquorice",
-    "rfq:metric",
+    "book:bebop",
+    "book:hashflow",
+    "book:liquorice",
+    "book:metric",
     "erc4626",
     "ring_swap_v2",
     "sky",
@@ -446,9 +446,9 @@ mod tests {
 
     #[test]
     fn test_single_permit2_with_approval() {
-        // rfq:bebop is not callback, not optimizable, and needs an approval (ProtocolWillDebit).
+        // book:bebop is not callback, not optimizable, and needs an approval (ProtocolWillDebit).
         // With Permit2 the user transfer costs 80k instead of 40k.
-        let solution = make_solution(vec![make_swap("rfq:bebop")])
+        let solution = make_solution(vec![make_swap("book:bebop")])
             .with_user_transfer_type(UserTransferType::TransferFromPermit2);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 

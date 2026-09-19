@@ -123,7 +123,7 @@ pub fn delayed_bebop_swap(token_in: Bytes, token_out: Bytes, delay: Duration) ->
     Swap::new(
         ProtocolComponent {
             id: "bebop-rfq".to_string(),
-            protocol_system: "rfq:bebop".to_string(),
+            protocol_system: "book:bebop".to_string(),
             ..Default::default()
         },
         default_token(token_in),
