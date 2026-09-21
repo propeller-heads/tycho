@@ -178,10 +178,15 @@ pub trait DeltasClient {
 
 /// Owns the websocket task started by [`DeltasClient::connect`].
 ///
-/// Dropping the handle shuts the task down the same way [`DeltasClient::close`] does, so a
+/// Dropping the handle shuts the connection down the same way [`DeltasClient::close`] does, so a
 /// caller that loses it — an early return, a finished `select!` — closes the connection instead
-/// of detaching it. Awaiting the handle yields the task's result.
-#[must_use = "the connection is closed as soon as this handle is dropped"]
+/// of detaching it. A handle dropped while the task waits to reconnect takes effect after that
+/// next attempt, because the task reads its command channel only once it is connected again.
+///
+/// The connection can also end while the handle is alive: [`DeltasClient::close`] on any clone of
+/// the client, a close from the server, or exhausted reconnection attempts. Awaiting the handle
+/// yields the task's result.
+#[must_use = "dropping this handle closes the connection"]
 pub struct ConnectionHandle {
     task: JoinHandle<Result<(), DeltasError>>,
     cmd_tx: Sender<()>,
@@ -190,11 +195,10 @@ pub struct ConnectionHandle {
 }
 
 impl ConnectionHandle {
-    /// Stops the websocket task immediately, for a connection no caller will ever own.
+    /// Stops the websocket task without waiting for it to read its command channel.
     ///
-    /// Unlike dropping the handle, this does not wait for the task to reach the point where it
-    /// reads its command channel: a task sleeping between reconnection attempts would otherwise
-    /// reconnect once more before it stops.
+    /// Unlike dropping the handle, this leaves no window for a task that sleeps between
+    /// reconnection attempts to open one more connection before it stops.
     fn abort(self) {
         self.task.abort();
     }
@@ -240,7 +244,8 @@ pub struct WsDeltasClient {
     conn_notify: Arc<Notify>,
     /// Shared client instance state.
     inner: Arc<Mutex<Option<Inner>>>,
-    /// If set the client has exhausted its reconnection attempts
+    /// Set once the client is closed: reconnects exhausted, `close()`, or the connection handle
+    /// dropped. `connect()` clears it again.
     dead: Arc<AtomicBool>,
     /// Pre-serialized `X-Tycho-Client-Metadata` header value. `None` sends no header.
     client_metadata_header: Option<String>,
@@ -947,6 +952,10 @@ impl DeltasClient for WsDeltasClient {
         if self.is_connected().await {
             return Err(DeltasError::AlreadyConnected);
         }
+        // A previous connection may have retired the client: reconnects exhausted, close(), or a
+        // dropped handle. The task started below is a new connection, so subscribes must not keep
+        // failing with NotConnected.
+        self.dead.store(false, Ordering::SeqCst);
         let ws_uri = format!("{uri}{TYCHO_SERVER_VERSION}/ws", uri = self.uri);
         info!(?ws_uri, "Starting TychoWebsocketClient");
 
@@ -1101,7 +1110,9 @@ impl DeltasClient for WsDeltasClient {
 
         // Not being connected does not mean the task has stopped: it clears `inner` every time it
         // loses the connection and retries. Returning the error without stopping it would leave a
-        // task that reconnects and then holds a connection no caller can ever close.
+        // task that reconnects and then holds a connection no caller can ever close. Stopping it
+        // marks the client closed, so pending subscribes fail fast; the next connect() clears
+        // that again.
         if self.is_connected().await {
             Ok(handle)
         } else {
@@ -1230,6 +1241,60 @@ mod tests {
             let _ = closed_tx.send(());
         });
         (addr, closed_rx)
+    }
+
+    /// Serves two connections: the first is only awaited until the client closes it, the second
+    /// runs `messages`. Lets a test drop a connection and then work with the next one.
+    async fn mock_ws_after_reconnect(messages: &[ExpectedComm]) -> (SocketAddr, JoinHandle<()>) {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("localhost bind failed");
+        let addr = server.local_addr().unwrap();
+        let messages = messages.to_vec();
+
+        let jh = tokio::spawn(async move {
+            let (stream, _) = server
+                .accept()
+                .await
+                .expect("first accept failed");
+            let mut first = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("first handshake failed");
+            loop {
+                match first.next().await {
+                    Some(Ok(tungstenite::protocol::Message::Close(_))) | Some(Err(_)) | None => {
+                        break
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+
+            let (stream, _) = server
+                .accept()
+                .await
+                .expect("second accept failed");
+            let mut second = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("second handshake failed");
+            for c in messages {
+                match c {
+                    ExpectedComm::Receive(t, exp) => {
+                        let msg = timeout(Duration::from_millis(t), second.next())
+                            .await
+                            .expect("Receive timeout")
+                            .expect("Stream exhausted")
+                            .expect("Failed to receive message.");
+                        assert_eq!(msg, exp)
+                    }
+                    ExpectedComm::Send(data) => second
+                        .send(data)
+                        .await
+                        .expect("Failed to send message"),
+                }
+            }
+            let _ = second.close(None).await;
+        });
+        (addr, jh)
     }
 
     const SUBSCRIPTION_ID: &str = "30b740d1-cf09-4e0e-8cfe-b1434d447ece";
@@ -1681,7 +1746,7 @@ mod tests {
         )
         .unwrap();
 
-        let jh: ConnectionHandle = client
+        let conn: ConnectionHandle = client
             .connect()
             .await
             .expect("connect failed");
@@ -1710,7 +1775,9 @@ mod tests {
                 .expect("awaiting closed connection timeout out");
             assert!(res.is_none());
         }
-        let res = jh.await.expect("ws client join failed");
+        let res = conn
+            .await
+            .expect("ws client join failed");
         // 5th client reconnect attempt should fail
         assert!(res.is_err());
         server_thread
@@ -1794,6 +1861,53 @@ mod tests {
         .await
         .expect("subscribe on a closed client must fail fast");
         assert!(subscription_res.is_err());
+    }
+
+    /// Closing a client does not retire it: connecting again returns a client that can subscribe.
+    #[test_log::test(tokio::test)]
+    async fn test_connect_after_handle_drop_yields_a_usable_client() {
+        let exp_comm = [
+            ExpectedComm::Receive(500, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_confirmation())),
+        ];
+        let (addr, server_thread) = mock_ws_after_reconnect(&exp_comm).await;
+        let client = WsDeltasClient::new(&format!("ws://{addr}"), None).unwrap();
+
+        drop(
+            client
+                .connect()
+                .await
+                .expect("first connect failed"),
+        );
+        timeout(Duration::from_secs(2), async {
+            while client.is_connected().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the handle should close the connection");
+
+        let handle = client
+            .connect()
+            .await
+            .expect("second connect failed");
+        let (_, _rx) = timeout(
+            Duration::from_secs(2),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        timeout(Duration::from_millis(100), client.close())
+            .await
+            .expect("close timed out")
+            .expect("close failed");
+        let _ = handle.await;
+        server_thread.await.unwrap();
     }
 
     /// Guard that reports when the future owning it is dropped, so a test can tell a cancelled
