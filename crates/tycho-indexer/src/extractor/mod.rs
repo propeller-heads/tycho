@@ -158,6 +158,11 @@ pub trait Extractor: Send + Sync {
     /// persisted block; during runtime it advances with every incoming block.
     async fn get_last_processed_block(&self) -> Option<Block>;
 
+    /// Commits every buffered block the source has marked final and waits for the write to
+    /// reach storage. The runner calls this when the stream ends, so a bounded run persists
+    /// the finalized blocks it processed instead of dropping the ones still buffered.
+    async fn commit_finalized_blocks(&self) -> Result<(), ExtractionError>;
+
     /// Processes a single block-scoped data message from the source stream.
     async fn handle_tick_scoped_data(
         &self,

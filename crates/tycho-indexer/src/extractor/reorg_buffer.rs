@@ -188,6 +188,28 @@ where
         Ok(drained)
     }
 
+    /// Drains every buffered block at or below `final_block_height` into the committing
+    /// section and returns them for the commit task. Unlike
+    /// [`ReorgBuffer::drain_into_committing`] the drain is inclusive and needs no buffered
+    /// target block, so it also empties a buffer whose newest block is final.
+    pub fn drain_finalized_into_committing(&mut self, final_block_height: u64) -> Vec<Arc<B>> {
+        let first_unfinalized = self
+            .block_messages
+            .iter()
+            .position(|msg| msg.block().number > final_block_height)
+            .unwrap_or(self.block_messages.len());
+        let unfinalized = self
+            .block_messages
+            .split_off(first_unfinalized);
+        let drained: Vec<Arc<B>> = std::mem::replace(&mut self.block_messages, unfinalized)
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        self.committing_blocks
+            .extend(drained.iter().cloned());
+        drained
+    }
+
     /// Drops every retained block at or below `flushed_block_height`: their writes
     /// reached the store, so the database covers them from here on.
     pub fn release_committed(&mut self, flushed_block_height: u64) {
@@ -1274,6 +1296,35 @@ mod test {
         let unknown = reorg_buffer.drain_blocks_until(999);
 
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn test_drain_finalized_into_committing() {
+        let mut reorg_buffer = ReorgBuffer::new();
+        reorg_buffer.strict = true;
+        for version in 1..=3 {
+            reorg_buffer
+                .insert_block(get_block_changes(version))
+                .unwrap();
+        }
+
+        let finalized = reorg_buffer.drain_finalized_into_committing(2);
+
+        assert_eq!(finalized.len(), 2);
+        assert_eq!(*finalized[0], get_block_changes(1));
+        assert_eq!(*finalized[1], get_block_changes(2));
+        assert_eq!(reorg_buffer.block_messages.len(), 1);
+        assert_eq!(reorg_buffer.committing_blocks.len(), 2);
+
+        let rest = reorg_buffer.drain_finalized_into_committing(999);
+
+        assert_eq!(rest.len(), 1);
+        assert_eq!(*rest[0], get_block_changes(3));
+        assert!(reorg_buffer.block_messages.is_empty());
+        assert_eq!(reorg_buffer.committing_blocks.len(), 3);
+        assert!(reorg_buffer
+            .drain_finalized_into_committing(999)
+            .is_empty());
     }
 
     #[test]

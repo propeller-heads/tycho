@@ -54,6 +54,8 @@ use crate::{
 pub struct Inner {
     cursor: Vec<u8>,
     last_processed_block: Option<Block>,
+    /// Finality height reported with the last full block, `None` before the first one.
+    final_block_height: Option<u64>,
     /// Used to give more informative logs
     last_report_ts: NaiveDateTime,
     last_report_block_number: u64,
@@ -148,6 +150,7 @@ where
                     inner: Arc::new(Mutex::new(Inner {
                         cursor: vec![],
                         last_processed_block: None,
+                        final_block_height: None,
                         last_report_ts: chrono::Utc::now().naive_utc(),
                         last_report_block_number: 0,
                         first_message_processed: false,
@@ -190,6 +193,7 @@ where
                     inner: Arc::new(Mutex::new(Inner {
                         cursor,
                         last_processed_block: Some(last_processed_block),
+                        final_block_height: None,
                         last_report_ts: chrono::Local::now().naive_utc(),
                         last_report_block_number: 0,
                         first_message_processed: false,
@@ -274,6 +278,119 @@ where
     async fn update_last_processed_block(&self, block: Block) {
         let mut state = self.inner.lock().await;
         state.last_processed_block = Some(block);
+    }
+
+    async fn update_final_block_height(&self, final_block_height: u64) {
+        let mut state = self.inner.lock().await;
+        state.final_block_height = Some(final_block_height);
+    }
+
+    /// Waits for the in-flight commit task, if any, and surfaces its result. Returns how long
+    /// the wait took when the task was still running.
+    async fn await_commit_task(
+        commit_handle: &mut Option<BatchCommitHandle>,
+    ) -> Result<Option<Duration>, ExtractionError> {
+        let Some(handle) = commit_handle.take() else {
+            return Ok(None);
+        };
+        let needs_await = !handle.is_finished();
+        let now = chrono::Utc::now().naive_utc();
+
+        match handle
+            .instrument(info_span!("await_previous_commit"))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(storage_err)) => return Err(storage_err),
+            Err(join_err) => {
+                return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
+                    "Failed to join database commit task: {join_err}"
+                ))));
+            }
+        }
+
+        if needs_await {
+            return Ok(Some(
+                chrono::Utc::now()
+                    .naive_utc()
+                    .signed_duration_since(now),
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Waits for the previous commit task, then schedules one that writes `blocks_to_commit`
+    /// in order. With `flush_last_block` the last block's write is pushed to the store right
+    /// away instead of waiting for the write batch to fill up.
+    async fn spawn_commit_task(
+        &self,
+        blocks_to_commit: Vec<Arc<BlockUpdateWithCursor<BlockChanges>>>,
+        flush_last_block: bool,
+    ) -> Result<(), ExtractionError> {
+        let Some(last_block) = blocks_to_commit.last() else {
+            return Ok(());
+        };
+        let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
+        let gateway = self.gateway.inner.clone();
+        let committed_block_height = self
+            .gateway
+            .committed_block_height
+            .clone();
+        let last_block_height = last_block.block_update.block.number;
+        let batch_size = blocks_to_commit.len();
+        let (extractor_name, chain) = (self.name.clone(), self.chain);
+
+        if let Some(wait_time) = Self::await_commit_task(&mut commit_handle_guard).await? {
+            trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, wait_time = %wait_time, "CommitTaskAwaited");
+        }
+
+        // Detached from the caller because the commit outlives the block that queued it;
+        // the caller is recorded as a follows-from link instead. The span wraps the task
+        // body, not its `JoinHandle` -- instrumenting the handle would only cover the
+        // await and leave every gateway call inside the task without a parent.
+        let commit_span = info_span!(
+            parent: None,
+            "commit_blocks_task",
+            batch_size,
+            block_height = last_block_height,
+            extractor_id = self.name.clone(),
+            chain = %self.chain,
+        );
+        commit_span.follows_from(tracing::Span::current().id());
+
+        let new_handle = tokio::spawn(
+            async move {
+                let now = std::time::Instant::now();
+
+                let mut it = blocks_to_commit.iter().peekable();
+                while let Some(block) = it.next() {
+                    let force_db_commit = flush_last_block && it.peek().is_none();
+
+                    gateway
+                        .advance(block.block_update(), block.cursor(), force_db_commit)
+                        .await
+                        .map_err(ExtractionError::Storage)?;
+                }
+
+                let mut committed_hieght_guard = committed_block_height.lock().await;
+                *committed_hieght_guard = Some(last_block_height);
+
+                trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
+
+                histogram!(
+                    "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
+                )
+                .record(now.elapsed().as_millis() as f64);
+
+                Ok(())
+            }
+            .instrument(commit_span),
+        );
+
+        *commit_handle_guard = Some(new_handle);
+
+        trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
+        Ok(())
     }
 
     /// Reports sync progress if a minute has passed since the last report.
@@ -794,95 +911,14 @@ where
             }
         };
 
-        if let Some(last_block) = blocks_to_commit.last() {
-            let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
-            let gateway = self.gateway.inner.clone();
-            let committed_block_height = self
-                .gateway
-                .committed_block_height
-                .clone();
-            let last_block_height = last_block.block_update.block.number;
-            let batch_size = blocks_to_commit.len();
-            let (extractor_name, chain) = (self.name.clone(), self.chain);
-
-            if let Some(db_commit_handle_to_join) = commit_handle_guard.take() {
-                let needs_await = !db_commit_handle_to_join.is_finished();
-                let now = chrono::Utc::now().naive_utc();
-
-                let result = db_commit_handle_to_join
-                    .instrument(info_span!("await_previous_commit"))
-                    .await;
-
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(storage_err)) => {
-                        return Err(storage_err);
-                    }
-                    Err(join_err) => {
-                        return Err(ExtractionError::Storage(StorageError::Unexpected(format!(
-                            "Failed to join database commit task: {join_err}"
-                        ))));
-                    }
-                }
-
-                if needs_await {
-                    let wait_time = chrono::Utc::now()
-                        .naive_utc()
-                        .signed_duration_since(now);
-                    trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, wait_time = %wait_time, "CommitTaskAwaited");
-                }
-            }
-
-            // Detached from the caller because the commit outlives the block that queued it;
-            // the caller is recorded as a follows-from link instead. The span wraps the task
-            // body, not its `JoinHandle` -- instrumenting the handle would only cover the
-            // await and leave every gateway call inside the task without a parent.
-            let commit_span = info_span!(
-                parent: None,
-                "commit_blocks_task",
-                batch_size,
-                block_height = last_block_height,
-                extractor_id = self.name.clone(),
-                chain = %self.chain,
-            );
-            commit_span.follows_from(tracing::Span::current().id());
-
-            let new_handle = tokio::spawn(
-                async move {
-                    let now = std::time::Instant::now();
-
-                    let mut it = blocks_to_commit.iter().peekable();
-                    while let Some(block) = it.next() {
-                        let force_db_commit =
-                            if is_syncing { false } else { it.peek().is_none() };
-
-                        gateway
-                            .advance(block.block_update(), block.cursor(), force_db_commit)
-                            .await
-                            .map_err(ExtractionError::Storage)?;
-                    }
-
-                    let mut committed_hieght_guard = committed_block_height.lock().await;
-                    *committed_hieght_guard = Some(last_block_height);
-
-                    trace!(batch_size, block_height = last_block_height, extractor_id = extractor_name, chain = %chain, "CommitTaskCompleted");
-
-                    histogram!(
-                        "database_commit_duration_ms", "chain" => chain.to_string(), "extractor" => extractor_name
-                    )
-                    .record(now.elapsed().as_millis() as f64);
-
-                    Ok(())
-                }
-                .instrument(commit_span),
-            );
-
-            *commit_handle_guard = Some(new_handle);
-
-            trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
-        };
+        if !blocks_to_commit.is_empty() {
+            self.spawn_commit_task(blocks_to_commit, !is_syncing)
+                .await?;
+        }
 
         self.update_last_processed_block(msg.block.clone())
+            .await;
+        self.update_final_block_height(final_block_height)
             .await;
 
         self.periodically_report_metrics(&msg, is_syncing)
@@ -984,6 +1020,30 @@ where
             .await
             .last_processed_block
             .clone()
+    }
+
+    async fn commit_finalized_blocks(&self) -> Result<(), ExtractionError> {
+        let Some(final_block_height) = self
+            .inner
+            .lock()
+            .await
+            .final_block_height
+        else {
+            return Ok(());
+        };
+        let blocks_to_commit = self
+            .reorg_buffer
+            .lock()
+            .await
+            .drain_finalized_into_committing(final_block_height);
+        let batch_size = blocks_to_commit.len();
+        self.spawn_commit_task(blocks_to_commit, true)
+            .await?;
+
+        let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
+        Self::await_commit_task(&mut commit_handle_guard).await?;
+        info!(batch_size, final_block_height, "Committed the finalized buffered blocks");
+        Ok(())
     }
 
     #[instrument(skip_all, fields(block_number, partial_block_index, final_block_height))]
@@ -2381,6 +2441,149 @@ mod test {
             .unwrap();
 
         assert_eq!(extractor.get_cursor().await, "cursor@2");
+    }
+
+    fn commit_test_gateway() -> MockExtractorGateway {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .times(1)
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .times(1)
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .times(1)
+            .returning(|_| Ok(Block::default()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw
+    }
+
+    fn scoped_block(number: u64, final_block_height: u64) -> BlockScopedData {
+        pb_fixtures::pb_block_scoped_data(
+            tycho_pb::BlockChanges {
+                block: Some(pb_fixtures::pb_blocks(number)),
+                ..Default::default()
+            },
+            Some(&format!("cursor@{number}")),
+            Some(final_block_height),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_commit_finalized_blocks_writes_the_buffered_final_blocks() {
+        let mut gw = commit_test_gateway();
+        let forced_commits = Arc::new(AtomicUsize::new(0));
+        let forced_commits_clone = forced_commits.clone();
+        gw.expect_advance()
+            .times(3)
+            .returning(move |_, _, force_commit| {
+                if force_commit {
+                    forced_commits_clone.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            });
+        // A batch size above the block count keeps every block in the buffer.
+        let extractor = create_extractor_with_batch_size(gw, 4).await;
+        for number in 1..=3 {
+            extractor
+                .handle_tick_scoped_data(scoped_block(number, number))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            3
+        );
+
+        extractor
+            .commit_finalized_blocks()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            extractor
+                .reorg_buffer
+                .lock()
+                .await
+                .count_blocks_before(u64::MAX),
+            0
+        );
+        assert_eq!(forced_commits.load(Ordering::SeqCst), 1, "only the last write is forced");
+        assert!(
+            extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .is_none(),
+            "commit awaited"
+        );
+        assert_eq!(
+            *extractor
+                .gateway
+                .committed_block_height
+                .lock()
+                .await,
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_finalized_blocks_keeps_blocks_past_the_finality_height() {
+        let mut gw = commit_test_gateway();
+        gw.expect_advance()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        let extractor = create_extractor_with_batch_size(gw, 1).await;
+        for number in 1..=3 {
+            extractor
+                .handle_tick_scoped_data(scoped_block(number, 1))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        extractor
+            .commit_finalized_blocks()
+            .await
+            .unwrap();
+
+        let reorg_buffer = extractor.reorg_buffer.lock().await;
+        assert_eq!(reorg_buffer.count_blocks_before(u64::MAX), 2);
+        assert_eq!(reorg_buffer.count_blocks_before(2), 0, "block 1 left the buffer");
+        assert_eq!(
+            *extractor
+                .gateway
+                .committed_block_height
+                .lock()
+                .await,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_finalized_blocks_without_processed_blocks_is_a_noop() {
+        let mut gw = commit_test_gateway();
+        gw.expect_advance().times(0);
+        let extractor = create_extractor_with_batch_size(gw, 1).await;
+
+        extractor
+            .commit_finalized_blocks()
+            .await
+            .unwrap();
+
+        assert!(extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .is_none());
     }
 
     #[tokio::test]
