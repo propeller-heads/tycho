@@ -1,22 +1,22 @@
 //! In-memory serving of state requests.
 //!
+//! This module holds the block window ([`window`]) and the entity cache ([`cache`]) it folds
+//! into. Locking is described in the [`cache`] module doc.
+//!
+//! # Planned end state
+//!
+//! The rest of this doc describes the target design (ENG-6293, ENG-6304, ENG-6305). The database
+//! fill path and the request routing layer are not built yet; `DiscardSink` is still the
+//! production sink and every request reads the database.
+//!
 //! State responses are built as `cached base ⊕ window deltas up to the requested version`, where
 //! `⊕` applies deltas on top of a base and the highest block wins for each value. The database is
 //! read only for entities the cache has never seen.
 //!
-//! This module currently contains the block window ([`window`]) and the entity store ([`cache`])
-//! it folds into. The database fill path and the request routing layer build on top of them.
-//!
-//! # Synchronization
-//!
-//! The cache is written by the startup load — which runs before anything else — and then only
-//! by folds. Reads and folds are sequential: a fold takes the write side of one lock and applies
-//! a whole block atomically, reads take the read side. Folds are fast, so waiting is fine, and a
-//! read never sees half a block.
-//!
-//! A read collects the window patch for its keys first, then reads the entries, and applies only
-//! the patch changes that are newer than each value's tag. If an entry has already moved past
-//! the requested version (folding is batched), that request is served the way uncommitted
+//! A read collects the window patch for its keys first, then reads the entries, and applies the
+//! patch changes that are not older than each value's tag — the rule folds use; re-applying an
+//! equal-tag change is harmless because delta values are absolute. If an entry has already moved
+//! past the requested version (folding is batched), that request is served the way uncommitted
 //! versions are served today — latest from the DB plus the buffered window changes — because the
 //! cache keeps no history.
 //!
