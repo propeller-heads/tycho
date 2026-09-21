@@ -224,10 +224,10 @@ impl CachedAccount {
         Self::from_snapshot(account, tags)
     }
 
-    /// Applies one folded delta; every changed value gets `tag`, values with a newer tag stay. A
-    /// deleted slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries
-    /// code replaces the code and its hash together.
-    pub(crate) fn fold(&mut self, delta: &AccountDelta, tag: WriteTag) {
+    /// Applies one delta; every changed value gets `tag`, values with a newer tag stay. A deleted
+    /// slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries code
+    /// replaces the code and its hash together.
+    pub(crate) fn apply_delta(&mut self, delta: &AccountDelta, tag: WriteTag) {
         for (key, value) in &delta.slots {
             write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), tag);
         }
@@ -241,8 +241,8 @@ impl CachedAccount {
         }
     }
 
-    /// Applies folded token balances under the same tag rule as [`CachedAccount::fold`].
-    pub(crate) fn fold_balances(
+    /// Applies token balances under the same tag rule as [`CachedAccount::apply_delta`].
+    pub(crate) fn apply_balances(
         &mut self,
         balances: &HashMap<Address, AccountBalance>,
         tag: WriteTag,
@@ -329,9 +329,9 @@ impl CachedComponentState {
         Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: tag }
     }
 
-    /// Applies one folded state delta unless the entry is newer than `tag`. Updates apply first,
-    /// then deletions, like [`ProtocolComponentState::apply_state_delta`].
-    pub(crate) fn fold(&mut self, delta: &ProtocolComponentStateDelta, tag: WriteTag) {
+    /// Applies one state delta unless the entry is newer than `tag`. Updates apply first, then
+    /// deletions, like [`ProtocolComponentState::apply_state_delta`].
+    pub(crate) fn apply_delta(&mut self, delta: &ProtocolComponentStateDelta, tag: WriteTag) {
         if !self.advance_to(tag) {
             return;
         }
@@ -345,8 +345,8 @@ impl CachedComponentState {
             .retain(|key, _| !delta.deleted_attributes.contains(key));
     }
 
-    /// Applies folded balances unless the entry is newer than `tag`.
-    pub(crate) fn fold_balances(
+    /// Applies balances unless the entry is newer than `tag`.
+    pub(crate) fn apply_balances(
         &mut self,
         balances: &HashMap<Bytes, ComponentBalance>,
         tag: WriteTag,
@@ -495,7 +495,7 @@ impl CacheState {
         };
         for (id, delta) in &block.state_deltas {
             match system_components.get_mut(id) {
-                Some(entry) => entry.fold(delta, tag),
+                Some(entry) => entry.apply_delta(delta, tag),
                 None => {
                     trace!(system = %block.extractor, %id, "State delta for an unknown component skipped")
                 }
@@ -503,7 +503,7 @@ impl CacheState {
         }
         for (id, balances) in &block.component_balances {
             match system_components.get_mut(id) {
-                Some(entry) => entry.fold_balances(balances, tag),
+                Some(entry) => entry.apply_balances(balances, tag),
                 None => {
                     trace!(system = %block.extractor, %id, "Balances for an unknown component skipped")
                 }
@@ -536,7 +536,7 @@ impl CacheState {
                 continue;
             }
             match self.accounts.get_mut(address) {
-                Some(entry) => entry.fold(delta, tag),
+                Some(entry) => entry.apply_delta(delta, tag),
                 None if delta.is_creation() => {
                     self.accounts
                         .insert(address.clone(), CachedAccount::from_creation(delta, tag));
@@ -546,7 +546,7 @@ impl CacheState {
         }
         for (address, balances) in &block.account_balances {
             match self.accounts.get_mut(address) {
-                Some(entry) => entry.fold_balances(balances, tag),
+                Some(entry) => entry.apply_balances(balances, tag),
                 None => trace!(%address, "Balances for an unknown account skipped"),
             }
         }
@@ -814,14 +814,14 @@ mod test {
     }
 
     #[test]
-    fn account_fold_keeps_newer_values_per_slot() {
+    fn account_apply_keeps_newer_values_per_slot() {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
             AccountWriteTags::uniform(&account(&address), tag(5)),
         );
 
-        cached.fold(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), tag(3));
+        cached.apply_delta(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), tag(3));
 
         let slots = cached
             .materialize(Chain::Ethereum, &address)
@@ -839,14 +839,14 @@ mod test {
     }
 
     #[test]
-    fn account_fold_applies_an_equal_time_write() {
+    fn account_apply_takes_an_equal_tag_write() {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
             AccountWriteTags::uniform(&account(&address), tag(5)),
         );
 
-        cached.fold(&update(&address, fixtures::optional_slots([(1, 11)])), tag(5));
+        cached.apply_delta(&update(&address, fixtures::optional_slots([(1, 11)])), tag(5));
 
         assert_eq!(
             cached
@@ -857,21 +857,21 @@ mod test {
     }
 
     #[test]
-    fn account_fold_twice_changes_nothing() {
+    fn account_apply_twice_changes_nothing() {
         let address = addr(1);
         let mut cached =
             CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
         let delta = update(&address, fixtures::optional_slots([(1, 11), (2, 2)]));
 
-        cached.fold(&delta, tag(2));
+        cached.apply_delta(&delta, tag(2));
         let once = cached.clone();
-        cached.fold(&delta, tag(2));
+        cached.apply_delta(&delta, tag(2));
 
         assert_eq!(cached, once);
     }
 
     #[test]
-    fn account_fold_zeroes_deleted_slots_and_refreshes_the_code_hash() {
+    fn account_apply_zeroes_deleted_slots_and_refreshes_the_code_hash() {
         let address = addr(1);
         let mut cached =
             CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
@@ -882,7 +882,7 @@ mod test {
         let mut delta = update(&address, HashMap::from([(key1.clone(), None)]));
         delta.set_code(code("0x6001"));
 
-        cached.fold(&delta, tag(2));
+        cached.apply_delta(&delta, tag(2));
 
         let account = cached.materialize(Chain::Ethereum, &address);
         assert_eq!(account.slots[&key1], Bytes::default());
@@ -892,13 +892,13 @@ mod test {
     }
 
     #[test]
-    fn account_fold_keeps_code_and_hash_against_an_older_write() {
+    fn account_apply_keeps_code_and_hash_against_an_older_write() {
         let address = addr(1);
         let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x6000"), tag(5));
         let mut delta = update(&address, HashMap::new());
         delta.set_code(code("0x6001"));
 
-        cached.fold(&delta, tag(4));
+        cached.apply_delta(&delta, tag(4));
 
         let account = cached.materialize(Chain::Ethereum, &address);
         assert_eq!(account.code, code("0x6000"));
@@ -907,15 +907,15 @@ mod test {
     }
 
     #[test]
-    fn account_fold_balances_follow_the_tag_rule() {
+    fn account_apply_balances_follow_the_tag_rule() {
         let address = addr(1);
         let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x"), tag(5));
 
-        cached.fold_balances(
+        cached.apply_balances(
             &HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))]),
             tag(5),
         );
-        cached.fold_balances(
+        cached.apply_balances(
             &HashMap::from([(addr(9), account_balance(&address, &addr(9), 1))]),
             tag(4),
         );
@@ -944,7 +944,7 @@ mod test {
     }
 
     #[test]
-    fn component_fold_skips_an_older_block_and_removes_deleted_attributes() {
+    fn component_apply_skips_an_older_block_and_removes_deleted_attributes() {
         let mut cached = CachedComponentState::from_snapshot(
             ProtocolComponentState::new(
                 "c1",
@@ -954,7 +954,7 @@ mod test {
             tag(5),
         );
 
-        cached.fold(&testing::state_delta("c1", 9), tag(4));
+        cached.apply_delta(&testing::state_delta("c1", 9), tag(4));
         assert_eq!(
             cached.materialize("c1").attributes["x"],
             Bytes::from(1u64),
@@ -968,8 +968,8 @@ mod test {
         delta
             .deleted_attributes
             .insert("x".to_string());
-        cached.fold(&delta, tag(5));
-        cached.fold_balances(
+        cached.apply_delta(&delta, tag(5));
+        cached.apply_balances(
             &HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))]),
             tag(6),
         );
