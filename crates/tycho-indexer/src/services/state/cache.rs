@@ -120,6 +120,19 @@ pub(crate) struct AccountWriteTags {
     pub(crate) token_balances: HashMap<Address, WriteTag>,
 }
 
+/// Contract code with its hash, so a code write replaces both or neither.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CachedCode {
+    pub(crate) code: Code,
+    pub(crate) hash: CodeHash,
+}
+
+impl CachedCode {
+    pub(crate) fn new(code: Code) -> Self {
+        Self { hash: keccak256(&code).into(), code }
+    }
+}
+
 /// Cached state of one contract account.
 ///
 /// Every value carries the time it was last written, so writes from different extractors (which
@@ -132,9 +145,7 @@ pub(crate) struct CachedAccount {
     slots: HashMap<StoreKey, Tagged<StoreVal>>,
     native_balance: Tagged<Balance>,
     token_balances: HashMap<Address, Tagged<AccountBalance>>,
-    code: Tagged<Code>,
-    /// Kept in sync when a fold carries code.
-    code_hash: CodeHash,
+    code: Tagged<CachedCode>,
     /// Transaction references come from the startup load only — folds don't carry them.
     balance_modify_tx: TxHash,
     code_modify_tx: TxHash,
@@ -175,8 +186,10 @@ impl CachedAccount {
             slots,
             native_balance: Tagged::new(account.native_balance, tags.native_balance),
             token_balances,
-            code: Tagged::new(account.code, tags.code),
-            code_hash: account.code_hash,
+            code: Tagged::new(
+                CachedCode { code: account.code, hash: account.code_hash },
+                tags.code,
+            ),
             balance_modify_tx: account.balance_modify_tx,
             code_modify_tx: account.code_modify_tx,
             creation_tx: account.creation_tx,
@@ -206,8 +219,7 @@ impl CachedAccount {
                 tag,
             ),
             token_balances: HashMap::new(),
-            code_hash: keccak256(&code).into(),
-            code: Tagged::new(code, tag),
+            code: Tagged::new(CachedCode::new(code), tag),
             balance_modify_tx: Bytes::from("0x00"),
             code_modify_tx: Bytes::from("0x00"),
             creation_tx: None,
@@ -216,7 +228,7 @@ impl CachedAccount {
 
     /// Applies one folded delta; every changed value gets `tag`, values with a newer tag stay. A
     /// deleted slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries
-    /// code also refreshes `code_hash`.
+    /// code replaces the code and its hash together.
     pub(crate) fn fold(&mut self, delta: &AccountDelta, tag: WriteTag) {
         for (key, value) in &delta.slots {
             write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), tag);
@@ -226,10 +238,8 @@ impl CachedAccount {
                 .write(balance.clone(), tag);
         }
         if let Some(code) = delta.code() {
-            if tag >= self.code.written_at() {
-                self.code_hash = keccak256(code).into();
-            }
-            self.code.write(code.clone(), tag);
+            self.code
+                .write(CachedCode::new(code.clone()), tag);
         }
     }
 
@@ -259,8 +269,8 @@ impl CachedAccount {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.value().clone()))
                 .collect(),
-            self.code.value().clone(),
-            self.code_hash.clone(),
+            self.code.value().code.clone(),
+            self.code.value().hash.clone(),
             self.balance_modify_tx.clone(),
             self.code_modify_tx.clone(),
             self.creation_tx.clone(),
@@ -280,7 +290,7 @@ impl CachedAccount {
         &self.token_balances
     }
 
-    pub(crate) fn code(&self) -> &Tagged<Code> {
+    pub(crate) fn code(&self) -> &Tagged<CachedCode> {
         &self.code
     }
 }
@@ -818,6 +828,21 @@ mod test {
         assert_eq!(account.code, code("0x6001"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
         assert_eq!(cached.code().written_at(), tag(2));
+    }
+
+    #[test]
+    fn account_fold_keeps_code_and_hash_against_an_older_write() {
+        let address = addr(1);
+        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x6000"), tag(5));
+        let mut delta = update(&address, HashMap::new());
+        delta.set_code(code("0x6001"));
+
+        cached.fold(&delta, tag(4));
+
+        let account = cached.materialize(&address);
+        assert_eq!(account.code, code("0x6000"));
+        assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6000"))));
+        assert_eq!(cached.code().written_at(), tag(5));
     }
 
     #[test]
