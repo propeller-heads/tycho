@@ -355,7 +355,7 @@ impl TychoStreamBuilder {
                 .with_client_metadata_header(metadata_header),
         )
         .map_err(|e| StreamError::SetUpError(e.to_string()))?;
-        let ws_jh = ws_client
+        let ws_conn = ws_client
             .connect()
             .await
             .map_err(|e| StreamError::WebSocketConnectionError(e.to_string()))?;
@@ -417,18 +417,16 @@ impl TychoStreamBuilder {
             .await
             .map_err(|e| StreamError::BlockSynchronizerError(e.to_string()))?;
 
-        // Monitor WebSocket and BlockSynchronizer futures
+        // Monitor WebSocket and BlockSynchronizer futures. Whichever branch wins, the `select!`
+        // drops `ws_conn`, which closes the websocket.
         let handle = tokio::spawn(async move {
             tokio::select! {
-                res = ws_jh => {
+                res = ws_conn => {
                     let _ = res.map_err(|e| StreamError::WebSocketConnectionError(e.to_string()));
                 }
                 res = sync_jh => {
                     res.map_err(|e| StreamError::BlockSynchronizerError(e.to_string())).unwrap();
                 }
-            }
-            if let Err(e) = ws_client.close().await {
-                warn!(?e, "Failed to close WebSocket client");
             }
         });
 
