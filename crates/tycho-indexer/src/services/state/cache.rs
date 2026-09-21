@@ -10,6 +10,7 @@
 //!   one extractor writes each protocol system, in order, so one tag per entry is enough.
 //!
 //! Tags compare with "not older" (>=), never "strictly newer", so a replay of a block converges.
+//! Removals follow the same rule: a deletion older than the entry's newest write is skipped.
 //!
 //! The cache is written from exactly two places: the startup load, which runs before the
 //! extractors start, and the folds coming out of the block windows. It never reads the database,
@@ -253,6 +254,21 @@ impl CachedAccount {
         }
     }
 
+    /// The newest write among this account's values.
+    fn newest_write(&self) -> WriteTag {
+        let mut newest = self
+            .native_balance
+            .written_at()
+            .max(self.code.written_at());
+        for slot in self.slots.values() {
+            newest = newest.max(slot.written_at());
+        }
+        for balance in self.token_balances.values() {
+            newest = newest.max(balance.written_at());
+        }
+        newest
+    }
+
     /// Materializes the cached state as an [`Account`] for response assembly.
     pub(crate) fn materialize(&self, address: &Address) -> Account {
         Account::new(
@@ -428,7 +444,8 @@ impl EntityCache {
 
 impl CacheState {
     /// Applies one block's component changes for `system`, in an order where a new component
-    /// exists before its first attributes arrive.
+    /// exists before its first attributes arrive. A deleted component is removed unless a newer
+    /// block already wrote to it.
     fn fold_components(&mut self, system: &str, block: &BlockAggregatedChanges, tag: WriteTag) {
         let family = self
             .components
@@ -452,17 +469,28 @@ impl CacheState {
             }
         }
         for id in block.deleted_protocol_components.keys() {
-            family.remove(id);
+            if family
+                .get(id)
+                .is_some_and(|entry| entry.updated_at() <= tag)
+            {
+                family.remove(id);
+            }
         }
     }
 
     /// Applies one block's account changes. A `Creation` delta carries the whole initial state
     /// and may create an entry; anything else for an unknown address is partial data and is
-    /// skipped. A `Deletion` removes the entry.
+    /// skipped. A `Deletion` removes the entry unless a newer block already wrote to it.
     fn fold_accounts(&mut self, block: &BlockAggregatedChanges, tag: WriteTag) {
         for (address, delta) in &block.account_deltas {
             if delta.change_type() == ChangeType::Deletion {
-                self.accounts.remove(address);
+                if self
+                    .accounts
+                    .get(address)
+                    .is_some_and(|entry| entry.newest_write() <= tag)
+                {
+                    self.accounts.remove(address);
+                }
                 continue;
             }
             match self.accounts.get_mut(address) {
@@ -1038,6 +1066,48 @@ mod test {
             .unwrap();
 
         assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn fold_skips_an_account_deletion_older_than_the_entry() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+        cache
+            .fold(&with_account_delta(
+                msg(5),
+                update(&address, fixtures::optional_slots([(1, 15)])),
+            ))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(
+                testing::aggregated_changes("other", 3, 3, Some(3)),
+                deletion(&address),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            cached_account(&cache, &address).map(|a| a.slots),
+            Some(fixtures::slots([(1, 15)])),
+            "block 3 cannot delete what block 5 wrote"
+        );
+    }
+
+    #[test]
+    fn fold_skips_a_component_deletion_older_than_the_entry() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
+            .unwrap();
+
+        cache
+            .fold(&with_deleted_component(msg(1), "c1"))
+            .unwrap();
+
+        assert!(cached_component(&cache, "c1").is_some(), "block 1 is a replay");
     }
 
     #[test]
