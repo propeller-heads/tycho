@@ -773,14 +773,14 @@ mod test {
     }
 
     #[test]
-    fn write_inserts_a_missing_key_and_updates_a_present_one() {
+    fn write_tagged_inserts_a_missing_key_and_updates_a_present_one() {
         let mut map: HashMap<&str, Tagged<u64>> = HashMap::new();
 
         write_tagged(&mut map, "a", 1, tag(3));
-        write_tagged(&mut map, "a", 2, tag(2));
+        write_tagged(&mut map, "a", 2, tag(4));
         write_tagged(&mut map, "b", 9, tag(1));
 
-        assert_eq!(map["a"], Tagged::new(1, tag(3)));
+        assert_eq!(map["a"], Tagged::new(2, tag(4)));
         assert_eq!(map["b"], Tagged::new(9, tag(1)));
     }
 
@@ -892,6 +892,22 @@ mod test {
     }
 
     #[test]
+    fn account_apply_native_balance_follows_the_tag_rule() {
+        let address = addr(1);
+        let mut cached = CachedAccount::from_creation(&creation(&address, [], 10, "0x"), tag(5));
+        let mut newer = update(&address, HashMap::new());
+        newer.balance = Some(Bytes::from(20u64));
+        let mut older = update(&address, HashMap::new());
+        older.balance = Some(Bytes::from(30u64));
+
+        cached.apply_delta(&newer, tag(6));
+        cached.apply_delta(&older, tag(4));
+
+        assert_eq!(cached.native_balance().value(), &Bytes::from(20u64));
+        assert_eq!(cached.native_balance().written_at(), tag(6));
+    }
+
+    #[test]
     fn account_apply_keeps_code_and_hash_against_an_older_write() {
         let address = addr(1);
         let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x6000"), tag(5));
@@ -920,13 +936,9 @@ mod test {
             tag(4),
         );
 
-        assert_eq!(
-            cached
-                .materialize(Chain::Ethereum, &address)
-                .token_balances[&addr(9)]
-                .balance,
-            Bytes::from(7u64)
-        );
+        let balance = &cached.token_balances()[&addr(9)];
+        assert_eq!(balance.value().balance, Bytes::from(7u64));
+        assert_eq!(balance.written_at(), tag(5));
     }
 
     #[test]
@@ -943,24 +955,30 @@ mod test {
         assert_eq!(cached.updated_at(), WriteTag::snapshot(ts(3)));
     }
 
-    #[test]
-    fn component_apply_skips_an_older_block_and_removes_deleted_attributes() {
-        let mut cached = CachedComponentState::from_snapshot(
+    fn component_at(n: u64) -> CachedComponentState {
+        CachedComponentState::from_snapshot(
             ProtocolComponentState::new(
                 "c1",
                 HashMap::from([("x".to_string(), Bytes::from(1u64))]),
                 HashMap::new(),
             ),
-            tag(5),
-        );
+            tag(n),
+        )
+    }
+
+    #[test]
+    fn component_apply_delta_skips_an_older_block() {
+        let mut cached = component_at(5);
 
         cached.apply_delta(&testing::state_delta("c1", 9), tag(4));
-        assert_eq!(
-            cached.materialize("c1").attributes["x"],
-            Bytes::from(1u64),
-            "older block skipped"
-        );
 
+        assert_eq!(cached.materialize("c1").attributes["x"], Bytes::from(1u64));
+        assert_eq!(cached.updated_at(), tag(5));
+    }
+
+    #[test]
+    fn component_apply_delta_updates_then_deletes_attributes() {
+        let mut cached = component_at(5);
         let mut delta = testing::state_delta("c1", 2);
         delta
             .updated_attributes
@@ -968,14 +986,25 @@ mod test {
         delta
             .deleted_attributes
             .insert("x".to_string());
+
         cached.apply_delta(&delta, tag(5));
+
+        assert_eq!(
+            cached.materialize("c1").attributes,
+            HashMap::from([("y".to_string(), Bytes::from(3u64))])
+        );
+    }
+
+    #[test]
+    fn component_apply_balances_moves_the_entry_to_the_block() {
+        let mut cached = component_at(5);
+
         cached.apply_balances(
             &HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))]),
             tag(6),
         );
 
         let state = cached.materialize("c1");
-        assert_eq!(state.attributes, HashMap::from([("y".to_string(), Bytes::from(3u64))]));
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), tag(6));
     }
@@ -1036,7 +1065,7 @@ mod test {
     }
 
     #[test]
-    fn fold_removes_deleted_components_and_skips_replayed_blocks() {
+    fn fold_skips_a_replayed_component_block() {
         let cache = EntityCache::new(Chain::Ethereum);
         cache
             .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
@@ -1045,6 +1074,7 @@ mod test {
         cache
             .fold(&with_state_delta(msg(1), "c1", 1))
             .unwrap();
+
         assert_eq!(
             cached_component(&cache, "c1")
                 .unwrap()
@@ -1052,10 +1082,19 @@ mod test {
             Bytes::from(2u64),
             "block 1 is a replay"
         );
+    }
+
+    #[test]
+    fn fold_removes_a_deleted_component() {
+        let cache = EntityCache::new(Chain::Ethereum);
+        cache
+            .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
+            .unwrap();
 
         cache
             .fold(&with_deleted_component(msg(3), "c1"))
             .unwrap();
+
         assert!(cached_component(&cache, "c1").is_none());
     }
 
@@ -1176,6 +1215,39 @@ mod test {
 
         assert_eq!(cached_account(&cache, &address), account_once);
         assert_eq!(cached_component(&cache, "c1"), component_once);
+    }
+
+    #[test]
+    fn folding_a_creating_block_again_keeps_newer_state() {
+        let cache = EntityCache::new(Chain::Ethereum);
+        let address = addr(1);
+        let creating = with_account_delta(
+            with_component(msg(1), "c1"),
+            creation(&address, [(1, 1)], 10, "0x6000"),
+        );
+        let newer = with_account_delta(
+            with_state_delta(msg(2), "c1", 2),
+            update(&address, fixtures::optional_slots([(1, 11)])),
+        );
+        cache.fold(&creating).unwrap();
+        cache.fold(&newer).unwrap();
+
+        cache.fold(&creating).unwrap();
+
+        assert_eq!(
+            cached_account(&cache, &address)
+                .unwrap()
+                .slots,
+            fixtures::slots([(1, 11)]),
+            "the replayed creation does not rebuild the account"
+        );
+        assert_eq!(
+            cached_component(&cache, "c1")
+                .unwrap()
+                .attributes["x"],
+            Bytes::from(2u64),
+            "the replayed creation does not reset the component"
+        );
     }
 
     #[test]
