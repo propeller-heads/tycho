@@ -3,14 +3,13 @@
 //! Two entity families are cached:
 //!
 //! - **Accounts** (contract state), keyed by address. Several extractors can write the same
-//!   account, so every cached value carries the time it was last written — the writing block's
-//!   timestamp, the same unit the database's `valid_from` versioning uses. A newer write always
-//!   wins; re-applying an equal-time change is a no-op because delta values are absolute.
+//!   account, so every cached value carries a [`WriteTag`]: the writing block's timestamp and
+//!   number. A newer write always wins; re-applying an equal-tag change is a no-op because delta
+//!   values are absolute.
 //! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
-//!   one extractor writes each protocol system, in order, so one write time per entry is enough.
+//!   one extractor writes each protocol system, in order, so one tag per entry is enough.
 //!
-//! Tags compare with "not older" (>=), never "strictly newer": consecutive blocks can share a
-//! timestamp on fast chains, and a strict comparison would silently drop the second block.
+//! Tags compare with "not older" (>=), never "strictly newer", so a replay of a block converges.
 //!
 //! The cache is written from exactly two places: the startup load, which runs before the
 //! extractors start, and the folds coming out of the block windows. It never reads the database,
@@ -34,7 +33,7 @@ use tracing::trace;
 use tycho_common::{
     keccak256,
     models::{
-        blockchain::BlockAggregatedChanges,
+        blockchain::{Block, BlockAggregatedChanges},
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
         Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId, StoreKey,
@@ -46,15 +45,39 @@ use tycho_common::{
 
 use super::window::FoldSink;
 
-/// A cached value together with the time it was last written (the writing block's timestamp).
+/// When a value was written: the writing block's timestamp, then its number.
+///
+/// The timestamp is the unit of the database's `valid_from`. The number orders blocks that share
+/// a timestamp — consecutive blocks do on fast chains — the way the transaction index does in the
+/// database. A snapshot row loads with number 0, so a folded block at the same timestamp still
+/// applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct WriteTag {
+    pub(crate) block_ts: NaiveDateTime,
+    pub(crate) block_number: u64,
+}
+
+impl WriteTag {
+    pub(crate) fn snapshot(valid_from: NaiveDateTime) -> Self {
+        Self { block_ts: valid_from, block_number: 0 }
+    }
+}
+
+impl From<&Block> for WriteTag {
+    fn from(block: &Block) -> Self {
+        Self { block_ts: block.ts, block_number: block.number }
+    }
+}
+
+/// A cached value together with the tag of the write that set it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Tagged<T> {
     value: T,
-    written_at: NaiveDateTime,
+    written_at: WriteTag,
 }
 
 impl<T> Tagged<T> {
-    pub(crate) fn new(value: T, written_at: NaiveDateTime) -> Self {
+    pub(crate) fn new(value: T, written_at: WriteTag) -> Self {
         Self { value, written_at }
     }
 
@@ -62,44 +85,39 @@ impl<T> Tagged<T> {
         &self.value
     }
 
-    pub(crate) fn written_at(&self) -> NaiveDateTime {
+    pub(crate) fn written_at(&self) -> WriteTag {
         self.written_at
     }
 
-    /// Writes `value` at `at` unless this already holds a newer value. Equal times apply: delta
-    /// values are absolute, so re-applying a block is harmless, and consecutive blocks can share
-    /// a timestamp on fast chains.
-    pub(crate) fn write(&mut self, value: T, at: NaiveDateTime) {
-        if at < self.written_at {
+    /// Writes `value` at `tag` unless this already holds a newer value. Equal tags apply: delta
+    /// values are absolute, so re-applying a block is harmless.
+    pub(crate) fn write(&mut self, value: T, tag: WriteTag) {
+        if tag < self.written_at {
             return;
         }
         self.value = value;
-        self.written_at = at;
+        self.written_at = tag;
     }
 }
 
 /// [`Tagged::write`] for a map entry; a missing key is inserted.
-fn write_tagged<K: Eq + Hash, V>(
-    map: &mut HashMap<K, Tagged<V>>,
-    key: K,
-    value: V,
-    at: NaiveDateTime,
-) {
+fn write_tagged<K: Eq + Hash, V>(map: &mut HashMap<K, Tagged<V>>, key: K, value: V, tag: WriteTag) {
     match map.entry(key) {
-        Entry::Occupied(mut e) => e.get_mut().write(value, at),
+        Entry::Occupied(mut e) => e.get_mut().write(value, tag),
         Entry::Vacant(e) => {
-            e.insert(Tagged::new(value, at));
+            e.insert(Tagged::new(value, tag));
         }
     }
 }
 
-/// Write times of one loaded account's values, each its row's `valid_from`.
+/// Write tags of one loaded account's values, each [`WriteTag::snapshot`] of its row's
+/// `valid_from`.
 #[derive(Debug, Clone)]
-pub(crate) struct AccountTags {
-    pub slots: HashMap<StoreKey, NaiveDateTime>,
-    pub native_balance: NaiveDateTime,
-    pub code: NaiveDateTime,
-    pub token_balances: HashMap<Address, NaiveDateTime>,
+pub(crate) struct AccountWriteTags {
+    pub(crate) slots: HashMap<StoreKey, WriteTag>,
+    pub(crate) native_balance: WriteTag,
+    pub(crate) code: WriteTag,
+    pub(crate) token_balances: HashMap<Address, WriteTag>,
 }
 
 /// Cached state of one contract account.
@@ -126,21 +144,29 @@ pub(crate) struct CachedAccount {
 impl CachedAccount {
     /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
     /// have a tag in `tags`; a missing tag is a loader bug and panics.
-    pub(crate) fn from_snapshot(account: Account, tags: AccountTags) -> Self {
+    pub(crate) fn from_snapshot(account: Account, tags: AccountWriteTags) -> Self {
         let slots = account
             .slots
             .into_iter()
             .map(|(key, value)| {
-                let at = tags.slots[&key];
-                (key, Tagged::new(value, at))
+                let tag = *tags
+                    .slots
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("snapshot slot {key} has no write tag"));
+                (key, Tagged::new(value, tag))
             })
             .collect();
         let token_balances = account
             .token_balances
             .into_iter()
             .map(|(token, balance)| {
-                let at = tags.token_balances[&token];
-                (token, Tagged::new(balance, at))
+                let tag = *tags
+                    .token_balances
+                    .get(&token)
+                    .unwrap_or_else(|| {
+                        panic!("snapshot balance of token {token} has no write tag")
+                    });
+                (token, Tagged::new(balance, tag))
             })
             .collect();
         Self {
@@ -157,10 +183,10 @@ impl CachedAccount {
         }
     }
 
-    /// Builds an entry from a `Creation` delta folded at `at` — after startup, the only way a new
+    /// Builds an entry from a `Creation` delta folded at `tag` — after startup, the only way a new
     /// contract enters the cache. Fields the delta does not carry take the values
     /// [`AccountDelta::into_account_without_tx`] uses, so both paths build the same account.
-    pub(crate) fn from_creation(delta: &AccountDelta, at: NaiveDateTime) -> Self {
+    pub(crate) fn from_creation(delta: &AccountDelta, tag: WriteTag) -> Self {
         let code = delta.code().clone().unwrap_or_default();
         Self {
             chain: delta.chain,
@@ -169,7 +195,7 @@ impl CachedAccount {
                 .slots
                 .iter()
                 .map(|(key, value)| {
-                    (key.clone(), Tagged::new(value.clone().unwrap_or_default(), at))
+                    (key.clone(), Tagged::new(value.clone().unwrap_or_default(), tag))
                 })
                 .collect(),
             native_balance: Tagged::new(
@@ -177,33 +203,33 @@ impl CachedAccount {
                     .balance
                     .clone()
                     .unwrap_or_default(),
-                at,
+                tag,
             ),
             token_balances: HashMap::new(),
             code_hash: keccak256(&code).into(),
-            code: Tagged::new(code, at),
+            code: Tagged::new(code, tag),
             balance_modify_tx: Bytes::from("0x00"),
             code_modify_tx: Bytes::from("0x00"),
             creation_tx: None,
         }
     }
 
-    /// Applies one folded delta; every changed value gets `at` as its tag, values with a newer tag
-    /// stay. A deleted slot becomes the zero value, as in [`Account::apply_delta`]. A delta that
-    /// carries code also refreshes `code_hash`.
-    pub(crate) fn fold(&mut self, delta: &AccountDelta, at: NaiveDateTime) {
+    /// Applies one folded delta; every changed value gets `tag`, values with a newer tag stay. A
+    /// deleted slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries
+    /// code also refreshes `code_hash`.
+    pub(crate) fn fold(&mut self, delta: &AccountDelta, tag: WriteTag) {
         for (key, value) in &delta.slots {
-            write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), at);
+            write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), tag);
         }
         if let Some(balance) = &delta.balance {
             self.native_balance
-                .write(balance.clone(), at);
+                .write(balance.clone(), tag);
         }
         if let Some(code) = delta.code() {
-            if at >= self.code.written_at() {
+            if tag >= self.code.written_at() {
                 self.code_hash = keccak256(code).into();
             }
-            self.code.write(code.clone(), at);
+            self.code.write(code.clone(), tag);
         }
     }
 
@@ -211,10 +237,10 @@ impl CachedAccount {
     pub(crate) fn fold_balances(
         &mut self,
         balances: &HashMap<Address, AccountBalance>,
-        at: NaiveDateTime,
+        tag: WriteTag,
     ) {
         for (token, balance) in balances {
-            write_tagged(&mut self.token_balances, token.clone(), balance.clone(), at);
+            write_tagged(&mut self.token_balances, token.clone(), balance.clone(), tag);
         }
     }
 
@@ -264,26 +290,26 @@ impl CachedAccount {
 pub(crate) struct CachedComponentState {
     attributes: HashMap<AttrStoreKey, StoreVal>,
     balances: HashMap<Address, Balance>,
-    /// One write time covers the whole entry: a single extractor writes each protocol system,
+    /// One write tag covers the whole entry: a single extractor writes each protocol system,
     /// in order.
-    updated_at: NaiveDateTime,
+    updated_at: WriteTag,
 }
 
 impl CachedComponentState {
     /// Builds an entry from the startup snapshot, tagged with its newest `valid_from`.
-    pub(crate) fn from_snapshot(state: ProtocolComponentState, at: NaiveDateTime) -> Self {
-        Self { attributes: state.attributes, balances: state.balances, updated_at: at }
+    pub(crate) fn from_snapshot(state: ProtocolComponentState, tag: WriteTag) -> Self {
+        Self { attributes: state.attributes, balances: state.balances, updated_at: tag }
     }
 
-    /// An entry for a component created at `at`, before its first attributes arrive.
-    pub(crate) fn created(at: NaiveDateTime) -> Self {
-        Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: at }
+    /// An entry for a component created at `tag`, before its first attributes arrive.
+    pub(crate) fn created(tag: WriteTag) -> Self {
+        Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: tag }
     }
 
-    /// Applies one folded state delta unless the entry is newer than `at`. Updates apply first,
+    /// Applies one folded state delta unless the entry is newer than `tag`. Updates apply first,
     /// then deletions, like [`ProtocolComponentState::apply_state_delta`].
-    pub(crate) fn fold(&mut self, delta: &ProtocolComponentStateDelta, at: NaiveDateTime) {
-        if !self.accepts(at) {
+    pub(crate) fn fold(&mut self, delta: &ProtocolComponentStateDelta, tag: WriteTag) {
+        if !self.accepts(tag) {
             return;
         }
         self.attributes.extend(
@@ -296,13 +322,13 @@ impl CachedComponentState {
             .retain(|key, _| !delta.deleted_attributes.contains(key));
     }
 
-    /// Applies folded balances unless the entry is newer than `at`.
+    /// Applies folded balances unless the entry is newer than `tag`.
     pub(crate) fn fold_balances(
         &mut self,
         balances: &HashMap<Bytes, ComponentBalance>,
-        at: NaiveDateTime,
+        tag: WriteTag,
     ) {
-        if !self.accepts(at) {
+        if !self.accepts(tag) {
             return;
         }
         self.balances.extend(
@@ -313,12 +339,12 @@ impl CachedComponentState {
     }
 
     /// The single writer folds in order, so an older block is a replay: skip it. Otherwise the
-    /// entry moves to `at`.
-    fn accepts(&mut self, at: NaiveDateTime) -> bool {
-        if at < self.updated_at {
+    /// entry moves to `tag`.
+    fn accepts(&mut self, tag: WriteTag) -> bool {
+        if tag < self.updated_at {
             return false;
         }
-        self.updated_at = at;
+        self.updated_at = tag;
         true
     }
 
@@ -327,8 +353,8 @@ impl CachedComponentState {
         ProtocolComponentState::new(component_id, self.attributes.clone(), self.balances.clone())
     }
 
-    /// Time of the last write, for readers that apply only newer window changes.
-    pub(crate) fn updated_at(&self) -> NaiveDateTime {
+    /// Tag of the last write, for readers that apply only newer window changes.
+    pub(crate) fn updated_at(&self) -> WriteTag {
         self.updated_at
     }
 }
@@ -394,7 +420,7 @@ impl EntityCache {
 impl CacheState {
     /// Applies one block's component changes for `system`, in an order where a new component
     /// exists before its first attributes arrive.
-    fn fold_components(&mut self, system: &str, block: &BlockAggregatedChanges, at: NaiveDateTime) {
+    fn fold_components(&mut self, system: &str, block: &BlockAggregatedChanges, tag: WriteTag) {
         let family = self
             .components
             .entry(system.to_string())
@@ -402,17 +428,17 @@ impl CacheState {
         for id in block.new_protocol_components.keys() {
             family
                 .entry(id.clone())
-                .or_insert_with(|| CachedComponentState::created(at));
+                .or_insert_with(|| CachedComponentState::created(tag));
         }
         for (id, delta) in &block.state_deltas {
             match family.get_mut(id) {
-                Some(entry) => entry.fold(delta, at),
+                Some(entry) => entry.fold(delta, tag),
                 None => trace!(system, %id, "State delta for an unknown component skipped"),
             }
         }
         for (id, balances) in &block.component_balances {
             match family.get_mut(id) {
-                Some(entry) => entry.fold_balances(balances, at),
+                Some(entry) => entry.fold_balances(balances, tag),
                 None => trace!(system, %id, "Balances for an unknown component skipped"),
             }
         }
@@ -424,24 +450,24 @@ impl CacheState {
     /// Applies one block's account changes. A `Creation` delta carries the whole initial state
     /// and may create an entry; anything else for an unknown address is partial data and is
     /// skipped. A `Deletion` removes the entry.
-    fn fold_accounts(&mut self, block: &BlockAggregatedChanges, at: NaiveDateTime) {
+    fn fold_accounts(&mut self, block: &BlockAggregatedChanges, tag: WriteTag) {
         for (address, delta) in &block.account_deltas {
             if delta.change_type() == ChangeType::Deletion {
                 self.accounts.remove(address);
                 continue;
             }
             match self.accounts.get_mut(address) {
-                Some(entry) => entry.fold(delta, at),
+                Some(entry) => entry.fold(delta, tag),
                 None if delta.is_creation() => {
                     self.accounts
-                        .insert(address.clone(), CachedAccount::from_creation(delta, at));
+                        .insert(address.clone(), CachedAccount::from_creation(delta, tag));
                 }
                 None => trace!(%address, "Change for an unknown account skipped"),
             }
         }
         for (address, balances) in &block.account_balances {
             match self.accounts.get_mut(address) {
-                Some(entry) => entry.fold_balances(balances, at),
+                Some(entry) => entry.fold_balances(balances, tag),
                 None => trace!(%address, "Balances for an unknown account skipped"),
             }
         }
@@ -455,10 +481,10 @@ impl FoldSink for EntityCache {
     /// No check can fail today. Any future check goes before the first mutation, so a replay of
     /// the same block converges.
     fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        let at = block.block.ts;
+        let tag = WriteTag::from(&block.block);
         let mut state = self.write();
-        state.fold_components(&block.extractor, block, at);
-        state.fold_accounts(block, at);
+        state.fold_components(&block.extractor, block, tag);
+        state.fold_accounts(block, tag);
         Ok(())
     }
 }
@@ -476,6 +502,10 @@ mod test {
 
     fn ts(n: u64) -> NaiveDateTime {
         testing::block(n).ts
+    }
+
+    fn tag(n: u64) -> WriteTag {
+        WriteTag::from(&testing::block(n))
     }
 
     fn cached_account(cache: &EntityCache, address: &Bytes) -> Option<Account> {
@@ -524,19 +554,19 @@ mod test {
         )
     }
 
-    fn tags(account: &Account, at: NaiveDateTime) -> AccountTags {
-        AccountTags {
+    fn tags(account: &Account, tag: WriteTag) -> AccountWriteTags {
+        AccountWriteTags {
             slots: account
                 .slots
                 .keys()
-                .map(|k| (k.clone(), at))
+                .map(|k| (k.clone(), tag))
                 .collect(),
-            native_balance: at,
-            code: at,
+            native_balance: tag,
+            code: tag,
             token_balances: account
                 .token_balances
                 .keys()
-                .map(|k| (k.clone(), at))
+                .map(|k| (k.clone(), tag))
                 .collect(),
         }
     }
@@ -649,32 +679,51 @@ mod test {
 
     #[test]
     fn write_keeps_a_newer_value() {
-        let mut slot = Tagged::new(1u64, ts(5));
+        let mut slot = Tagged::new(1u64, tag(5));
 
-        slot.write(2, ts(4));
+        slot.write(2, tag(4));
 
-        assert_eq!(slot, Tagged::new(1, ts(5)));
+        assert_eq!(slot, Tagged::new(1, tag(5)));
     }
 
     #[test]
-    fn write_applies_an_equal_time_value() {
-        let mut slot = Tagged::new(1u64, ts(5));
+    fn write_applies_an_equal_tag() {
+        let mut slot = Tagged::new(1u64, tag(5));
 
-        slot.write(2, ts(5));
+        slot.write(2, tag(5));
 
-        assert_eq!(slot, Tagged::new(2, ts(5)));
+        assert_eq!(slot, Tagged::new(2, tag(5)));
+    }
+
+    #[test]
+    fn write_keeps_the_higher_block_at_an_equal_timestamp() {
+        let mut slot = Tagged::new(1u64, tag(5));
+        let lower_block = WriteTag { block_ts: ts(5), block_number: 4 };
+
+        slot.write(2, lower_block);
+
+        assert_eq!(slot.value(), &1);
+    }
+
+    #[test]
+    fn write_applies_a_folded_block_over_a_snapshot_at_an_equal_timestamp() {
+        let mut slot = Tagged::new(1u64, WriteTag::snapshot(ts(5)));
+
+        slot.write(2, tag(5));
+
+        assert_eq!(slot.value(), &2);
     }
 
     #[test]
     fn write_inserts_a_missing_key_and_updates_a_present_one() {
         let mut map: HashMap<&str, Tagged<u64>> = HashMap::new();
 
-        write_tagged(&mut map, "a", 1, ts(3));
-        write_tagged(&mut map, "a", 2, ts(2));
-        write_tagged(&mut map, "b", 9, ts(1));
+        write_tagged(&mut map, "a", 1, tag(3));
+        write_tagged(&mut map, "a", 2, tag(2));
+        write_tagged(&mut map, "b", 9, tag(1));
 
-        assert_eq!(map["a"], Tagged::new(1, ts(3)));
-        assert_eq!(map["b"], Tagged::new(9, ts(1)));
+        assert_eq!(map["a"], Tagged::new(1, tag(3)));
+        assert_eq!(map["b"], Tagged::new(9, tag(1)));
     }
 
     #[test]
@@ -682,14 +731,15 @@ mod test {
         let address = addr(1);
         let loaded = account(&address);
 
-        let cached = CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, ts(1)));
+        let cached =
+            CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, WriteTag::snapshot(ts(1))));
 
         assert_eq!(cached.materialize(&address), loaded);
         let key1 = fixtures::slots([(1, 1)])
             .into_keys()
             .next()
             .unwrap();
-        assert_eq!(cached.slots()[&key1].written_at(), ts(1));
+        assert_eq!(cached.slots()[&key1].written_at(), WriteTag::snapshot(ts(1)));
     }
 
     #[test]
@@ -697,19 +747,19 @@ mod test {
         let address = addr(1);
         let delta = creation(&address, [(1, 1)], 10, "0x6000");
 
-        let cached = CachedAccount::from_creation(&delta, ts(1));
+        let cached = CachedAccount::from_creation(&delta, tag(1));
 
         assert_eq!(cached.materialize(&address), delta.into_account_without_tx());
-        assert_eq!(cached.code().written_at(), ts(1));
+        assert_eq!(cached.code().written_at(), tag(1));
     }
 
     #[test]
     fn account_fold_keeps_newer_values_per_slot() {
         let address = addr(1);
         let mut cached =
-            CachedAccount::from_snapshot(account(&address), tags(&account(&address), ts(5)));
+            CachedAccount::from_snapshot(account(&address), tags(&account(&address), tag(5)));
 
-        cached.fold(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), ts(3));
+        cached.fold(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), tag(3));
 
         let slots = cached.materialize(&address).slots;
         assert_eq!(
@@ -721,16 +771,16 @@ mod test {
             .into_keys()
             .next()
             .unwrap();
-        assert_eq!(cached.slots()[&key3].written_at(), ts(3));
+        assert_eq!(cached.slots()[&key3].written_at(), tag(3));
     }
 
     #[test]
     fn account_fold_applies_an_equal_time_write() {
         let address = addr(1);
         let mut cached =
-            CachedAccount::from_snapshot(account(&address), tags(&account(&address), ts(5)));
+            CachedAccount::from_snapshot(account(&address), tags(&account(&address), tag(5)));
 
-        cached.fold(&update(&address, fixtures::optional_slots([(1, 11)])), ts(5));
+        cached.fold(&update(&address, fixtures::optional_slots([(1, 11)])), tag(5));
 
         assert_eq!(cached.materialize(&address).slots, fixtures::slots([(1, 11), (2, 2)]));
     }
@@ -739,12 +789,12 @@ mod test {
     fn account_fold_twice_changes_nothing() {
         let address = addr(1);
         let mut cached =
-            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
         let delta = update(&address, fixtures::optional_slots([(1, 11), (2, 2)]));
 
-        cached.fold(&delta, ts(2));
+        cached.fold(&delta, tag(2));
         let once = cached.clone();
-        cached.fold(&delta, ts(2));
+        cached.fold(&delta, tag(2));
 
         assert_eq!(cached, once);
     }
@@ -753,7 +803,7 @@ mod test {
     fn account_fold_zeroes_deleted_slots_and_refreshes_the_code_hash() {
         let address = addr(1);
         let mut cached =
-            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), ts(1));
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
         let key1 = fixtures::slots([(1, 1)])
             .into_keys()
             .next()
@@ -761,27 +811,27 @@ mod test {
         let mut delta = update(&address, HashMap::from([(key1.clone(), None)]));
         delta.set_code(code("0x6001"));
 
-        cached.fold(&delta, ts(2));
+        cached.fold(&delta, tag(2));
 
         let account = cached.materialize(&address);
         assert_eq!(account.slots[&key1], Bytes::default());
         assert_eq!(account.code, code("0x6001"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
-        assert_eq!(cached.code().written_at(), ts(2));
+        assert_eq!(cached.code().written_at(), tag(2));
     }
 
     #[test]
     fn account_fold_balances_follow_the_tag_rule() {
         let address = addr(1);
-        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x"), ts(5));
+        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x"), tag(5));
 
         cached.fold_balances(
             &HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))]),
-            ts(5),
+            tag(5),
         );
         cached.fold_balances(
             &HashMap::from([(addr(9), account_balance(&address, &addr(9), 1))]),
-            ts(4),
+            tag(4),
         );
 
         assert_eq!(
@@ -801,10 +851,10 @@ mod test {
             HashMap::from([(addr(9), Bytes::from(5u64))]),
         );
 
-        let cached = CachedComponentState::from_snapshot(loaded.clone(), ts(3));
+        let cached = CachedComponentState::from_snapshot(loaded.clone(), WriteTag::snapshot(ts(3)));
 
         assert_eq!(cached.materialize("c1"), loaded);
-        assert_eq!(cached.updated_at(), ts(3));
+        assert_eq!(cached.updated_at(), WriteTag::snapshot(ts(3)));
     }
 
     #[test]
@@ -815,10 +865,10 @@ mod test {
                 HashMap::from([("x".to_string(), Bytes::from(1u64))]),
                 HashMap::new(),
             ),
-            ts(5),
+            tag(5),
         );
 
-        cached.fold(&testing::state_delta("c1", 9), ts(4));
+        cached.fold(&testing::state_delta("c1", 9), tag(4));
         assert_eq!(
             cached.materialize("c1").attributes["x"],
             Bytes::from(1u64),
@@ -832,16 +882,16 @@ mod test {
         delta
             .deleted_attributes
             .insert("x".to_string());
-        cached.fold(&delta, ts(5));
+        cached.fold(&delta, tag(5));
         cached.fold_balances(
             &HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))]),
-            ts(6),
+            tag(6),
         );
 
         let state = cached.materialize("c1");
         assert_eq!(state.attributes, HashMap::from([("y".to_string(), Bytes::from(3u64))]));
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
-        assert_eq!(cached.updated_at(), ts(6));
+        assert_eq!(cached.updated_at(), tag(6));
     }
 
     #[test]
@@ -853,12 +903,12 @@ mod test {
 
         cache.insert_loaded_account(
             address.clone(),
-            CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, ts(1))),
+            CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, WriteTag::snapshot(ts(1)))),
         );
         cache.insert_loaded_component(
             EXTRACTOR.to_string(),
             "c1".to_string(),
-            CachedComponentState::from_snapshot(state.clone(), ts(1)),
+            CachedComponentState::from_snapshot(state.clone(), WriteTag::snapshot(ts(1))),
         );
 
         assert_eq!(cached_account(&cache, &address), Some(loaded));
@@ -1022,6 +1072,33 @@ mod test {
             slots,
             fixtures::slots([(1, 15), (2, 23)]),
             "slot 1 keeps block 5, slot 2 takes block 3"
+        );
+    }
+
+    #[test]
+    fn a_lower_block_at_an_equal_timestamp_does_not_overwrite() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+        let ahead =
+            with_account_delta(msg(5), update(&address, fixtures::optional_slots([(1, 15)])));
+        let mut behind = with_account_delta(
+            testing::aggregated_changes("other", 4, 4, Some(4)),
+            update(&address, fixtures::optional_slots([(1, 14)])),
+        );
+        behind.block.ts = ahead.block.ts;
+
+        cache.fold(&ahead).unwrap();
+        cache.fold(&behind).unwrap();
+
+        assert_eq!(
+            cached_account(&cache, &address)
+                .unwrap()
+                .slots,
+            fixtures::slots([(1, 15)]),
+            "block 5 wins over block 4 at the same timestamp"
         );
     }
 
