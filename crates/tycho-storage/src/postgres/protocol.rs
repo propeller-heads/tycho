@@ -2467,6 +2467,82 @@ mod test {
         assert_eq!(result, expected)
     }
 
+    async fn probe_at(
+        gateway: &PostgresGateway,
+        block: i64,
+        conn: &mut AsyncPgConnection,
+    ) -> Option<Bytes> {
+        gateway
+            .get_protocol_states(
+                &Chain::Ethereum,
+                Some(Version::from_block_number(Chain::Ethereum, block)),
+                None,
+                Some(&["state3"]),
+                false,
+                None,
+                conn,
+            )
+            .await
+            .unwrap()
+            .entity
+            .into_iter()
+            .find(|state| state.component_id == "state3")
+            .and_then(|state| state.attributes.get("probe").cloned())
+    }
+
+    /// A superseded version is kept only while its `valid_to` is later than the retention
+    /// horizon, so reading block N by version needs a horizon no later than block N. With the
+    /// horizon at the current time only the latest version survives and the block-1 read is
+    /// empty; with the horizon at block 1 both versions are readable.
+    #[tokio::test]
+    async fn versioned_reads_need_a_horizon_no_later_than_the_version() {
+        let block_1_tx =
+            Bytes::from_str("0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945")
+                .unwrap();
+        let block_2_tx =
+            Bytes::from_str("0x3108322284d0a89a7accb288d1a94384d499504fe7e04441b0706c7628dee7b7")
+                .unwrap();
+        let probe = |value: u128| Bytes::from(value).lpad(32, 0);
+        let delta = |value: u128| {
+            ProtocolComponentStateDelta::new(
+                "state3",
+                HashMap::from([("probe".to_string(), probe(value))]),
+                HashSet::new(),
+            )
+        };
+        for (horizon, expected_at_block_1) in
+            [(Utc::now().naive_utc(), None), (db_fixtures::yesterday_midnight(), Some(probe(1)))]
+        {
+            let mut conn = setup_db().await;
+            setup_data(&mut conn).await;
+            let base = EVMGateway::from_connection(&mut conn).await;
+            let gateway = PostgresGateway::with_cache(
+                base.chain_id_cache.clone(),
+                base.native_token_id_cache.clone(),
+                base.protocol_system_id_cache.clone(),
+                None,
+                horizon,
+            );
+            for (tx, value) in [(&block_1_tx, 1), (&block_2_tx, 2)] {
+                gateway
+                    .update_protocol_states(
+                        &Chain::Ethereum,
+                        &[(tx.clone(), &delta(value))],
+                        &mut conn,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            assert_eq!(
+                probe_at(&gateway, 1, &mut conn).await,
+                expected_at_block_1,
+                "block 1 read with retention horizon {horizon}"
+            );
+            assert_eq!(probe_at(&gateway, 2, &mut conn).await, Some(probe(2)));
+        }
+    }
+
     fn protocol_state_delta() -> ProtocolComponentStateDelta {
         let attributes: HashMap<String, Bytes> =
             vec![("reserve1".to_owned(), Bytes::from(1000u128).lpad(32, 0))]
