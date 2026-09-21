@@ -905,6 +905,15 @@ impl ProtocolSim for UniswapV4State {
         Ok(())
     }
 
+    /// The pool's own attributes all travel in the delta. A hook, if present, decides for
+    /// itself — one that quotes through the shared VM database cannot serve a pending block.
+    fn transitions_from_delta_alone(&self, delta: &ProtocolStateDelta) -> bool {
+        match &self.hook {
+            Some(hook) => hook.transitions_from_delta_alone(delta),
+            None => true,
+        }
+    }
+
     /// See [`ProtocolSim::query_pool_swap`] for the trait documentation.
     ///
     /// This method uses Uniswap V4 internal swap logic by swapping an infinite amount of token_in

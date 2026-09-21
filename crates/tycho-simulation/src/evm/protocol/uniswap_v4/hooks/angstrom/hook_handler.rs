@@ -168,6 +168,10 @@ impl HookHandler for AngstromHookHandler {
         Ok(())
     }
 
+    fn transitions_from_delta_alone(&self, _delta: &ProtocolStateDelta) -> bool {
+        true
+    }
+
     fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
         Err(SimulationError::RecoverableError(
             "spot_price is not implemented for AngstromHook".to_string(),

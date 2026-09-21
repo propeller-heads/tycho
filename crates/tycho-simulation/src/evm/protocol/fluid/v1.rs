@@ -430,6 +430,14 @@ impl ProtocolSim for FluidV1 {
         Ok(())
     }
 
+    /// True only when the delta carries `pool_reserves_adjusted`. Without it the transition
+    /// falls back to reading the resolver against the confirmed VM database.
+    fn transitions_from_delta_alone(&self, delta: &ProtocolStateDelta) -> bool {
+        delta
+            .updated_attributes
+            .contains_key(vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE)
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
@@ -1316,6 +1324,24 @@ mod test {
                 10,
         );
         (wsteth, eth, pool)
+    }
+
+    /// Without `pool_reserves_adjusted` the transition reads the resolver against the confirmed
+    /// VM database, which a pending block never reaches.
+    #[test]
+    fn test_delta_alone_suffices_only_with_the_reserves_attribute() {
+        let (_, _, pool) = setup_fluid_pool(U256::from(1));
+
+        let with_reserves = ProtocolStateDelta {
+            updated_attributes: HashMap::from([(
+                vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE.to_string(),
+                Bytes::from(vec![1u8, 2, 3]),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(pool.transitions_from_delta_alone(&with_reserves));
+        assert!(!pool.transitions_from_delta_alone(&ProtocolStateDelta::default()));
     }
 
     fn limits_wide() -> DexLimits {
