@@ -37,8 +37,8 @@ use tycho_common::{
         blockchain::{Block, BlockAggregatedChanges},
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
-        Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId, StoreKey,
-        StoreVal, TxHash,
+        Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId,
+        ProtocolSystem, StoreKey, StoreVal, TxHash,
     },
     storage::StorageError,
     Bytes,
@@ -327,14 +327,14 @@ impl CachedComponentState {
     }
 
     /// An entry for a component created at `tag`, before its first attributes arrive.
-    pub(crate) fn created(tag: WriteTag) -> Self {
+    pub(crate) fn from_creation(tag: WriteTag) -> Self {
         Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: tag }
     }
 
     /// Applies one folded state delta unless the entry is newer than `tag`. Updates apply first,
     /// then deletions, like [`ProtocolComponentState::apply_state_delta`].
     pub(crate) fn fold(&mut self, delta: &ProtocolComponentStateDelta, tag: WriteTag) {
-        if !self.accepts(tag) {
+        if !self.advance_to(tag) {
             return;
         }
         self.attributes.extend(
@@ -353,7 +353,7 @@ impl CachedComponentState {
         balances: &HashMap<Bytes, ComponentBalance>,
         tag: WriteTag,
     ) {
-        if !self.accepts(tag) {
+        if !self.advance_to(tag) {
             return;
         }
         self.balances.extend(
@@ -363,9 +363,9 @@ impl CachedComponentState {
         );
     }
 
-    /// The single writer folds in order, so an older block is a replay: skip it. Otherwise the
-    /// entry moves to `tag`.
-    fn accepts(&mut self, tag: WriteTag) -> bool {
+    /// Moves the entry to `tag` and returns `true`, unless `tag` is older: the single writer
+    /// folds in order, so an older block is a replay and is skipped.
+    fn advance_to(&mut self, tag: WriteTag) -> bool {
         if tag < self.updated_at {
             return false;
         }
@@ -396,7 +396,7 @@ pub(crate) struct CacheState {
     pub(crate) accounts: HashMap<Address, CachedAccount>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
-    pub(crate) components: HashMap<String, HashMap<ComponentId, CachedComponentState>>,
+    pub(crate) components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
 }
 
 impl EntityCache {
@@ -430,7 +430,7 @@ impl EntityCache {
     /// Startup load only.
     pub(crate) fn insert_loaded_component(
         &self,
-        system: String,
+        system: ProtocolSystem,
         component_id: ComponentId,
         entry: CachedComponentState,
     ) {
@@ -443,37 +443,51 @@ impl EntityCache {
 }
 
 impl CacheState {
-    /// Applies one block's component changes for `system`, in an order where a new component
-    /// exists before its first attributes arrive. A deleted component is removed unless a newer
-    /// block already wrote to it.
-    fn fold_components(&mut self, system: &str, block: &BlockAggregatedChanges, tag: WriteTag) {
-        let family = self
-            .components
-            .entry(system.to_string())
-            .or_default();
-        for id in block.new_protocol_components.keys() {
-            family
-                .entry(id.clone())
-                .or_insert_with(|| CachedComponentState::created(tag));
+    /// Applies one block's component changes, in an order where a new component exists before
+    /// its first attributes arrive. A deleted component is removed unless a newer block already
+    /// wrote to it.
+    fn fold_components(&mut self, block: &BlockAggregatedChanges) {
+        let tag = WriteTag::from(&block.block);
+        if !block.new_protocol_components.is_empty() {
+            let system_components = self
+                .components
+                .entry(block.extractor.clone())
+                .or_default();
+            for id in block.new_protocol_components.keys() {
+                system_components
+                    .entry(id.clone())
+                    .or_insert_with(|| CachedComponentState::from_creation(tag));
+            }
         }
+        let Some(system_components) = self
+            .components
+            .get_mut(&block.extractor)
+        else {
+            trace!(system = %block.extractor, "Changes for a system with no cached components skipped");
+            return;
+        };
         for (id, delta) in &block.state_deltas {
-            match family.get_mut(id) {
+            match system_components.get_mut(id) {
                 Some(entry) => entry.fold(delta, tag),
-                None => trace!(system, %id, "State delta for an unknown component skipped"),
+                None => {
+                    trace!(system = %block.extractor, %id, "State delta for an unknown component skipped")
+                }
             }
         }
         for (id, balances) in &block.component_balances {
-            match family.get_mut(id) {
+            match system_components.get_mut(id) {
                 Some(entry) => entry.fold_balances(balances, tag),
-                None => trace!(system, %id, "Balances for an unknown component skipped"),
+                None => {
+                    trace!(system = %block.extractor, %id, "Balances for an unknown component skipped")
+                }
             }
         }
         for id in block.deleted_protocol_components.keys() {
-            if family
+            if system_components
                 .get(id)
                 .is_some_and(|entry| entry.updated_at() <= tag)
             {
-                family.remove(id);
+                system_components.remove(id);
             }
         }
     }
@@ -481,7 +495,8 @@ impl CacheState {
     /// Applies one block's account changes. A `Creation` delta carries the whole initial state
     /// and may create an entry; anything else for an unknown address is partial data and is
     /// skipped. A `Deletion` removes the entry unless a newer block already wrote to it.
-    fn fold_accounts(&mut self, block: &BlockAggregatedChanges, tag: WriteTag) {
+    fn fold_accounts(&mut self, block: &BlockAggregatedChanges) {
+        let tag = WriteTag::from(&block.block);
         for (address, delta) in &block.account_deltas {
             if delta.change_type() == ChangeType::Deletion {
                 if self
@@ -518,10 +533,9 @@ impl FoldSink for EntityCache {
     /// No check can fail today. Any future check goes before the first mutation, so a replay of
     /// the same block converges.
     fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        let tag = WriteTag::from(&block.block);
         let mut state = self.write();
-        state.fold_components(&block.extractor, block, tag);
-        state.fold_accounts(block, tag);
+        state.fold_components(block);
+        state.fold_accounts(block);
         Ok(())
     }
 }
