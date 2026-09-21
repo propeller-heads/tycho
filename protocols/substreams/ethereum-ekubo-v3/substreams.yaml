@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_ekubo_v3"
-  version: v0.2.3
+  version: v0.2.4
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
 protobuf:
@@ -31,6 +31,8 @@ networks:
 # The Ve33 extension address for the indexed chain, or empty on chains
 # without a Ve33 deployment (e.g. Ethereum). Override at deployment time,
 # e.g. `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
+# map_components also accepts `signed_exclusive_swap_address=0x...` for chains
+# whose SignedExclusiveSwap deployment differs from Ethereum's.
 params:
   map_events: ""
   map_components: ""

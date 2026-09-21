@@ -51,7 +51,9 @@ mod tests {
     };
 
     use super::{
-        addresses::{ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS},
+        addresses::{
+            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ROBINHOOD_ADDRESS,
+        },
         *,
     };
 
@@ -74,10 +76,12 @@ mod tests {
 
     #[test]
     fn signed_exclusive_swap_excluded_by_default() {
-        let signed = with_extension(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+        for extension in [SIGNED_EXCLUSIVE_SWAP_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ROBINHOOD_ADDRESS] {
+            let signed = with_extension(extension);
 
-        assert!(!filter_fn(&signed));
-        assert!(filter_fn_with_signed_exclusive_swap(&signed));
+            assert!(!filter_fn(&signed));
+            assert!(filter_fn_with_signed_exclusive_swap(&signed));
+        }
     }
 
     #[test]

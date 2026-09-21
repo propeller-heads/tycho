@@ -27,7 +27,7 @@ use super::pool::{
 };
 use crate::evm::protocol::{
     ekubo_v3::{
-        addresses::SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+        addresses::is_signed_exclusive_swap,
         pool::{
             boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
         },
@@ -69,7 +69,7 @@ fn sqrt_price_q128_to_f64(
 impl EkuboV3State {
     /// Zero unless the extension forces the swap through `Core.forward`.
     fn forward_overhead_gas(&self) -> u64 {
-        if self.key().config.extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+        if is_signed_exclusive_swap(self.key().config.extension) {
             SIGNED_EXCLUSIVE_SWAP_GAS
         } else {
             0

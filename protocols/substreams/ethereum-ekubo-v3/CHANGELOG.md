@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.4
+
+- Read the SignedExclusiveSwap extension address from the `map_components`
+  params (`signed_exclusive_swap_address=0x...`), defaulting to the Ethereum
+  deployment, so each chain tags `is_exclusive` on its own deployment. The
+  Robinhood manifest carries the Robinhood address.
+
 ## v0.2.3
 
 - Track Ve33 pool swap-fee changes for accurate off-chain quotes. The Ve33
