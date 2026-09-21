@@ -156,9 +156,9 @@ impl CachedCode {
 
 /// Cached state of one contract account.
 ///
-/// Every value carries the time it was last written, so writes from different extractors (which
-/// run at different points of the chain) can never regress a value: newer wins, equal-time
-/// re-application is a no-op.
+/// Every value carries the tag of the write that set it, so writes from different extractors
+/// (which run at different points of the chain) can never regress a value: newer wins,
+/// equal-tag re-application is a no-op. The getters return each value with its tag.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CachedAccount {
     title: String,
@@ -267,7 +267,7 @@ impl CachedAccount {
         newest
     }
 
-    /// Materializes the cached state as an [`Account`] for response assembly.
+    /// Builds the [`Account`] the cached values describe.
     pub(crate) fn materialize(&self, chain: Chain, address: &Address) -> Account {
         Account::new(
             chain,
@@ -290,7 +290,6 @@ impl CachedAccount {
         )
     }
 
-    /// Tagged storage slots, for readers that apply only window changes newer than a value.
     pub(crate) fn slots(&self) -> &HashMap<StoreKey, Tagged<StoreVal>> {
         &self.slots
     }
@@ -371,12 +370,12 @@ impl CachedComponentState {
         true
     }
 
-    /// Materializes the cached state for response assembly.
+    /// Builds the [`ProtocolComponentState`] the cached values describe.
     pub(crate) fn materialize(&self, component_id: &str) -> ProtocolComponentState {
         ProtocolComponentState::new(component_id, self.attributes.clone(), self.balances.clone())
     }
 
-    /// Tag of the last write, for readers that apply only newer window changes.
+    /// Tag of the newest write applied to this entry.
     pub(crate) fn updated_at(&self) -> WriteTag {
         self.updated_at
     }
@@ -384,8 +383,6 @@ impl CachedComponentState {
 
 /// The long-lived entity store. See the module doc for the data model and locking.
 pub(crate) struct EntityCache {
-    /// Folds take the write side and apply one whole block atomically; reads take the read
-    /// side. Folds are fast, so waiting is fine and a reader never sees half a block.
     state: RwLock<CacheState>,
 }
 
@@ -426,8 +423,8 @@ impl EntityCache {
         }
     }
 
-    /// Read access for response assembly. Folds wait until the guard is dropped — hold it only
-    /// long enough to copy out what the response needs.
+    /// Returns a read guard over the entries. Folds wait until it is dropped, so hold it only as
+    /// long as the copy takes.
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, CacheState> {
         self.state
             .read()

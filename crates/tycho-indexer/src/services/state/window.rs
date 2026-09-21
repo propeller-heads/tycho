@@ -88,7 +88,7 @@ impl Default for WindowConfig {
 }
 
 /// Drops every folded block.
-// Placeholder until the entity cache (ENG-6291) provides the real sink.
+// Placeholder until ENG-6305 wires the entity cache in as the real sink.
 pub(crate) struct DiscardSink;
 
 impl FoldSink for DiscardSink {
