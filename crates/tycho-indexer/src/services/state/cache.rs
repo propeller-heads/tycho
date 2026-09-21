@@ -574,7 +574,10 @@ mod test {
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::{extractor::models::fixtures, testing};
+    use crate::{
+        extractor::models::fixtures,
+        testing::{self, with_state_delta},
+    };
 
     const EXTRACTOR: &str = "ex";
 
@@ -602,6 +605,10 @@ mod test {
 
     fn addr(n: u64) -> Bytes {
         Bytes::from(n).lpad(20, 0)
+    }
+
+    fn slot(n: u64) -> Bytes {
+        Bytes::from(n).lpad(32, 0)
     }
 
     fn code(hex: &str) -> Bytes {
@@ -700,12 +707,6 @@ mod test {
         m
     }
 
-    fn with_state_delta(mut m: BlockAggregatedChanges, id: &str, x: u64) -> BlockAggregatedChanges {
-        m.state_deltas
-            .insert(id.to_string(), testing::state_delta(id, x));
-        m
-    }
-
     fn with_component_balance(
         mut m: BlockAggregatedChanges,
         id: &str,
@@ -795,11 +796,7 @@ mod test {
         );
 
         assert_eq!(cached.materialize(Chain::Ethereum, &address), loaded);
-        let key1 = fixtures::slots([(1, 1)])
-            .into_keys()
-            .next()
-            .unwrap();
-        assert_eq!(cached.slots()[&key1].written_at(), WriteTag::snapshot(ts(1)));
+        assert_eq!(cached.slots()[&slot(1)].written_at(), WriteTag::snapshot(ts(1)));
     }
 
     #[test]
@@ -831,11 +828,7 @@ mod test {
             fixtures::slots([(1, 1), (2, 2), (3, 3)]),
             "older slot 1 kept, new slot 3 added"
         );
-        let key3 = fixtures::slots([(3, 3)])
-            .into_keys()
-            .next()
-            .unwrap();
-        assert_eq!(cached.slots()[&key3].written_at(), tag(3));
+        assert_eq!(cached.slots()[&slot(3)].written_at(), tag(3));
     }
 
     #[test]
@@ -875,17 +868,13 @@ mod test {
         let address = addr(1);
         let mut cached =
             CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
-        let key1 = fixtures::slots([(1, 1)])
-            .into_keys()
-            .next()
-            .unwrap();
-        let mut delta = update(&address, HashMap::from([(key1.clone(), None)]));
+        let mut delta = update(&address, HashMap::from([(slot(1), None)]));
         delta.set_code(code("0x6001"));
 
         cached.apply_delta(&delta, tag(2));
 
         let account = cached.materialize(Chain::Ethereum, &address);
-        assert_eq!(account.slots[&key1], Bytes::default());
+        assert_eq!(account.slots[&slot(1)], Bytes::default());
         assert_eq!(account.code, code("0x6001"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
         assert_eq!(cached.code().written_at(), tag(2));
@@ -1039,12 +1028,9 @@ mod test {
     #[test]
     fn fold_creates_components_before_their_first_attributes() {
         let cache = EntityCache::new(Chain::Ethereum);
-        let block = with_component_balance(
-            with_state_delta(with_component(msg(1), "c1"), "c1", 1),
-            "c1",
-            &addr(9),
-            5,
-        );
+        let block = with_component(msg(1), "c1");
+        let block = with_state_delta(block, "c1", 1);
+        let block = with_component_balance(block, "c1", &addr(9), 5);
 
         cache.fold(&block).unwrap();
 
@@ -1056,8 +1042,8 @@ mod test {
     #[test]
     fn fold_skips_changes_for_an_unknown_component() {
         let cache = EntityCache::new(Chain::Ethereum);
-        let block =
-            with_component_balance(with_state_delta(msg(1), "ghost", 1), "ghost", &addr(9), 5);
+        let block = with_state_delta(msg(1), "ghost", 1);
+        let block = with_component_balance(block, "ghost", &addr(9), 5);
 
         cache.fold(&block).unwrap();
 
@@ -1103,15 +1089,10 @@ mod test {
         let cache = EntityCache::new(Chain::Ethereum);
         let address = addr(1);
         let delta = creation(&address, [(1, 1), (2, 2)], 10, "0x6000");
+        let block = with_account_delta(msg(1), delta.clone());
+        let block = with_account_balance(block, &address, &addr(9), 7);
 
-        cache
-            .fold(&with_account_balance(
-                with_account_delta(msg(1), delta.clone()),
-                &address,
-                &addr(9),
-                7,
-            ))
-            .unwrap();
+        cache.fold(&block).unwrap();
 
         let mut expected = delta.into_account_without_tx();
         expected
@@ -1124,12 +1105,9 @@ mod test {
     fn fold_skips_changes_for_an_unknown_account() {
         let cache = EntityCache::new(Chain::Ethereum);
         let address = addr(1);
-        let block = with_account_balance(
-            with_account_delta(msg(1), update(&address, fixtures::optional_slots([(1, 1)]))),
-            &address,
-            &addr(9),
-            7,
-        );
+        let block =
+            with_account_delta(msg(1), update(&address, fixtures::optional_slots([(1, 1)])));
+        let block = with_account_balance(block, &address, &addr(9), 7);
 
         cache.fold(&block).unwrap();
 
@@ -1197,14 +1175,12 @@ mod test {
     fn folding_the_same_block_twice_changes_nothing() {
         let cache = EntityCache::new(Chain::Ethereum);
         let address = addr(1);
-        cache
-            .fold(&with_account_delta(
-                with_component(msg(1), "c1"),
-                creation(&address, [(1, 1)], 10, "0x6000"),
-            ))
-            .unwrap();
+        let creating = with_component(msg(1), "c1");
+        let creating = with_account_delta(creating, creation(&address, [(1, 1)], 10, "0x6000"));
+        cache.fold(&creating).unwrap();
+        let block = with_state_delta(msg(2), "c1", 2);
         let block = with_account_delta(
-            with_state_delta(msg(2), "c1", 2),
+            block,
             update(&address, fixtures::optional_slots([(1, 11), (2, 2)])),
         );
 
@@ -1221,14 +1197,11 @@ mod test {
     fn folding_a_creating_block_again_keeps_newer_state() {
         let cache = EntityCache::new(Chain::Ethereum);
         let address = addr(1);
-        let creating = with_account_delta(
-            with_component(msg(1), "c1"),
-            creation(&address, [(1, 1)], 10, "0x6000"),
-        );
-        let newer = with_account_delta(
-            with_state_delta(msg(2), "c1", 2),
-            update(&address, fixtures::optional_slots([(1, 11)])),
-        );
+        let creating = with_component(msg(1), "c1");
+        let creating = with_account_delta(creating, creation(&address, [(1, 1)], 10, "0x6000"));
+        let newer = with_state_delta(msg(2), "c1", 2);
+        let newer =
+            with_account_delta(newer, update(&address, fixtures::optional_slots([(1, 11)])));
         cache.fold(&creating).unwrap();
         cache.fold(&newer).unwrap();
 
@@ -1309,47 +1282,22 @@ mod test {
         let cache = EntityCache::new(Chain::Ethereum);
         let address = addr(1);
         let token = addr(9);
-        let slot2 = fixtures::slots([(2, 2)])
-            .into_keys()
-            .next()
-            .unwrap();
-        let blocks = vec![
-            with_component_balance(
-                with_state_delta(
-                    with_component(
-                        with_account_delta(
-                            msg(1),
-                            creation(&address, [(1, 1), (2, 2)], 10, "0x6000"),
-                        ),
-                        "c1",
-                    ),
-                    "c1",
-                    1,
-                ),
-                "c1",
-                &token,
-                5,
-            ),
-            with_state_delta(
-                with_account_balance(
-                    with_account_delta(
-                        msg(2),
-                        update(&address, fixtures::optional_slots([(1, 11), (3, 3)])),
-                    ),
-                    &address,
-                    &token,
-                    7,
-                ),
-                "c1",
-                2,
-            ),
-            with_component_balance(
-                with_account_delta(msg(3), update(&address, HashMap::from([(slot2, None)]))),
-                "c1",
-                &token,
-                6,
-            ),
-        ];
+        let block1 = with_account_delta(msg(1), creation(&address, [(1, 1), (2, 2)], 10, "0x6000"));
+        let block1 = with_component(block1, "c1");
+        let block1 = with_state_delta(block1, "c1", 1);
+        let block1 = with_component_balance(block1, "c1", &token, 5);
+
+        let block2 = with_account_delta(
+            msg(2),
+            update(&address, fixtures::optional_slots([(1, 11), (3, 3)])),
+        );
+        let block2 = with_account_balance(block2, &address, &token, 7);
+        let block2 = with_state_delta(block2, "c1", 2);
+
+        let block3 = with_account_delta(msg(3), update(&address, HashMap::from([(slot(2), None)])));
+        let block3 = with_component_balance(block3, "c1", &token, 6);
+
+        let blocks = [block1, block2, block3];
 
         for block in &blocks {
             cache.fold(block).unwrap();

@@ -707,6 +707,18 @@ pub fn state_delta(component_id: &str, value: u64) -> ProtocolComponentStateDelt
     }
 }
 
+/// `m` with a state delta setting attribute `x` of `component_id` to `value`.
+#[cfg(test)]
+pub fn with_state_delta(
+    mut m: BlockAggregatedChanges,
+    component_id: &str,
+    value: u64,
+) -> BlockAggregatedChanges {
+    m.state_deltas
+        .insert(component_id.to_string(), state_delta(component_id, value));
+    m
+}
+
 #[cfg(test)]
 pub mod fixtures {
     use std::{collections::HashSet, str::FromStr};
