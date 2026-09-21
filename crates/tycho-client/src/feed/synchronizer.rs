@@ -1224,7 +1224,7 @@ mod test {
 
     use super::*;
     use crate::{
-        deltas::MockDeltasClient,
+        deltas::{ConnectionHandle, MockDeltasClient},
         rpc::{MockRPCClient, Page},
         DeltasError, RPCError,
     };
@@ -1349,7 +1349,7 @@ mod test {
                 .await
         }
 
-        async fn connect(&self) -> Result<crate::deltas::ConnectionHandle, DeltasError> {
+        async fn connect(&self) -> Result<ConnectionHandle, DeltasError> {
             self.0.connect().await
         }
 
