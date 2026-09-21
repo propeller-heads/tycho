@@ -48,26 +48,47 @@ use super::window::FoldSink;
 
 /// A cached value together with the time it was last written (the writing block's timestamp).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Tagged<T>(pub(crate) T, pub(crate) NaiveDateTime);
+pub(crate) struct Tagged<T> {
+    value: T,
+    written_at: NaiveDateTime,
+}
 
 impl<T> Tagged<T> {
-    /// Writes `value` at `at` unless this slot holds a newer value. Equal times apply: delta
+    pub(crate) fn new(value: T, written_at: NaiveDateTime) -> Self {
+        Self { value, written_at }
+    }
+
+    pub(crate) fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub(crate) fn written_at(&self) -> NaiveDateTime {
+        self.written_at
+    }
+
+    /// Writes `value` at `at` unless this already holds a newer value. Equal times apply: delta
     /// values are absolute, so re-applying a block is harmless, and consecutive blocks can share
     /// a timestamp on fast chains.
     pub(crate) fn write(&mut self, value: T, at: NaiveDateTime) {
-        if at < self.1 {
+        if at < self.written_at {
             return;
         }
-        *self = Tagged(value, at);
+        self.value = value;
+        self.written_at = at;
     }
 }
 
 /// [`Tagged::write`] for a map entry; a missing key is inserted.
-fn write<K: Eq + Hash, V>(map: &mut HashMap<K, Tagged<V>>, key: K, value: V, at: NaiveDateTime) {
+fn write_tagged<K: Eq + Hash, V>(
+    map: &mut HashMap<K, Tagged<V>>,
+    key: K,
+    value: V,
+    at: NaiveDateTime,
+) {
     match map.entry(key) {
         Entry::Occupied(mut e) => e.get_mut().write(value, at),
         Entry::Vacant(e) => {
-            e.insert(Tagged(value, at));
+            e.insert(Tagged::new(value, at));
         }
     }
 }
@@ -111,7 +132,7 @@ impl CachedAccount {
             .into_iter()
             .map(|(key, value)| {
                 let at = tags.slots[&key];
-                (key, Tagged(value, at))
+                (key, Tagged::new(value, at))
             })
             .collect();
         let token_balances = account
@@ -119,16 +140,16 @@ impl CachedAccount {
             .into_iter()
             .map(|(token, balance)| {
                 let at = tags.token_balances[&token];
-                (token, Tagged(balance, at))
+                (token, Tagged::new(balance, at))
             })
             .collect();
         Self {
             chain: account.chain,
             title: account.title,
             slots,
-            native_balance: Tagged(account.native_balance, tags.native_balance),
+            native_balance: Tagged::new(account.native_balance, tags.native_balance),
             token_balances,
-            code: Tagged(account.code, tags.code),
+            code: Tagged::new(account.code, tags.code),
             code_hash: account.code_hash,
             balance_modify_tx: account.balance_modify_tx,
             code_modify_tx: account.code_modify_tx,
@@ -147,9 +168,11 @@ impl CachedAccount {
             slots: delta
                 .slots
                 .iter()
-                .map(|(key, value)| (key.clone(), Tagged(value.clone().unwrap_or_default(), at)))
+                .map(|(key, value)| {
+                    (key.clone(), Tagged::new(value.clone().unwrap_or_default(), at))
+                })
                 .collect(),
-            native_balance: Tagged(
+            native_balance: Tagged::new(
                 delta
                     .balance
                     .clone()
@@ -158,7 +181,7 @@ impl CachedAccount {
             ),
             token_balances: HashMap::new(),
             code_hash: keccak256(&code).into(),
-            code: Tagged(code, at),
+            code: Tagged::new(code, at),
             balance_modify_tx: Bytes::from("0x00"),
             code_modify_tx: Bytes::from("0x00"),
             creation_tx: None,
@@ -170,14 +193,14 @@ impl CachedAccount {
     /// carries code also refreshes `code_hash`.
     pub(crate) fn fold(&mut self, delta: &AccountDelta, at: NaiveDateTime) {
         for (key, value) in &delta.slots {
-            write(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), at);
+            write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), at);
         }
         if let Some(balance) = &delta.balance {
             self.native_balance
                 .write(balance.clone(), at);
         }
         if let Some(code) = delta.code() {
-            if at >= self.code.1 {
+            if at >= self.code.written_at() {
                 self.code_hash = keccak256(code).into();
             }
             self.code.write(code.clone(), at);
@@ -191,7 +214,7 @@ impl CachedAccount {
         at: NaiveDateTime,
     ) {
         for (token, balance) in balances {
-            write(&mut self.token_balances, token.clone(), balance.clone(), at);
+            write_tagged(&mut self.token_balances, token.clone(), balance.clone(), at);
         }
     }
 
@@ -203,14 +226,14 @@ impl CachedAccount {
             self.title.clone(),
             self.slots
                 .iter()
-                .map(|(k, Tagged(v, _))| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), v.value().clone()))
                 .collect(),
-            self.native_balance.0.clone(),
+            self.native_balance.value().clone(),
             self.token_balances
                 .iter()
-                .map(|(k, Tagged(v, _))| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), v.value().clone()))
                 .collect(),
-            self.code.0.clone(),
+            self.code.value().clone(),
             self.code_hash.clone(),
             self.balance_modify_tx.clone(),
             self.code_modify_tx.clone(),
@@ -626,32 +649,32 @@ mod test {
 
     #[test]
     fn write_keeps_a_newer_value() {
-        let mut slot = Tagged(1u64, ts(5));
+        let mut slot = Tagged::new(1u64, ts(5));
 
         slot.write(2, ts(4));
 
-        assert_eq!(slot, Tagged(1, ts(5)));
+        assert_eq!(slot, Tagged::new(1, ts(5)));
     }
 
     #[test]
     fn write_applies_an_equal_time_value() {
-        let mut slot = Tagged(1u64, ts(5));
+        let mut slot = Tagged::new(1u64, ts(5));
 
         slot.write(2, ts(5));
 
-        assert_eq!(slot, Tagged(2, ts(5)));
+        assert_eq!(slot, Tagged::new(2, ts(5)));
     }
 
     #[test]
     fn write_inserts_a_missing_key_and_updates_a_present_one() {
         let mut map: HashMap<&str, Tagged<u64>> = HashMap::new();
 
-        write(&mut map, "a", 1, ts(3));
-        write(&mut map, "a", 2, ts(2));
-        write(&mut map, "b", 9, ts(1));
+        write_tagged(&mut map, "a", 1, ts(3));
+        write_tagged(&mut map, "a", 2, ts(2));
+        write_tagged(&mut map, "b", 9, ts(1));
 
-        assert_eq!(map["a"], Tagged(1, ts(3)));
-        assert_eq!(map["b"], Tagged(9, ts(1)));
+        assert_eq!(map["a"], Tagged::new(1, ts(3)));
+        assert_eq!(map["b"], Tagged::new(9, ts(1)));
     }
 
     #[test]
@@ -666,7 +689,7 @@ mod test {
             .into_keys()
             .next()
             .unwrap();
-        assert_eq!(cached.slots()[&key1].1, ts(1));
+        assert_eq!(cached.slots()[&key1].written_at(), ts(1));
     }
 
     #[test]
@@ -677,7 +700,7 @@ mod test {
         let cached = CachedAccount::from_creation(&delta, ts(1));
 
         assert_eq!(cached.materialize(&address), delta.into_account_without_tx());
-        assert_eq!(cached.code().1, ts(1));
+        assert_eq!(cached.code().written_at(), ts(1));
     }
 
     #[test]
@@ -698,7 +721,7 @@ mod test {
             .into_keys()
             .next()
             .unwrap();
-        assert_eq!(cached.slots()[&key3].1, ts(3));
+        assert_eq!(cached.slots()[&key3].written_at(), ts(3));
     }
 
     #[test]
@@ -744,7 +767,7 @@ mod test {
         assert_eq!(account.slots[&key1], Bytes::default());
         assert_eq!(account.code, code("0x6001"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
-        assert_eq!(cached.code().1, ts(2));
+        assert_eq!(cached.code().written_at(), ts(2));
     }
 
     #[test]
