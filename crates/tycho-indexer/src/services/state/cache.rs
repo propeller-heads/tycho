@@ -414,27 +414,34 @@ impl EntityCache {
             .expect("entity cache lock poisoned")
     }
 
-    fn write(&self) -> RwLockWriteGuard<'_, CacheState> {
+    fn write_lock(&self) -> RwLockWriteGuard<'_, CacheState> {
         self.state
             .write()
             .expect("entity cache lock poisoned")
     }
 
-    /// Startup load only: runs before the extractors start, so nothing else is writing.
-    pub(crate) fn insert_loaded_account(&self, address: Address, entry: CachedAccount) {
-        self.write()
-            .accounts
-            .insert(address, entry);
+    /// Write handle for the startup load. Nothing reads or folds while it exists.
+    pub(crate) fn loader(&self) -> CacheLoader<'_> {
+        CacheLoader(self.write_lock())
+    }
+}
+
+/// Inserts entries without a tag check, under one write lock held for as long as the handle
+/// lives. It exists only for the startup load, which runs before the extractors start.
+pub(crate) struct CacheLoader<'a>(RwLockWriteGuard<'a, CacheState>);
+
+impl CacheLoader<'_> {
+    pub(crate) fn insert_account(&mut self, address: Address, entry: CachedAccount) {
+        self.0.accounts.insert(address, entry);
     }
 
-    /// Startup load only.
-    pub(crate) fn insert_loaded_component(
-        &self,
+    pub(crate) fn insert_component(
+        &mut self,
         system: ProtocolSystem,
         component_id: ComponentId,
         entry: CachedComponentState,
     ) {
-        self.write()
+        self.0
             .components
             .entry(system)
             .or_default()
@@ -533,7 +540,7 @@ impl FoldSink for EntityCache {
     /// No check can fail today. Any future check goes before the first mutation, so a replay of
     /// the same block converges.
     fn fold(&self, block: &BlockAggregatedChanges) -> Result<(), StorageError> {
-        let mut state = self.write();
+        let mut state = self.write_lock();
         state.fold_components(block);
         state.fold_accounts(block);
         Ok(())
@@ -956,18 +963,21 @@ mod test {
         let loaded = account(&address);
         let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
 
-        cache.insert_loaded_account(
-            address.clone(),
-            CachedAccount::from_snapshot(
-                loaded.clone(),
-                AccountWriteTags::uniform(&loaded, WriteTag::snapshot(ts(1))),
-            ),
-        );
-        cache.insert_loaded_component(
-            EXTRACTOR.to_string(),
-            "c1".to_string(),
-            CachedComponentState::from_snapshot(state.clone(), WriteTag::snapshot(ts(1))),
-        );
+        {
+            let mut loader = cache.loader();
+            loader.insert_account(
+                address.clone(),
+                CachedAccount::from_snapshot(
+                    loaded.clone(),
+                    AccountWriteTags::uniform(&loaded, WriteTag::snapshot(ts(1))),
+                ),
+            );
+            loader.insert_component(
+                EXTRACTOR.to_string(),
+                "c1".to_string(),
+                CachedComponentState::from_snapshot(state.clone(), WriteTag::snapshot(ts(1))),
+            );
+        }
 
         assert_eq!(cached_account(&cache, &address), Some(loaded));
         assert_eq!(cached_component(&cache, "c1"), Some(state));
