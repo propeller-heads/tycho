@@ -19,13 +19,6 @@
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
 //! under a millisecond, so blocking is acceptable and a reader never observes half a block.
-//!
-//! # Memory
-//!
-//! There is no cap and no eviction: an entry the cache drops could never be reloaded, so the
-//! protection is visibility. A reporter publishes entry counts per family every minute and walks
-//! the cache with `deep_size_of` every ten minutes to publish bytes per family and the walk
-//! duration. Nothing on the write path counts bytes.
 
 // Not yet constructed by production code; wired into the loader and the pump in follow-ups.
 #![allow(dead_code)]
@@ -33,14 +26,11 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
-    time::{Duration, Instant},
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use chrono::NaiveDateTime;
-use deepsize::{Context, DeepSizeOf};
-use metrics::{gauge, histogram};
-use tracing::{info, trace};
+use tracing::trace;
 use tycho_common::{
     keccak256,
     models::{
@@ -59,13 +49,6 @@ use super::window::FoldSink;
 /// A cached value together with the time it was last written (the writing block's timestamp).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Tagged<T>(pub(crate) T, pub(crate) NaiveDateTime);
-
-// `NaiveDateTime` has no `DeepSizeOf` impl; it is inline, so only the value has children.
-impl<T: DeepSizeOf> DeepSizeOf for Tagged<T> {
-    fn deep_size_of_children(&self, context: &mut Context) -> usize {
-        self.0.deep_size_of_children(context)
-    }
-}
 
 impl<T> Tagged<T> {
     /// Writes `value` at `at` unless this slot holds a newer value. Equal times apply: delta
@@ -103,7 +86,7 @@ pub(crate) struct AccountTags {
 /// Every value carries the time it was last written, so writes from different extractors (which
 /// run at different points of the chain) can never regress a value: newer wins, equal-time
 /// re-application is a no-op.
-#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CachedAccount {
     chain: Chain,
     title: String,
@@ -261,16 +244,6 @@ pub(crate) struct CachedComponentState {
     /// One write time covers the whole entry: a single extractor writes each protocol system,
     /// in order.
     updated_at: NaiveDateTime,
-}
-
-// `NaiveDateTime` has no `DeepSizeOf` impl; it is inline.
-impl DeepSizeOf for CachedComponentState {
-    fn deep_size_of_children(&self, context: &mut Context) -> usize {
-        self.attributes
-            .deep_size_of_children(context) +
-            self.balances
-                .deep_size_of_children(context)
-    }
 }
 
 impl CachedComponentState {
@@ -464,59 +437,6 @@ impl FoldSink for EntityCache {
         state.fold_components(&block.extractor, block, at);
         state.fold_accounts(block, at);
         Ok(())
-    }
-}
-
-/// How often the reporter publishes entry counts. Same cadence as `pending_deltas_buffer_size`.
-const REPORT_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Reports between size walks. A walk visits every value under the read lock; a fold that
-/// arrives meanwhile waits, and because the lock prefers writers, new readers queue behind it.
-/// `entity_cache_measure_duration_ms` shows what that costs; if it is seconds, walk less often or
-/// walk in chunks.
-const MEASURE_EVERY: u32 = 10;
-
-impl EntityCache {
-    /// Publishes entry counts per family. Two map lengths under the read lock.
-    pub(crate) fn report(&self) {
-        let state = self.read();
-        let components: usize = state
-            .components
-            .values()
-            .map(HashMap::len)
-            .sum();
-        gauge!("entity_cache_entries", "family" => "accounts").set(state.accounts.len() as f64);
-        gauge!("entity_cache_entries", "family" => "components").set(components as f64);
-    }
-
-    /// Walks every entry and publishes the bytes per family and the walk duration. Returns
-    /// `(accounts, components)` in bytes.
-    pub(crate) fn measure(&self) -> (usize, usize) {
-        let started = Instant::now();
-        let state = self.read();
-        let accounts = state.accounts.deep_size_of();
-        let components = state.components.deep_size_of();
-        drop(state);
-        let elapsed = started.elapsed();
-        gauge!("entity_cache_size_bytes", "family" => "accounts").set(accounts as f64);
-        gauge!("entity_cache_size_bytes", "family" => "components").set(components as f64);
-        histogram!("entity_cache_measure_duration_ms").record(elapsed.as_secs_f64() * 1000.0);
-        info!(accounts, components, elapsed_ms = elapsed.as_millis(), "Entity cache measured");
-        (accounts, components)
-    }
-
-    /// Reports every [`REPORT_INTERVAL`] and measures every [`MEASURE_EVERY`] reports.
-    pub(crate) async fn run_reporter(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(REPORT_INTERVAL);
-        let mut reports = 0u32;
-        loop {
-            tick.tick().await;
-            reports += 1;
-            self.report();
-            if reports.is_multiple_of(MEASURE_EVERY) {
-                self.measure();
-            }
-        }
     }
 }
 
@@ -1162,79 +1082,5 @@ mod test {
         }
         assert_eq!(cached_account(&cache, &address), expected_account);
         assert_eq!(cached_component(&cache, "c1"), Some(expected_state));
-    }
-
-    fn recorded_gauges(
-        snapshotter: &metrics_util::debugging::Snapshotter,
-    ) -> HashMap<(String, String), f64> {
-        use metrics_util::debugging::DebugValue;
-
-        snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter_map(|(key, _, _, value)| {
-                let family = key
-                    .key()
-                    .labels()
-                    .find(|l| l.key() == "family")?
-                    .value()
-                    .to_string();
-                let DebugValue::Gauge(v) = value else { return None };
-                Some(((key.key().name().to_string(), family), v.into_inner()))
-            })
-            .collect()
-    }
-
-    // `metrics::with_local_recorder` takes a sync closure; `report` and `measure` are sync.
-    #[test]
-    fn report_publishes_entry_counts_per_family() {
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let cache = EntityCache::new();
-        cache
-            .fold(&with_account_delta(
-                with_component(with_component(msg(1), "c1"), "c2"),
-                creation(&addr(1), [], 0, "0x"),
-            ))
-            .unwrap();
-
-        metrics::with_local_recorder(&recorder, || cache.report());
-
-        let gauges = recorded_gauges(&snapshotter);
-        assert_eq!(gauges[&("entity_cache_entries".to_string(), "accounts".to_string())], 1.0);
-        assert_eq!(gauges[&("entity_cache_entries".to_string(), "components".to_string())], 2.0);
-        assert!(
-            !gauges.contains_key(&("entity_cache_size_bytes".to_string(), "accounts".to_string())),
-            "report does not walk"
-        );
-    }
-
-    #[test]
-    fn measure_publishes_the_walked_size_per_family() {
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let cache = EntityCache::new();
-        cache
-            .fold(&with_account_delta(
-                with_state_delta(with_component(msg(1), "c1"), "c1", 1),
-                creation(&addr(1), [(1, 1), (2, 2)], 10, "0x6000"),
-            ))
-            .unwrap();
-
-        let (accounts, components) = metrics::with_local_recorder(&recorder, || cache.measure());
-
-        let state = cache.read();
-        assert_eq!(accounts, state.accounts.deep_size_of());
-        assert_eq!(components, state.components.deep_size_of());
-        let gauges = recorded_gauges(&snapshotter);
-        assert_eq!(
-            gauges[&("entity_cache_size_bytes".to_string(), "accounts".to_string())],
-            accounts as f64
-        );
-        assert_eq!(
-            gauges[&("entity_cache_size_bytes".to_string(), "components".to_string())],
-            components as f64
-        );
     }
 }
