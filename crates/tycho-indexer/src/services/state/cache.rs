@@ -120,6 +120,26 @@ pub(crate) struct AccountWriteTags {
     pub(crate) token_balances: HashMap<Address, WriteTag>,
 }
 
+impl AccountWriteTags {
+    /// One tag for every value of `account`.
+    pub(crate) fn uniform(account: &Account, tag: WriteTag) -> Self {
+        Self {
+            slots: account
+                .slots
+                .keys()
+                .map(|key| (key.clone(), tag))
+                .collect(),
+            native_balance: tag,
+            code: tag,
+            token_balances: account
+                .token_balances
+                .keys()
+                .map(|token| (token.clone(), tag))
+                .collect(),
+        }
+    }
+}
+
 /// Contract code with its hash, so a code write replaces both or neither.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CachedCode {
@@ -197,33 +217,12 @@ impl CachedAccount {
     }
 
     /// Builds an entry from a `Creation` delta folded at `tag` — after startup, the only way a new
-    /// contract enters the cache. Fields the delta does not carry take the values
-    /// [`AccountDelta::into_account_without_tx`] uses, so both paths build the same account.
+    /// contract enters the cache. The account is the one
+    /// [`AccountDelta::into_account_without_tx`] builds; every value carries `tag`.
     pub(crate) fn from_creation(delta: &AccountDelta, tag: WriteTag) -> Self {
-        let code = delta.code().clone().unwrap_or_default();
-        Self {
-            chain: delta.chain,
-            title: format!("{:#020x}", delta.address),
-            slots: delta
-                .slots
-                .iter()
-                .map(|(key, value)| {
-                    (key.clone(), Tagged::new(value.clone().unwrap_or_default(), tag))
-                })
-                .collect(),
-            native_balance: Tagged::new(
-                delta
-                    .balance
-                    .clone()
-                    .unwrap_or_default(),
-                tag,
-            ),
-            token_balances: HashMap::new(),
-            code: Tagged::new(CachedCode::new(code), tag),
-            balance_modify_tx: Bytes::from("0x00"),
-            code_modify_tx: Bytes::from("0x00"),
-            creation_tx: None,
-        }
+        let account = delta.clone().into_account_without_tx();
+        let tags = AccountWriteTags::uniform(&account, tag);
+        Self::from_snapshot(account, tags)
     }
 
     /// Applies one folded delta; every changed value gets `tag`, values with a newer tag stay. A
@@ -564,23 +563,6 @@ mod test {
         )
     }
 
-    fn tags(account: &Account, tag: WriteTag) -> AccountWriteTags {
-        AccountWriteTags {
-            slots: account
-                .slots
-                .keys()
-                .map(|k| (k.clone(), tag))
-                .collect(),
-            native_balance: tag,
-            code: tag,
-            token_balances: account
-                .token_balances
-                .keys()
-                .map(|k| (k.clone(), tag))
-                .collect(),
-        }
-    }
-
     fn creation(
         address: &Bytes,
         slots: impl IntoIterator<Item = (u64, u64)>,
@@ -741,8 +723,10 @@ mod test {
         let address = addr(1);
         let loaded = account(&address);
 
-        let cached =
-            CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, WriteTag::snapshot(ts(1))));
+        let cached = CachedAccount::from_snapshot(
+            loaded.clone(),
+            AccountWriteTags::uniform(&loaded, WriteTag::snapshot(ts(1))),
+        );
 
         assert_eq!(cached.materialize(&address), loaded);
         let key1 = fixtures::slots([(1, 1)])
@@ -766,8 +750,10 @@ mod test {
     #[test]
     fn account_fold_keeps_newer_values_per_slot() {
         let address = addr(1);
-        let mut cached =
-            CachedAccount::from_snapshot(account(&address), tags(&account(&address), tag(5)));
+        let mut cached = CachedAccount::from_snapshot(
+            account(&address),
+            AccountWriteTags::uniform(&account(&address), tag(5)),
+        );
 
         cached.fold(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), tag(3));
 
@@ -787,8 +773,10 @@ mod test {
     #[test]
     fn account_fold_applies_an_equal_time_write() {
         let address = addr(1);
-        let mut cached =
-            CachedAccount::from_snapshot(account(&address), tags(&account(&address), tag(5)));
+        let mut cached = CachedAccount::from_snapshot(
+            account(&address),
+            AccountWriteTags::uniform(&account(&address), tag(5)),
+        );
 
         cached.fold(&update(&address, fixtures::optional_slots([(1, 11)])), tag(5));
 
@@ -928,7 +916,10 @@ mod test {
 
         cache.insert_loaded_account(
             address.clone(),
-            CachedAccount::from_snapshot(loaded.clone(), tags(&loaded, WriteTag::snapshot(ts(1)))),
+            CachedAccount::from_snapshot(
+                loaded.clone(),
+                AccountWriteTags::uniform(&loaded, WriteTag::snapshot(ts(1))),
+            ),
         );
         cache.insert_loaded_component(
             EXTRACTOR.to_string(),
