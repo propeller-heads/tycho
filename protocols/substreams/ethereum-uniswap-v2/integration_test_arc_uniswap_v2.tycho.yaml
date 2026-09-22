@@ -1,0 +1,25 @@
+substreams_yaml_path: ./arc-uniswap-v2.yaml
+protocol_system: "uniswap_v2"
+protocol_type_names:
+  - "uniswap_v2_pool"
+module_name: "map_pool_events"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The pair is created and funded in block 1954465, then first swapped in block 1954468.
+  - name: test_first_traded_pair
+    start_block: 1954465
+    stop_block: 1954469
+    expected_components:
+      - id: "0x1d33f404a56dbd85c4995a5709b0e12ce0a8ad22"
+        tokens:
+          - "0x99f381b8bcd5b367178809abdbb7ae79da782e0e"
+          - "0xf9744854e71ab8cd238bc46002eef5ce6f00c6c2"
+        static_attributes:
+          fee: "0x1e"
+          pool_address: "0x1d33f404a56dbd85c4995a5709b0e12ce0a8ad22"
+        creation_tx: "0xf749c57490709116ba67c1d0f9dc95e369558399de2fec4af552a4b58716f4c2"
+        skip_simulation: false
+        # This real Arc pair is non-USDC. Keep simulation coverage enabled, but disable execution
+        # until Arc executor/router configuration is available.
+        skip_execution: true

@@ -100,6 +100,11 @@ mod tests {
     use std::{env, str::FromStr};
 
     use alloy::primitives::address;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::mpsc,
+    };
 
     use super::*;
 
@@ -138,6 +143,99 @@ mod tests {
             .unwrap();
 
         assert_eq!(balance, U256::from(717250938432_u64));
+    }
+
+    #[tokio::test]
+    async fn arc_routable_usdc_uses_erc20_balance_of_while_zero_address_uses_native_balance() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock RPC listener must bind");
+        let address = listener
+            .local_addr()
+            .expect("mock RPC listener must have an address");
+        let (requests_tx, mut requests_rx) = mpsc::channel(2);
+
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("mock RPC must accept request");
+                let mut buffer = vec![0; 4096];
+                let bytes_read = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("mock RPC must read request");
+                let request = String::from_utf8(buffer[..bytes_read].to_vec())
+                    .expect("mock RPC request must be UTF-8");
+                let body_start = request
+                    .find("\r\n\r\n")
+                    .expect("mock RPC request must contain headers") +
+                    4;
+                let request_id = serde_json::from_str::<serde_json::Value>(&request[body_start..])
+                    .expect("mock RPC request must contain JSON")["id"]
+                    .clone();
+                requests_tx
+                    .send(request)
+                    .await
+                    .expect("test must receive mock RPC request");
+
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": "0x000000000000000000000000000000000000000000000000000000000000002a",
+                })
+                .to_string();
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                socket
+                    .write_all(http_response.as_bytes())
+                    .await
+                    .expect("mock RPC must respond");
+            }
+        });
+
+        let rpc_provider = RPCProvider::new(format!("http://{address}"));
+        let component = address!("0x1111111111111111111111111111111111111111");
+
+        assert_eq!(
+            rpc_provider
+                .get_token_balance(
+                    address!("0x3600000000000000000000000000000000000000"),
+                    component,
+                    1,
+                )
+                .await
+                .expect("Arc ERC-20 USDC balance must be readable"),
+            U256::from(42)
+        );
+        assert_eq!(
+            rpc_provider
+                .get_token_balance(
+                    address!("0x0000000000000000000000000000000000000000"),
+                    component,
+                    1
+                )
+                .await
+                .expect("native balance must be readable"),
+            U256::from(42)
+        );
+
+        let first_request = requests_rx
+            .recv()
+            .await
+            .expect("first request must be recorded");
+        let second_request = requests_rx
+            .recv()
+            .await
+            .expect("second request must be recorded");
+        assert!(first_request.contains("eth_call"));
+        assert!(first_request.contains("0x3600000000000000000000000000000000000000"));
+        assert!(first_request.contains("0x70a08231"));
+        assert!(second_request.contains("eth_getBalance"));
     }
 
     #[tokio::test]
