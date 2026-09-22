@@ -9,8 +9,9 @@
 //! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
 //!   one extractor writes each protocol system, in order, so one tag per entry is enough.
 //!
-//! Tags compare with "not older" (>=), never "strictly newer", so a replay of a block converges.
-//! Removals follow the same rule: a deletion older than the entry's newest write is skipped.
+//! A change applies only when its block is strictly newer than the tag the entry records. An equal
+//! tag is the same block folded again — the values are identical, so there is nothing to apply.
+//! Removals follow the same rule.
 //!
 //! The cache is written from exactly two places: the startup load, which runs before the
 //! extractors start, and the folds coming out of the block windows. It never reads the database,
@@ -90,10 +91,10 @@ impl<T> Tagged<T> {
         self.written_at
     }
 
-    /// Writes `value` at `tag` unless this already holds a newer value. Equal tags apply: delta
-    /// values are absolute, so re-applying a block is harmless.
+    /// Writes `value` at `tag` unless this already holds a value from that block or a newer one.
+    /// An equal tag is the same block folded again, so there is nothing to apply.
     pub(crate) fn write(&mut self, value: T, tag: WriteTag) {
-        if tag < self.written_at {
+        if tag <= self.written_at {
             return;
         }
         self.value = value;
@@ -743,12 +744,12 @@ mod test {
     }
 
     #[test]
-    fn write_applies_an_equal_tag() {
+    fn write_skips_an_equal_tag() {
         let mut slot = Tagged::new(1u64, tag(5));
 
         slot.write(2, tag(5));
 
-        assert_eq!(slot, Tagged::new(2, tag(5)));
+        assert_eq!(slot, Tagged::new(1, tag(5)));
     }
 
     #[test]
@@ -829,7 +830,7 @@ mod test {
     }
 
     #[test]
-    fn account_apply_takes_an_equal_tag_write() {
+    fn account_apply_skips_an_equal_tag_write() {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
@@ -842,7 +843,8 @@ mod test {
             cached
                 .materialize(Chain::Ethereum, &address)
                 .slots,
-            fixtures::slots([(1, 11), (2, 2)])
+            fixtures::slots([(1, 1), (2, 2)]),
+            "block 5 already wrote this entry"
         );
     }
 
