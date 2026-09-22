@@ -9,7 +9,6 @@ use anyhow::{anyhow, Error};
 use async_stream::try_stream;
 use futures03::{Stream, StreamExt};
 use metrics::{counter, gauge};
-use once_cell::sync::Lazy;
 use prost::Message as ProstMessage;
 use tokio::time::sleep;
 use tokio_retry::strategy::ExponentialBackoff;
@@ -66,12 +65,29 @@ impl SubstreamsStream {
     }
 }
 
-static DEFAULT_BACKOFF: Lazy<ExponentialBackoff> =
-    Lazy::new(|| ExponentialBackoff::from_millis(500).max_delay(Duration::from_secs(45)));
+/// Delays between reconnection attempts: none before the first, then 200ms, 400ms, 800ms, 1.6s,
+/// 3.2s, 6.4s, 12.8s, 25.6s, then 30s before every further attempt.
+///
+/// The first attempt costs nothing because nearly every disconnect here is a transport drop the
+/// endpoint is already able to serve again, and consumers see the whole delay as a hole in the
+/// block feed. The ladder is rebuilt whenever a block arrives, so the free attempt is spent once
+/// per disconnect and an endpoint that is genuinely down still falls back to the delays.
+///
+/// [`ExponentialBackoff`] raises its base to the n-th power, so `from_millis(n)` alone jumps
+/// straight from `n` to `n²` milliseconds. Building the ladder from a base of 2 and a factor of
+/// 100 keeps the doubling that the cap implies, which a base of 500 does not: that yields 500ms
+/// followed by 250s, and every attempt after the first therefore waits the whole `max_delay`.
+fn retry_delays() -> impl Iterator<Item = Duration> {
+    std::iter::once(Duration::ZERO).chain(
+        ExponentialBackoff::from_millis(2)
+            .factor(100)
+            .max_delay(Duration::from_secs(30)),
+    )
+}
 
 /// Consecutive `Unauthenticated` retries allowed once the endpoint has proven the credential by
-/// delivering a block. With `DEFAULT_BACKOFF` these span about three minutes.
-const MAX_UNAUTHENTICATED_RETRIES: u32 = 5;
+/// delivering a block. With [`retry_delays`] these span about two and a half minutes.
+const MAX_UNAUTHENTICATED_RETRIES: u32 = 12;
 
 /// Whether an `Unauthenticated` status from the endpoint should be retried.
 ///
@@ -85,7 +101,7 @@ fn should_retry_unauthenticated(block_received: bool, retries_used: u32) -> bool
 }
 
 async fn wait_for_next_retry(
-    backoff: &mut ExponentialBackoff,
+    backoff: &mut impl Iterator<Item = Duration>,
     retry_count: &mut u32,
     extractor_id: &str,
 ) -> Result<(), Error> {
@@ -122,7 +138,7 @@ fn stream_blocks(
     let mut latest_cursor = cursor.unwrap_or_default();
     let mut latest_block = start_block_num as u64;
     let mut retry_count = 0;
-    let mut backoff = DEFAULT_BACKOFF.clone();
+    let mut backoff = retry_delays();
     let mut block_received = false;
     let mut unauthenticated_retries = 0;
 
@@ -177,7 +193,7 @@ fn stream_blocks(
                                 gauge!("block_message_size_bytes", "extractor" => extractor_id.clone()).set(block_scoped_data.encoded_len() as f64);
 
                                 // Reset backoff because we got a good value from the stream
-                                backoff = DEFAULT_BACKOFF.clone();
+                                backoff = retry_delays();
 
                                 // The endpoint accepted the credential, so any later rejection of
                                 // it is the endpoint's problem, not a misconfiguration.
@@ -191,7 +207,7 @@ fn stream_blocks(
                             },
                             BlockProcessedResult::BlockUndoSignal(block_undo_signal) => {
                                 // Reset backoff because we got a good value from the stream
-                                backoff = DEFAULT_BACKOFF.clone();
+                                backoff = retry_delays();
 
                                 let to_block = block_undo_signal.last_valid_block.clone().unwrap_or_default().number;
                                 counter!(
@@ -446,5 +462,40 @@ mod tests {
     fn test_unauthenticated_retries_are_bounded() {
         assert!(should_retry_unauthenticated(true, MAX_UNAUTHENTICATED_RETRIES - 1));
         assert!(!should_retry_unauthenticated(true, MAX_UNAUTHENTICATED_RETRIES));
+    }
+
+    /// The first attempt is free, and a single missed reconnect used to cost the whole cap, which
+    /// is longer than the window a consumer waits before it treats the feed as broken.
+    #[test]
+    fn test_retry_delays_are_free_then_double_up_to_the_cap() {
+        let steps: Vec<Duration> = retry_delays().take(10).collect();
+
+        assert_eq!(
+            steps,
+            vec![
+                Duration::ZERO,
+                Duration::from_millis(200),
+                Duration::from_millis(400),
+                Duration::from_millis(800),
+                Duration::from_millis(1_600),
+                Duration::from_millis(3_200),
+                Duration::from_millis(6_400),
+                Duration::from_millis(12_800),
+                Duration::from_millis(25_600),
+                Duration::from_secs(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unauthenticated_retries_span_about_two_and_a_half_minutes() {
+        let total: Duration = retry_delays()
+            .take(MAX_UNAUTHENTICATED_RETRIES as usize)
+            .sum();
+
+        assert!(
+            (Duration::from_secs(120)..=Duration::from_secs(165)).contains(&total),
+            "the documented ~2.5 minute window is now {total:?}"
+        );
     }
 }

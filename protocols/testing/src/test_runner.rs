@@ -68,6 +68,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
+        ("arc-uniswap-v2", "ethereum-uniswap-v2"),
         ("base-balancer-v3", "ethereum-balancer-v3"),
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),

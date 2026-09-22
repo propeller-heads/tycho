@@ -1,3 +1,36 @@
+## [0.417.0](https://github.com/propeller-heads/tycho/compare/0.416.0...0.417.0) (2026-09-22)
+
+
+### Features
+
+* **testing:** support Arc Substreams integration ([7474bdb](https://github.com/propeller-heads/tycho/commit/7474bdbb01b12165b40bf71b1f295b4fe312fe0b))
+* **testing:** support Arc Substreams integration ([#1480](https://github.com/propeller-heads/tycho/issues/1480)) ([6a77465](https://github.com/propeller-heads/tycho/commit/6a7746515fbb8f5245299ad11dca64a64bec8ec3))
+
+## [0.416.0](https://github.com/propeller-heads/tycho/compare/0.415.1...0.416.0) (2026-09-22)
+
+
+### Features
+
+* tune Arc client timing ([88d0051](https://github.com/propeller-heads/tycho/commit/88d00513eea3a50d4a7e54b7b37178c953b7aa0b))
+* tune Arc client timing ([#1468](https://github.com/propeller-heads/tycho/issues/1468)) ([3180320](https://github.com/propeller-heads/tycho/commit/31803204391c235c3d636da9b1393b4417449726))
+
+## [0.415.1](https://github.com/propeller-heads/tycho/compare/0.415.0...0.415.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* **indexer:** shorten substreams reconnect delays ([014bf28](https://github.com/propeller-heads/tycho/commit/014bf288b00c02c9d08378421251ffc25f718568))
+* **indexer:** shorten substreams reconnect delays ([#1471](https://github.com/propeller-heads/tycho/issues/1471)) ([8f9d54f](https://github.com/propeller-heads/tycho/commit/8f9d54f1bc28b44638338f55efea88b426df840b))
+
+## [0.415.0](https://github.com/propeller-heads/tycho/compare/0.414.0...0.415.0) (2026-09-21)
+
+
+### Features
+
+* add Arc chain and native USDC model ([#1467](https://github.com/propeller-heads/tycho/issues/1467)) ([3d2a388](https://github.com/propeller-heads/tycho/commit/3d2a38877e9cfe2a4557f90ff777ff8372587a52))
+* add Arc chain model and DTOs ([4ab1af5](https://github.com/propeller-heads/tycho/commit/4ab1af5b8e177db7c9a04c876e7ece0c191c10e7))
+* model Arc native USDC ([0e23bc2](https://github.com/propeller-heads/tycho/commit/0e23bc291b4514cebf4631f6dbac3332a2810086))
+
 ## [0.414.0](https://github.com/propeller-heads/tycho/compare/0.413.0...0.414.0) (2026-09-21)
 
 

@@ -39,6 +39,7 @@ RUN resolve_base() { \
             robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
+            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -82,6 +83,7 @@ RUN resolve_base() { \
             robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
+            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \

@@ -633,7 +633,7 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 /// Ensures the given chain is present in the database, inserting it if absent.
 ///
 /// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
-/// Also ensures the chain's native and wrapped native tokens are present.
+/// Also ensures every representation of the chain's native asset is present.
 ///
 /// # Arguments
 ///
@@ -678,8 +678,10 @@ async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), 
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-    ensure_token_with_price(chain_id, &chain.native_token(), conn).await;
-    ensure_token_with_price(chain_id, &chain.wrapped_native_token(), conn).await;
+    let native_asset = chain.native_asset();
+    for token in native_asset.representations() {
+        ensure_token_with_price(chain_id, token, conn).await;
+    }
 
     debug!("Ensured chain enum and native token presence for: {:?}", chain);
     Ok(())
@@ -1509,10 +1511,11 @@ mod tests_transaction_conflict {
 
 #[cfg(test)]
 mod tests_ensure_chain {
-    use diesel_async::AsyncConnection;
+    use diesel::prelude::*;
+    use diesel_async::{AsyncConnection, RunQueryDsl};
     use tycho_common::models::Chain;
 
-    use super::ensure_chain;
+    use super::{ensure_chain, schema};
 
     async fn setup_conn() -> diesel_async::AsyncPgConnection {
         let db_url = std::env::var("DATABASE_URL").unwrap();
@@ -1542,6 +1545,53 @@ mod tests_ensure_chain {
         ensure_chain(Chain::Ethereum, &mut conn)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_arc_native_asset_bootstrap_is_idempotent_and_prices_both_representations() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Arc, &mut conn)
+            .await
+            .unwrap();
+        ensure_chain(Chain::Arc, &mut conn)
+            .await
+            .unwrap();
+
+        let chain_id: i64 = schema::chain::table
+            .select(schema::chain::id)
+            .filter(schema::chain::name.eq("arc"))
+            .first(&mut conn)
+            .await
+            .unwrap();
+
+        let account_count: i64 = schema::account::table
+            .filter(schema::account::chain_id.eq(chain_id))
+            .count()
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        let token_count: i64 = schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(chain_id))
+            .count()
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(account_count, 2);
+        assert_eq!(token_count, 2);
+
+        let rows: Vec<(Vec<u8>, i32, f64)> = schema::account::table
+            .inner_join(schema::token::table.inner_join(schema::token_price::table))
+            .filter(schema::account::chain_id.eq(chain_id))
+            .select((schema::account::address, schema::token::decimals, schema::token_price::price))
+            .order(schema::account::address.asc())
+            .load(&mut conn)
+            .await
+            .unwrap();
+
+        let mut routable_address = vec![0u8; 20];
+        routable_address[0] = 0x36;
+        assert_eq!(rows, vec![(vec![0u8; 20], 18, 1e18), (routable_address, 6, 1e6)]);
     }
 
     #[tokio::test]

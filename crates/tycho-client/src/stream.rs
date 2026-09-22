@@ -162,6 +162,7 @@ impl TychoStreamBuilder {
             Chain::Polygon => (2, 12, 50),   // ~2s block time
             Chain::Plasma => (1, 10, 100),   // ~1s block time
             Chain::Robinhood => (1, 5, 100), // Arbitrum Orbit, typically closer to 0.25s
+            Chain::Arc => (1, 5, 100),       // Typically closer to 0.5s
             _ => {
                 let block_time = chain.block_time_secs();
                 (block_time, block_time * 3, 50)
@@ -651,6 +652,11 @@ mod tests {
         let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
         assert!(builder.compression, "Compression should be enabled by default.");
         assert!(!builder.partial_blocks, "partial_blocks should be disabled by default.");
+    }
+
+    #[test]
+    fn arc_uses_fast_chain_default_timing() {
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arc), (1, 5, 100));
     }
 
     #[tokio::test]

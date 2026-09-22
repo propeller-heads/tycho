@@ -253,6 +253,7 @@ jobs:
     environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
     env:
       RPC_URL: ${{ secrets.RPC_URL_ARCHIVE }}
+      ARC_RPC_URL: ${{ secrets.ARC_RPC_URL_ARCHIVE }}
       BASE_RPC_URL: ${{ secrets.BASE_RPC_URL_ARCHIVE }}
       ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL_ARCHIVE }}
       UNICHAIN_RPC_URL: ${{ secrets.UNICHAIN_RPC_URL_ARCHIVE }}

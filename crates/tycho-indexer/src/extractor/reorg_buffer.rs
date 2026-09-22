@@ -1277,6 +1277,47 @@ mod test {
     }
 
     #[test]
+    fn arc_same_timestamp_blocks_enter_persistence_in_number_order() {
+        let timestamp = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut reorg_buffer = ReorgBuffer::new();
+        for number in 40..=42 {
+            reorg_buffer
+                .insert_block(BlockAggregatedChanges {
+                    chain: Chain::Arc,
+                    block: Block::new(
+                        number,
+                        Chain::Arc,
+                        Bytes::from(number).lpad(32, 0),
+                        Bytes::from(number - 1).lpad(32, 0),
+                        timestamp,
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let drained = reorg_buffer
+            .drain_into_committing(42)
+            .unwrap();
+
+        assert_eq!(
+            drained
+                .iter()
+                .map(|entry| entry.block.number)
+                .collect::<Vec<_>>(),
+            vec![40, 41]
+        );
+        assert_eq!(
+            reorg_buffer
+                .newest()
+                .map(|entry| entry.block.number),
+            Some(42)
+        );
+    }
+
+    #[test]
     fn test_purge() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer
