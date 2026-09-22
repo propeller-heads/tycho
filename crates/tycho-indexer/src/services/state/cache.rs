@@ -162,6 +162,8 @@ impl CachedCode {
 /// equal-tag re-application is a no-op. The getters return each value with its tag.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CachedAccount {
+    chain: Chain,
+    address: Address,
     title: String,
     slots: HashMap<StoreKey, Tagged<StoreVal>>,
     native_balance: Tagged<Balance>,
@@ -202,6 +204,8 @@ impl CachedAccount {
             })
             .collect();
         Self {
+            chain: account.chain,
+            address: account.address,
             title: account.title,
             slots,
             native_balance: Tagged::new(account.native_balance, tags.native_balance),
@@ -274,29 +278,6 @@ impl CachedAccount {
         newest
     }
 
-    /// Builds the [`Account`] the cached values describe.
-    pub(crate) fn materialize(&self, chain: Chain, address: &Address) -> Account {
-        Account::new(
-            chain,
-            address.clone(),
-            self.title.clone(),
-            self.slots
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value().clone()))
-                .collect(),
-            self.native_balance.value().clone(),
-            self.token_balances
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value().clone()))
-                .collect(),
-            self.code.value().code.clone(),
-            self.code.value().hash.clone(),
-            self.balance_modify_tx.clone(),
-            self.code_modify_tx.clone(),
-            self.creation_tx.clone(),
-        )
-    }
-
     pub(crate) fn slots(&self) -> &HashMap<StoreKey, Tagged<StoreVal>> {
         &self.slots
     }
@@ -311,6 +292,32 @@ impl CachedAccount {
 
     pub(crate) fn code(&self) -> &Tagged<CachedCode> {
         &self.code
+    }
+}
+
+impl From<&CachedAccount> for Account {
+    fn from(cached: &CachedAccount) -> Self {
+        Account::new(
+            cached.chain,
+            cached.address.clone(),
+            cached.title.clone(),
+            cached
+                .slots
+                .iter()
+                .map(|(k, v)| (k.clone(), v.value().clone()))
+                .collect(),
+            cached.native_balance.value().clone(),
+            cached
+                .token_balances
+                .iter()
+                .map(|(k, v)| (k.clone(), v.value().clone()))
+                .collect(),
+            cached.code.value().code.clone(),
+            cached.code.value().hash.clone(),
+            cached.balance_modify_tx.clone(),
+            cached.code_modify_tx.clone(),
+            cached.creation_tx.clone(),
+        )
     }
 }
 
@@ -399,8 +406,6 @@ pub(crate) struct EntityCache {
 
 /// The maps behind the lock.
 pub(crate) struct CacheState {
-    /// One chain per process: every extractor indexes it.
-    chain: Chain,
     accounts: HashMap<Address, CachedAccount>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
@@ -408,10 +413,6 @@ pub(crate) struct CacheState {
 }
 
 impl CacheState {
-    pub(crate) fn chain(&self) -> Chain {
-        self.chain
-    }
-
     pub(crate) fn account(&self, address: &Address) -> Option<&CachedAccount> {
         self.accounts.get(address)
     }
@@ -424,13 +425,9 @@ impl CacheState {
 }
 
 impl EntityCache {
-    pub(crate) fn new(chain: Chain) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            state: RwLock::new(CacheState {
-                chain,
-                accounts: HashMap::new(),
-                components: HashMap::new(),
-            }),
+            state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
         }
     }
 
@@ -619,10 +616,10 @@ mod test {
     }
 
     fn cached_account(cache: &EntityCache, address: &Bytes) -> Option<Account> {
-        let state = cache.read();
-        state
+        cache
+            .read()
             .account(address)
-            .map(|a| a.materialize(state.chain(), address))
+            .map(Account::from)
     }
 
     fn cached_component(cache: &EntityCache, id: &str) -> Option<ProtocolComponentState> {
@@ -824,7 +821,7 @@ mod test {
             AccountWriteTags::uniform(&loaded, WriteTag::snapshot(ts(1))),
         );
 
-        assert_eq!(cached.materialize(Chain::Ethereum, &address), loaded);
+        assert_eq!(Account::from(&cached), loaded);
         assert_eq!(cached.slots()[&slot(1)].written_at(), WriteTag::snapshot(ts(1)));
     }
 
@@ -835,7 +832,7 @@ mod test {
 
         let cached = CachedAccount::from_creation(&delta, None, tag(1));
 
-        assert_eq!(cached.materialize(Chain::Ethereum, &address), delta.into_account_without_tx());
+        assert_eq!(Account::from(&cached), delta.into_account_without_tx());
         assert_eq!(cached.code().written_at(), tag(1));
     }
 
@@ -853,9 +850,7 @@ mod test {
             tag(3),
         );
 
-        let slots = cached
-            .materialize(Chain::Ethereum, &address)
-            .slots;
+        let slots = Account::from(&cached).slots;
         assert_eq!(
             slots,
             fixtures::slots([(1, 1), (2, 2), (3, 3)]),
@@ -879,9 +874,7 @@ mod test {
         );
 
         assert_eq!(
-            cached
-                .materialize(Chain::Ethereum, &address)
-                .slots,
+            Account::from(&cached).slots,
             fixtures::slots([(1, 1), (2, 2)]),
             "block 5 already wrote this entry"
         );
@@ -911,7 +904,7 @@ mod test {
 
         cached.apply_block(Some(&delta), None, tag(2));
 
-        let account = cached.materialize(Chain::Ethereum, &address);
+        let account = Account::from(&cached);
         assert_eq!(account.slots[&slot(1)], Bytes::default());
         assert_eq!(account.code, code("0x6001"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
@@ -945,7 +938,7 @@ mod test {
 
         cached.apply_block(Some(&delta), None, tag(4));
 
-        let account = cached.materialize(Chain::Ethereum, &address);
+        let account = Account::from(&cached);
         assert_eq!(account.code, code("0x6000"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6000"))));
         assert_eq!(cached.code().written_at(), tag(5));
@@ -1044,7 +1037,7 @@ mod test {
 
     #[test]
     fn loaded_entries_read_back_by_address_and_by_system_and_id() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         let loaded = account(&address);
         let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
@@ -1071,7 +1064,7 @@ mod test {
 
     #[test]
     fn fold_creates_components_before_their_first_attributes() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let block = with_component(msg(1), "c1");
         let block = with_state_delta(block, "c1", 1);
         let block = with_component_balance(block, "c1", &addr(9), 5);
@@ -1085,7 +1078,7 @@ mod test {
 
     #[test]
     fn fold_skips_changes_for_an_unknown_component() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let block = with_state_delta(msg(1), "ghost", 1);
         let block = with_component_balance(block, "ghost", &addr(9), 5);
 
@@ -1096,7 +1089,7 @@ mod test {
 
     #[test]
     fn fold_skips_a_replayed_component_block() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         cache
             .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
             .unwrap();
@@ -1116,7 +1109,7 @@ mod test {
 
     #[test]
     fn fold_removes_a_deleted_component() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         cache
             .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
             .unwrap();
@@ -1130,7 +1123,7 @@ mod test {
 
     #[test]
     fn fold_creation_creates_a_complete_account() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         let delta = creation(&address, [(1, 1), (2, 2)], 10, "0x6000");
         let block = with_account_delta(msg(1), delta.clone());
@@ -1147,7 +1140,7 @@ mod test {
 
     #[test]
     fn fold_skips_changes_for_an_unknown_account() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         let block =
             with_account_delta(msg(1), update(&address, fixtures::optional_slots([(1, 1)])));
@@ -1160,7 +1153,7 @@ mod test {
 
     #[test]
     fn fold_removes_a_deleted_account() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         cache
             .fold(&with_account_delta(msg(1), creation(&address, [], 0, "0x")))
@@ -1175,7 +1168,7 @@ mod test {
 
     #[test]
     fn fold_skips_a_deletion_from_the_block_that_wrote_the_entry() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         cache
             .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
@@ -1190,7 +1183,7 @@ mod test {
 
     #[test]
     fn fold_skips_an_account_deletion_older_than_the_entry() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         cache
             .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
@@ -1218,7 +1211,7 @@ mod test {
 
     #[test]
     fn fold_skips_a_component_deletion_older_than_the_entry() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         cache
             .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
             .unwrap();
@@ -1232,7 +1225,7 @@ mod test {
 
     #[test]
     fn folding_the_same_block_twice_changes_nothing() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         let creating = with_component(msg(1), "c1");
         let creating = with_account_delta(creating, creation(&address, [(1, 1)], 10, "0x6000"));
@@ -1254,7 +1247,7 @@ mod test {
 
     #[test]
     fn folding_a_creating_block_again_keeps_newer_state() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         let creating = with_component(msg(1), "c1");
         let creating = with_account_delta(creating, creation(&address, [(1, 1)], 10, "0x6000"));
@@ -1284,7 +1277,7 @@ mod test {
 
     #[test]
     fn two_extractors_folding_the_same_account_keep_both_values() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         cache
             .fold(&with_account_delta(msg(1), creation(&address, [(1, 1), (2, 2)], 0, "0x")))
@@ -1311,7 +1304,7 @@ mod test {
 
     #[test]
     fn a_lower_block_at_an_equal_timestamp_does_not_overwrite() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         cache
             .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
@@ -1338,7 +1331,7 @@ mod test {
 
     #[test]
     fn folding_matches_the_delta_path() {
-        let cache = EntityCache::new(Chain::Ethereum);
+        let cache = EntityCache::new();
         let address = addr(1);
         let token = addr(9);
         let block1 = with_account_delta(msg(1), creation(&address, [(1, 1), (2, 2)], 10, "0x6000"));
