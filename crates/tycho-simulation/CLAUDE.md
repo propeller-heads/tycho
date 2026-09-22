@@ -33,21 +33,41 @@ for any protocol indexed by Tycho.
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
   `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
-  Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
-  round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are
-  identified as `pricelevelstream:{pamm}`. A new builder serves nothing: `with_known_pamms`
-  registers the known-good venues and denies known-unexecutable ones, `add_pamm` registers
-  individual ones, `deny_pamm` excludes one (dropping any registration and blocking
-  auto-detection), and opt-in auto-detection additionally serves unknown venues under their
-  address (`pricelevelstream:{0xaddress}`). Precedence: between `add_pamm` and `deny_pamm` for
-  the same address the later call wins; `with_known_pamms` defaults never override either,
-  regardless of call order. `build` emits venues on Titan's PropAMMRouter whitelist under
-  `propammfallback:{pamm}` instead, so tycho-execution routes their swaps through the router
-  (Uniswap V3 fallback on venue revert); it reads that whitelist once on the first poll via
-  `RPC_URL`, and warns and stays on the direct path without it. `without_fallback_router` skips
-  the read and keeps every venue on the direct path. Venues may overlap with other integration
-  paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by venue where
-  double-counting matters
+  Titan WebSocket's per-pair quote-ladder frames directly into `Update`s (no indexer feed
+  round-trip); `PriceLevelStreamState` quotes by interpolating the ladder and refuses to quote
+  once its frame is one slot old (`quotable_until`, monotonic, never serialized, ignored by
+  `eq`; `without_quote_guard` on the builder turns it off for slow quoters). Frames are best
+  effort, so `tracker.rs` never removes a component because a frame omits it. It gives every
+  component its own deadline and emits `removed_pairs` only when the component's data is
+  `stale_after` old or its PropAMMRouter family changes. The next accepted frame carrying the
+  component re-adds it. Frames are accepted only if their wire `timestamp` is younger than
+  `stale_after`, not more than one slot in the future, not older than the newest accepted one
+  (equal allowed), and their block neither regresses nor jumps more than one block per elapsed
+  slot plus 2; the block frontier lives in `ServingState::Serving`, so it exists only while
+  something is served. The windows and their defaults are listed under `# Freshness contract` in
+  `price_level_stream/mod.rs`; every window is a multiple of `SLOT` in `mod.rs`. `build()`
+  returns `Err(PriceLevelStreamBuildError)` without `fallback_router_rpc_url` or `RPC_URL`, with
+  a URL that does not parse, or with a `stale_after` outside `(0, MAX_STALE_AFTER]`; otherwise it
+  is an `async_stream` loop that selects over frames, a timer set to the earliest component
+  deadline, and the whitelist reader in `fallback_router.rs`, which yields only successful reads
+  (each bounded by a timeout, retried with backoff, repeated on an interval). Nothing is served
+  until the first read succeeds; `without_fallback_router` skips the read and keeps every venue
+  on the direct path. `titan.rs` reconnects when no frame parses within the idle timeout; pings,
+  unparsable text and the consumer's own pauses between polls do not count. `telemetry.rs` emits
+  `price_level_stream_*` metrics through the `metrics` facade, with label values as enums there
+  and a frame-age histogram at acceptance. Per-venue series start at zero, and no label carries
+  a wire value except the address of an auto-detected venue. A new builder serves nothing:
+  `with_known_pamms` registers
+  the known-good venues and denies known-unexecutable ones, `add_pamm` registers individual ones,
+  `deny_pamm` excludes one (dropping any registration and blocking auto-detection), and opt-in
+  auto-detection additionally serves unknown venues under their address
+  (`pricelevelstream:{0xaddress}`). Registration precedence: between `add_pamm` and `deny_pamm`
+  for the same address the later call wins; `with_known_pamms` defaults never override either.
+  Components are identified as `pricelevelstream:{pamm}`, or `propammfallback:{pamm}` for
+  whitelisted venues, so tycho-execution routes those swaps through the router (Uniswap V3
+  fallback on venue revert). Consumers cannot tell a stale removal from a retired venue. Venues
+  may overlap with other integration paths of the same liquidity (e.g. `vm:fermiswap`) —
+  consumers must deduplicate by venue where double-counting matters
 
 ## Simulation Approaches
 
