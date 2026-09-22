@@ -657,7 +657,8 @@ mod test {
             .unwrap();
         let mut w = window(128, 1);
         for number in 40..=42 {
-            put(&mut w, with_component_delta(arc_msg(number, timestamp), "c1", number)).unwrap();
+            put(&mut w, testing::with_state_delta(arc_msg(number, timestamp), "c1", number))
+                .unwrap();
         }
 
         let patch = w
