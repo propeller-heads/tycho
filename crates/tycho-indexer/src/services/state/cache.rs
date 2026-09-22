@@ -366,7 +366,7 @@ impl CachedComponentState {
             balances: HashMap::new(),
             updated_at: at,
         };
-        entry.merge(delta, balances);
+        entry.apply(delta, balances);
         entry
     }
 
@@ -382,11 +382,13 @@ impl CachedComponentState {
         if at <= self.updated_at {
             return;
         }
-        self.merge(delta, balances);
+        self.apply(delta, balances);
         self.updated_at = at;
     }
 
-    fn merge(
+    /// Writes `delta` and `balances` into the entry without touching `updated_at` or checking it.
+    /// [`Self::apply_block`] does both around this.
+    fn apply(
         &mut self,
         delta: Option<&ProtocolComponentStateDelta>,
         balances: Option<&HashMap<Bytes, ComponentBalance>>,
