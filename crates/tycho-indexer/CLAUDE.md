@@ -146,7 +146,10 @@ components → state → entry points → cursor). Every mutable row is versione
 `valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
 
 **Trigger:** `ReorgBuffer::drain_blocks_until(finalized_height)` — blocks are only committed once
-they are provably behind the finality horizon.
+they are provably behind the finality horizon. When the stream ends (a bounded `run` reached its
+stop block) the runner calls `Extractor::commit_finalized_blocks`, which drains every buffered
+block up to and including the last reported finality height, forces the write, and waits for it
+before the process exits.
 
 Drained blocks stay in the buffer's committing section (shared with the commit task via
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can

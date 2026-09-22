@@ -296,6 +296,14 @@ impl ExtractorRunner {
                                     }
                                 }
                                 Some(Ok(BlockResponse::Ended)) => {
+                                    self.extractor
+                                        .commit_finalized_blocks()
+                                        .await
+                                        .map_err(|err| {
+                                            error!(error = %err, "Error while committing the buffered blocks at stream end");
+                                            tracing::Span::current().record("otel.status_code", "error");
+                                            err
+                                        })?;
                                     tracing::Span::current().record("otel.status_code", "ok");
                                     return Ok(false);
                                 }
