@@ -194,16 +194,22 @@ pub struct ConnectionHandle {
     cmd_tx: Sender<()>,
     dead: Arc<AtomicBool>,
     conn_notify: Arc<Notify>,
+    inner: Arc<Mutex<Option<Inner>>>,
 }
 
 impl ConnectionHandle {
-    /// Stops the websocket task without waiting for it to read its command channel.
+    /// Stops the websocket task without waiting for it to read its command channel, and closes
+    /// the connection it holds.
     ///
     /// Unlike dropping the handle, this leaves no window for a task that sleeps between
     /// reconnection attempts to open one more connection before it stops. The client is marked
     /// closed either way, and the next [`DeltasClient::connect`] clears that again.
-    pub fn abort(self) {
+    pub async fn abort(self) {
         self.task.abort();
+        // A cancelled task never reaches its own cleanup, so the websocket sink would keep the
+        // socket open and the client would report itself connected.
+        let mut guard = self.inner.lock().await;
+        *guard = None;
     }
 }
 
@@ -1089,6 +1095,7 @@ impl DeltasClient for WsDeltasClient {
             cmd_tx: handle_cmd_tx,
             dead: Arc::clone(&self.dead),
             conn_notify: Arc::clone(&self.conn_notify),
+            inner: Arc::clone(&self.inner),
         };
 
         // Not being connected does not mean the task has stopped: it clears `inner` every time it
@@ -1099,7 +1106,7 @@ impl DeltasClient for WsDeltasClient {
         if self.is_connected().await {
             Ok(handle)
         } else {
-            handle.abort();
+            handle.abort().await;
             Err(DeltasError::NotConnected)
         }
     }
@@ -1860,6 +1867,48 @@ mod tests {
         assert!(subscription_res.is_err());
     }
 
+    /// A cancelled task never runs its own cleanup, so `abort` has to drop the websocket sink
+    /// itself. Otherwise the socket stays open and the client keeps reporting itself connected.
+    #[test_log::test(tokio::test)]
+    async fn test_abort_closes_the_socket_and_allows_reconnect() {
+        let exp_comm = [
+            ExpectedComm::Receive(500, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_confirmation())),
+        ];
+        let (addr, server_thread) = mock_ws_after_reconnect(&exp_comm).await;
+        let client = WsDeltasClient::new(&format!("ws://{addr}"), None).unwrap();
+
+        client
+            .connect()
+            .await
+            .expect("first connect failed")
+            .abort()
+            .await;
+        assert!(!client.is_connected().await, "abort must leave no connection behind");
+
+        let handle = client
+            .connect()
+            .await
+            .expect("connect after abort failed");
+        let (_, _rx) = timeout(
+            Duration::from_secs(2),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        timeout(Duration::from_millis(100), client.close())
+            .await
+            .expect("close timed out")
+            .expect("close failed");
+        let _ = handle.await;
+        server_thread.await.unwrap();
+    }
+
     /// Closing a client does not retire it: connecting again returns a client that can subscribe.
     #[test_log::test(tokio::test)]
     async fn test_connect_after_handle_drop_yields_a_usable_client() {
@@ -1936,9 +1985,10 @@ mod tests {
             cmd_tx,
             dead: Arc::new(AtomicBool::new(false)),
             conn_notify: Arc::new(Notify::new()),
+            inner: Arc::new(Mutex::new(None)),
         };
 
-        handle.abort();
+        handle.abort().await;
 
         for _ in 0..100 {
             if cancelled.load(Ordering::SeqCst) {
