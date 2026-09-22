@@ -198,8 +198,9 @@ impl ConnectionHandle {
     /// Stops the websocket task without waiting for it to read its command channel.
     ///
     /// Unlike dropping the handle, this leaves no window for a task that sleeps between
-    /// reconnection attempts to open one more connection before it stops.
-    fn abort(self) {
+    /// reconnection attempts to open one more connection before it stops. The client is marked
+    /// closed either way, and the next [`DeltasClient::connect`] clears that again.
+    pub fn abort(self) {
         self.task.abort();
     }
 }
