@@ -324,6 +324,7 @@ impl From<&CachedAccount> for Account {
 /// Cached state of one protocol component.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CachedComponentState {
+    component_id: ComponentId,
     attributes: HashMap<AttrStoreKey, StoreVal>,
     balances: HashMap<Address, Balance>,
     /// One write tag covers the whole entry: a single extractor writes each protocol system,
@@ -334,17 +335,27 @@ pub(crate) struct CachedComponentState {
 impl CachedComponentState {
     /// Builds an entry from the startup snapshot, tagged with its newest `valid_from`.
     pub(crate) fn from_snapshot(state: ProtocolComponentState, tag: WriteTag) -> Self {
-        Self { attributes: state.attributes, balances: state.balances, updated_at: tag }
+        Self {
+            component_id: state.component_id,
+            attributes: state.attributes,
+            balances: state.balances,
+            updated_at: tag,
+        }
     }
 
     /// An entry for a component created at `tag`, holding that block's changes.
     pub(crate) fn from_creation(
+        component_id: &str,
         delta: Option<&ProtocolComponentStateDelta>,
         balances: Option<&HashMap<Bytes, ComponentBalance>>,
         tag: WriteTag,
     ) -> Self {
-        let mut entry =
-            Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: tag };
+        let mut entry = Self {
+            component_id: component_id.to_string(),
+            attributes: HashMap::new(),
+            balances: HashMap::new(),
+            updated_at: tag,
+        };
         entry.merge(delta, balances);
         entry
     }
@@ -388,14 +399,19 @@ impl CachedComponentState {
         );
     }
 
-    /// Builds the [`ProtocolComponentState`] the cached values describe.
-    pub(crate) fn materialize(&self, component_id: &str) -> ProtocolComponentState {
-        ProtocolComponentState::new(component_id, self.attributes.clone(), self.balances.clone())
-    }
-
     /// Tag of the newest write applied to this entry.
     pub(crate) fn updated_at(&self) -> WriteTag {
         self.updated_at
+    }
+}
+
+impl From<&CachedComponentState> for ProtocolComponentState {
+    fn from(cached: &CachedComponentState) -> Self {
+        ProtocolComponentState::new(
+            &cached.component_id,
+            cached.attributes.clone(),
+            cached.balances.clone(),
+        )
     }
 }
 
@@ -490,6 +506,7 @@ impl CacheState {
                     .entry(id.clone())
                     .or_insert_with(|| {
                         CachedComponentState::from_creation(
+                            id,
                             block.state_deltas.get(id),
                             block.component_balances.get(id),
                             tag,
@@ -626,7 +643,7 @@ mod test {
         cache
             .read()
             .component(EXTRACTOR, id)
-            .map(|c| c.materialize(id))
+            .map(ProtocolComponentState::from)
     }
 
     fn addr(n: u64) -> Bytes {
@@ -976,7 +993,7 @@ mod test {
 
         let cached = CachedComponentState::from_snapshot(loaded.clone(), WriteTag::snapshot(ts(3)));
 
-        assert_eq!(cached.materialize("c1"), loaded);
+        assert_eq!(ProtocolComponentState::from(&cached), loaded);
         assert_eq!(cached.updated_at(), WriteTag::snapshot(ts(3)));
     }
 
@@ -997,7 +1014,7 @@ mod test {
 
         cached.apply_block(Some(&testing::state_delta("c1", 9)), None, tag(4));
 
-        assert_eq!(cached.materialize("c1").attributes["x"], Bytes::from(1u64));
+        assert_eq!(ProtocolComponentState::from(&cached).attributes["x"], Bytes::from(1u64));
         assert_eq!(cached.updated_at(), tag(5));
     }
 
@@ -1015,7 +1032,7 @@ mod test {
         cached.apply_block(Some(&delta), None, tag(6));
 
         assert_eq!(
-            cached.materialize("c1").attributes,
+            ProtocolComponentState::from(&cached).attributes,
             HashMap::from([("y".to_string(), Bytes::from(3u64))])
         );
     }
@@ -1030,7 +1047,7 @@ mod test {
             tag(6),
         );
 
-        let state = cached.materialize("c1");
+        let state = ProtocolComponentState::from(&cached);
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), tag(6));
     }
