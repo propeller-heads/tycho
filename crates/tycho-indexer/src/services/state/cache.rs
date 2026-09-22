@@ -219,36 +219,42 @@ impl CachedAccount {
     /// Builds an entry from a `Creation` delta folded at `tag` — after startup, the only way a new
     /// contract enters the cache. The account is the one
     /// [`AccountDelta::into_account_without_tx`] builds; every value carries `tag`.
-    pub(crate) fn from_creation(delta: &AccountDelta, tag: WriteTag) -> Self {
+    pub(crate) fn from_creation(
+        delta: &AccountDelta,
+        balances: Option<&HashMap<Address, AccountBalance>>,
+        tag: WriteTag,
+    ) -> Self {
         let account = delta.clone().into_account_without_tx();
         let tags = AccountWriteTags::uniform(&account, tag);
-        Self::from_snapshot(account, tags)
+        let mut entry = Self::from_snapshot(account, tags);
+        entry.apply_block(None, balances, tag);
+        entry
     }
 
-    /// Applies one delta; every changed value gets `tag`, values with a newer tag stay. A deleted
-    /// slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries code
-    /// replaces the code and its hash together.
-    pub(crate) fn apply_delta(&mut self, delta: &AccountDelta, tag: WriteTag) {
-        for (key, value) in &delta.slots {
-            write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), tag);
-        }
-        if let Some(balance) = &delta.balance {
-            self.native_balance
-                .write(balance.clone(), tag);
-        }
-        if let Some(code) = delta.code() {
-            self.code
-                .write(CachedCode::new(code.clone()), tag);
-        }
-    }
-
-    /// Applies token balances under the same tag rule as [`CachedAccount::apply_delta`].
-    pub(crate) fn apply_balances(
+    /// Applies one block's changes. Each value takes `tag`; a value already written by that block
+    /// or a newer one is left alone, so the rule lives in [`Tagged::write`] rather than here —
+    /// there is no entry-level tag to compare. A deleted slot becomes the zero value, as in
+    /// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
+    pub(crate) fn apply_block(
         &mut self,
-        balances: &HashMap<Address, AccountBalance>,
+        delta: Option<&AccountDelta>,
+        balances: Option<&HashMap<Address, AccountBalance>>,
         tag: WriteTag,
     ) {
-        for (token, balance) in balances {
+        if let Some(delta) = delta {
+            for (key, value) in &delta.slots {
+                write_tagged(&mut self.slots, key.clone(), value.clone().unwrap_or_default(), tag);
+            }
+            if let Some(balance) = &delta.balance {
+                self.native_balance
+                    .write(balance.clone(), tag);
+            }
+            if let Some(code) = delta.code() {
+                self.code
+                    .write(CachedCode::new(code.clone()), tag);
+            }
+        }
+        for (token, balance) in balances.into_iter().flatten() {
             write_tagged(&mut self.token_balances, token.clone(), balance.clone(), tag);
         }
     }
@@ -533,18 +539,27 @@ impl CacheState {
                 }
                 continue;
             }
+            let balances = block.account_balances.get(address);
             match self.accounts.get_mut(address) {
-                Some(entry) => entry.apply_delta(delta, tag),
+                Some(entry) => entry.apply_block(Some(delta), balances, tag),
                 None if delta.is_creation() => {
-                    self.accounts
-                        .insert(address.clone(), CachedAccount::from_creation(delta, tag));
+                    self.accounts.insert(
+                        address.clone(),
+                        CachedAccount::from_creation(delta, balances, tag),
+                    );
                 }
                 None => trace!(%address, "Change for an unknown account skipped"),
             }
         }
         for (address, balances) in &block.account_balances {
+            if block
+                .account_deltas
+                .contains_key(address)
+            {
+                continue;
+            }
             match self.accounts.get_mut(address) {
-                Some(entry) => entry.apply_balances(balances, tag),
+                Some(entry) => entry.apply_block(None, Some(balances), tag),
                 None => trace!(%address, "Balances for an unknown account skipped"),
             }
         }
@@ -802,7 +817,7 @@ mod test {
         let address = addr(1);
         let delta = creation(&address, [(1, 1)], 10, "0x6000");
 
-        let cached = CachedAccount::from_creation(&delta, tag(1));
+        let cached = CachedAccount::from_creation(&delta, None, tag(1));
 
         assert_eq!(cached.materialize(Chain::Ethereum, &address), delta.into_account_without_tx());
         assert_eq!(cached.code().written_at(), tag(1));
@@ -816,7 +831,11 @@ mod test {
             AccountWriteTags::uniform(&account(&address), tag(5)),
         );
 
-        cached.apply_delta(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)])), tag(3));
+        cached.apply_block(
+            Some(&update(&address, fixtures::optional_slots([(1, 11), (3, 3)]))),
+            None,
+            tag(3),
+        );
 
         let slots = cached
             .materialize(Chain::Ethereum, &address)
@@ -837,7 +856,11 @@ mod test {
             AccountWriteTags::uniform(&account(&address), tag(5)),
         );
 
-        cached.apply_delta(&update(&address, fixtures::optional_slots([(1, 11)])), tag(5));
+        cached.apply_block(
+            Some(&update(&address, fixtures::optional_slots([(1, 11)]))),
+            None,
+            tag(5),
+        );
 
         assert_eq!(
             cached
@@ -852,12 +875,12 @@ mod test {
     fn account_apply_twice_changes_nothing() {
         let address = addr(1);
         let mut cached =
-            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), None, tag(1));
         let delta = update(&address, fixtures::optional_slots([(1, 11), (2, 2)]));
 
-        cached.apply_delta(&delta, tag(2));
+        cached.apply_block(Some(&delta), None, tag(2));
         let once = cached.clone();
-        cached.apply_delta(&delta, tag(2));
+        cached.apply_block(Some(&delta), None, tag(2));
 
         assert_eq!(cached, once);
     }
@@ -866,11 +889,11 @@ mod test {
     fn account_apply_zeroes_deleted_slots_and_refreshes_the_code_hash() {
         let address = addr(1);
         let mut cached =
-            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), tag(1));
+            CachedAccount::from_creation(&creation(&address, [(1, 1)], 10, "0x6000"), None, tag(1));
         let mut delta = update(&address, HashMap::from([(slot(1), None)]));
         delta.set_code(code("0x6001"));
 
-        cached.apply_delta(&delta, tag(2));
+        cached.apply_block(Some(&delta), None, tag(2));
 
         let account = cached.materialize(Chain::Ethereum, &address);
         assert_eq!(account.slots[&slot(1)], Bytes::default());
@@ -882,14 +905,15 @@ mod test {
     #[test]
     fn account_apply_native_balance_follows_the_tag_rule() {
         let address = addr(1);
-        let mut cached = CachedAccount::from_creation(&creation(&address, [], 10, "0x"), tag(5));
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [], 10, "0x"), None, tag(5));
         let mut newer = update(&address, HashMap::new());
         newer.balance = Some(Bytes::from(20u64));
         let mut older = update(&address, HashMap::new());
         older.balance = Some(Bytes::from(30u64));
 
-        cached.apply_delta(&newer, tag(6));
-        cached.apply_delta(&older, tag(4));
+        cached.apply_block(Some(&newer), None, tag(6));
+        cached.apply_block(Some(&older), None, tag(4));
 
         assert_eq!(cached.native_balance().value(), &Bytes::from(20u64));
         assert_eq!(cached.native_balance().written_at(), tag(6));
@@ -898,11 +922,12 @@ mod test {
     #[test]
     fn account_apply_keeps_code_and_hash_against_an_older_write() {
         let address = addr(1);
-        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x6000"), tag(5));
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [], 0, "0x6000"), None, tag(5));
         let mut delta = update(&address, HashMap::new());
         delta.set_code(code("0x6001"));
 
-        cached.apply_delta(&delta, tag(4));
+        cached.apply_block(Some(&delta), None, tag(4));
 
         let account = cached.materialize(Chain::Ethereum, &address);
         assert_eq!(account.code, code("0x6000"));
@@ -913,14 +938,17 @@ mod test {
     #[test]
     fn account_apply_balances_follow_the_tag_rule() {
         let address = addr(1);
-        let mut cached = CachedAccount::from_creation(&creation(&address, [], 0, "0x"), tag(5));
+        let mut cached =
+            CachedAccount::from_creation(&creation(&address, [], 0, "0x"), None, tag(5));
 
-        cached.apply_balances(
-            &HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))]),
+        cached.apply_block(
+            None,
+            Some(&HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))])),
             tag(5),
         );
-        cached.apply_balances(
-            &HashMap::from([(addr(9), account_balance(&address, &addr(9), 1))]),
+        cached.apply_block(
+            None,
+            Some(&HashMap::from([(addr(9), account_balance(&address, &addr(9), 1))])),
             tag(4),
         );
 
