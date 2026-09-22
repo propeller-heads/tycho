@@ -479,8 +479,8 @@ impl CacheLoader<'_> {
 
 impl CacheState {
     /// Applies one block's component changes. A component the block creates is built holding that
-    /// block's own delta and balances. A deleted component is removed unless a newer block already
-    /// wrote to it.
+    /// block's own delta and balances. A deleted component is removed unless that block or a newer
+    /// one already wrote to it.
     fn fold_components(&mut self, block: &BlockAggregatedChanges) {
         let tag = WriteTag::from(&block.block);
         if !block.new_protocol_components.is_empty() {
@@ -531,7 +531,7 @@ impl CacheState {
         for id in block.deleted_protocol_components.keys() {
             if system_components
                 .get(id)
-                .is_some_and(|entry| entry.updated_at() <= tag)
+                .is_some_and(|entry| entry.updated_at() < tag)
             {
                 system_components.remove(id);
             }
@@ -540,7 +540,8 @@ impl CacheState {
 
     /// Applies one block's account changes. A `Creation` delta carries the whole initial state
     /// and may create an entry; anything else for an unknown address is partial data and is
-    /// skipped. A `Deletion` removes the entry unless a newer block already wrote to it.
+    /// skipped. A `Deletion` removes the entry unless that block or a newer one already wrote to
+    /// it.
     fn fold_accounts(&mut self, block: &BlockAggregatedChanges) {
         let tag = WriteTag::from(&block.block);
         for (address, delta) in &block.account_deltas {
@@ -548,7 +549,7 @@ impl CacheState {
                 if self
                     .accounts
                     .get(address)
-                    .is_some_and(|entry| entry.newest_write() <= tag)
+                    .is_some_and(|entry| entry.newest_write() < tag)
                 {
                     self.accounts.remove(address);
                 }
@@ -1170,6 +1171,21 @@ mod test {
             .unwrap();
 
         assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn fold_skips_a_deletion_from_the_block_that_wrote_the_entry() {
+        let cache = EntityCache::new(Chain::Ethereum);
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(msg(1), deletion(&address)))
+            .unwrap();
+
+        assert!(cached_account(&cache, &address).is_some(), "block 1 cannot delete its own write");
     }
 
     #[test]
