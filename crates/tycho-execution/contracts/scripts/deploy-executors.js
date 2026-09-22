@@ -38,6 +38,7 @@ const deploy_protocols = {
         "propammfallback",
         "sky",
         "lido_v4",
+        "etherfi",
     ],
     "base": [
         "uniswap_v2",
