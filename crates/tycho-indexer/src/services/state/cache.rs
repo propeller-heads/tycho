@@ -330,51 +330,55 @@ impl CachedComponentState {
         Self { attributes: state.attributes, balances: state.balances, updated_at: tag }
     }
 
-    /// An entry for a component created at `tag`, before its first attributes arrive.
-    pub(crate) fn from_creation(tag: WriteTag) -> Self {
-        Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: tag }
+    /// An entry for a component created at `tag`, holding that block's changes.
+    pub(crate) fn from_creation(
+        delta: Option<&ProtocolComponentStateDelta>,
+        balances: Option<&HashMap<Bytes, ComponentBalance>>,
+        tag: WriteTag,
+    ) -> Self {
+        let mut entry =
+            Self { attributes: HashMap::new(), balances: HashMap::new(), updated_at: tag };
+        entry.merge(delta, balances);
+        entry
     }
 
-    /// Applies one state delta unless the entry is newer than `tag`. Updates apply first, then
-    /// deletions, like [`ProtocolComponentState::apply_state_delta`].
-    pub(crate) fn apply_delta(&mut self, delta: &ProtocolComponentStateDelta, tag: WriteTag) {
-        if !self.advance_to(tag) {
-            return;
-        }
-        self.attributes.extend(
-            delta
-                .updated_attributes
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
-        self.attributes
-            .retain(|key, _| !delta.deleted_attributes.contains(key));
-    }
-
-    /// Applies balances unless the entry is newer than `tag`.
-    pub(crate) fn apply_balances(
+    /// Applies one block's changes, unless the entry already holds that block or a newer one. One
+    /// tag covers the whole entry, so the guard is here rather than per value. Attribute updates
+    /// apply before deletions, like [`ProtocolComponentState::apply_state_delta`].
+    pub(crate) fn apply_block(
         &mut self,
-        balances: &HashMap<Bytes, ComponentBalance>,
+        delta: Option<&ProtocolComponentStateDelta>,
+        balances: Option<&HashMap<Bytes, ComponentBalance>>,
         tag: WriteTag,
     ) {
-        if !self.advance_to(tag) {
+        if tag <= self.updated_at {
             return;
+        }
+        self.merge(delta, balances);
+        self.updated_at = tag;
+    }
+
+    fn merge(
+        &mut self,
+        delta: Option<&ProtocolComponentStateDelta>,
+        balances: Option<&HashMap<Bytes, ComponentBalance>>,
+    ) {
+        if let Some(delta) = delta {
+            self.attributes.extend(
+                delta
+                    .updated_attributes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
+            self.attributes
+                .retain(|key, _| !delta.deleted_attributes.contains(key));
         }
         self.balances.extend(
             balances
-                .iter()
+                .into_iter()
+                .flatten()
                 .map(|(token, balance)| (token.clone(), balance.balance.clone())),
         );
-    }
-
-    /// Moves the entry to `tag` and returns `true`, unless `tag` is older: the single writer
-    /// folds in order, so an older block is a replay and is skipped.
-    fn advance_to(&mut self, tag: WriteTag) -> bool {
-        if tag < self.updated_at {
-            return false;
-        }
-        self.updated_at = tag;
-        true
     }
 
     /// Builds the [`ProtocolComponentState`] the cached values describe.
@@ -474,8 +478,8 @@ impl CacheLoader<'_> {
 }
 
 impl CacheState {
-    /// Applies one block's component changes, in an order where a new component exists before
-    /// its first attributes arrive. A deleted component is removed unless a newer block already
+    /// Applies one block's component changes. A component the block creates is built holding that
+    /// block's own delta and balances. A deleted component is removed unless a newer block already
     /// wrote to it.
     fn fold_components(&mut self, block: &BlockAggregatedChanges) {
         let tag = WriteTag::from(&block.block);
@@ -487,7 +491,13 @@ impl CacheState {
             for id in block.new_protocol_components.keys() {
                 system_components
                     .entry(id.clone())
-                    .or_insert_with(|| CachedComponentState::from_creation(tag));
+                    .or_insert_with(|| {
+                        CachedComponentState::from_creation(
+                            block.state_deltas.get(id),
+                            block.component_balances.get(id),
+                            tag,
+                        )
+                    });
             }
         }
         let Some(system_components) = self
@@ -499,15 +509,20 @@ impl CacheState {
         };
         for (id, delta) in &block.state_deltas {
             match system_components.get_mut(id) {
-                Some(entry) => entry.apply_delta(delta, tag),
+                Some(entry) => {
+                    entry.apply_block(Some(delta), block.component_balances.get(id), tag)
+                }
                 None => {
                     trace!(system = %block.extractor, %id, "State delta for an unknown component skipped")
                 }
             }
         }
         for (id, balances) in &block.component_balances {
+            if block.state_deltas.contains_key(id) {
+                continue;
+            }
             match system_components.get_mut(id) {
-                Some(entry) => entry.apply_balances(balances, tag),
+                Some(entry) => entry.apply_block(None, Some(balances), tag),
                 None => {
                     trace!(system = %block.extractor, %id, "Balances for an unknown component skipped")
                 }
@@ -986,7 +1001,7 @@ mod test {
     fn component_apply_delta_skips_an_older_block() {
         let mut cached = component_at(5);
 
-        cached.apply_delta(&testing::state_delta("c1", 9), tag(4));
+        cached.apply_block(Some(&testing::state_delta("c1", 9)), None, tag(4));
 
         assert_eq!(cached.materialize("c1").attributes["x"], Bytes::from(1u64));
         assert_eq!(cached.updated_at(), tag(5));
@@ -1003,7 +1018,7 @@ mod test {
             .deleted_attributes
             .insert("x".to_string());
 
-        cached.apply_delta(&delta, tag(5));
+        cached.apply_block(Some(&delta), None, tag(6));
 
         assert_eq!(
             cached.materialize("c1").attributes,
@@ -1015,8 +1030,9 @@ mod test {
     fn component_apply_balances_moves_the_entry_to_the_block() {
         let mut cached = component_at(5);
 
-        cached.apply_balances(
-            &HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))]),
+        cached.apply_block(
+            None,
+            Some(&HashMap::from([(addr(9), component_balance("c1", &addr(9), 5))])),
             tag(6),
         );
 
