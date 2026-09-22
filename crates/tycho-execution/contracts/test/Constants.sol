@@ -216,6 +216,10 @@ contract Constants is
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
 
+    // Eden Network's view quoter for Uniswap V3 pools, used by TychoFallbackRouter
+    address UNISWAP_V3_STATIC_QUOTER =
+        0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE;
+
     // FermiSwap
     address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
 

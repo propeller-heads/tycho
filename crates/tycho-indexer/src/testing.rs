@@ -9,8 +9,8 @@ use mockall::mock;
 use tycho_common::{
     models::{
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, BlockAggregatedChanges, EntryPoint, EntryPointWithTracingParams,
+            TracedEntryPoint, TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -677,6 +677,34 @@ pub fn block(version: u64) -> Block {
         Bytes::from(version - 1).lpad(32, 0),
         ts + Duration::from_secs(version * 12),
     )
+}
+
+/// Aggregated changes for one full block with no deltas.
+#[cfg(test)]
+pub fn aggregated_changes(
+    extractor: &str,
+    number: u64,
+    finalized: u64,
+    committed: Option<u64>,
+) -> BlockAggregatedChanges {
+    BlockAggregatedChanges {
+        extractor: extractor.to_string(),
+        block: block(number),
+        finalized_block_height: finalized,
+        db_committed_block_height: committed,
+        ..Default::default()
+    }
+}
+
+/// A state delta that sets attribute `x` of `component_id` to `value`.
+#[cfg(test)]
+pub fn state_delta(component_id: &str, value: u64) -> ProtocolComponentStateDelta {
+    ProtocolComponentStateDelta {
+        component_id: component_id.to_string(),
+        updated_attributes: HashMap::from([("x".to_string(), Bytes::from(value))]),
+        deleted_attributes: HashSet::new(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

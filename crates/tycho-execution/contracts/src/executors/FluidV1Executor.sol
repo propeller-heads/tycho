@@ -9,22 +9,7 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {TransferManager} from "../TransferManager.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
-
-interface IFluidV1Dex {
-    function swapInWithCallback(
-        bool swap0to1_,
-        uint256 amountIn_,
-        uint256 amountOutMin_,
-        address to_
-    ) external payable returns (uint256 amountOut_);
-
-    function swapIn(
-        bool swap0to1_,
-        uint256 amountIn_,
-        uint256 amountOutMin_,
-        address to_
-    ) external payable returns (uint256 amountOut_);
-}
+import {IFluidV1Dex} from "@interfaces/IFluidV1Dex.sol";
 
 error FluidV1Executor__ZeroLiquidityAddress();
 error FluidV1Executor__InvalidDataLength();

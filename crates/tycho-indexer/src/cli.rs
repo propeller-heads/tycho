@@ -1,11 +1,11 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{builder::TypedValueParser as _, Args, Parser, Subcommand};
 use tycho_common::{models::Chain, Bytes};
 use tycho_ethereum::rpc::{
     config::{RPCBatchingConfig, RPCRetryConfig},
     EthereumRpcClient,
 };
 
-use crate::extractor::ExtractionError;
+use crate::{extractor::ExtractionError, services::WindowConfig};
 
 /// Tycho Indexer using Substreams
 ///
@@ -57,6 +57,24 @@ pub struct GlobalArgs {
     /// Batch size for the database inserts
     #[clap(long, default_value = "0")]
     pub database_insert_batch_size: usize,
+
+    /// Minimum number of blocks each extractor's delta window retains in memory
+    #[clap(
+        long,
+        env,
+        default_value_t = WindowConfig::default().depth,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub delta_window_depth: u64,
+
+    /// Number of retired blocks the delta window collects before it folds them out in one batch
+    #[clap(
+        long,
+        env,
+        default_value_t = WindowConfig::default().min_fold_batch,
+        value_parser = clap::value_parser!(u64).range(1..).try_map(usize::try_from)
+    )]
+    pub delta_window_fold_batch: usize,
 
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
@@ -340,6 +358,8 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 256,
+                delta_window_depth: 128,
+                delta_window_fold_batch: 1,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -378,6 +398,48 @@ mod cli_tests {
         assert_eq!(cli, expected_args);
     }
 
+    fn args_with_delta_window(depth: &'static str, fold_batch: &'static str) -> Vec<&'static str> {
+        vec![
+            "tycho-indexer",
+            "--endpoint",
+            "http://example.com",
+            "--database-url",
+            "my_db",
+            "--rpc-url",
+            "http://example.com",
+            "--rpc-max-retries",
+            "10",
+            "--rpc-initial-backoff-ms",
+            "200",
+            "--rpc-max-backoff-ms",
+            "10000",
+            "--delta-window-depth",
+            depth,
+            "--delta-window-fold-batch",
+            fold_batch,
+            "index",
+            "--extractors-config",
+            "/opt/extractors.yaml",
+            "--api_token",
+            "your_api_token",
+            "--enable-partial-blocks",
+        ]
+    }
+
+    #[test]
+    fn test_arg_parsing_delta_window_flags() {
+        let cli = Cli::try_parse_from(args_with_delta_window("64", "4")).expect("parse errored");
+
+        assert_eq!(cli.global_args.delta_window_depth, 64);
+        assert_eq!(cli.global_args.delta_window_fold_batch, 4);
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_zero_delta_window_flags() {
+        assert!(Cli::try_parse_from(args_with_delta_window("0", "1")).is_err());
+        assert!(Cli::try_parse_from(args_with_delta_window("128", "0")).is_err());
+    }
+
     #[tokio::test]
     async fn test_arg_parsing_index_cmd() {
         let cli = Cli::try_parse_from(vec![
@@ -408,6 +470,8 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 0,
+                delta_window_depth: 128,
+                delta_window_fold_batch: 1,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,

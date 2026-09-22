@@ -50,6 +50,8 @@ If you don't have an RPC URL, here are some public ones for <a href="https://eth
 
 The `PRIVATE_KEY` environment variable is unnecessary if you want to run the quickstart without simulation or execution.
 
+On Arc, pass `--sell-token` explicitly. No default sell token is configured for Arc.
+
 ### What it does
 
 The quickstart fetches all protocol states. Then it returns the best amount out (best price) for a given token pair (by default, 10 USDC to WETH).

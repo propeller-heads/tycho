@@ -21,23 +21,31 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::extractor::{
-    reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer},
-    DeltaCommand,
+use crate::{
+    extractor::{
+        reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+        DeltaCommand,
+    },
+    services::state::window::{DeltaWindow, DiscardSink, FoldSink, WindowConfig},
 };
 
-/// The `PendingDeltas` struct manages access to the reorg buffers maintained by each extractor.
+/// Facade over one [`DeltaWindow`] per extractor.
 ///
-/// The main responsibilities of `PendingDeltas` include:
-/// - Inserting new blocks and deltas into the correct `ReorgBuffer`.
-/// - Managing and applying deltas to state data, which includes merging buffered changes with data
-///   fetched from the database.
-/// - Retrieving commit status for blocks, which is used to determine whether to fetch data from the
-///   database and/or from the buffer.
-#[derive(Default, Clone, DeepSizeOf)]
+/// Inserts full-block messages and folds evictable blocks into the sink; merges window deltas over
+/// database state; reports commit status so RPC handlers know whether to read the database, the
+/// window, or both.
+#[derive(Clone)]
 pub struct PendingDeltas {
-    // Map with the protocol system name as key and a `ReorgBuffer` as value.
-    buffers: HashMap<String, Arc<Mutex<ReorgBuffer<BlockAggregatedChanges>>>>,
+    /// Keyed by protocol system name.
+    windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
+    sink: Arc<dyn FoldSink>,
+}
+
+impl DeepSizeOf for PendingDeltas {
+    fn deep_size_of_children(&self, context: &mut deepsize::Context) -> usize {
+        self.windows
+            .deep_size_of_children(context)
+    }
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -93,52 +101,64 @@ pub trait PendingDeltasBuffer {
 }
 
 impl PendingDeltas {
+    /// Windows at the default depth, folding into a [`DiscardSink`].
+    #[allow(dead_code)] // production builds the facade through `with_config`
     pub fn new<'a>(extractors: impl IntoIterator<Item = &'a str>) -> Self {
-        Self {
-            buffers: extractors
-                .into_iter()
-                .map(|e| {
-                    debug!("Creating new ReorgBuffer for {}", e);
-                    (e.to_string(), Arc::new(Mutex::new(ReorgBuffer::new())))
-                })
-                .collect(),
-        }
+        Self::with_config(extractors, WindowConfig::default(), Arc::new(DiscardSink))
     }
 
-    fn insert(&self, message: Arc<BlockAggregatedChanges>) -> Result<()> {
-        let maybe_buffer = self.buffers.get(&message.extractor);
+    /// One empty window per extractor, all with the same `config`, folding into `sink`.
+    pub fn with_config<'a>(
+        extractors: impl IntoIterator<Item = &'a str>,
+        config: WindowConfig,
+        sink: Arc<dyn FoldSink>,
+    ) -> Self {
+        let windows = extractors
+            .into_iter()
+            .map(|e| {
+                debug!("Creating new DeltaWindow for {}", e);
+                (e.to_string(), Arc::new(Mutex::new(DeltaWindow::new(e.to_string(), config))))
+            })
+            .collect();
+        Self { windows, sink }
+    }
 
-        match maybe_buffer {
-            Some(buffer) => {
-                let mut guard = buffer.lock().map_err(|e| {
-                    PendingDeltasError::LockError(message.extractor.to_string(), e.to_string())
-                })?;
-                if message.revert {
-                    // Skip partial reverts: PendingDeltas only holds full-block messages
-                    if message.partial_block_index.is_none() {
-                        trace!(
-                            block_number = message.block.number,
-                            extractor = message.extractor,
-                            "DeltaBufferPurge"
-                        );
-                        guard.purge(message.block.hash.clone())?;
-                    }
-                } else {
-                    trace!(
-                        block_number = message.block.number,
-                        finality = message.finalized_block_height,
-                        db_commit_upto = message.db_committed_block_height,
-                        extractor = message.extractor,
-                        "DeltaBufferInsertion"
-                    );
-                    guard.insert_block((*message).clone())?;
-                    if let Some(height) = message.db_committed_block_height {
-                        guard.drain_blocks_until(height + 1)?;
-                    }
-                }
-            }
-            _ => return Err(PendingDeltasError::UnknownExtractor(message.extractor.clone())),
-        }
+    /// Folds one extractor's committed blocks into the sink, then empties its window. Nothing
+    /// the window held is lost: the restarted extractor replays every block above its database
+    /// cursor.
+    fn fold_committed_and_clear(&self, extractor: &str) -> Result<()> {
+        let Some(window) = self.windows.get(extractor) else {
+            warn!(extractor, "No window found for the restarted extractor");
+            return Ok(());
+        };
+        let mut guard = window
+            .lock()
+            .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
+        guard.fold_committed(self.sink.as_ref())?;
+        guard.clear();
+        debug!(extractor, "PendingDeltas window cleared");
+        Ok(())
+    }
+
+    /// Inserts the message into its extractor's window and folds evictable blocks into the sink.
+    fn insert(&self, message: &Arc<BlockAggregatedChanges>) -> Result<()> {
+        let window = self
+            .windows
+            .get(&message.extractor)
+            .ok_or_else(|| PendingDeltasError::UnknownExtractor(message.extractor.clone()))?;
+        let mut guard = window.lock().map_err(|e| {
+            PendingDeltasError::LockError(message.extractor.to_string(), e.to_string())
+        })?;
+        trace!(
+            block_number = message.block.number,
+            revert = message.revert,
+            finality = message.finalized_block_height,
+            db_commit_upto = message.db_committed_block_height,
+            extractor = message.extractor,
+            "DeltaWindowInsertion"
+        );
+        guard.insert(message)?;
+        guard.fold_evictable(self.sink.as_ref())?;
         Ok(())
     }
 
@@ -151,7 +171,7 @@ impl PendingDeltas {
         let mut change_found = false;
 
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -162,7 +182,7 @@ impl PendingDeltas {
             PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
         })?;
 
-        for entry in guard.get_block_range(None, version)? {
+        for entry in guard.blocks(None, version)? {
             // Apply state deltas if found
             if let Some(delta) = entry
                 .state_deltas
@@ -195,7 +215,7 @@ impl PendingDeltas {
         let mut change_found = false;
 
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -206,7 +226,7 @@ impl PendingDeltas {
             PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
         })?;
 
-        for entry in guard.get_block_range(None, version)? {
+        for entry in guard.blocks(None, version)? {
             if let Some(delta) = entry
                 .account_deltas
                 .get(&db_state.address)
@@ -245,11 +265,11 @@ impl PendingDeltas {
         version: Option<BlockNumberOrTimestamp>,
     ) -> Result<Account> {
         let mut account: Option<Account> = None;
-        for buffer in self.buffers.values() {
+        for buffer in self.windows.values() {
             let guard = buffer
                 .lock()
                 .map_err(|e| PendingDeltasError::LockError("VM".to_string(), e.to_string()))?;
-            for entry in guard.get_block_range(None, version)? {
+            for entry in guard.blocks(None, version)? {
                 if let Some(delta) = entry.account_deltas.get(&address) {
                     // Update account state or create a new one if not present
                     let account_ref =
@@ -310,38 +330,26 @@ impl PendingDeltas {
         loop {
             match all_messages.next().await {
                 Some(DeltaCommand::Block(message)) => {
-                    // Skip partial messages - only full-block updates go to the reorg buffer.
-                    if message.partial_block_index.is_none() {
-                        self.insert(message).map_err(|e| {
-                            error!(error = %e, "Failed to insert into PendingDeltas buffer");
-                            e
-                        })?;
+                    // Skip partial messages - only full-block updates go to the window.
+                    if message.partial_block_index.is_some() {
+                        continue;
                     }
+                    self.insert(&message).map_err(|err| {
+                        error!(
+                            error = %err,
+                            extractor = %message.extractor,
+                            block = message.block.number,
+                            "Failed to insert into PendingDeltas window"
+                        );
+                        err
+                    })?;
                 }
                 Some(DeltaCommand::ExtractorRestarted(extractor_name)) => {
-                    debug!(extractor = %extractor_name, "Resetting PendingDeltas buffer for extractor");
-                    if let Some(buffer) = self.buffers.get(&extractor_name) {
-                        match buffer.lock() {
-                            Ok(mut guard) => {
-                                *guard = ReorgBuffer::new();
-                                debug!(extractor = %extractor_name, "PendingDeltas buffer reset");
-                            }
-                            Err(err) => {
-                                error!(
-                                    extractor = %extractor_name,
-                                    error = %err,
-                                    "Failed to lock buffer for reset"
-                                );
-                                return Err(PendingDeltasError::LockError(
-                                    extractor_name,
-                                    err.to_string(),
-                                )
-                                .into());
-                            }
-                        }
-                    } else {
-                        warn!(extractor = %extractor_name, "No buffer found for reset — extractor unknown");
-                    }
+                    debug!(
+                        extractor = %extractor_name,
+                        "Extractor restarted; folding committed blocks and clearing its window"
+                    );
+                    self.fold_committed_and_clear(&extractor_name)?;
                 }
                 None => {
                     info!("All PendingDeltas streams ended");
@@ -467,7 +475,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         let mut new_components = Vec::new();
 
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -478,7 +486,7 @@ impl PendingDeltasBuffer for PendingDeltas {
             PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
         })?;
 
-        for entry in guard.get_block_range(None, None)? {
+        for entry in guard.uncommitted_blocks()? {
             let components_tvls = &entry.component_tvl;
 
             new_components.extend(
@@ -518,7 +526,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         protocol_system: &str,
     ) -> Result<Option<CommitStatus>> {
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -528,7 +536,7 @@ impl PendingDeltasBuffer for PendingDeltas {
             PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
         })?;
 
-        Ok(guard.get_commit_status(version))
+        Ok(guard.commit_status(version))
     }
 
     fn search_block(
@@ -537,7 +545,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         protocol_system: &str,
     ) -> Result<Option<BlockAggregatedChanges>> {
         let buffer = self
-            .buffers
+            .windows
             .get(protocol_system)
             .ok_or_else(|| {
                 error!("Missing reorg buffer for {}", protocol_system);
@@ -547,7 +555,7 @@ impl PendingDeltasBuffer for PendingDeltas {
             PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
         })?;
 
-        for block in guard.get_block_range(None, None)? {
+        for block in guard.blocks(None, None)? {
             if f(block) {
                 return Ok(Some(block.clone()));
             }
@@ -568,7 +576,7 @@ mod test {
     };
 
     use super::*;
-    use crate::{extractor::models::fixtures, testing::block};
+    use crate::{extractor::models::fixtures, testing, testing::block};
 
     fn vm_state() -> Account {
         Account::new(
@@ -851,22 +859,252 @@ mod test {
         }
     }
 
+    fn native_msg(number: u64, committed: Option<u64>, x: u64) -> Arc<BlockAggregatedChanges> {
+        Arc::new(BlockAggregatedChanges {
+            new_protocol_components: HashMap::from([(
+                format!("new{number}"),
+                ProtocolComponent { id: format!("new{number}"), ..Default::default() },
+            )]),
+            state_deltas: HashMap::from([("c1".to_string(), testing::state_delta("c1", x))]),
+            ..testing::aggregated_changes("native:extractor", number, number, committed)
+        })
+    }
+
+    fn native_revert(number: u64) -> Arc<BlockAggregatedChanges> {
+        Arc::new(BlockAggregatedChanges {
+            revert: true,
+            ..testing::aggregated_changes("native:extractor", number, 0, None)
+        })
+    }
+
+    fn has_block(buffer: &PendingDeltas, number: u64) -> bool {
+        buffer
+            .search_block(
+                &|b: &BlockAggregatedChanges| b.block.number == number,
+                "native:extractor",
+            )
+            .unwrap()
+            .is_some()
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        folded: Mutex<Vec<u64>>,
+    }
+
+    impl FoldSink for RecordingSink {
+        fn fold(&self, block: &BlockAggregatedChanges) -> std::result::Result<(), StorageError> {
+            self.folded
+                .lock()
+                .unwrap()
+                .push(block.block.number);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_folds_committed_blocks_and_clears_the_window_when_the_extractor_restarts() {
+        let sink = Arc::new(RecordingSink::default());
+        let buffer =
+            PendingDeltas::with_config(["native:extractor"], WindowConfig::default(), sink.clone());
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.clone().run(vec![rx], start_tx));
+
+        for n in 1..=5 {
+            tx.send(DeltaCommand::Block(native_msg(n, Some(3), n)))
+                .await
+                .unwrap();
+        }
+        tx.send(DeltaCommand::ExtractorRestarted("native:extractor".to_string()))
+            .await
+            .unwrap();
+        // The restarted extractor replays from above its database cursor.
+        tx.send(DeltaCommand::Block(native_msg(4, Some(3), 4)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        pump.await.unwrap().unwrap();
+        assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2, 3]);
+        assert!(has_block(&buffer, 4));
+        assert!(!has_block(&buffer, 1) && !has_block(&buffer, 5));
+    }
+
+    #[tokio::test]
+    async fn run_ends_with_the_error_after_a_bad_insert() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.clone().run(vec![rx], start_tx));
+
+        tx.send(DeltaCommand::Block(native_msg(1, None, 1)))
+            .await
+            .unwrap();
+        // Parent-hash gap: the window rejects it.
+        tx.send(DeltaCommand::Block(native_msg(3, None, 3)))
+            .await
+            .unwrap();
+
+        // The sender stays open: the pump must return without waiting for the stream to end.
+        let err = pump.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unexpected block sequence"),
+            "{err}"
+        );
+        assert!(has_block(&buffer, 1) && !has_block(&buffer, 3));
+        drop(tx);
+    }
+
+    #[test]
+    fn insert_retains_committed_blocks_up_to_the_depth() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(4), n))
+                .unwrap();
+        }
+
+        assert!(has_block(&buffer, 1));
+        assert!(has_block(&buffer, 5));
+    }
+
+    #[test]
+    fn depth_one_retains_only_the_tip() {
+        let buffer = PendingDeltas::with_config(
+            ["native:extractor"],
+            WindowConfig { depth: 1, min_fold_batch: 1 },
+            Arc::new(DiscardSink),
+        );
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(4), n))
+                .unwrap();
+        }
+
+        // bound = min(finalized 5, committed 4, tip 5 - 1) = 4
+        assert!(!has_block(&buffer, 4));
+        assert!(has_block(&buffer, 5));
+    }
+
+    #[test]
+    fn a_revert_purges_the_abandoned_blocks_and_keeps_the_commit_status() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(3), n))
+                .unwrap();
+        }
+
+        buffer
+            .insert(&native_revert(3))
+            .unwrap();
+
+        assert!(has_block(&buffer, 3) && !has_block(&buffer, 4));
+        assert_eq!(
+            buffer
+                .get_block_commit_status(BlockNumberOrTimestamp::Number(3), "native:extractor")
+                .unwrap(),
+            Some(CommitStatus::Committed)
+        );
+    }
+
+    #[test]
+    fn replaying_retained_committed_blocks_over_db_state_is_idempotent() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(3), n * 10))
+                .unwrap();
+        }
+        // The database at its committed height already holds block 3's write.
+        let db_state = ProtocolComponentState::new(
+            "c1",
+            HashMap::from([("x".to_string(), Bytes::from(30u64))]),
+            HashMap::new(),
+        );
+
+        let mut at_five = vec![db_state.clone()];
+        buffer
+            .merge_native_states(
+                Some(&["c1"]),
+                &mut at_five,
+                Some(BlockNumberOrTimestamp::Number(5)),
+                "native:extractor",
+            )
+            .unwrap();
+        assert_eq!(at_five[0].attributes.get("x"), Some(&Bytes::from(50u64)));
+
+        let mut at_four = vec![db_state];
+        buffer
+            .merge_native_states(
+                Some(&["c1"]),
+                &mut at_four,
+                Some(BlockNumberOrTimestamp::Number(4)),
+                "native:extractor",
+            )
+            .unwrap();
+        assert_eq!(at_four[0].attributes.get("x"), Some(&Bytes::from(40u64)));
+    }
+
+    #[test]
+    fn new_components_exclude_retained_committed_blocks() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(3), n))
+                .unwrap();
+        }
+
+        let mut ids: Vec<String> = buffer
+            .get_new_components(None, "native:extractor", None)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        ids.sort();
+
+        assert_eq!(ids, vec!["new4", "new5"]);
+    }
+
+    #[test]
+    fn commit_status_comes_from_the_watermark() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        for n in 1..=5 {
+            buffer
+                .insert(&native_msg(n, Some(3), n))
+                .unwrap();
+        }
+
+        let status = |n| {
+            buffer
+                .get_block_commit_status(BlockNumberOrTimestamp::Number(n), "native:extractor")
+                .unwrap()
+        };
+        assert_eq!(status(1), Some(CommitStatus::Committed));
+        assert_eq!(status(3), Some(CommitStatus::Committed));
+        assert_eq!(status(4), Some(CommitStatus::Uncommitted));
+    }
+
     #[test]
     fn test_insert_extractor() {
         let buffer = PendingDeltas::new(["vm:extractor"]);
         let exp: BlockAggregatedChanges = vm_block_deltas();
 
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .expect("insert failed");
 
         let reorg_buffer = buffer
-            .buffers
+            .windows
             .get("vm:extractor")
             .expect("extractor buffer missing");
         let binding = reorg_buffer.lock().unwrap();
         let res = binding
-            .get_block_range(None, None)
+            .blocks(None, None)
             .expect("Failed to get block range")
             .collect::<Vec<_>>();
         assert_eq!(res[0], &exp);
@@ -877,7 +1115,7 @@ mod test {
         let mut state = vec![native_state()]; // db state
         let buffer = PendingDeltas::new(["native:extractor"]);
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .unwrap();
         // expected state after applying buffer deltas to the given db state
         let exp1 = ProtocolComponentState::new(
@@ -921,7 +1159,7 @@ mod test {
         let mut state = vec![vm_state()];
         let buffer = PendingDeltas::new(["vm:extractor"]);
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .unwrap();
         let address0 = Bytes::from("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05");
         let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
@@ -1041,10 +1279,10 @@ mod test {
         ];
         let buffer = PendingDeltas::new(["vm:extractor", "native:extractor"]);
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .unwrap();
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .unwrap();
 
         let new_components = buffer
@@ -1069,29 +1307,34 @@ mod test {
 
     #[test]
     fn test_insert_respects_db_committed_height() {
-        let buffer = PendingDeltas::new(["vm:extractor"]);
+        // depth 1 alone would allow evicting up to block 2; the commit height must hold it back
+        let buffer = PendingDeltas::with_config(
+            ["vm:extractor"],
+            WindowConfig { depth: 1, min_fold_batch: 1 },
+            Arc::new(DiscardSink),
+        );
 
         let exp1 = simple_block_changes(1, None);
         let exp2 = simple_block_changes(2, None);
-        let exp3 = simple_block_changes(3, Some(2));
+        let exp3 = simple_block_changes(3, Some(1));
 
         buffer
-            .insert(Arc::new(exp1.clone()))
+            .insert(&Arc::new(exp1.clone()))
             .expect("first insert failed");
         buffer
-            .insert(Arc::new(exp2.clone()))
+            .insert(&Arc::new(exp2.clone()))
             .expect("second insert failed");
 
         {
             let reorg_buffer = buffer
-                .buffers
+                .windows
                 .get("vm:extractor")
                 .expect("extractor buffer missing");
             let guard = reorg_buffer
                 .lock()
                 .expect("lock poisoned");
             let block_numbers: Vec<&BlockAggregatedChanges> = guard
-                .get_block_range(None, None)
+                .blocks(None, None)
                 .expect("Failed to get block range")
                 .collect();
             assert_eq!(
@@ -1102,22 +1345,22 @@ mod test {
         }
 
         buffer
-            .insert(Arc::new(exp3.clone()))
+            .insert(&Arc::new(exp3.clone()))
             .expect("third insert failed");
 
         let reorg_buffer = buffer
-            .buffers
+            .windows
             .get("vm:extractor")
             .expect("extractor buffer missing");
         let guard = reorg_buffer
             .lock()
             .expect("lock poisoned");
         let block_numbers: Vec<&BlockAggregatedChanges> = guard
-            .get_block_range(None, None)
+            .blocks(None, None)
             .expect("Failed to get block range")
             .collect();
 
-        assert_eq!(block_numbers, vec![&exp3], "blocks <= commit height should be drained");
+        assert_eq!(block_numbers, vec![&exp2, &exp3], "blocks <= commit height should be drained");
     }
 
     use rstest::rstest;
@@ -1135,10 +1378,10 @@ mod test {
     ) {
         let buffer = PendingDeltas::new(["vm:extractor", "native:extractor"]);
         buffer
-            .insert(Arc::new(vm_block_deltas()))
+            .insert(&Arc::new(vm_block_deltas()))
             .expect("vm insert failed");
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .expect("native insert failed");
 
         let version = BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap());
@@ -1167,7 +1410,7 @@ mod test {
     ) {
         let buffer = PendingDeltas::new(["native:extractor"]);
         buffer
-            .insert(Arc::new(native_block_deltas()))
+            .insert(&Arc::new(native_block_deltas()))
             .unwrap();
 
         let res = buffer

@@ -116,10 +116,19 @@ impl SwapEncoder for CurveSwapEncoder {
         chain: Chain,
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
+        let native_asset = chain.native_asset();
+        let wrapper = native_asset.wrapper().ok_or_else(|| {
+            EncodingError::FatalError(format!(
+                "Curve encoding requires a native wrapper contract on {chain}"
+            ))
+        })?;
         Ok(Self {
             executor_address,
-            native_token_address: chain.native_token().address,
-            wrapped_native_token_address: chain.wrapped_native_token().address,
+            native_token_address: native_asset
+                .native_token()
+                .address
+                .clone(),
+            wrapped_native_token_address: wrapper.address.clone(),
         })
     }
 
@@ -192,6 +201,16 @@ mod tests {
 
     fn curve_config() -> Option<HashMap<String, String>> {
         None
+    }
+
+    #[test]
+    fn test_curve_rejects_arc_without_wrapper() {
+        assert_eq!(
+            CurveSwapEncoder::new(Bytes::default(), Chain::Arc, curve_config()).err(),
+            Some(EncodingError::FatalError(
+                "Curve encoding requires a native wrapper contract on arc".to_string()
+            ))
+        );
     }
 
     #[rstest]

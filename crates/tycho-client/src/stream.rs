@@ -6,7 +6,10 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::{sync::mpsc::Receiver, task::JoinHandle};
+use tokio::{
+    sync::{mpsc::Receiver, Semaphore},
+    task::JoinHandle,
+};
 use tracing::{info, warn};
 use tycho_common::{
     dto::{PaginationLimits, ProtocolSystemsRequestBody},
@@ -18,7 +21,7 @@ use tycho_common::{
 
 use crate::{
     client_metadata::serialize_client_metadata,
-    deltas::DeltasClient,
+    deltas::{DeltasClient, DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE},
     feed::{
         component_tracker::ComponentFilter, synchronizer::ProtocolStateSynchronizer, BlockHeader,
         BlockSynchronizer, BlockSynchronizerError, FeedMessage,
@@ -70,6 +73,25 @@ fn validate_chain_config() -> Result<(), StreamError> {
     Ok(())
 }
 
+fn validate_subscription_buffer_size(subscription_buffer_size: usize) -> Result<(), StreamError> {
+    if subscription_buffer_size == 0 {
+        return Err(StreamError::SetUpError(
+            "subscription buffer size must be greater than zero".to_string(),
+        ));
+    }
+
+    if subscription_buffer_size > Semaphore::MAX_PERMITS {
+        return Err(StreamError::SetUpError(format!(
+            "subscription buffer size must not exceed {} (Tokio's maximum channel capacity); \
+             choose a value between 1 and {}",
+            Semaphore::MAX_PERMITS,
+            Semaphore::MAX_PERMITS,
+        )));
+    }
+
+    Ok(())
+}
+
 pub struct TychoStreamBuilder {
     tycho_url: String,
     chain: Chain,
@@ -89,6 +111,7 @@ pub struct TychoStreamBuilder {
     partial_blocks: bool,
     max_messages: Option<usize>,
     client_metadata: HashMap<String, String>,
+    subscription_buffer_size: usize,
 }
 
 impl TychoStreamBuilder {
@@ -121,6 +144,7 @@ impl TychoStreamBuilder {
             partial_blocks: false,
             max_messages: None,
             client_metadata: HashMap::new(),
+            subscription_buffer_size: DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE,
         }
     }
 
@@ -264,6 +288,15 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Sets the number of deltas buffered for each WebSocket subscription.
+    ///
+    /// The default is 128. Values outside Tokio's supported channel range are rejected as setup
+    /// errors when [`build`](Self::build) is called, before any network I/O begins.
+    pub fn subscription_buffer_size(mut self, subscription_buffer_size: usize) -> Self {
+        self.subscription_buffer_size = subscription_buffer_size;
+        self
+    }
+
     /// Stops the stream after emitting this many messages. Useful for testing or
     /// triggering a periodic restart after a fixed number of blocks.
     pub fn max_messages(mut self, n: usize) -> Self {
@@ -290,6 +323,31 @@ impl TychoStreamBuilder {
         self
     }
 
+    /// Constructs the WebSocket delta client from this builder's retry, buffer, and metadata
+    /// configuration.
+    pub(crate) fn build_ws_deltas_client(
+        &self,
+        ws_uri: &str,
+        auth_key: Option<&str>,
+        client_metadata_header: Option<String>,
+    ) -> Result<WsDeltasClient, StreamError> {
+        validate_subscription_buffer_size(self.subscription_buffer_size)?;
+
+        let ws_client = match &self.websockets_retry_config {
+            RetryConfiguration::Constant(config) => WsDeltasClient::new_with_reconnects(
+                ws_uri,
+                auth_key,
+                config.max_attempts,
+                config.cooldown,
+            ),
+        }
+        .map_err(|e| StreamError::SetUpError(e.to_string()))?
+        .with_subscription_buffer_size(self.subscription_buffer_size)
+        .with_client_metadata_header(client_metadata_header);
+
+        Ok(ws_client)
+    }
+
     /// Builds and starts the Tycho client, connecting to the Tycho server and
     /// setting up the synchronization of exchange components.
     pub async fn build(
@@ -298,6 +356,8 @@ impl TychoStreamBuilder {
         (JoinHandle<()>, Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>),
         StreamError,
     > {
+        validate_subscription_buffer_size(self.subscription_buffer_size)?;
+
         if self.exchanges.is_empty() {
             return Err(StreamError::SetUpError(
                 "At least one exchange must be registered.".to_string(),
@@ -336,17 +396,11 @@ impl TychoStreamBuilder {
             (tycho_ws_url, tycho_rpc_url)
         };
 
-        // Initialize the WebSocket client
-        let ws_client = match &self.websockets_retry_config {
-            RetryConfiguration::Constant(config) => WsDeltasClient::new_with_reconnects(
-                &tycho_ws_url,
-                auth_key.as_deref(),
-                config.max_attempts,
-                config.cooldown,
-            ),
-        }
-        .map_err(|e| StreamError::SetUpError(e.to_string()))?
-        .with_client_metadata_header(metadata_header.clone());
+        let ws_client = self.build_ws_deltas_client(
+            &tycho_ws_url,
+            auth_key.as_deref(),
+            metadata_header.clone(),
+        )?;
         let rpc_client = HttpRPCClient::new(
             &tycho_rpc_url,
             HttpRPCClientOptions::new()
@@ -604,6 +658,42 @@ mod tests {
             .build()
             .await;
         assert!(receiver.is_err(), "Client should fail to build when no exchanges are registered.");
+    }
+
+    #[tokio::test]
+    async fn test_zero_subscription_buffer_size_fails_before_network_io() {
+        let error = TychoStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .exchange("uniswap_v2", ComponentFilter::with_tvl_range(100.0, 100.0))
+            .subscription_buffer_size(0)
+            .build()
+            .await
+            .expect_err("a zero subscription buffer size must be rejected during setup");
+
+        assert!(matches!(error, StreamError::SetUpError(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must be greater than zero"),
+            "error should explain how to correct the configuration: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_too_large_subscription_buffer_size_fails_before_network_io() {
+        let error = TychoStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .exchange("uniswap_v2", ComponentFilter::with_tvl_range(100.0, 100.0))
+            .subscription_buffer_size(usize::MAX)
+            .build()
+            .await
+            .expect_err("an oversized subscription buffer size must be rejected during setup");
+
+        assert!(matches!(error, StreamError::SetUpError(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must not exceed"),
+            "error should name the maximum supported capacity: {error}"
+        );
     }
 
     #[test]

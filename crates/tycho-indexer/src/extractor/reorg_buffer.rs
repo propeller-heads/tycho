@@ -24,10 +24,17 @@ pub enum BlockNumberOrTimestamp {
 }
 
 impl BlockNumberOrTimestamp {
-    fn greater_than(&self, other: &Block) -> bool {
+    pub(crate) fn greater_than(&self, other: &Block) -> bool {
         match self {
             BlockNumberOrTimestamp::Number(n) => n > &other.number,
             BlockNumberOrTimestamp::Timestamp(ts) => ts > &other.ts,
+        }
+    }
+
+    pub(crate) fn less_than(&self, other: &Block) -> bool {
+        match self {
+            BlockNumberOrTimestamp::Number(n) => n < &other.number,
+            BlockNumberOrTimestamp::Timestamp(ts) => ts < &other.ts,
         }
     }
 }
@@ -50,6 +57,9 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
         })
     }
 }
+
+// TODO: rename ReorgBuffer. `DeltaWindow` also keeps committed blocks here for serving, so this is
+// a contiguous chain segment with revert purge, not a buffer of blocks awaiting persistence.
 
 /// Buffer that holds blocks awaiting persistence to the database so extractors can batch commits
 /// and efficiently handle chain reorganisations (reorg) without requiring database rollbacks.
@@ -301,6 +311,36 @@ where
         Ok(PurgeOutcome::HeightMatch(purged))
     }
 
+    /// The oldest buffered message, or `None` if the buffer is empty.
+    pub fn oldest(&self) -> Option<&B> {
+        self.block_messages.front()
+    }
+
+    /// The newest buffered message, or `None` if the buffer is empty.
+    pub fn newest(&self) -> Option<&B> {
+        self.block_messages.back()
+    }
+
+    /// The buffered message for block `number`, or `None` if that block is not buffered.
+    /// Buffered blocks are contiguous, so this is an index lookup.
+    pub fn block_at(&self, number: u64) -> Option<&B> {
+        let first = self.oldest()?.block().number;
+        let index = usize::try_from(number.checked_sub(first)?).ok()?;
+        let msg = self.block_messages.get(index)?;
+        let found = msg.block().number;
+        if found != number {
+            error!(
+                number,
+                found,
+                first,
+                len = self.block_messages.len(),
+                "ReorgBuffer is not contiguous: index lookup landed on a different block"
+            );
+            return None;
+        }
+        Some(msg)
+    }
+
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
     /// is empty
     pub fn get_most_recent_block(&self) -> Option<tycho_common::models::blockchain::Block> {
@@ -384,6 +424,9 @@ where
     }
 
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
+    // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
+    // the buffer-bound behaviour the window deliberately diverges from.
+    #[allow(dead_code)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();
@@ -624,7 +667,7 @@ mod test {
 
     use rstest::rstest;
     use tycho_common::models::{
-        blockchain::{Transaction, TxWithChanges},
+        blockchain::{BlockAggregatedChanges, Transaction, TxWithChanges},
         protocol::{ProtocolComponent, ProtocolComponentStateDelta},
         Chain, ChangeType,
     };
@@ -839,6 +882,51 @@ mod test {
             _ => panic!("block entity version not implemented"),
         }
     }
+    fn numbered_buffer(
+        range: std::ops::RangeInclusive<u64>,
+    ) -> ReorgBuffer<BlockAggregatedChanges> {
+        let mut buffer = ReorgBuffer::new();
+        for n in range {
+            buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: testing::block(n),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        buffer
+    }
+
+    #[test]
+    fn oldest_and_newest_are_the_buffer_ends() {
+        let empty: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
+        assert!(empty.oldest().is_none() && empty.newest().is_none());
+
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(buffer.oldest().map(|b| b.block.number), Some(4));
+        assert_eq!(buffer.newest().map(|b| b.block.number), Some(6));
+    }
+
+    #[rstest]
+    #[case::first(4, Some(4))]
+    #[case::middle(5, Some(5))]
+    #[case::below(3, None)]
+    #[case::above(7, None)]
+    fn block_at_finds_a_buffered_block_by_number(
+        #[case] number: u64,
+        #[case] expected: Option<u64>,
+    ) {
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(
+            buffer
+                .block_at(number)
+                .map(|b| b.block.number),
+            expected
+        );
+    }
+
     #[test]
     fn test_reorg_buffer_state_lookup() {
         let mut reorg_buffer = ReorgBuffer::new();
@@ -1419,8 +1507,13 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    // The `committed_oldest_no` case pins current behavior: the oldest buffered block
+    // reports `Committed` although it is still only buffered (the oldest buffered block is
+    // `db_committed + 1`). `services::state::window::DeltaWindow::commit_status` documents this
+    // off-by-one and deliberately diverges from it.
     #[rstest]
     #[case::committed_no(BlockNumberOrTimestamp::Number(0), CommitStatus::Committed)]
+    #[case::committed_oldest_no(BlockNumberOrTimestamp::Number(1), CommitStatus::Committed)]
     #[case::committed_ts(
         BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap()),
         CommitStatus::Committed

@@ -9,32 +9,16 @@ import {
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {TransferManager} from "../TransferManager.sol";
 import {TychoRouterV3} from "../TychoRouterV3.sol";
+import {
+    ICurveCryptoPool,
+    ICurveCryptoPoolETH,
+    ICurveStablePool,
+    isCurveStablePool
+} from "@interfaces/ICurvePool.sol";
 
 error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
-
-interface CryptoPool {
-    function exchange(uint256 i, uint256 j, uint256 dx, uint256 minDy)
-        external
-        payable;
-}
-
-interface StablePool {
-    function exchange(int128 i, int128 j, uint256 dx, uint256 minDy)
-        external
-        payable;
-}
-
-interface CryptoPoolETH {
-    function exchange(
-        uint256 i,
-        uint256 j,
-        uint256 dx,
-        uint256 minDy,
-        bool useEth
-    ) external payable;
-}
 
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
@@ -88,19 +72,18 @@ contract CurveExecutor is IExecutor {
             ethAmount = amountIn;
         }
 
-        if (poolType == 1 || poolType == 10) {
-            // stable and stable_ng
+        if (isCurveStablePool(poolType)) {
             // slither-disable-next-line arbitrary-send-eth
-            StablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
+            ICurveStablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
         } else {
             // crypto or llamma
             if (tokenIn == nativeToken || tokenOut == nativeToken) {
                 // slither-disable-next-line arbitrary-send-eth
-                CryptoPoolETH(pool).exchange{value: ethAmount}(
+                ICurveCryptoPoolETH(pool).exchange{value: ethAmount}(
                     uint256(int256(i)), uint256(int256(j)), amountIn, 0, true
                 );
             } else {
-                CryptoPool(pool)
+                ICurveCryptoPool(pool)
                     .exchange(
                         uint256(int256(i)), uint256(int256(j)), amountIn, 0
                     );

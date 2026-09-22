@@ -1,0 +1,31 @@
+substreams_yaml_path: ./substreams.yaml
+protocol_system: "etherfi"
+protocol_type_names:
+  - "ethereum_etherfi_pool"
+module_name: "map_protocol_changes"
+# Both balances are the protocol's own accounting - `totalValueInLp` for the pool and
+# `eETH.balanceOf(weETH)` for the wrapper - not token balances held at the component addresses.
+skip_balance_check: true
+initialized_accounts:
+tests:
+  - name: test_etherfi
+    start_block: 25940000
+    stop_block: 25940200
+    expected_components:
+      - id: "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"
+        tokens:
+          - "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee" # weeth
+          - "0x35fA164735182de50811E8e2E824cFb9B6118ac2" # eeth
+        creation_tx: "0xdc387d47c733ca16693792c12f81b3a038930489b2b89dfcae14b6c4f293fe56"
+        skip_simulation: false
+        # The harness has no EtherFi executor bytecode fixture: the executor's constructor needs
+        # code at four addresses the pinned fork lacks, and propeller-heads/tycho#1455 reworks how
+        # fixtures are produced. Add the fixture and flip this to false once it lands.
+        skip_execution: true
+      - id: "0x35fA164735182de50811E8e2E824cFb9B6118ac2"
+        tokens:
+          - "0x35fA164735182de50811E8e2E824cFb9B6118ac2" # eeth
+          - "0x0000000000000000000000000000000000000000" # eth (native)
+        creation_tx: "0xdc387d47c733ca16693792c12f81b3a038930489b2b89dfcae14b6c4f293fe56"
+        skip_simulation: false
+        skip_execution: true

@@ -1,0 +1,69 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_lido_v4"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_lido_v4.wasm
+
+network: mainnet
+
+params:
+  # Recompute these raw slot values with:
+  #   RPC_URL=<your-archive-rpc> ./scripts/compute_initial_state.sh <block_number>
+  store_balance_slots: &initial_state |
+    {
+      "start_block": 25603297,
+      "total_and_external_shares": "0x00000000000000c9b9001a2e4d7ccd3f00000000000639d56fd47ec2536471cb",
+      "buffered_ether_and_deposited_post_report": "0x000000000000a13dbebf95fa7d800000000000000000001d4009424f9565a013",
+      "cl_validators_balance_and_cl_pending_balance": "0x00000000000000000000000000000000000000000007162e4f16cc0af69a3200",
+      "staking_state": "0x00001fc3842bd1f071c000000000190000001fc383c40d61b0f6f0000186acdf",
+      "wsteth_shares": "0x000000000000000000000000000000000000000000030059cedfb0543bebad72",
+      "creation_tx": "0x297042b4e5fd41399634f124beec7afc37712bc3374c3419b72932caf52714aa",
+      "implementations": {
+        "steth": "0x028271e30a695c0527a0c50ca30603fed004cdb0"
+      }
+    }
+  map_protocol_components: *initial_state
+  map_protocol_changes: *initial_state
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: &start_block 25603297
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_balance_slots
+    kind: store
+    updatePolicy: set
+    valueType: bigint
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_balance_slots
+        mode: deltas
+      - store: store_balance_slots
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

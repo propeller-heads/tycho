@@ -33,20 +33,22 @@ pub struct NativeWrapperState {
 }
 
 impl NativeWrapperState {
-    pub fn new(chain: Chain) -> Self {
-        Self { native_token: chain.native_token(), wrapped_token: chain.wrapped_native_token() }
+    pub fn new(chain: Chain) -> Option<Self> {
+        let native_asset = chain.native_asset();
+        Some(Self {
+            native_token: native_asset.native_token().clone(),
+            wrapped_token: native_asset.wrapper()?.clone(),
+        })
     }
 
     /// Builds the `ProtocolComponent` metadata for stream injection.
-    pub fn component(chain: Chain) -> ProtocolComponent {
-        let native = chain.native_token();
-        let wrapped = chain.wrapped_native_token();
+    pub fn component(&self) -> ProtocolComponent {
         ProtocolComponent::new(
             Bytes::from(NATIVE_WRAPPER_ID.as_bytes()),
             NATIVE_WRAPPER_PROTOCOL_SYSTEM.to_string(),
             NATIVE_WRAPPER_PROTOCOL_TYPE.to_string(),
-            chain,
-            vec![native, wrapped],
+            self.native_token.chain,
+            vec![self.native_token.clone(), self.wrapped_token.clone()],
             vec![],
             HashMap::new(),
             Bytes::default(),
@@ -139,7 +141,7 @@ mod tests {
     use super::*;
 
     fn eth_state() -> NativeWrapperState {
-        NativeWrapperState::new(Chain::Ethereum)
+        NativeWrapperState::new(Chain::Ethereum).expect("Ethereum should have a wrapper")
     }
 
     fn native_token() -> Token {
@@ -147,7 +149,15 @@ mod tests {
     }
 
     fn wrapped_token() -> Token {
-        Chain::Ethereum.wrapped_native_token()
+        Chain::Ethereum
+            .wrapped_native_token()
+            .expect("Ethereum should have a wrapper")
+    }
+
+    #[test]
+    fn test_new_rejects_chains_without_wrapper_contracts() {
+        assert!(NativeWrapperState::new(Chain::Arc).is_none());
+        assert!(NativeWrapperState::new(Chain::Starknet).is_none());
     }
 
     #[test]
@@ -219,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_component_metadata() {
-        let component = NativeWrapperState::component(Chain::Ethereum);
+        let component = eth_state().component();
         assert_eq!(component.id, Bytes::from(NATIVE_WRAPPER_ID.as_bytes()));
         assert_eq!(component.protocol_system, "native_wrapper");
         assert_eq!(component.protocol_type_name, "NativeWrapper");

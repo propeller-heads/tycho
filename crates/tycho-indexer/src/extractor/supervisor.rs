@@ -246,8 +246,9 @@ impl ExtractorSupervisor {
 
             // Notify all subscribers of the restart. Sent on the same channels as block
             // messages, so it is guaranteed to arrive after all blocks the runner emitted
-            // before failing. Each subscriber decides how to react: `PendingDeltas` resets its
-            // buffer, the WS service ends the affected client subscriptions.
+            // before failing. Each subscriber decides how to react: `PendingDeltas` folds its
+            // committed blocks and clears its window, the WS service ends the affected client
+            // subscriptions.
             {
                 let mut subs = self.subscriptions.lock().await;
                 let mut closed = Vec::new();

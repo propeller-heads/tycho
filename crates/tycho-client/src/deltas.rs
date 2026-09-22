@@ -70,6 +70,8 @@ use zstd;
 
 use crate::{client_metadata::CLIENT_METADATA_HEADER, TYCHO_SERVER_VERSION};
 
+pub(crate) const DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE: usize = 128;
+
 #[derive(Error, Debug)]
 pub enum DeltasError {
     /// Failed to parse the provided URI.
@@ -534,7 +536,7 @@ impl WsDeltasClient {
             auth_key: auth_key.map(|s| s.to_string()),
             inner: Arc::new(Mutex::new(None)),
             ws_buffer_size: 128,
-            subscription_buffer_size: 128,
+            subscription_buffer_size: DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE,
             conn_notify: Arc::new(Notify::new()),
             max_reconnects,
             retry_cooldown,
@@ -549,29 +551,9 @@ impl WsDeltasClient {
         self
     }
 
-    // Construct a new client with custom buffer sizes (for testing)
-    #[cfg(test)]
-    pub fn new_with_custom_buffers(
-        ws_uri: &str,
-        auth_key: Option<&str>,
-        ws_buffer_size: usize,
-        subscription_buffer_size: usize,
-    ) -> Result<Self, DeltasError> {
-        let uri = ws_uri
-            .parse::<Uri>()
-            .map_err(|e| DeltasError::UriParsing(ws_uri.to_string(), e.to_string()))?;
-        Ok(Self {
-            uri,
-            auth_key: auth_key.map(|s| s.to_string()),
-            inner: Arc::new(Mutex::new(None)),
-            ws_buffer_size,
-            subscription_buffer_size,
-            conn_notify: Arc::new(Notify::new()),
-            max_reconnects: 5,
-            retry_cooldown: Duration::from_millis(0),
-            dead: Arc::new(AtomicBool::new(false)),
-            client_metadata_header: None,
-        })
+    pub(crate) fn with_subscription_buffer_size(mut self, subscription_buffer_size: usize) -> Self {
+        self.subscription_buffer_size = subscription_buffer_size;
+        self
     }
 
     /// Ensures that the client is connected.
@@ -1151,6 +1133,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::stream::TychoStreamBuilder;
 
     #[derive(Clone)]
     enum ExpectedComm {
@@ -1471,6 +1454,19 @@ mod tests {
                 .unwrap(),
             format!("tycho-client-{}", env!("CARGO_PKG_VERSION")).as_str()
         );
+    }
+
+    #[test]
+    fn test_new_with_reconnects_preserves_default_subscription_buffer_size() {
+        let client = WsDeltasClient::new_with_reconnects(
+            "ws://localhost:4242",
+            None,
+            3,
+            Duration::from_secs(1),
+        )
+        .expect("a valid websocket URI should construct a client");
+
+        assert_eq!(client.subscription_buffer_size, DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE);
     }
 
     #[tokio::test]
@@ -1999,7 +1995,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_buffer_full_triggers_unsubscribe() {
+    async fn test_stream_builder_buffer_size_limits_subscription_channel() {
         // Expected communication sequence for buffer full scenario
         let exp_comm = {
             [
@@ -2098,14 +2094,12 @@ mod tests {
 
         let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
 
-        // Create client with very small buffer size (1) to easily trigger BufferFull
-        let client = WsDeltasClient::new_with_custom_buffers(
-            &format!("ws://{addr}"),
-            None,
-            128, // ws_buffer_size
-            1,   // subscription_buffer_size - this will trigger BufferFull easily
-        )
-        .unwrap();
+        // Build the client through the public stream builder so the test observes its configured
+        // capacity on the real subscription channel.
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
 
         let jh = client
             .connect()

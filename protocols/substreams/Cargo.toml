@@ -21,6 +21,7 @@ members = [
     "ethereum-ekubo-v3",
     "ethereum-maverick-v2",
     "ethereum-lido",
+    "ethereum-lido-v4",
     "ethereum-balancer-v3",
     "ethereum-fluid",
     "base-aerodrome-v1",
@@ -35,6 +36,7 @@ members = [
     "ethereum-ring-swap-v2",
     "ethereum-sky",
     "polygon-ramses-v3",
+    "ethereum-etherfi",
 ]
 resolver = "2"
 
