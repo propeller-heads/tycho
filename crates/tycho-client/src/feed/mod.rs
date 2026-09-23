@@ -379,7 +379,8 @@ impl SynchronizerStream {
     ///
     /// If a synchronizer is delayed, this method will try to catch up to the next expected block
     /// by consuming all waiting messages in its queue and waiting for any new block messages
-    /// within a timeout. Finally, all update messages are merged into one and returned.
+    /// within a timeout. It stops at the first block that is next expected, the next partial, or
+    /// advanced. Finally, all update messages are merged into one and returned.
     async fn try_catch_up(
         &mut self,
         block_history: &BlockHistory,
@@ -403,8 +404,14 @@ impl SynchronizerStream {
                     debug!(%extractor_id, block=%msg.header, "Received new message during catch-up");
                     let block_pos = block_history.determine_block_position(&msg.header)?;
                     results.push(msg);
-                    if matches!(block_pos, BlockPosition::NextExpected | BlockPosition::NextPartial)
-                    {
+                    // Advanced means nothing later in the queue can connect to this history
+                    // either. Reading on only widens the gap the reinit has to stitch.
+                    if matches!(
+                        block_pos,
+                        BlockPosition::NextExpected |
+                            BlockPosition::NextPartial |
+                            BlockPosition::Advanced
+                    ) {
                         break;
                     }
                 }
@@ -2671,6 +2678,45 @@ mod tests {
         // Rebuilt block 4, then an undo of it again: the revert to 3 must still resolve.
         advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
         advance_both(&v2, &v3, &mut rx, partial_revert_message(3, 0)).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A Delayed stream whose queue does not connect to the tip must report the first block above
+    /// the tip, not consume until its deadline and report the last one. The stale-tip case on
+    /// Base turned a one-block gap into a seven-block gap this way.
+    #[test(tokio::test)]
+    async fn test_catch_up_stops_on_first_advanced_block() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+
+        // v2 moves to block 2; v3 is silent and becomes Delayed at block 1.
+        v2.send_header(header_message(2))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 2, None);
+        assert!(matches!(
+            feed.sync_states
+                .get("uniswap-v3")
+                .unwrap(),
+            SynchronizerState::Delayed(_)
+        ));
+
+        // v3's queue: block 3 on an unknown parent (does not connect), then block 4 on it.
+        let mut detached_3 = header_message(3);
+        detached_3.header.parent_hash = Bytes::from(vec![0xAA]);
+        v3.send_header(detached_3)
+            .await
+            .expect("v3 send failed");
+        v3.send_header(header_message(4))
+            .await
+            .expect("v3 send failed");
+
+        // The round reinitialises on v3's advanced header. After reinit, v3 is Ready at the
+        // block it reported: 3 when catch-up stopped at the first advanced block, 4 when it
+        // read on to the deadline.
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v3", 3, None);
 
         shutdown_block_synchronizer(nanny, rx).await;
     }
