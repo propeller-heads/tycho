@@ -1,8 +1,7 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, Pow, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -15,55 +14,47 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::{
-    client::RFQClient,
-    protocols::liquorice::{client::LiquoriceClient, models::LiquoriceTokenPairPrice},
+use crate::{
+    book::sim::{self, SwapDirection},
+    rfq::protocols::liquorice::{client::LiquoriceClient, models::LiquoriceTokenPairPrice},
 };
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct LiquoriceState {
-    pub base_token: Token,
-    pub quote_token: Token,
-    pub prices_by_mm: HashMap<String, LiquoriceTokenPairPrice>,
-    pub client: LiquoriceClient,
-}
+/// Rough gas estimate for one Liquorice settlement.
+const LIQUORICE_SWAP_GAS: u64 = 134_000;
 
-impl fmt::Debug for LiquoriceState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mm_names: Vec<&String> = self.prices_by_mm.keys().collect();
-        f.debug_struct("LiquoriceState")
-            .field("base_token", &self.base_token)
-            .field("quote_token", &self.quote_token)
-            .field("market_makers", &mm_names)
-            .finish_non_exhaustive()
-    }
+#[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
+pub struct LiquoriceState {
+    pub(super) base_token: Token,
+    pub(super) quote_token: Token,
+    /// Printed as the makers' names only; the ladders are too long for a log line.
+    #[debug("{:?}", prices_by_mm.keys().collect::<Vec<_>>())]
+    pub(super) prices_by_mm: HashMap<String, LiquoriceTokenPairPrice>,
+    #[debug(skip)]
+    pub(super) client: Arc<LiquoriceClient>,
 }
 
 impl LiquoriceState {
-    pub fn new(
-        base_token: Token,
-        quote_token: Token,
-        prices_by_mm: HashMap<String, LiquoriceTokenPairPrice>,
-        client: LiquoriceClient,
-    ) -> Self {
-        Self { base_token, quote_token, prices_by_mm, client }
+    /// The pair's base token (the token whose amounts the price levels are quoted in).
+    pub fn base_token(&self) -> &Token {
+        &self.base_token
     }
 
+    /// The pair's quote token.
+    pub fn quote_token(&self) -> &Token {
+        &self.quote_token
+    }
+    /// The levels price one direction only: selling base for quote.
     fn valid_direction_guard(
         &self,
         token_address_in: &Bytes,
         token_address_out: &Bytes,
     ) -> Result<(), SimulationError> {
-        if !(token_address_in == &self.base_token.address &&
-            token_address_out == &self.quote_token.address)
-        {
-            Err(SimulationError::InvalidInput(
-                format!("Invalid token addresses. Got in={token_address_in}, out={token_address_out}, expected in={}, out={}", self.base_token.address, self.quote_token.address),
-                None,
-            ))
-        } else {
-            Ok(())
-        }
+        SwapDirection::require_base_to_quote(
+            &self.base_token,
+            &self.quote_token,
+            token_address_in,
+            token_address_out,
+        )
     }
 
     fn valid_levels_guard(&self) -> Result<(), SimulationError> {
@@ -76,6 +67,13 @@ impl LiquoriceState {
         }
         Ok(())
     }
+
+    /// The market makers' ladders that carry liquidity.
+    fn populated_books(&self) -> impl Iterator<Item = &LiquoriceTokenPairPrice> {
+        self.prices_by_mm
+            .values()
+            .filter(|price| !price.levels.is_empty())
+    }
 }
 
 #[typetag::serde]
@@ -87,10 +85,9 @@ impl ProtocolSim for LiquoriceState {
     /// Returns the best available price across all market makers
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         self.valid_direction_guard(&base.address, &quote.address)?;
-
         self.prices_by_mm
             .values()
-            .filter_map(|price| price.get_price())
+            .filter_map(|price| price.average_price())
             .reduce(f64::max)
             .ok_or(SimulationError::RecoverableError("No liquidity".into()))
     }
@@ -103,39 +100,18 @@ impl ProtocolSim for LiquoriceState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         self.valid_direction_guard(&token_in.address, &token_out.address)?;
         self.valid_levels_guard()?;
-
-        let amount_in = amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".into())
-        })? / 10f64.powi(token_in.decimals as i32);
-
-        // Find out largest amount_out across all market makers for the given amount_in
-        let (amount_out, remaining_amount_in) = self
-            .prices_by_mm
-            .values()
-            .filter(|price| !price.levels.is_empty())
-            .map(|price| price.get_amount_out_from_levels(amount_in))
+        let amount_in = sim::to_human(&amount_in, token_in.decimals);
+        // The market maker paying the most for amount_in fills the swap.
+        let fill = self
+            .populated_books()
+            .map(|price| price.levels.fill(amount_in))
             .max_by(|a, b| {
-                a.0.partial_cmp(&b.0)
+                a.amount_out
+                    .partial_cmp(&b.amount_out)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .ok_or(SimulationError::RecoverableError("No liquidity".into()))?;
-
-        let res = GetAmountOutResult {
-            amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
-                .ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
-                })?,
-            gas: BigUint::from(134_000u64),
-            new_state: self.clone_box(),
-        };
-
-        if remaining_amount_in > 0.0 {
-            return Err(SimulationError::InvalidInput(
-                format!("Pool has not enough liquidity to support complete swap. Input amount: {amount_in}, consumed amount: {}", amount_in-remaining_amount_in),
-                Some(res)));
-        }
-
-        Ok(res)
+        sim::fill_result(fill, amount_in, token_out.decimals, LIQUORICE_SWAP_GAS, self.clone_box())
     }
 
     fn get_limits(
@@ -145,32 +121,17 @@ impl ProtocolSim for LiquoriceState {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         self.valid_direction_guard(&sell_token, &buy_token)?;
         self.valid_levels_guard()?;
-
-        let sell_decimals = self.base_token.decimals;
-        let buy_decimals = self.quote_token.decimals;
-        let (total_sell_amount, total_buy_amount) = self
-            .prices_by_mm
-            .values()
-            .filter(|price| !price.levels.is_empty())
-            .map(|price| {
-                price
-                    .levels
-                    .iter()
-                    .fold((0.0, 0.0), |(sell_sum, buy_sum), level| {
-                        (sell_sum + level.quantity, buy_sum + level.quantity * level.price)
-                    })
-            })
+        // The limits are those of the deepest market maker's ladder.
+        let deepest = self
+            .populated_books()
             .max_by(|a, b| {
-                a.1.partial_cmp(&b.1)
+                a.levels
+                    .notional()
+                    .partial_cmp(&b.levels.notional())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .ok_or(SimulationError::RecoverableError("No liquidity".into()))?;
-
-        let sell_limit =
-            BigUint::from((total_sell_amount * 10_f64.pow(sell_decimals as f64)) as u128);
-        let buy_limit = BigUint::from((total_buy_amount * 10_f64.pow(buy_decimals as f64)) as u128);
-
-        Ok((sell_limit, buy_limit))
+        sim::limits(&deepest.levels, self.base_token.decimals, self.quote_token.decimals)
     }
 
     fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
@@ -227,13 +188,13 @@ impl IndicativelyPriced for LiquoriceState {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::str::FromStr;
 
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::liquorice::models::LiquoricePriceLevel;
+    use crate::book::levels::{Levels, PriceLevel};
 
     fn wbtc() -> Token {
         Token::new(
@@ -275,19 +236,16 @@ mod tests {
         )
     }
 
-    fn empty_liquorice_client() -> LiquoriceClient {
-        LiquoriceClient::new(
+    fn empty_client() -> Arc<LiquoriceClient> {
+        Arc::new(LiquoriceClient::new(
             Chain::Ethereum,
-            HashSet::new(),
-            0.0,
-            HashSet::new(),
+            "https://api.liquorice.tech/v1/solver/rfq".to_string(),
+            "https://api.liquorice.tech/v1/solver/price-levels".to_string(),
             "".to_string(),
             "".to_string(),
-            Duration::from_secs(0),
             Duration::from_secs(30),
             300,
-        )
-        .unwrap()
+        ))
     }
 
     fn create_test_liquorice_state() -> LiquoriceState {
@@ -299,11 +257,12 @@ mod tests {
             LiquoriceTokenPairPrice {
                 base_token: base_addr.clone(),
                 quote_token: quote_addr.clone(),
-                levels: vec![
-                    LiquoricePriceLevel { quantity: 0.5, price: 3000.0 },
-                    LiquoricePriceLevel { quantity: 1.5, price: 3000.0 },
-                    LiquoricePriceLevel { quantity: 5.0, price: 2999.0 },
-                ],
+                levels: Levels::new(vec![
+                    PriceLevel { quantity: 0.5, price: 3000.0 },
+                    PriceLevel { quantity: 1.5, price: 3000.0 },
+                    PriceLevel { quantity: 5.0, price: 2999.0 },
+                ])
+                .unwrap(),
                 updated_at: None,
             },
         );
@@ -312,7 +271,7 @@ mod tests {
             LiquoriceTokenPairPrice {
                 base_token: base_addr.clone(),
                 quote_token: quote_addr.clone(),
-                levels: vec![LiquoricePriceLevel { quantity: 1.0, price: 2998.0 }],
+                levels: Levels::new(vec![PriceLevel { quantity: 1.0, price: 2998.0 }]).unwrap(),
                 updated_at: None,
             },
         );
@@ -320,8 +279,43 @@ mod tests {
             base_token: weth(),
             quote_token: usdc(),
             prices_by_mm,
-            client: empty_liquorice_client(),
+            client: empty_client(),
         }
+    }
+
+    /// A Liquorice book prices one direction, so the reverse direction is rejected like a token
+    /// outside the pair, by every method.
+    #[test]
+    fn rejects_tokens_outside_the_pair_and_the_reverse_direction() {
+        let state = create_test_liquorice_state();
+        let amount = BigUint::from_str("100000000").unwrap();
+        let is_invalid_pair = |result: Result<_, SimulationError>| {
+            matches!(
+                result,
+                Err(SimulationError::InvalidInput(msg, _)) if msg.contains("Invalid token addresses")
+            )
+        };
+
+        assert!(is_invalid_pair(
+            state
+                .spot_price(&wbtc(), &usdc())
+                .map(|_| ())
+        ));
+        assert!(is_invalid_pair(
+            state
+                .get_amount_out(amount.clone(), &wbtc(), &usdc())
+                .map(|_| ())
+        ));
+        assert!(is_invalid_pair(
+            state
+                .get_amount_out(amount, &usdc(), &weth())
+                .map(|_| ())
+        ));
+        assert!(is_invalid_pair(
+            state
+                .get_limits(wbtc().address.clone(), state.quote_token.address.clone())
+                .map(|_| ())
+        ));
     }
 
     mod spot_price {
@@ -337,24 +331,12 @@ mod tests {
         }
 
         #[test]
-        fn returns_invalid_input_error() {
-            let state = create_test_liquorice_state();
-            let result = state.spot_price(&wbtc(), &usdc());
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, _)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
-        }
-
-        #[test]
         fn returns_no_liquidity_error() {
             let mut state = create_test_liquorice_state();
             state
                 .prices_by_mm
                 .values_mut()
-                .for_each(|price| price.levels.clear());
+                .for_each(|price| price.levels = Levels::default());
             let result = state.spot_price(&state.base_token, &state.quote_token);
             assert!(result.is_err());
             if let Err(SimulationError::RecoverableError(msg)) = result {
@@ -381,21 +363,6 @@ mod tests {
         }
 
         #[test]
-        fn usdc_to_weth() {
-            let state = create_test_liquorice_state();
-
-            let result =
-                state.get_amount_out(BigUint::from_str("10000000000").unwrap(), &usdc(), &weth());
-
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, ..)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
-        }
-
-        #[test]
         fn insufficient_liquidity() {
             let state = create_test_liquorice_state();
 
@@ -409,21 +376,6 @@ mod tests {
             assert!(result.is_err());
             if let Err(SimulationError::InvalidInput(msg, _)) = result {
                 assert!(msg.contains("Pool has not enough liquidity"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
-        }
-
-        #[test]
-        fn invalid_token_pair() {
-            let state = create_test_liquorice_state();
-
-            let result =
-                state.get_amount_out(BigUint::from_str("100000000").unwrap(), &wbtc(), &usdc());
-
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, ..)) = result {
-                assert!(msg.contains("Invalid token addresses"));
             } else {
                 panic!("Expected InvalidInput");
             }
@@ -442,19 +394,6 @@ mod tests {
 
             assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
             assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
-        }
-
-        #[test]
-        fn invalid_token_pair() {
-            let state = create_test_liquorice_state();
-            let result =
-                state.get_limits(wbtc().address.clone(), state.quote_token.address.clone());
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, _)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
         }
     }
 }

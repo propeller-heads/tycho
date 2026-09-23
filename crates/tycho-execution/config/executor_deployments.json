@@ -34,18 +34,18 @@
     },
     "vm:maverick_v2": { "contract": "MaverickV2Executor", "args": [] },
     "vm:balancer_v3": { "contract": "BalancerV3Executor", "args": [] },
-    "rfq:bebop": {
+    "book:bebop": {
       "contract": "BebopExecutor",
       "args": [
         "0xbbbbbBB520d69a9775E85b458C58c648259FAD5F",
         "0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A"
       ]
     },
-    "rfq:hashflow": {
+    "book:hashflow": {
       "contract": "HashflowExecutor",
       "args": ["0x55084eE0fEf03f14a305cd24286359A35D735151"]
     },
-    "rfq:native": {
+    "book:native": {
       "contract": "NativeExecutor",
       "args": ["0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"]
     },
@@ -63,7 +63,7 @@
       "contract": "NativeWrapExecutor",
       "args": ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
     },
-    "rfq:liquorice": {
+    "book:liquorice": {
       "contract": "LiquoriceExecutor",
       "args": [
         "0x0448633eb8B0A42EfED924C42069E0DcF08fb552",
@@ -84,7 +84,7 @@
       "contract": "FallbackExecutor",
       "args": ["0xA4bC389e87011fED8e902166bF421A29Fa6ef633"]
     },
-    "rfq:metric": {
+    "book:metric": {
       "contract": "MetricExecutor",
       "args": []
     },
@@ -124,7 +124,7 @@
         "0x631352Aaa9d6554848aF674106bCD8Bb9E59a5CF"
       ]
     },
-    "rfq:bebop": {
+    "book:bebop": {
       "contract": "BebopExecutor",
       "args": [
         "0xbbbbbBB520d69a9775E85b458C58c648259FAD5F",
@@ -142,11 +142,11 @@
       "contract": "FallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
     },
-    "rfq:metric": {
+    "book:metric": {
       "contract": "MetricExecutor",
       "args": []
     },
-    "rfq:native": {
+    "book:native": {
       "contract": "NativeExecutor",
       "args": ["0x9706D3fff42571305Fc201F996ADC0e768d72911"]
     }
@@ -188,7 +188,7 @@
       "contract": "NativeWrapExecutor",
       "args": ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
     },
-    "rfq:native": {
+    "book:native": {
       "contract": "NativeExecutor",
       "args": ["0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"]
     }
@@ -223,7 +223,7 @@
       "contract": "NativeWrapExecutor",
       "args": ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
     },
-    "rfq:native": {
+    "book:native": {
       "contract": "NativeExecutor",
       "args": ["0x1fDED89D98CBeADd96a109D28689c2638025dad3"]
     }
@@ -261,7 +261,7 @@
       "contract": "NativeWrapExecutor",
       "args": ["0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"]
     },
-    "rfq:metric": {
+    "book:metric": {
       "contract": "MetricExecutor",
       "args": []
     }

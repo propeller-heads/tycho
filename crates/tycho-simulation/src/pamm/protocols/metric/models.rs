@@ -1,122 +1,66 @@
-use std::str::FromStr;
-
-use alloy::primitives::Address;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnNull, DisplayFromStr};
 use tycho_common::Bytes;
 
-use crate::rfq::errors::RFQError;
+use crate::{serde_helpers::evm_address, snapshot_feed::errors::FeedError};
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
 
-/// Metric returns numeric fields as decimal strings. Parse them once at deserialization so the
-/// hot pricing paths never re-parse, and serialize back to the same string form.
-mod biguint_string {
-    use super::*;
-
-    pub fn serialize<S: Serializer>(value: &BigUint, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(value)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BigUint, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        BigUint::from_str(&raw).map_err(serde::de::Error::custom)
-    }
-}
-
-/// `Option` variant of [`biguint_string`] for nullable numeric fields.
-mod option_biguint_string {
-    use super::*;
-
-    pub fn serialize<S: Serializer>(
-        value: &Option<BigUint>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match value {
-            Some(value) => serializer.collect_str(value),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<BigUint>, D::Error> {
-        Option::<String>::deserialize(deserializer)?
-            .map(|raw| BigUint::from_str(&raw).map_err(serde::de::Error::custom))
-            .transpose()
-    }
-}
-
 /// The `PaginatedMetadataResponse` envelope returned by `GET /public/v1/evm/{chain_id}/metadata`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaginatedMetadataResponse {
     pub data: Vec<MetricMetadata>,
     /// `offset` for the next page, or `None` on the last page.
-    #[serde(rename = "nextOffset", default)]
     pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricMetadata {
-    #[serde(rename = "poolAddress", deserialize_with = "deserialize_address")]
+    #[serde(deserialize_with = "evm_address::deserialize")]
     pub pool_address: Bytes,
-    #[serde(deserialize_with = "deserialize_address")]
+    #[serde(deserialize_with = "evm_address::deserialize")]
     pub token0: Bytes,
-    #[serde(deserialize_with = "deserialize_address")]
+    #[serde(deserialize_with = "evm_address::deserialize")]
     pub token1: Bytes,
     /// Total value locked in the requested fiat currency. Absent when Metric has no price for the
     /// pool; used directly as the component TVL. Not carried through the component attributes, so
     /// it is `None` once a state is reconstructed by the decoder.
-    #[serde(rename = "tvlFiat", default)]
     pub tvl_fiat: Option<f64>,
 }
 
-fn deserialize_address<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    let address = Address::from_str(&s).map_err(serde::de::Error::custom)?;
-    Bytes::from_str(&address.to_checksum(None)).map_err(serde::de::Error::custom)
-}
-
+/// Metric returns its numeric fields as decimal strings; they are parsed once at deserialization
+/// (`DisplayFromStr`) so the pricing paths never re-parse, and serialize back to the same form.
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricBidAskResponse {
     /// Fee-adjusted bid price, Q64.64.
-    #[serde(rename = "bidAdj", with = "biguint_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub bid_adj: BigUint,
     /// Fee-adjusted ask price, Q64.64.
-    #[serde(rename = "askAdj", with = "biguint_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub ask_adj: BigUint,
     /// Token0 available for the quote (raw units). `None` when the pool cannot currently quote.
-    #[serde(rename = "totalToken0Available", default, with = "option_biguint_string")]
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub total_token0_available: Option<BigUint>,
     /// Token1 available for the quote (raw units). `None` when the pool cannot currently quote.
-    #[serde(rename = "totalToken1Available", default, with = "option_biguint_string")]
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub total_token1_available: Option<BigUint>,
     /// Server Unix timestamp (seconds) when the quote was produced.
-    #[serde(rename = "serverTs")]
     pub server_ts: u64,
     /// Price-provider health for this quote: `healthy`, `feed_down` (no valid price right now),
     /// or `internal_error`. `None` when the field is absent (older responses, or states rebuilt
     /// from component attributes).
-    #[serde(rename = "priceProviderStatus", default)]
     pub price_provider_status: Option<String>,
     /// Per-side depth bins. Absent on older responses and explicitly `null` when the endpoint is
     /// queried with `depth=false`; both decode to an empty book.
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde_as(as = "DefaultOnNull")]
+    #[serde(default)]
     pub depth: MetricDepth,
-}
-
-/// `#[serde(default)]` only covers a missing key; this also maps an explicit JSON `null` to the
-/// type's default.
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Default + Deserialize<'de>,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -127,41 +71,42 @@ pub struct MetricDepth {
     pub bids: Vec<MetricDepthBin>,
 }
 
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricDepthBin {
-    #[serde(rename = "binIdx")]
     pub bin_idx: i64,
     /// Fee-adjusted price at this bin boundary, Q64.64.
-    #[serde(with = "biguint_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub price: BigUint,
     /// Cumulative output-token volume from the current position to this boundary (raw units).
-    #[serde(rename = "cumulativeVolume", with = "biguint_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub cumulative_volume: BigUint,
     /// Cumulative input-token amount required to reach this boundary (raw units). Used to drive
     /// the input-based depth walk so pricing matches Metric's own accounting.
-    #[serde(rename = "cumulativeInputVolume", with = "biguint_string")]
+    #[serde_as(as = "DisplayFromStr")]
     pub cumulative_input_volume: BigUint,
 }
 
 impl MetricBidAskResponse {
-    pub fn bid_price(&self) -> Result<f64, RFQError> {
+    pub fn bid_price(&self) -> Result<f64, FeedError> {
         q64_to_f64(&self.bid_adj)
     }
 
-    pub fn ask_price(&self) -> Result<f64, RFQError> {
+    pub fn ask_price(&self) -> Result<f64, FeedError> {
         q64_to_f64(&self.ask_adj)
     }
 
-    pub fn total_token0_available(&self) -> Result<BigUint, RFQError> {
+    pub fn total_token0_available(&self) -> Result<BigUint, FeedError> {
         self.total_token0_available
             .clone()
-            .ok_or_else(|| RFQError::ParsingError("totalToken0Available is null".to_string()))
+            .ok_or_else(|| FeedError::Parsing("totalToken0Available is null".to_string()))
     }
 
-    pub fn total_token1_available(&self) -> Result<BigUint, RFQError> {
+    pub fn total_token1_available(&self) -> Result<BigUint, FeedError> {
         self.total_token1_available
             .clone()
-            .ok_or_else(|| RFQError::ParsingError("totalToken1Available is null".to_string()))
+            .ok_or_else(|| FeedError::Parsing("totalToken1Available is null".to_string()))
     }
 
     /// Whether the pool can currently be quoted.
@@ -185,22 +130,16 @@ impl MetricBidAskResponse {
 }
 
 /// Converts a Q64.64 fixed-point value to an f64 price.
-pub fn q64_to_f64(value: &BigUint) -> Result<f64, RFQError> {
+fn q64_to_f64(value: &BigUint) -> Result<f64, FeedError> {
     let raw = value
         .to_f64()
-        .ok_or_else(|| RFQError::ParsingError(format!("Q64 price does not fit in f64: {value}")))?;
+        .ok_or_else(|| FeedError::Parsing(format!("Q64 price does not fit in f64: {value}")))?;
     Ok(raw / Q64_FLOAT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_q64_to_f64() {
-        let one = BigUint::from_str("18446744073709551616").unwrap();
-        assert_eq!(q64_to_f64(&one).unwrap(), 1.0);
-    }
 
     #[test]
     fn test_bid_ask_deserializes_depth_bins() {
@@ -258,6 +197,20 @@ mod tests {
 
         assert_eq!(response.total_token0_available, None);
         assert!(!response.is_quotable());
+    }
+
+    #[test]
+    fn test_bid_ask_absent_totals_decode_as_none() {
+        let response: MetricBidAskResponse = serde_json::from_value(serde_json::json!({
+            "bidAdj": "55340232221128654848000",
+            "askAdj": "55524699661865750400000",
+            "serverTs": 1_770_053_095u64,
+        }))
+        .unwrap();
+
+        assert_eq!(response.total_token0_available, None);
+        assert_eq!(response.total_token1_available, None);
+        assert_eq!(response.price_provider_status, None);
     }
 
     #[test]
