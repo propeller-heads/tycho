@@ -1,8 +1,8 @@
 specVersion: v0.1.0
 package:
-  name: "unichain_uniswap_v4_with_hooks"
+  name: "robinhood_uniswap_v4_with_hooks"
   version: v0.8.0
-  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v4/with-hooks"
+  url: "https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/ethereum-uniswap-v4/with-hooks"
 
 protobuf:
   files:
@@ -21,12 +21,12 @@ protobuf:
 binaries:
   default:
     type: wasm/rust-v1
-    file: ..//target/wasm32-unknown-unknown/release/ethereum_uniswap_v4_with_hooks.wasm
+    file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v4_with_hooks.wasm
 
 modules:
   - name: map_pools_created
     kind: map
-    initialBlock: 0
+    initialBlock: 9070
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -35,7 +35,7 @@ modules:
 
   - name: store_pools
     kind: store
-    initialBlock: 0
+    initialBlock: 9070
     updatePolicy: set_if_not_exists
     valueType: proto:uniswap.v4.Pool
     inputs:
@@ -43,7 +43,7 @@ modules:
 
   - name: map_events
     kind: map
-    initialBlock: 0
+    initialBlock: 9070
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_pools
@@ -52,7 +52,7 @@ modules:
 
   - name: store_pool_current_tick
     kind: store
-    initialBlock: 0
+    initialBlock: 9070
     updatePolicy: set
     valueType: int64
     inputs:
@@ -60,7 +60,7 @@ modules:
 
   - name: store_pool_current_sqrt_price
     kind: store
-    initialBlock: 0
+    initialBlock: 9070
     updatePolicy: set
     valueType: bigint
     inputs:
@@ -68,7 +68,7 @@ modules:
 
   - name: map_balance_changes
     kind: map
-    initialBlock: 0
+    initialBlock: 9070
     inputs:
       - map: map_events
       - store: store_pool_current_sqrt_price
@@ -77,7 +77,7 @@ modules:
 
   - name: store_pools_balances
     kind: store
-    initialBlock: 0
+    initialBlock: 9070
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -85,7 +85,7 @@ modules:
 
   - name: map_ticks_changes
     kind: map
-    initialBlock: 0
+    initialBlock: 9070
     inputs:
       - map: map_events
     output:
@@ -93,7 +93,7 @@ modules:
 
   - name: store_ticks_liquidity
     kind: store
-    initialBlock: 0
+    initialBlock: 9070
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -101,7 +101,7 @@ modules:
 
   - name: map_liquidity_changes
     kind: map
-    initialBlock: 0
+    initialBlock: 9070
     inputs:
       - map: map_events
       - store: store_pool_current_tick
@@ -110,35 +110,17 @@ modules:
 
   - name: store_liquidity
     kind: store
-    initialBlock: 0
+    initialBlock: 9070
     updatePolicy: set_sum
     valueType: bigint
     inputs:
       - map: map_liquidity_changes
 
-  - name: store_euler_hooks
-    kind: store
-    initialBlock: 0
-    updatePolicy: set_if_not_exists
-    valueType: int64
+  - name: map_pons_enriched_block_changes
+    kind: map
+    initialBlock: 9070
     inputs:
       - params: string
-      - source: sf.ethereum.type.v2.Block
-
-  - name: store_pool_per_euler_hook
-    kind: store
-    initialBlock: 0
-    updatePolicy: set_if_not_exists
-    valueType: string
-    inputs:
-      - map: map_pools_created
-      - store: store_euler_hooks
-        mode: get
-
-  - name: map_protocol_changes
-    kind: map
-    initialBlock: 0
-    inputs:
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created
       - map: map_events
@@ -154,21 +136,6 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
-  - name: map_euler_enriched_protocol_changes
-    kind: map
-    initialBlock: 0
-    inputs:
-      - params: string
-      - source: sf.ethereum.type.v2.Block
-      - map: map_protocol_changes
-      - store: store_euler_hooks
-        mode: get
-      - store: store_pool_per_euler_hook
-        mode: get
-    output:
-      type: proto:tycho.evm.v1.BlockChanges
-
 params:
-  map_pools_created: "1F98400000000000000000000000000000000004"
-  store_euler_hooks: "0x45b146BC07c9985589B52df651310e75C6BE066A"
-  map_euler_enriched_protocol_changes: "0x45b146BC07c9985589B52df651310e75C6BE066A"
+  map_pools_created: "8366a39CC670B4001A1121B8F6A443A643e40951"
+  map_pons_enriched_block_changes: "pons_hook=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044"

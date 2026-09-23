@@ -25,7 +25,7 @@ pub fn map_pools_created(
 
 // Extract new pools initialized on the pool manager contract
 // Only includes pools WITH swap hooks
-fn get_new_pools(
+pub(crate) fn get_new_pools(
     block: &eth::Block,
     new_pools: &mut Vec<TransactionEntityChanges>,
     pool_manager_address: &str,

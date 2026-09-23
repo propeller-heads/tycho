@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 
 [lib]
@@ -17,6 +17,7 @@ hex-literal = "0.4.1"
 substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.5.0" }
 tycho-substreams = "0.6.0"
 hex = "0.4.3"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
 
 # Shared library dependency
 ethereum-uniswap-v4-shared = { path = "../shared" }
@@ -25,6 +26,8 @@ serde_qs = "0.13.0"
 
 [dev-dependencies]
 rstest = "0.24.0"
+# Builds the block header of the Robinhood fixture; `BlockHeader::timestamp` is a prost type.
+prost-types = "0.11"
 
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
