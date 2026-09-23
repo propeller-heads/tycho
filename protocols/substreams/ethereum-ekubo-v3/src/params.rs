@@ -1,8 +1,6 @@
 use alloy_primitives::Address;
 use serde::Deserialize;
 
-use crate::addresses::ETHEREUM_SIGNED_EXCLUSIVE_SWAP_ADDRESS;
-
 #[derive(Debug, Deserialize)]
 struct Params {
     ve33_address: Option<Address>,
@@ -21,10 +19,8 @@ pub fn ve33_address(params: &str) -> Option<Address> {
 }
 
 /// Parses the deployment-specific SignedExclusiveSwap extension address from the
-/// module params (`signed_exclusive_swap_address=0x...`). Omitting it selects the
-/// Ethereum deployment.
-pub fn signed_exclusive_swap_address(params: &str) -> Address {
-    parse(params)
-        .signed_exclusive_swap_address
-        .unwrap_or(ETHEREUM_SIGNED_EXCLUSIVE_SWAP_ADDRESS)
+/// module params (`signed_exclusive_swap_address=0x...`). Omitting it means no
+/// pool gets the `is_exclusive` attribute.
+pub fn signed_exclusive_swap_address(params: &str) -> Option<Address> {
+    parse(params).signed_exclusive_swap_address
 }

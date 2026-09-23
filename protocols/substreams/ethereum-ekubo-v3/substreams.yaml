@@ -28,14 +28,13 @@ networks:
     initialBlock:
       map_events: 24134506 # First pool creation
 
-# The Ve33 extension address for the indexed chain, or empty on chains
-# without a Ve33 deployment (e.g. Ethereum). Override at deployment time,
-# e.g. `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
-# map_components also accepts `signed_exclusive_swap_address=0x...` for chains
-# whose SignedExclusiveSwap deployment differs from Ethereum's.
+# Extension addresses for the indexed chain. `ve33_address` is empty on chains
+# without a Ve33 deployment (e.g. Ethereum); `signed_exclusive_swap_address` is
+# the chain's SignedExclusiveSwap deployment. Override at deployment time, e.g.
+# `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
 params:
   map_events: ""
-  map_components: ""
+  map_components: "signed_exclusive_swap_address=0x55b703eED01b35641963da2FB2E14885993605A3"
 
 modules:
   # Stage 1

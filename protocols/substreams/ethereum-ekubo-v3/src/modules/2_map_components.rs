@@ -61,7 +61,7 @@ fn maybe_create_component(
     log: PoolLog,
     timestamp: u64,
     ve33_address: Option<Address>,
-    signed_exclusive_swap_address: Address,
+    signed_exclusive_swap_address: Option<Address>,
 ) -> Option<(ProtocolComponent, EntityChanges, Vec<BalanceChange>)> {
     let Event::PoolInitialized(pi) = log.event.unwrap() else {
         return None;
@@ -154,7 +154,7 @@ fn maybe_create_component(
         },
     ];
 
-    if pool_config.extension == signed_exclusive_swap_address {
+    if Some(pool_config.extension) == signed_exclusive_swap_address {
         static_att.push(Attribute {
             change: ChangeType::Creation.into(),
             name: "is_exclusive".to_string(),
