@@ -21,7 +21,8 @@
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
 //! under a millisecond, so blocking is acceptable and a reader never observes half a block.
 
-// Not yet constructed by production code; wired into the loader and the pump in follow-ups.
+// Not yet constructed by production code; built by the startup load (ENG-6292) and fed by the
+// pump (ENG-6305).
 #![allow(dead_code)]
 
 use std::{
@@ -550,7 +551,11 @@ impl CacheState {
             zip_changes(&block.account_deltas, &block.account_balances)
         {
             if delta.is_some_and(|delta| delta.change_type() == ChangeType::Deletion) {
-                warn!(%address, block = block.block.number, "Account deletion ignored, the entry stays cached");
+                warn!(
+                    %address,
+                    block = block.block.number,
+                    "Account deletion ignored, the entry stays cached"
+                );
                 continue;
             }
             match (self.accounts.get_mut(address), delta) {
