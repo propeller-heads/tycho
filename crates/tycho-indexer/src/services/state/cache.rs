@@ -98,8 +98,18 @@ impl<T> Timestamped<T> {
     }
 
     /// Writes `value` at `at` unless this already holds a value from that block or a newer one.
-    /// An equal timestamp is the same block folded again, so there is nothing to apply.
-    pub(crate) fn write(&mut self, value: T, at: WriteTimestamp) {
+    /// An equal timestamp is the same block folded again, or two extractors folding the same
+    /// block for a shared account; either way the values must agree, so a different one is logged.
+    pub(crate) fn write(&mut self, value: T, at: WriteTimestamp)
+    where
+        T: PartialEq,
+    {
+        if at == self.written_at && value != self.value {
+            warn!(
+                block = at.block_number(),
+                "Skipped write from the applied block carries a different value"
+            );
+        }
         if at <= self.written_at {
             return;
         }
@@ -109,7 +119,7 @@ impl<T> Timestamped<T> {
 }
 
 /// [`Timestamped::write`] for a map entry; a missing key is inserted.
-fn write_timestamped<K: Eq + Hash, V>(
+fn write_timestamped<K: Eq + Hash, V: PartialEq>(
     map: &mut HashMap<K, Timestamped<V>>,
     key: K,
     value: V,
@@ -776,6 +786,15 @@ mod test {
         slot.write(2, at(5));
 
         assert_eq!(slot, Timestamped::new(1, at(5)));
+    }
+
+    #[test]
+    fn write_skips_an_equal_tag_with_a_different_value() {
+        let mut slot = Timestamped::new(1u64, at(5));
+
+        slot.write(9, at(5));
+
+        assert_eq!(slot, Timestamped::new(1, at(5)), "the cached value stays, the write is logged");
     }
 
     #[test]
