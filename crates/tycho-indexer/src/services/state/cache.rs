@@ -460,54 +460,53 @@ impl EntityCache {
     }
 }
 
+/// Every key of `deltas` or `balances`, paired with what each map holds for it. A key present in
+/// both maps comes up once, so one call applies a block's delta and balances to an entry together.
+fn zip_changes<'a, K: Eq + Hash, D, B>(
+    deltas: &'a HashMap<K, D>,
+    balances: &'a HashMap<K, B>,
+) -> impl Iterator<Item = (&'a K, Option<&'a D>, Option<&'a B>)> {
+    let with_delta = deltas
+        .iter()
+        .map(|(key, delta)| (key, Some(delta), balances.get(key)));
+    let balances_only = balances
+        .iter()
+        .filter(|(key, _)| !deltas.contains_key(*key))
+        .map(|(key, balances)| (key, None, Some(balances)));
+    with_delta.chain(balances_only)
+}
+
 impl CacheState {
     /// Applies one block's component changes. A component the block creates is built holding that
     /// block's own delta and balances. A deleted component is removed unless that block or a newer
     /// one already wrote to it.
     fn fold_components(&mut self, block: &BlockAggregatedChanges) {
         let at = WriteTimestamp::from(&block.block);
-        if !block.new_protocol_components.is_empty() {
-            let system_components = self
-                .components
-                .entry(block.extractor.clone())
-                .or_default();
-            for id in block.new_protocol_components.keys() {
-                system_components
-                    .entry(id.clone())
-                    .or_insert_with(|| {
-                        CachedComponentState::from_creation(
-                            id,
-                            block.state_deltas.get(id),
-                            block.component_balances.get(id),
-                            at,
-                        )
-                    });
-            }
-        }
-        let Some(system_components) = self
+        let system_components = self
             .components
-            .get_mut(&block.extractor)
-        else {
-            trace!(system = %block.extractor, "Changes for a system with no cached components skipped");
-            return;
-        };
-        for (id, delta) in &block.state_deltas {
+            .entry(block.extractor.clone())
+            .or_default();
+        for (id, delta, balances) in zip_changes(&block.state_deltas, &block.component_balances) {
             match system_components.get_mut(id) {
-                Some(entry) => entry.apply_block(Some(delta), block.component_balances.get(id), at),
+                Some(entry) => entry.apply_block(delta, balances, at),
+                None if block
+                    .new_protocol_components
+                    .contains_key(id) =>
+                {
+                    system_components.insert(
+                        id.clone(),
+                        CachedComponentState::from_creation(id, delta, balances, at),
+                    );
+                }
                 None => {
-                    trace!(system = %block.extractor, %id, "State delta for an unknown component skipped")
+                    trace!(system = %block.extractor, %id, "Change for an unknown component skipped")
                 }
             }
         }
-        for (id, balances) in &block.component_balances {
-            if block.state_deltas.contains_key(id) {
-                continue;
-            }
-            match system_components.get_mut(id) {
-                Some(entry) => entry.apply_block(None, Some(balances), at),
-                None => {
-                    trace!(system = %block.extractor, %id, "Balances for an unknown component skipped")
-                }
+        for id in block.new_protocol_components.keys() {
+            if !system_components.contains_key(id) {
+                system_components
+                    .insert(id.clone(), CachedComponentState::from_creation(id, None, None, at));
             }
         }
         for id in block.deleted_protocol_components.keys() {
@@ -525,31 +524,20 @@ impl CacheState {
     /// skipped. A `Deletion` is not expected from any extractor: it is logged and the entry stays.
     fn fold_accounts(&mut self, block: &BlockAggregatedChanges) {
         let at = WriteTimestamp::from(&block.block);
-        for (address, delta) in &block.account_deltas {
-            if delta.change_type() == ChangeType::Deletion {
+        for (address, delta, balances) in
+            zip_changes(&block.account_deltas, &block.account_balances)
+        {
+            if delta.is_some_and(|delta| delta.change_type() == ChangeType::Deletion) {
                 warn!(%address, block = block.block.number, "Account deletion ignored, the entry stays cached");
                 continue;
             }
-            let balances = block.account_balances.get(address);
-            match self.accounts.get_mut(address) {
-                Some(entry) => entry.apply_block(Some(delta), balances, at),
-                None if delta.is_creation() => {
+            match (self.accounts.get_mut(address), delta) {
+                (Some(entry), delta) => entry.apply_block(delta, balances, at),
+                (None, Some(delta)) if delta.is_creation() => {
                     self.accounts
                         .insert(address.clone(), CachedAccount::from_creation(delta, balances, at));
                 }
-                None => trace!(%address, "Change for an unknown account skipped"),
-            }
-        }
-        for (address, balances) in &block.account_balances {
-            if block
-                .account_deltas
-                .contains_key(address)
-            {
-                continue;
-            }
-            match self.accounts.get_mut(address) {
-                Some(entry) => entry.apply_block(None, Some(balances), at),
-                None => trace!(%address, "Balances for an unknown account skipped"),
+                (None, _) => trace!(%address, "Change for an unknown account skipped"),
             }
         }
     }
@@ -1054,6 +1042,43 @@ mod test {
                 .attributes["x"],
             Bytes::from(2u64),
             "block 1 is a replay"
+        );
+    }
+
+    #[test]
+    fn fold_applies_a_components_delta_and_balances_from_one_block() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_component(msg(1), "c1"))
+            .unwrap();
+        let block = with_state_delta(msg(2), "c1", 2);
+        let block = with_component_balance(block, "c1", &addr(9), 5);
+
+        cache.fold(&block).unwrap();
+
+        let state = cached_component(&cache, "c1").unwrap();
+        assert_eq!(state.attributes["x"], Bytes::from(2u64));
+        assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
+    }
+
+    #[test]
+    fn fold_applies_an_accounts_delta_and_balances_from_one_block() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+        let block =
+            with_account_delta(msg(2), update(&address, fixtures::optional_slots([(1, 12)])));
+        let block = with_account_balance(block, &address, &addr(9), 7);
+
+        cache.fold(&block).unwrap();
+
+        let account = cached_account(&cache, &address).unwrap();
+        assert_eq!(account.slots, fixtures::slots([(1, 12)]));
+        assert_eq!(
+            account.token_balances,
+            HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))])
         );
     }
 
