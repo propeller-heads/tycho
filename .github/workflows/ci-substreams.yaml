@@ -118,3 +118,60 @@ jobs:
       - name: Skip check
         if: steps.substreams-files-changed.outputs.any_changed != 'true'
         run: echo "No changes to substreams directory, skipping test check"
+
+  release-script:
+    name: Substreams Release Script
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: false
+          fetch-depth: 0
+
+      - name: Check if any shell script changed
+        id: shell-files-changed
+        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        with:
+          files: |
+            protocols/substreams/*.sh
+            protocols/substreams/tests/**
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        with:
+          cache-on-failure: true
+
+      # shellcheck ships with the runner image; shfmt does not. Installing it through the Go
+      # module proxy pins the version and verifies it against the checksum database.
+      - name: Install shfmt
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        shell: bash
+        run: |
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.14.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Lint shell scripts
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        shell: bash
+        run: |
+          shellcheck protocols/substreams/*.sh protocols/substreams/tests/*.sh
+          shfmt -i 4 -d protocols/substreams/*.sh protocols/substreams/tests/*.sh
+
+      # The harness copies the substreams tree into a throwaway git repository under $TMPDIR and
+      # runs release.sh there, so it needs bash, git, jq and cargo metadata but uploads nothing.
+      - name: Test release.sh
+        if: steps.shell-files-changed.outputs.any_changed == 'true'
+        shell: bash
+        run: RELEASE_DRY_RUN=1 bash protocols/substreams/tests/release_sh_test.sh
+
+      - name: Skip check
+        if: steps.shell-files-changed.outputs.any_changed != 'true'
+        run: echo "No changes to substreams shell scripts, skipping release script check"
