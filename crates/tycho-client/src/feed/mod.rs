@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     sync::{
-        mpsc::{self, Receiver},
+        mpsc::{self, error::TryRecvError, Receiver},
         oneshot,
     },
     task::JoinHandle,
@@ -266,8 +266,8 @@ impl SynchronizerStream {
     /// - `latency_buffer`: added on top of `block_time` to absorb network/processing jitter.
     /// - `stale_threshold`: how long a stream can make no progress before it is marked Stale and
     ///   skipped.
-    /// - `skip_wait`: skip the blocking wait for all protocol state synchronizers - only advance
-    ///   those that have waiting messages.
+    /// - `skip_wait`: `Delayed` and `Stale` streams take only the messages already queued, without
+    ///   waiting. `Ready` streams always wait for their next block.
     async fn try_advance(
         &mut self,
         block_history: &BlockHistory,
@@ -380,6 +380,9 @@ impl SynchronizerStream {
     /// If a synchronizer is delayed, this method will try to catch up to the next expected block
     /// by consuming all waiting messages in its queue and waiting for any new block messages
     /// within a timeout. Finally, all update messages are merged into one and returned.
+    ///
+    /// A zero `max_wait` consumes only the messages that are already queued and returns without
+    /// blocking.
     async fn try_catch_up(
         &mut self,
         block_history: &BlockHistory,
@@ -392,14 +395,28 @@ impl SynchronizerStream {
         // Set a deadline for the overall catch-up operation
         let deadline = std::time::Instant::now() + max_wait;
 
-        while std::time::Instant::now() < deadline {
-            match timeout(
-                deadline.saturating_duration_since(std::time::Instant::now()),
-                self.rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(Ok(msg))) => {
+        loop {
+            let received = if max_wait.is_zero() {
+                match self.rx.try_recv() {
+                    Ok(item) => Some(item),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => None,
+                }
+            } else {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match timeout(remaining, self.rx.recv()).await {
+                    Ok(item) => item,
+                    Err(_) => {
+                        debug!(%extractor_id, "Timed out waiting for catch-up");
+                        break;
+                    }
+                }
+            };
+            match received {
+                Some(Ok(msg)) => {
                     debug!(%extractor_id, block=%msg.header, "Received new message during catch-up");
                     let block_pos = block_history.determine_block_position(&msg.header)?;
                     results.push(msg);
@@ -408,12 +425,12 @@ impl SynchronizerStream {
                         break;
                     }
                 }
-                Ok(Some(Err(e))) => {
+                Some(Err(e)) => {
                     // Synchronizer errored during catch up
                     self.mark_errored(e);
                     return Ok(None);
                 }
-                Ok(None) => {
+                None => {
                     // This case should not happen, as we shouldn't poll the synchronizer after we
                     // closed it or after it errored.
                     warn!(
@@ -422,10 +439,6 @@ impl SynchronizerStream {
                     );
                     self.mark_closed();
                     return Ok(None);
-                }
-                Err(_) => {
-                    debug!(%extractor_id, "Timed out waiting for catch-up");
-                    break;
                 }
             }
         }
@@ -575,8 +588,16 @@ impl SynchronizerStream {
         matches!(self.state, SynchronizerState::Stale(_))
     }
 
+    fn is_delayed(&self) -> bool {
+        matches!(self.state, SynchronizerState::Delayed(_))
+    }
+
     fn is_advanced(&self) -> bool {
         matches!(self.state, SynchronizerState::Advanced(_))
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.state, SynchronizerState::Ready(_))
     }
 
     /// Gets the streams current header from active streams.
@@ -899,19 +920,39 @@ where
         ready_sync_msgs: &mut HashMap<String, StateSyncMessage<BlockHeader>>,
         block_history: &mut BlockHistory,
     ) -> BlockSyncResult<()> {
-        // If any synchronizer already has a future block, Delayed/Stale streams should not
-        // wait their full catch-up timeout — a reinit is about to fire and the wait would
-        // only lock-step the consumer further behind the chain head.
-        let any_advanced = sync_streams
+        // Delayed/Stale streams do not wait on their own. They take what is queued once the other
+        // streams are done, when either:
+        // - a synchronizer already has a future block: a reinit is about to fire and the wait would
+        //   only lock-step the consumer further behind the chain head;
+        // - a synchronizer is Ready: it already bounds this tick by its own timeout. A Delayed
+        //   stream that also waited its full timeout would pace every tick to the silent stream, so
+        //   the feed would deliver one block per timeout while the others' blocks queue up.
+        // When no stream is Ready or Advanced, nothing else bounds the tick, so they still wait.
+        let skip_wait = sync_streams
             .iter()
-            .any(SynchronizerStream::is_advanced);
-        let mut recv_futures = Vec::new();
+            .any(|stream| stream.is_advanced() || stream.is_ready());
+        let stale_threshold = self
+            .block_time
+            .mul_f64(self.max_missed_blocks as f64);
+        let history: &BlockHistory = block_history;
+
+        let mut waiting = Vec::new();
+        let mut drained_after_wait = Vec::new();
         for stream in sync_streams.iter_mut() {
             // If stream is in ended state, do not check for any messages (it's receiver
             // is closed), but do check stale streams.
             if stream.has_ended() {
                 continue;
             }
+            if skip_wait && (stream.is_delayed() || stream.is_stale()) {
+                drained_after_wait.push(stream);
+            } else {
+                waiting.push(stream);
+            }
+        }
+
+        let mut recv_futures = Vec::new();
+        for stream in waiting {
             // Here we simply wait block_time + max_wait. This will not work for chains with
             // unknown block times but is simple enough for now.
             // If we would like to support unknown block times we could: Instruct all handles to
@@ -921,15 +962,14 @@ where
             // max_wait and then proceed as usual. So basically each try_advance task would have
             // a select statement that allows it to exit the first timeout preemptively if any
             // other try_advance task finished earlier.
-            recv_futures.push(async {
+            recv_futures.push(async move {
                 let res = stream
                     .try_advance(
-                        block_history,
+                        history,
                         self.block_time,
                         self.latency_buffer,
-                        self.block_time
-                            .mul_f64(self.max_missed_blocks as f64),
-                        any_advanced,
+                        stale_threshold,
+                        false,
                     )
                     .await?;
                 Ok::<_, BlockSynchronizerError>(
@@ -945,6 +985,17 @@ where
                 .into_iter()
                 .flatten(),
         );
+
+        // Drained only once the waiting streams are done, so a block that arrived at any point
+        // during the tick is still included in it.
+        for stream in drained_after_wait {
+            let res = stream
+                .try_advance(history, self.block_time, self.latency_buffer, stale_threshold, true)
+                .await?;
+            if let Some(msg) = res {
+                ready_sync_msgs.insert(stream.extractor_id.name.clone(), msg);
+            }
+        }
 
         // Check if we have any active synchronizers (Ready, Delayed, or Advanced)
         // If all synchronizers have been purged (Stale/Ended), exit the main loop
@@ -1364,12 +1415,228 @@ mod tests {
         stream
     }
 
+    /// Builds a stream in `state` whose channel stays open, so `try_advance` really blocks on
+    /// `rx.recv()` instead of seeing a closed channel. Returns the sender so the test decides
+    /// what, if anything, the stream delivers.
+    fn stream_with_sender(
+        name: &str,
+        state: SynchronizerState,
+    ) -> (SynchronizerStream, mpsc::Sender<SyncResult<StateSyncMessage<BlockHeader>>>) {
+        let (tx, rx) = mpsc::channel(8);
+        let id = ExtractorIdentity { chain: Chain::Ethereum, name: name.to_string() };
+        let mut stream = SynchronizerStream::new(&id, rx);
+        stream.state = state;
+        (stream, tx)
+    }
+
+    async fn queue_block(
+        tx: &mpsc::Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
+        header: BlockHeader,
+    ) {
+        tx.send(Ok(StateSyncMessage { header, ..Default::default() }))
+            .await
+            .expect("queue a block on the stream");
+    }
+
+    /// Timings are robinhood's production values from `TychoStreamBuilder::default_timing`:
+    /// `block_time` 1s, `timeout` 5s, i.e. a 6s budget.
+    fn robinhood_block_sync() -> (BlockSynchronizer<MockStateSync>, Duration) {
+        let block_time = Duration::from_secs(1);
+        let latency_buffer = Duration::from_secs(5);
+        (BlockSynchronizer::new(block_time, latency_buffer, 100), block_time + latency_buffer)
+    }
+
+    /// A `Ready` stream that goes silent costs one full budget, on the tick where it first
+    /// misses its block, even when the other streams already have their blocks queued.
+    #[test(tokio::test(start_paused = true))]
+    async fn test_silent_ready_stream_costs_one_budget() {
+        let (block_sync, budget) = robinhood_block_sync();
+        let start = full_header(100, 100, 99);
+
+        let (fast, fast_tx) = stream_with_sender("fast", SynchronizerState::Ready(start.clone()));
+        let (slow, _slow_tx) = stream_with_sender("slow", SynchronizerState::Ready(start.clone()));
+        queue_block(&fast_tx, full_header(101, 101, 100)).await;
+
+        let mut streams = vec![fast, slow];
+        let mut ready = HashMap::new();
+        let mut history =
+            BlockHistory::new(vec![start], BLOCK_HISTORY_SIZE).expect("seed block history");
+
+        let started = tokio::time::Instant::now();
+        block_sync
+            .handle_next_message(&mut streams, &mut ready, &mut history)
+            .await
+            .expect("tick completes");
+
+        assert_eq!(started.elapsed(), budget);
+        assert_eq!(ready.keys().collect::<Vec<_>>(), vec!["fast"]);
+        assert!(matches!(streams[1].state, SynchronizerState::Delayed(_)));
+    }
+
+    /// Once a silent stream is `Delayed`, later ticks do not wait for it: the feed keeps
+    /// delivering the other streams' blocks as fast as they arrive.
+    #[test(tokio::test(start_paused = true))]
+    async fn test_delayed_stream_does_not_throttle_later_ticks() {
+        let (block_sync, budget) = robinhood_block_sync();
+        let h100 = full_header(100, 100, 99);
+
+        let (fast, fast_tx) = stream_with_sender("fast", SynchronizerState::Ready(h100.clone()));
+        let (slow, _slow_tx) = stream_with_sender("slow", SynchronizerState::Ready(h100.clone()));
+
+        let mut streams = vec![fast, slow];
+        let mut history =
+            BlockHistory::new(vec![h100], BLOCK_HISTORY_SIZE).expect("seed block history");
+
+        let mut tick_durations = Vec::new();
+        for n in 101..104u64 {
+            queue_block(&fast_tx, full_header(n, n, n - 1)).await;
+
+            let mut ready = HashMap::new();
+            let started = tokio::time::Instant::now();
+            block_sync
+                .handle_next_message(&mut streams, &mut ready, &mut history)
+                .await
+                .expect("tick completes");
+            tick_durations.push(started.elapsed());
+
+            assert_eq!(ready.keys().collect::<Vec<_>>(), vec!["fast"], "tick for block {n}");
+        }
+
+        assert_eq!(tick_durations, vec![budget, Duration::ZERO, Duration::ZERO]);
+        assert!(matches!(streams[1].state, SynchronizerState::Delayed(_)));
+    }
+
+    /// A `Delayed` stream that skips its wait still consumes the blocks already in its queue,
+    /// so it catches up in the same tick.
+    #[test(tokio::test(start_paused = true))]
+    async fn test_delayed_stream_catches_up_from_queue_without_waiting() {
+        let (block_sync, _budget) = robinhood_block_sync();
+        let h100 = full_header(100, 100, 99);
+        let h101 = full_header(101, 101, 100);
+
+        let (fast, fast_tx) = stream_with_sender("fast", SynchronizerState::Ready(h100.clone()));
+        let (slow, slow_tx) = stream_with_sender("slow", SynchronizerState::Delayed(h100.clone()));
+        queue_block(&fast_tx, h101.clone()).await;
+        queue_block(&slow_tx, h101.clone()).await;
+
+        let mut streams = vec![fast, slow];
+        let mut ready = HashMap::new();
+        let mut history =
+            BlockHistory::new(vec![h100], BLOCK_HISTORY_SIZE).expect("seed block history");
+
+        let started = tokio::time::Instant::now();
+        block_sync
+            .handle_next_message(&mut streams, &mut ready, &mut history)
+            .await
+            .expect("tick completes");
+
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(ready.len(), 2);
+        assert!(ready.contains_key("slow"));
+        assert_eq!(streams[1].state, SynchronizerState::Ready(h101));
+    }
+
+    /// A `Delayed` stream's block that arrives while the tick is still waiting on a `Ready`
+    /// stream is included in that tick, so the tick is not emitted empty.
+    #[test(tokio::test(start_paused = true))]
+    async fn test_delayed_stream_block_arriving_mid_tick_is_included() {
+        let (block_sync, budget) = robinhood_block_sync();
+        let h100 = full_header(100, 100, 99);
+        let h101 = full_header(101, 101, 100);
+
+        let (quiet, _quiet_tx) =
+            stream_with_sender("quiet", SynchronizerState::Ready(h100.clone()));
+        let (late, late_tx) = stream_with_sender("late", SynchronizerState::Delayed(h100.clone()));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            queue_block(&late_tx, h101).await;
+        });
+
+        let mut streams = vec![quiet, late];
+        let mut ready = HashMap::new();
+        let mut history =
+            BlockHistory::new(vec![h100], BLOCK_HISTORY_SIZE).expect("seed block history");
+
+        let started = tokio::time::Instant::now();
+        block_sync
+            .handle_next_message(&mut streams, &mut ready, &mut history)
+            .await
+            .expect("tick completes");
+
+        assert_eq!(started.elapsed(), budget);
+        assert_eq!(ready.keys().collect::<Vec<_>>(), vec!["late"]);
+    }
+
+    /// When no stream is `Ready`, nothing else bounds the tick, so `Delayed` streams keep
+    /// waiting their full budget instead of returning an empty tick at once.
+    #[test(tokio::test(start_paused = true))]
+    async fn test_delayed_streams_wait_when_no_stream_is_ready() {
+        let (block_sync, budget) = robinhood_block_sync();
+        let h100 = full_header(100, 100, 99);
+
+        let (first, _first_tx) =
+            stream_with_sender("first", SynchronizerState::Delayed(h100.clone()));
+        let (second, _second_tx) =
+            stream_with_sender("second", SynchronizerState::Delayed(h100.clone()));
+
+        let mut streams = vec![first, second];
+        let mut ready = HashMap::new();
+        let mut history =
+            BlockHistory::new(vec![h100], BLOCK_HISTORY_SIZE).expect("seed block history");
+
+        let started = tokio::time::Instant::now();
+        block_sync
+            .handle_next_message(&mut streams, &mut ready, &mut history)
+            .await
+            .expect("tick completes");
+
+        assert_eq!(started.elapsed(), budget);
+        assert!(ready.is_empty());
+    }
+
     async fn receive_message(rx: &mut Receiver<BlockSyncResult<FeedMessage>>) -> FeedMessage {
         timeout(Duration::from_millis(100), rx.recv())
             .await
             .expect("Responds in time")
             .expect("Should receive first message")
             .expect("No error")
+    }
+
+    /// Receives feed messages until `done` returns true for one of them and returns that
+    /// message. Panics if that does not happen within `max_messages` messages.
+    async fn receive_until(
+        rx: &mut Receiver<BlockSyncResult<FeedMessage>>,
+        max_messages: usize,
+        mut done: impl FnMut(&FeedMessage) -> bool,
+    ) -> FeedMessage {
+        for _ in 0..max_messages {
+            let msg = receive_message(rx).await;
+            if done(&msg) {
+                return msg;
+            }
+        }
+        panic!("condition not met within {max_messages} feed messages");
+    }
+
+    /// Receives feed messages until every stream in `names` has delivered a message for
+    /// `block`, possibly in different feed messages. A delayed stream rejoins up to one tick
+    /// after the others, so their messages for the same block need not arrive together.
+    async fn receive_until_all_delivered(
+        rx: &mut Receiver<BlockSyncResult<FeedMessage>>,
+        names: &[&str],
+        block: u64,
+    ) {
+        let mut pending: Vec<&str> = names.to_vec();
+        receive_until(rx, 10, |msg| {
+            pending.retain(|name| {
+                msg.state_msgs
+                    .get(*name)
+                    .map(|state_msg| state_msg.header.number) !=
+                    Some(block)
+            });
+            pending.is_empty()
+        })
+        .await;
     }
 
     async fn setup_block_sync(
@@ -1748,36 +2015,7 @@ mod tests {
             .await
             .expect("send_header failed");
 
-        // Consume messages until we get both synchronizers on block 3
-        // We may get an intermediate message for v3's catch-up or a combined message
-        let mut third_feed_msg = receive_message(&mut rx).await;
-
-        // If this message doesn't have both univ2, it's an intermediate message, so we get the next
-        // one
-        if !third_feed_msg
-            .state_msgs
-            .contains_key("uniswap-v2")
-        {
-            third_feed_msg = rx
-                .recv()
-                .await
-                .expect("header channel was closed")
-                .expect("no error");
-        }
-        assert!(third_feed_msg
-            .state_msgs
-            .contains_key("uniswap-v2"));
-        assert!(third_feed_msg
-            .state_msgs
-            .contains_key("uniswap-v3"));
-        assert!(matches!(
-            third_feed_msg.sync_states.get("uniswap-v2").unwrap(),
-            SynchronizerState::Ready(header) if header.number == 3
-        ));
-        assert!(matches!(
-            third_feed_msg.sync_states.get("uniswap-v3").unwrap(),
-            SynchronizerState::Ready(header) if header.number == 3
-        ));
+        receive_until_all_delivered(&mut rx, &["uniswap-v2", "uniswap-v3"], 3).await;
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
@@ -1841,17 +2079,7 @@ mod tests {
             .await
             .expect("send_header failed");
 
-        // Consume third message - both should be on block 3
-        let second_feed_msg = receive_message(&mut rx).await;
-        assert_eq!(second_feed_msg.state_msgs.len(), 2);
-        assert!(matches!(
-            second_feed_msg.sync_states.get("uniswap-v2").unwrap(),
-            SynchronizerState::Ready(header) if header.number == 3
-        ));
-        assert!(matches!(
-            second_feed_msg.sync_states.get("uniswap-v3").unwrap(),
-            SynchronizerState::Ready(header) if header.number == 3
-        ));
+        receive_until_all_delivered(&mut rx, &["uniswap-v2", "uniswap-v3"], 3).await;
 
         shutdown_block_synchronizer(jh, rx).await;
     }
@@ -1971,15 +2199,10 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(40)).await;
 
-        let mut stale_found = false;
-        for _ in 0..2 {
-            if let Some(Ok(msg)) = rx.recv().await {
-                if let Some(SynchronizerState::Stale(_)) = msg.sync_states.get("uniswap-v2") {
-                    stale_found = true;
-                }
-            }
-        }
-        assert!(stale_found, "v2 synchronizer should be stale");
+        receive_until(&mut rx, 10, |msg| {
+            matches!(msg.sync_states.get("uniswap-v2"), Some(SynchronizerState::Stale(_)))
+        })
+        .await;
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
@@ -2206,21 +2429,23 @@ mod tests {
         let _ = v2_sync
             .send_header(block3_msg.clone())
             .await;
-        let third_msg = receive_message(&mut rx).await;
-        dbg!(&third_msg);
-        assert!(matches!(
+        let mut v2_delivered_block3 = false;
+        let third_msg = receive_until(&mut rx, 10, |msg| {
+            v2_delivered_block3 |= msg
+                .state_msgs
+                .get("uniswap-v2")
+                .map(|state_msg| state_msg.header.number) ==
+                Some(3);
+            matches!(msg.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_)))
+        })
+        .await;
+        assert!(v2_delivered_block3, "v2 keeps delivering while v3 goes stale");
+        assert!(!matches!(
             third_msg
                 .sync_states
                 .get("uniswap-v2")
                 .unwrap(),
-            SynchronizerState::Ready(_)
-        ));
-        assert!(matches!(
-            third_msg
-                .sync_states
-                .get("uniswap-v3")
-                .unwrap(),
-            SynchronizerState::Stale(_)
+            SynchronizerState::Stale(_) | SynchronizerState::Ended(_)
         ));
 
         let block4_msg = header_message(4);
@@ -2236,21 +2461,7 @@ mod tests {
         let _ = v2_sync
             .send_header(block4_msg.clone())
             .await;
-        let fourth_msg = receive_message(&mut rx).await;
-        assert!(matches!(
-            fourth_msg
-                .sync_states
-                .get("uniswap-v2")
-                .unwrap(),
-            SynchronizerState::Ready(_)
-        ));
-        assert!(matches!(
-            fourth_msg
-                .sync_states
-                .get("uniswap-v3")
-                .unwrap(),
-            SynchronizerState::Ready(_)
-        ));
+        receive_until_all_delivered(&mut rx, &["uniswap-v2", "uniswap-v3"], 4).await;
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
 
@@ -2476,18 +2687,13 @@ mod tests {
             .expect("v3 catch up partial 2 failed");
 
         // v3 catches up within a few message cycles
-        let mut v3_ready = false;
-        for _ in 0..3 {
-            let msg = receive_message(&mut rx).await;
-            if matches!(
-                msg.sync_states.get("uniswap-v3").unwrap(),
-                SynchronizerState::Ready(h) if h.partial_block_index == Some(2)
-            ) {
-                v3_ready = true;
-                break;
-            }
-        }
-        assert!(v3_ready, "v3 caught up to partial 2");
+        receive_until(&mut rx, 5, |msg| {
+            msg.state_msgs
+                .get("uniswap-v3")
+                .map(|state_msg| state_msg.header.partial_block_index) ==
+                Some(Some(2))
+        })
+        .await;
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
