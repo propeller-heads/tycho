@@ -12,9 +12,9 @@
 //! equal timestamp is the same block folded again — the values are identical, so there is nothing
 //! to apply. Removals follow the same rule.
 //!
-//! The cache is written from exactly two places: the startup load, which runs before the
-//! extractors start, and the folds coming out of the block windows. It never reads the database,
-//! and it never evicts — an entity missing from the cache does not exist.
+//! The folds coming out of the block windows are the only writer. The startup load builds the
+//! cache from a database snapshot before the extractors start (ENG-6292). The cache never reads
+//! the database, and it never evicts — an entity missing from the cache does not exist.
 //!
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
@@ -471,35 +471,6 @@ impl EntityCache {
         self.state
             .write()
             .expect("entity cache lock poisoned")
-    }
-
-    /// Write handle for the startup load. Nothing reads or folds while it exists.
-    pub(crate) fn loader(&self) -> CacheLoader<'_> {
-        CacheLoader(self.write_lock())
-    }
-}
-
-/// Installs whole entries, each already carrying the timestamps of its database rows, under one
-/// write lock held for as long as the handle lives. Nothing is compared, because the maps are
-/// empty: it exists only for the startup load, which runs before the extractors start.
-pub(crate) struct CacheLoader<'a>(RwLockWriteGuard<'a, CacheState>);
-
-impl CacheLoader<'_> {
-    pub(crate) fn insert_account(&mut self, address: Address, entry: CachedAccount) {
-        self.0.accounts.insert(address, entry);
-    }
-
-    pub(crate) fn insert_component(
-        &mut self,
-        system: ProtocolSystem,
-        component_id: ComponentId,
-        entry: CachedComponentState,
-    ) {
-        self.0
-            .components
-            .entry(system)
-            .or_default()
-            .insert(component_id, entry);
     }
 }
 
@@ -1060,33 +1031,6 @@ mod test {
         let state = ProtocolComponentState::from(&cached);
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), at(6));
-    }
-
-    #[test]
-    fn loaded_entries_read_back_by_address_and_by_system_and_id() {
-        let cache = EntityCache::new();
-        let address = addr(1);
-        let loaded = account(&address);
-        let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
-
-        {
-            let mut loader = cache.loader();
-            loader.insert_account(
-                address.clone(),
-                CachedAccount::from_snapshot(
-                    loaded.clone(),
-                    AccountWriteTimestamps::uniform(&loaded, WriteTimestamp::snapshot(ts(1))),
-                ),
-            );
-            loader.insert_component(
-                EXTRACTOR.to_string(),
-                "c1".to_string(),
-                CachedComponentState::from_snapshot(state.clone(), WriteTimestamp::snapshot(ts(1))),
-            );
-        }
-
-        assert_eq!(cached_account(&cache, &address), Some(loaded));
-        assert_eq!(cached_component(&cache, "c1"), Some(state));
     }
 
     #[test]
