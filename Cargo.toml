@@ -47,6 +47,7 @@ tycho-execution        = { path = "crates/tycho-execution",        version = "0.
 # --- Serialization/Deserialization ---
 serde = { version = "1.0.204", features = ["rc", "derive"] }
 serde_json = "1.0.120"
+serde_with = "3.16.1"
 toml = "0.8"
 typetag = "0.2.21"
 uuid = { version = "1.4.1", features = ["serde", "macro-diagnostics"] }
@@ -76,6 +77,7 @@ alloy = { version = "1.1.0", default-features = false }
 ethabi = "18.0.0"
 
 # --- Utility ---
+bytes = "1.11.1"
 chrono = { version = "0.4.26", default-features = false, features = ["serde", "clock", "std"] }
 hex = "0.4.3"
 hex-literal = "0.4.1"
@@ -89,6 +91,7 @@ itertools = "0.13.0"
 lru = "0.16.3"
 roaring = "0.10"
 dotenv = "0.15.0"
+derive_more = { version = "2.0", features = ["debug", "deref"] }
 deepsize = "0.2.0"
 unicode-segmentation = "1.12.0"
 clap = "4.5.48"

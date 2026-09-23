@@ -26,7 +26,7 @@ cargo run -p tycho-integration-test -- \
   --tvl-threshold 100
 ```
 
-Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
+Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq-feeds`, `--disable-pamm-feeds`,
 `--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
@@ -51,8 +51,8 @@ shows up as a failure.
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
-  - `rfq_stream_processor.rs`: Handles RFQ protocol updates — fetches live quotes, compares
-    against simulation
+  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
+    fetches live quotes, compares against simulation
   - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum
     only) — emits one sampled update per `--price-level-stream-block-interval` blocks, holding a
     chosen block's latest snapshot back until the stream moves to the next block (least drift to

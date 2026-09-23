@@ -204,7 +204,7 @@ mod tests {
 
         let liquorice_component = ProtocolComponent {
             id: String::from("liquorice-rfq"),
-            protocol_system: String::from("rfq:liquorice"),
+            protocol_system: String::from("book:liquorice"),
             ..Default::default()
         };
 

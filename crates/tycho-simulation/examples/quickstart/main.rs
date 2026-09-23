@@ -603,7 +603,7 @@ fn get_best_swap(
 ) -> Option<(String, GetAmountOutResult)> {
     println!(
         "\n==================== Received block {block:?} ====================",
-        block = message.block_number_or_timestamp
+        block = message.block_number
     );
     for (id, comp) in message.new_pairs.iter() {
         pairs

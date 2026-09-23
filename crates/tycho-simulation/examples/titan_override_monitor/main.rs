@@ -187,7 +187,7 @@ async fn main() {
                 };
                 print_block_recap(current_block, &pools, &block_stats);
                 block_stats.clear();
-                current_block = Some(update.block_number_or_timestamp);
+                current_block = Some(update.block_number);
 
                 for (id, component) in update.new_pairs {
                     // The stream also carries synthetic components (e.g. the native ETH/WETH
@@ -209,7 +209,7 @@ async fn main() {
 
                 println!(
                     "\n═══ tycho block {} ({} pool(s)) ═══",
-                    update.block_number_or_timestamp,
+                    update.block_number,
                     pools.len()
                 );
                 quote_all(&pools, &providers, cli.sell_units, &mut last_printed, &mut block_stats, true);

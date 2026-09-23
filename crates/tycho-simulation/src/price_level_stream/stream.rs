@@ -350,11 +350,8 @@ impl SnapshotTracker {
                     continue;
                 }
                 let sells_token0 = token_in < token_out;
-                let key = if sells_token0 {
-                    (token_in.clone(), token_out.clone())
-                } else {
-                    (token_out.clone(), token_in.clone())
-                };
+                // The pair in address order, so both directions of a pair share one entry.
+                let key = if sells_token0 { (token_in, token_out) } else { (token_out, token_in) };
                 let quotes = order_book
                     .into_iter()
                     .map(|TitanPriceLevel { amount_in, amount_out }| {
@@ -537,18 +534,12 @@ mod tests {
     #[test]
     fn first_snapshot_emits_new_pair_with_both_directions() {
         let mut tracker = tracker();
-        let Update {
-            block_number_or_timestamp,
-            is_partial,
-            sync_states,
-            states,
-            new_pairs,
-            removed_pairs,
-        } = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
+        let Update { block_number, is_partial, sync_states, states, new_pairs, removed_pairs } =
+            tracker
+                .process(message(100, wbtc_usdc_pairs()))
+                .expect("update expected");
 
-        assert_eq!(block_number_or_timestamp, 100);
+        assert_eq!(block_number, 100);
         assert!(is_partial);
         assert!(sync_states.is_empty());
         assert!(removed_pairs.is_empty());
