@@ -25,7 +25,9 @@ for any protocol indexed by Tycho.
     `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
     `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
-    not protocols
+    not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
+    `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
+    Unichain, and Pons V2 is the native handler for Robinhood
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
