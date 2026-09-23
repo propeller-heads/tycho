@@ -357,8 +357,10 @@ impl CachedComponentState {
     }
 
     /// Applies one block's changes, unless the entry already holds that block or a newer one. One
-    /// timestamp covers the whole entry, so the guard is here rather than per value. Attribute
-    /// updates apply before deletions, like [`ProtocolComponentState::apply_state_delta`].
+    /// timestamp covers the whole entry, so the guard is here rather than per value. One extractor
+    /// writes a system in order, so a skipped block is a replay or an ordering fault and is logged.
+    /// Attribute updates apply before deletions, like
+    /// [`ProtocolComponentState::apply_state_delta`].
     pub(crate) fn apply_block(
         &mut self,
         delta: Option<&ProtocolComponentStateDelta>,
@@ -366,6 +368,12 @@ impl CachedComponentState {
         at: WriteTimestamp,
     ) {
         if at <= self.updated_at {
+            warn!(
+                component = %self.component_id,
+                block = at.block_number,
+                entry = self.updated_at.block_number,
+                "Component change from a block already applied skipped"
+            );
             return;
         }
         self.apply(delta, balances);
@@ -517,7 +525,12 @@ impl CacheState {
                 Some(entry) if entry.updated_at() < at => {
                     system_components.remove(id);
                 }
-                Some(_) => {}
+                Some(_) => warn!(
+                    system = %block.extractor,
+                    %id,
+                    block = block.block.number,
+                    "Component deletion from a block already applied skipped"
+                ),
                 None => warn!(
                     system = %block.extractor,
                     %id,
