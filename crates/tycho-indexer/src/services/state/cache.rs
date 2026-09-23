@@ -9,9 +9,10 @@
 //!   one extractor writes each protocol system, in order, so one timestamp per entry is enough.
 //!
 //! A change applies only when its block is strictly newer than the timestamp the entry records. An
-//! equal timestamp is the same block folded again — the values are identical, so there is nothing
-//! to apply. Component removals follow the same rule. Account deletions are not expected and never
-//! remove an entry.
+//! equal timestamp is that block written again, by a replay or by a second extractor sharing the
+//! account; the two writes are expected to agree, so a skipped one that differs is logged.
+//! Component removals follow the same rule. Account deletions are not expected and never remove an
+//! entry.
 //!
 //! The folds coming out of the block windows are the only writer. The startup load builds the
 //! cache from a database snapshot before the extractors start (ENG-6292). The cache never reads
@@ -77,6 +78,20 @@ impl From<&Block> for WriteTimestamp {
     }
 }
 
+/// What a write did to a [`Timestamped`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteOutcome {
+    /// The write came from a newer block, and its value now holds.
+    Applied,
+    /// A value from the same block or a newer one already holds. The write agreed with it, or came
+    /// from an older block.
+    Skipped,
+    /// The block the value already carries wrote it again with different content: a replay or a
+    /// second extractor sharing the account disagrees about what that block holds. Nothing was
+    /// applied.
+    Conflict,
+}
+
 /// A cached value together with the timestamp of the write that set it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Timestamped<T> {
@@ -98,37 +113,37 @@ impl<T> Timestamped<T> {
     }
 
     /// Writes `value` at `at` unless this already holds a value from that block or a newer one.
-    /// An equal timestamp is the same block folded again, or two extractors folding the same
-    /// block for a shared account; either way the values must agree, so a different one is logged.
-    pub(crate) fn write(&mut self, value: T, at: WriteTimestamp)
+    /// The [`WriteOutcome`] says which of the three happened.
+    pub(crate) fn write(&mut self, value: T, at: WriteTimestamp) -> WriteOutcome
     where
         T: PartialEq,
     {
-        if at == self.written_at && value != self.value {
-            warn!(
-                block = at.block_number(),
-                "Skipped write from the applied block carries a different value"
-            );
-        }
         if at <= self.written_at {
-            return;
+            return if at == self.written_at && value != self.value {
+                WriteOutcome::Conflict
+            } else {
+                WriteOutcome::Skipped
+            };
         }
         self.value = value;
         self.written_at = at;
+        WriteOutcome::Applied
     }
 }
 
-/// [`Timestamped::write`] for a map entry; a missing key is inserted.
+/// [`Timestamped::write`] for a map entry; a missing key is inserted, which is
+/// [`WriteOutcome::Applied`].
 fn write_timestamped<K: Eq + Hash, V: PartialEq>(
     map: &mut HashMap<K, Timestamped<V>>,
     key: K,
     value: V,
     at: WriteTimestamp,
-) {
+) -> WriteOutcome {
     match map.entry(key) {
         Entry::Occupied(mut e) => e.get_mut().write(value, at),
         Entry::Vacant(e) => {
             e.insert(Timestamped::new(value, at));
+            WriteOutcome::Applied
         }
     }
 }
@@ -259,32 +274,51 @@ impl CachedAccount {
     /// or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than here —
     /// there is no entry-level timestamp to compare. A deleted slot becomes the zero value, as in
     /// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
+    /// [`WriteOutcome::Conflict`]s are counted and logged once here, where the address is known.
     pub(crate) fn apply_block(
         &mut self,
         delta: Option<&AccountDelta>,
         balances: Option<&HashMap<Address, AccountBalance>>,
         at: WriteTimestamp,
     ) {
+        let mut conflicts = 0;
+        let mut count = |outcome| {
+            if outcome == WriteOutcome::Conflict {
+                conflicts += 1;
+            }
+        };
         if let Some(delta) = delta {
             for (key, value) in &delta.slots {
-                write_timestamped(
+                count(write_timestamped(
                     &mut self.slots,
                     key.clone(),
                     value.clone().unwrap_or_default(),
                     at,
-                );
+                ));
             }
             if let Some(balance) = &delta.balance {
-                self.native_balance
-                    .write(balance.clone(), at);
+                count(
+                    self.native_balance
+                        .write(balance.clone(), at),
+                );
             }
             if let Some(code) = delta.code() {
-                self.code
-                    .write(CachedCode::new(code.clone()), at);
+                count(
+                    self.code
+                        .write(CachedCode::new(code.clone()), at),
+                );
             }
         }
         for (token, balance) in balances.into_iter().flatten() {
-            write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at);
+            count(write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at));
+        }
+        if conflicts > 0 {
+            warn!(
+                address = %self.address,
+                block = at.block_number(),
+                values = conflicts,
+                "Skipped writes from the applied block carry different values"
+            );
         }
     }
 
@@ -774,27 +808,30 @@ mod test {
     fn write_keeps_a_newer_value() {
         let mut slot = Timestamped::new(1u64, at(5));
 
-        slot.write(2, at(4));
+        let outcome = slot.write(2, at(4));
 
         assert_eq!(slot, Timestamped::new(1, at(5)));
+        assert_eq!(outcome, WriteOutcome::Skipped, "an older block is a lagging writer");
     }
 
     #[test]
     fn write_skips_an_equal_tag() {
         let mut slot = Timestamped::new(1u64, at(5));
 
-        slot.write(2, at(5));
+        let outcome = slot.write(1, at(5));
 
         assert_eq!(slot, Timestamped::new(1, at(5)));
+        assert_eq!(outcome, WriteOutcome::Skipped, "the same block wrote the same value");
     }
 
     #[test]
     fn write_skips_an_equal_tag_with_a_different_value() {
         let mut slot = Timestamped::new(1u64, at(5));
 
-        slot.write(9, at(5));
+        let outcome = slot.write(9, at(5));
 
-        assert_eq!(slot, Timestamped::new(1, at(5)), "the cached value stays, the write is logged");
+        assert_eq!(slot, Timestamped::new(1, at(5)), "the cached value stays");
+        assert_eq!(outcome, WriteOutcome::Conflict, "two writers disagree on block 5");
     }
 
     #[test]
@@ -811,10 +848,11 @@ mod test {
     fn write_tagged_inserts_a_missing_key_and_updates_a_present_one() {
         let mut map: HashMap<&str, Timestamped<u64>> = HashMap::new();
 
-        write_timestamped(&mut map, "a", 1, at(3));
+        let inserted = write_timestamped(&mut map, "a", 1, at(3));
         write_timestamped(&mut map, "a", 2, at(4));
         write_timestamped(&mut map, "b", 9, at(1));
 
+        assert_eq!(inserted, WriteOutcome::Applied, "a vacant key takes the write");
         assert_eq!(map["a"], Timestamped::new(2, at(4)));
         assert_eq!(map["b"], Timestamped::new(9, at(1)));
     }
