@@ -117,9 +117,12 @@ jobs:
             tr '\n' ' ' | sed 's/ *$//')
 
           # When a base directory changes, also add any clone protocols that use it.
+          # CHANGED_DIRS holds top-level directory names only, so a nested base such as
+          # "ethereum-uniswap-v4/with-hooks" is matched on its first path segment. For a flat
+          # base that segment is the base itself, so flat mappings are unaffected.
           for clone in "${!CLONE_TO_BASE[@]}"; do
             base="${CLONE_TO_BASE[$clone]}"
-            if echo "$CHANGED_DIRS" | grep -qx "$base"; then
+            if echo "$CHANGED_DIRS" | grep -qx "${base%%/*}"; then
               CHANGED="$CHANGED $clone"
             fi
           done
