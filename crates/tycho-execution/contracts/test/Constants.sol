@@ -223,14 +223,6 @@ contract Constants is
     // FermiSwap
     address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
 
-    // PropAMMRouter (github.com/lambdaclass/propamm-router-contracts) and its Uniswap V3 fallback
-    address PROPAMM_ROUTER = 0x4DdF368080CD7946db5b459aD591c350158175e1;
-    address PROPAMM_FALLBACK_SWAP_ROUTER =
-        0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
-    // Whitelisted pAMM venues on the PropAMMRouter
-    address FERMI_PROPAMM_VENUE = 0x5979458912F80B96d30D4220af8E2e4925A33320;
-    address KIPSELI_PROPAMM_VENUE = 0x71e790dd841c8A9061487cb3E78C288E75cE0B3d;
-
     // BopAMM (Bebop on-chain PMM)
     address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;
     address BOPAMM_MODULE = 0xBC60639345dFa607d73b74e88C2d54D8B8AD7Cc3;

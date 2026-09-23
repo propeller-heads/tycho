@@ -41,11 +41,10 @@ for any protocol indexed by Tycho.
   auto-detection), and opt-in auto-detection additionally serves unknown venues under their
   address (`pricelevelstream:{0xaddress}`). Precedence: between `add_pamm` and `deny_pamm` for
   the same address the later call wins; `with_known_pamms` defaults never override either,
-  regardless of call order. `build` emits venues on Titan's PropAMMRouter whitelist under
-  `propammfallback:{pamm}` instead, so tycho-execution routes their swaps through the router
-  (Uniswap V3 fallback on venue revert); it reads that whitelist once on the first poll via
-  `RPC_URL`, and warns and stays on the direct path without it. `without_fallback_router` skips
-  the read and keeps every venue on the direct path. Venues may overlap with other integration
+  regardless of call order. By default `build` emits every venue under `fallback:{pamm}`, so
+  tycho-execution routes their swaps through `TychoFallbackRouter` (retry on a solver-named
+  fallback pool when the venue reverts); `without_fallback_router` keeps every venue on the
+  direct `pricelevelstream:` path. Venues may overlap with other integration
   paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by venue where
   double-counting matters
 

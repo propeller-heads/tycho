@@ -7,8 +7,8 @@ use crate::encoding::{
     evm::{
         constants::{
             DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_KEY,
-            PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG, SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG, SLIPSTREAMS_FORKS,
+            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -102,8 +102,7 @@ impl SwapEncoderRegistry {
     /// Price-level-stream protocols (`pricelevelstream:{protocol}`) without an exact entry fall
     /// back to the family entry registered under `pricelevelstream`, so a single configured
     /// executor address serves every pAMM — including auto-detected, address-named ones.
-    /// `propammfallback:{protocol}` and `fallback:{protocol}` resolve the same way against
-    /// `propammfallback` and `fallback`.
+    /// `fallback:{protocol}` resolves the same way against `fallback`.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
@@ -113,9 +112,6 @@ impl SwapEncoderRegistry {
             return self
                 .encoders
                 .get(PRICE_LEVEL_STREAM_KEY);
-        }
-        if protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) {
-            return self.encoders.get(PROPAMM_FALLBACK_KEY);
         }
         if protocol_system.starts_with(FALLBACK_PREFIX) {
             return self.encoders.get(FALLBACK_KEY);
@@ -224,14 +220,8 @@ impl SwapEncoderRegistry {
             // executor; the concrete protocol is identified by the component, not the encoder. The
             // bare family key serves every protocol via the `get_encoder` fallback;
             // protocol-specific `pricelevelstream:{protocol}` entries override it per
-            // protocol. The PropAMMRouter path takes the same calldata, so it reuses
-            // the same encoder and differs only in the executor address configured for
-            // the family.
-            pls if pls == PRICE_LEVEL_STREAM_KEY ||
-                pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) ||
-                pls == PROPAMM_FALLBACK_KEY ||
-                pls.starts_with(PROPAMM_FALLBACK_PREFIX) =>
-            {
+            // protocol.
+            pls if pls == PRICE_LEVEL_STREAM_KEY || pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "lido_v4" => {
@@ -279,48 +269,17 @@ mod tests {
             .is_none());
     }
 
-    /// The PropAMMRouter family resolves the same way, and to a different executor than the direct
-    /// path — same calldata, different call target.
+    /// The TychoFallbackRouter family resolves like the price-level-stream family: the single
+    /// `fallback` config entry serves the bare key and every `fallback:{protocol}` protocol,
+    /// against the `FallbackExecutor` address.
     #[test]
-    fn test_propamm_fallback_protocol_resolution() {
+    fn test_fallback_protocol_resolution() {
         let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
         let registry = SwapEncoderRegistry::new(Chain::Ethereum)
             .add_default_encoders(Some(executors))
             .unwrap();
-
-        for protocol in [
-            PROPAMM_FALLBACK_KEY,
-            "propammfallback:fermiswap",
-            "propammfallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
-        ] {
-            assert!(registry.get_encoder(protocol).is_some(), "no encoder resolved for {protocol}");
-        }
-
-        let direct = registry
-            .get_encoder("pricelevelstream:fermiswap")
-            .unwrap()
-            .executor_address()
-            .clone();
-        let via_router = registry
-            .get_encoder("propammfallback:fermiswap")
-            .unwrap()
-            .executor_address()
-            .clone();
-        assert_ne!(direct, via_router);
-    }
-
-    /// The TychoFallbackRouter family resolves like the other two pAMM families, against its own
-    /// encoder. No `fallback` entry ships in the executor configs until the FallbackExecutor is
-    /// deployed, so the test registers the family key itself.
-    #[test]
-    fn test_fallback_protocol_resolution() {
         let executor_address =
-            Bytes::from_str("0x5c2f5a71f67c01775180adc06909288b4c329308").unwrap();
-        let registry = SwapEncoderRegistry::new(Chain::Ethereum);
-        let encoder = registry
-            .create_encoder(FALLBACK_KEY, executor_address.clone(), None)
-            .unwrap();
-        let registry = registry.register_encoder(FALLBACK_KEY, encoder);
+            Bytes::from_str("0x89CA9F4f77B267778EB2eA0Ba1bEAdEe8523af36").unwrap();
 
         for protocol in [
             FALLBACK_KEY,

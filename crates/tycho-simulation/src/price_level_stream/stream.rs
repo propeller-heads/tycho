@@ -17,7 +17,6 @@ use super::{
         default_denied_pamms, default_served_pamms, PriceLevelStreamConfig,
         DEFAULT_AUTO_DETECTED_GAS_COST,
     },
-    fallback_router::fetch_fallback_router_venues,
     state::{PriceLevelStreamQuote, PriceLevelStreamState},
     titan::{
         self, ConnectionSettings, TitanPairLevels, TitanPammLevels, TitanPriceLevel,
@@ -39,10 +38,9 @@ pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 ///
 /// One component is emitted per (pAMM, token pair), identified by the concatenation
 /// `pamm ++ token0 ++ token1` (tokens sorted ascending), under the protocol system
-/// `pricelevelstream:{pamm}` — or `propammfallback:{pamm}` for venues on the PropAMMRouter
-/// whitelist, unless [`without_fallback_router`](Self::without_fallback_router) turns that off.
-/// The venue address is exposed through the [`PAMM_ADDRESS_ATTRIBUTE`] static attribute for
-/// downstream encoding.
+/// `fallback:{pamm}` — or `pricelevelstream:{pamm}` after
+/// [`without_fallback_router`](Self::without_fallback_router). The venue address is exposed
+/// through the [`PAMM_ADDRESS_ATTRIBUTE`] static attribute for downstream encoding.
 pub struct PriceLevelStreamBuilder {
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
     denied: HashSet<Bytes>,
@@ -51,8 +49,8 @@ pub struct PriceLevelStreamBuilder {
     auto_detect: bool,
     auto_detected_gas_cost: Option<BigUint>,
     connection: ConnectionSettings,
-    /// Whether [`build`](Self::build) reads the PropAMMRouter whitelist and serves the venues on
-    /// it under the `propammfallback:` family.
+    /// Whether components are emitted under the `fallback:` family, executed through
+    /// `TychoFallbackRouter`, instead of the direct `pricelevelstream:` family.
     fallback_router: bool,
 }
 
@@ -191,10 +189,9 @@ impl PriceLevelStreamBuilder {
     /// Keeps every venue on the direct `pricelevelstream:{name}` path, so swaps execute on the
     /// venues themselves and a stale maker quote reverts the route.
     ///
-    /// By default [`build`](Self::build) emits venues on Titan's PropAMMRouter whitelist under
-    /// `propammfallback:{name}` instead, so tycho-execution routes their swaps through the
-    /// router. Opt out when the direct call is what you want to measure or execute, or to skip
-    /// the whitelist read at startup.
+    /// By default components are emitted under `fallback:{name}`, so tycho-execution routes
+    /// their swaps through `TychoFallbackRouter`. Opt out when the direct call is what you want
+    /// to measure or execute.
     pub fn without_fallback_router(mut self) -> Self {
         self.fallback_router = false;
         self
@@ -202,22 +199,11 @@ impl PriceLevelStreamBuilder {
 
     /// Consumes the builder and opens the stream.
     ///
-    /// Venues on Titan's PropAMMRouter whitelist are served under `propammfallback:{name}`, so
-    /// tycho-execution routes their swaps through the router. The router falls back to a
-    /// single-hop Uniswap V3 pool when the venue reverts — which a stale maker quote does in any
-    /// simulation against a mined block. Only whitelisted venues may use the family: the router
-    /// reverts `UnknownVenue` for others, so every swap would execute on the Uniswap V3 fallback
-    /// at a worse price than the venue gives.
-    ///
-    /// Reading that whitelist needs a node at `RPC_URL` (from the environment, falling back to
-    /// `.env`), and degrades instead of failing: without the variable, or when the read fails, a
-    /// warning is logged and every venue stays on the direct `pricelevelstream:` path.
-    /// [`without_fallback_router`](Self::without_fallback_router) skips the read and takes the
-    /// direct path unconditionally.
-    ///
-    /// The whitelist is read once, on the first poll, and never re-read — it is governance-gated
-    /// and changes rarely, and renaming a running component's protocol system would churn every
-    /// consumer's component set. Restart the stream to pick up a whitelist change.
+    /// Components are emitted under `fallback:{name}`, so tycho-execution routes their swaps
+    /// through `TychoFallbackRouter`, which retries a reverted pAMM swap — a stale maker quote
+    /// reverts in any simulation against a mined block — on the fallback pool the solver names.
+    /// [`without_fallback_router`](Self::without_fallback_router) keeps them on the direct
+    /// `pricelevelstream:` path.
     ///
     /// The connection is established lazily on first poll and maintained (with reconnects) for as
     /// long as the stream is polled; it never terminates on its own, and dropping the stream
@@ -256,59 +242,15 @@ impl PriceLevelStreamBuilder {
         let auto_detected_gas_cost =
             auto_detected_gas_cost.unwrap_or_else(|| BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
 
-        futures::FutureExt::flatten_stream(async move {
-            let router_venues = if fallback_router {
-                fetch_router_venues(rpc_url_from_env()).await
-            } else {
-                HashSet::new()
-            };
-            let mut tracker = SnapshotTracker::new(
-                registry,
-                denied,
-                tokens,
-                auto_detect,
-                auto_detected_gas_cost,
-                router_venues,
-            );
-
-            titan::messages(url, connection).filter_map(move |message| tracker.process(message))
-        })
-    }
-}
-
-/// The node URL the whitelist is read from: `RPC_URL` from the environment, falling back to
-/// `.env`.
-fn rpc_url_from_env() -> Option<String> {
-    std::env::var("RPC_URL")
-        .ok()
-        .or_else(|| {
-            dotenv::dotenv().ok()?;
-            std::env::var("RPC_URL").ok()
-        })
-}
-
-/// The PropAMMRouter's whitelisted venues, or an empty set when they cannot be read — no node
-/// URL, or a failed call. Both cases warn and leave every venue on the direct path, so a
-/// misconfigured deployment loses the Uniswap V3 fallback instead of losing the stream.
-async fn fetch_router_venues(rpc_url: Option<String>) -> HashSet<Bytes> {
-    let Some(rpc_url) = rpc_url else {
-        tracing::warn!(
-            "RPC_URL is not set; pAMM swaps execute on the venues directly, without the \
-             PropAMMRouter's Uniswap V3 fallback"
+        let mut tracker = SnapshotTracker::new(
+            registry,
+            denied,
+            tokens,
+            auto_detect,
+            auto_detected_gas_cost,
+            fallback_router,
         );
-        return HashSet::new();
-    };
-
-    match fetch_fallback_router_venues(&rpc_url).await {
-        Ok(venues) => venues.into_iter().collect(),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "Could not read the PropAMMRouter venue whitelist; pAMM swaps execute on the \
-                 venues directly, without the Uniswap V3 fallback"
-            );
-            HashSet::new()
-        }
+        titan::messages(url, connection).filter_map(move |message| tracker.process(message))
     }
 }
 
@@ -325,9 +267,9 @@ struct SnapshotTracker {
     auto_detect: bool,
     /// The per-swap gas cost synthesized auto-detected configurations are served with.
     auto_detected_gas_cost: BigUint,
-    /// Venues whose components are emitted under the `propammfallback:` family, so their swaps
-    /// execute through Titan's PropAMMRouter instead of the venue directly.
-    router_venues: HashSet<Bytes>,
+    /// Whether components are emitted under the `fallback:` family, so their swaps execute
+    /// through `TychoFallbackRouter` instead of the venue directly.
+    via_fallback_router: bool,
     /// Components of the last emitted snapshot, across all pAMMs. A frame is a complete
     /// snapshot of everything Titan currently streams, so removals are diffed globally: a
     /// known component a frame does not re-emit is gone — including when its venue vanishes
@@ -346,7 +288,7 @@ impl SnapshotTracker {
         tokens: HashMap<Bytes, Token>,
         auto_detect: bool,
         auto_detected_gas_cost: BigUint,
-        router_venues: HashSet<Bytes>,
+        via_fallback_router: bool,
     ) -> Self {
         Self {
             registry,
@@ -354,7 +296,7 @@ impl SnapshotTracker {
             tokens,
             auto_detect,
             auto_detected_gas_cost,
-            router_venues,
+            via_fallback_router,
             components: HashMap::new(),
             newest_block: 0,
         }
@@ -433,11 +375,14 @@ impl SnapshotTracker {
                 let component = previous
                     .remove(&id_string)
                     .unwrap_or_else(|| {
-                        let via_router = self
-                            .router_venues
-                            .contains(&config.address);
-                        let component =
-                            build_component(&self.tokens, config, id, &token0, &token1, via_router);
+                        let component = build_component(
+                            &self.tokens,
+                            config,
+                            id,
+                            &token0,
+                            &token1,
+                            self.via_fallback_router,
+                        );
                         new_pairs.insert(id_string.clone(), component.clone());
                         component
                     });
@@ -547,7 +492,7 @@ mod tests {
             tokens(),
             false,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::new(),
+            false,
         )
     }
 
@@ -731,7 +676,7 @@ mod tests {
             tokens(),
             false,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::new(),
+            false,
         );
         assert!(tracker
             .process(message(100, wbtc_usdc_pairs()))
@@ -747,7 +692,7 @@ mod tests {
             tokens(),
             true,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::new(),
+            false,
         );
         assert!(tracker
             .process(message(100, wbtc_usdc_pairs()))
@@ -820,7 +765,7 @@ mod tests {
             tokens(),
             true,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::new(),
+            false,
         );
         let update = tracker
             .process(message(100, wbtc_usdc_pairs()))
@@ -849,7 +794,7 @@ mod tests {
             tokens(),
             true,
             BigUint::from(42_000u64),
-            HashSet::new(),
+            false,
         );
         let update = tracker
             .process(message(100, wbtc_usdc_pairs()))
@@ -904,10 +849,10 @@ mod tests {
         }
     }
 
-    /// A venue on the router's whitelist is emitted under `propammfallback:{name}`, so its swaps
-    /// execute through Titan's PropAMMRouter; identity and attributes stay the same.
+    /// Components are emitted under `fallback:{name}`, so their swaps execute through
+    /// `TychoFallbackRouter`; identity and attributes are the same as on the direct path.
     #[test]
-    fn whitelisted_venue_is_served_under_the_fallback_family() {
+    fn venues_are_served_under_the_fallback_family() {
         let config = PriceLevelStreamConfig::new(
             "fermiswap",
             Bytes::from_str(PAMM).unwrap(),
@@ -919,7 +864,7 @@ mod tests {
             tokens(),
             false,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::from([Bytes::from_str(PAMM).unwrap()]),
+            true,
         );
 
         let update = tracker
@@ -927,23 +872,23 @@ mod tests {
             .expect("update expected");
 
         let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, "propammfallback:fermiswap");
+        assert_eq!(component.protocol_system, "fallback:fermiswap");
         assert_eq!(
             component.static_attributes[PAMM_ADDRESS_ATTRIBUTE],
             Bytes::from_str(PAMM).unwrap()
         );
     }
 
-    /// The whitelist check is by address, so it also covers auto-detected, address-named venues.
+    /// Auto-detected, address-named venues take the fallback family too.
     #[test]
-    fn auto_detected_whitelisted_venue_is_served_under_the_fallback_family() {
+    fn auto_detected_venue_is_served_under_the_fallback_family() {
         let mut tracker = SnapshotTracker::new(
             HashMap::new(),
             HashSet::new(),
             tokens(),
             true,
             BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::from([Bytes::from_str(PAMM).unwrap()]),
+            true,
         );
 
         let update = tracker
@@ -951,29 +896,13 @@ mod tests {
             .expect("update expected");
 
         let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, format!("propammfallback:{PAMM}"));
+        assert_eq!(component.protocol_system, format!("fallback:{PAMM}"));
     }
 
-    /// A venue absent from the whitelist keeps the direct `pricelevelstream:{name}` family — the
-    /// router reverts `UnknownVenue` for it, which would send every swap to the Uniswap V3
-    /// fallback.
+    /// Off the fallback router, a venue keeps the direct `pricelevelstream:{name}` family.
     #[test]
-    fn unwhitelisted_venue_keeps_the_direct_family() {
-        let other_venue =
-            Bytes::from_str("0x71e790dd841c8a9061487cb3e78c288e75ce0b3d").expect("valid address");
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        let mut tracker = SnapshotTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            HashSet::from([other_venue]),
-        );
+    fn without_fallback_router_keeps_the_direct_family() {
+        let mut tracker = tracker();
 
         let update = tracker
             .process(message(100, wbtc_usdc_pairs()))
@@ -982,7 +911,7 @@ mod tests {
         assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
     }
 
-    /// The PropAMMRouter path is the default; `without_fallback_router` is the way off it.
+    /// The fallback router path is the default; `without_fallback_router` is the way off it.
     #[test]
     fn fallback_router_is_on_unless_opted_out() {
         assert!(PriceLevelStreamBuilder::new().fallback_router);
@@ -993,33 +922,16 @@ mod tests {
         );
     }
 
-    /// Without a node URL there is nothing to read the whitelist from: every venue stays on the
-    /// direct path instead of the build failing.
-    #[tokio::test]
-    async fn missing_rpc_url_leaves_every_venue_on_the_direct_path() {
-        assert!(fetch_router_venues(None)
-            .await
-            .is_empty());
-    }
-
-    /// A failed whitelist read degrades the same way as a missing node URL.
-    #[tokio::test]
-    async fn failed_whitelist_read_leaves_every_venue_on_the_direct_path() {
-        assert!(fetch_router_venues(Some("not a url".to_string()))
-            .await
-            .is_empty());
-    }
-
     /// The families this stream emits are the ones tycho-execution resolves an encoder for. A
     /// drift between the two makes every route through a pAMM fail to encode.
     #[test]
     fn families_match_the_execution_side_prefixes() {
-        use tycho_execution::encoding::evm::{PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX};
+        use tycho_execution::encoding::evm::{FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX};
 
-        use super::super::config::{PRICE_LEVEL_STREAM_FAMILY, PROPAMM_FALLBACK_FAMILY};
+        use super::super::config::{FALLBACK_FAMILY, PRICE_LEVEL_STREAM_FAMILY};
 
         assert_eq!(format!("{PRICE_LEVEL_STREAM_FAMILY}:"), PRICE_LEVEL_STREAM_PREFIX);
-        assert_eq!(format!("{PROPAMM_FALLBACK_FAMILY}:"), PROPAMM_FALLBACK_PREFIX);
+        assert_eq!(format!("{FALLBACK_FAMILY}:"), FALLBACK_PREFIX);
     }
 
     #[test]

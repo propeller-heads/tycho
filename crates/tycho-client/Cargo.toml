@@ -53,3 +53,4 @@ mockall.workspace = true
 mockito.workspace = true
 tracing-subscriber = "0.3.17"
 test-log = { version = "0.2.14", features = ["trace"] }
+tokio = { workspace = true, features = ["test-util"] }

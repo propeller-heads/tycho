@@ -53,7 +53,7 @@ getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRout
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
-`IPropAMM` / `IPropAMMRouter` (the pAMM standard and Titan's fallback router) and `IUniversalRouter`.
+`IPropAMM` (the pAMM standard) and `IUniversalRouter`.
 
 ### Vault (`Vault.sol`)
 
@@ -147,8 +147,8 @@ Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo
 AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ), Hashflow (RFQ),
 Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other native wrappers),
 PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
-address travels in the swap data), PropAMMFallback (the same liquidity routed via Titan's PropAMMRouter), and
-Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol fallback").
+address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
+fallback").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
 
@@ -256,7 +256,9 @@ Constraints:
   static quoter from the script's own `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is
   missing. The `FallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
   `fallback` entry with the printed router address to `executor_deployments.json` and list `fallback` under the
-  chain. Not deployed anywhere yet.
+  chain. Deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`, executor
+  `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router `0xd38142E88f3d1011D8258737f257c709Dd0e2204`,
+  executor `0x08f22285d13533d68aA8bE5949536322DB3538De`).
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
@@ -383,26 +385,21 @@ resolve generically: a single `pricelevelstream` config entry serves the whole f
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
 `pricelevelstream:{protocol}` entries overriding per protocol.
 
-`propammfallback:{protocol}` is the same liquidity executed through Titan's PropAMMRouter
-(`0x4DdF368080CD7946db5b459aD591c350158175e1`, hardcoded in the executor) instead of the protocol
-directly, so a stale maker quote falls back to a single-hop Uniswap V3 pool rather than reverting
-the route. It resolves the same
-way (family key `propammfallback`, shared `PropAMMSwapEncoder`, `PropAMMFallbackExecutor`). Only protocols
-whitelisted on the PropAMMRouter may use the prefix.
-
 `fallback:{protocol}` is the same liquidity executed through `TychoFallbackRouter` (see "protocol
-fallback" above), which replaces the PropAMMRouter path: any pAMM qualifies, and the solver picks
-the fallback protocol per swap instead of the router owning one Uniswap V3 mapping. It resolves the
-same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
+fallback" above): any pAMM qualifies, and the solver picks the fallback protocol per swap. It
+resolves the same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
 one of Uniswap V2/V3/V4, Curve, Fluid V1 or Aerodrome V1 with its pool parameters — travels as JSON in the
 swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
 static attribute. The public `FallbackProtocol` enum (`swap_encoder::FallbackProtocol`) is the
 list other projects import: `from_protocol_system` maps a Tycho protocol name to the variant it
 encodes as (`UNISWAP_V2_FORKS`, `UNISWAP_V3_FORKS` and the Slipstreams deployments resolve to
 their base variant, `vm:curve` to Curve), `supported_on(chain)` says whether the chain's
-`TychoFallbackRouter` runs it, and `user_data_name` is the tag to write. The
-encoder rejects a protocol the chain's router does not run with an `InvalidInput` error instead
-of letting it revert on chain.
+`TychoFallbackRouter` runs it, and `user_data_name` is the tag to write. `FallbackSwapData`
+(`swap_encoder::FallbackSwapData`) is public too, one variant per protocol with the pool
+parameters the contract decodes: a solver builds the variant for the pool it picked and
+`serde_json` serializes it into the `user_data` the encoder reads back, so the JSON shape is
+defined once. The encoder rejects a protocol the chain's router does not run with an
+`InvalidInput` error instead of letting it revert on chain.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
@@ -417,8 +414,7 @@ fallback protocol means adding the variant, its `forks` arm, the `FallbackSwapDa
 the fields the contract decodes, that variant's arm in `FallbackSwapData::encode`, and its chains
 in `SUPPORTED_PROTOCOLS`. The encoder builds on any
 chain and takes no config. A Uniswap V4 fallback must name the zero hook and no hook data; hooked
-pools are not supported yet. No `fallback` entry ships in the executor configs until the
-FallbackExecutor is deployed.
+pools are not supported yet.
 
 ### Angstrom attestations (`evm/swap_encoder/angstrom.rs`)
 

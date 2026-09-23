@@ -1,7 +1,7 @@
 use std::{collections::HashMap, str::FromStr, sync::LazyLock};
 
 use alloy::sol_types::SolValue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 use tycho_common::{models::Chain, Bytes};
@@ -25,6 +25,9 @@ const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
 /// A protocol `TychoFallbackRouter` can fall back on. Mirrors the contract's `FallbackProtocol`
 /// enum: the discriminant is the protocol byte, and the snake-case variant name is the
 /// `fallback_protocol` tag in `user_data` and the [`FallbackSwapData`] variant name.
+///
+/// [`FallbackSwapData`] is the public half of that contract: a solver builds the variant for the
+/// pool it chose and serializes it into the swap's `user_data`.
 ///
 /// To add a protocol: add the variant last, matching the contract enum; a [`forks`](Self::forks)
 /// arm if it has forks; the [`FallbackSwapData`] variant of the same name; its
@@ -169,20 +172,29 @@ impl FallbackSwap {
     }
 }
 
-/// The protocol data after the protocol byte, one variant per [`FallbackProtocol`]. The fields
-/// are the `user_data` JSON fields.
-#[derive(Clone, Debug, Deserialize)]
+/// The fallback pool a `fallback:` swap names in its `user_data`, one variant per
+/// [`FallbackProtocol`].
+///
+/// Serializes to the JSON `FallbackSwapEncoder` reads, tagged `fallback_protocol` with the
+/// protocol's [`user_data_name`](FallbackProtocol::user_data_name), e.g.
+/// `{"fallback_protocol":"uniswap_v3","pool":"0x…"}`. A solver builds the variant for the pool it
+/// picked and puts `serde_json::to_vec(&data)` on the swap's `user_data`. The tag also accepts a
+/// fork's protocol system (`sushiswap_v2`, `vm:curve`) on the way in, which maps to the base
+/// variant.
+///
+/// Swap direction for the Uniswap family and Aerodrome follows from the swap's own tokens, so it
+/// is not carried here. Curve's coin indices and Fluid's `zero2one` are the pool's own ordering,
+/// which the encoder cannot recover from the tokens.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "fallback_protocol", rename_all = "snake_case")]
-enum FallbackSwapData {
-    UniswapV2 {
-        pair: Bytes,
-        fee_bps: u8,
-    },
-    UniswapV3 {
-        pool: Bytes,
-    },
-    /// Hooked pools are not supported yet: `hook` must be absent or the zero address and
-    /// `hook_data` absent or empty.
+pub enum FallbackSwapData {
+    /// A Uniswap V2 pair or fork. `fee_bps` is the pair's swap fee; the router accepts at most
+    /// 30.
+    UniswapV2 { pair: Bytes, fee_bps: u8 },
+    /// A Uniswap V3 pool, or a fork on Uniswap V3's `swap` and callback (Slipstreams included).
+    UniswapV3 { pool: Bytes },
+    /// A Uniswap V4 pool, identified by its key rather than an address. Hooked pools are not
+    /// supported yet: `hook` must be absent or the zero address and `hook_data` absent or empty.
     UniswapV4 {
         fee: u32,
         tick_spacing: i32,
@@ -191,19 +203,13 @@ enum FallbackSwapData {
         #[serde(default)]
         hook_data: Bytes,
     },
-    Curve {
-        pool: Bytes,
-        pool_type: u8,
-        i: u8,
-        j: u8,
-    },
-    FluidV1 {
-        dex: Bytes,
-        zero2one: bool,
-    },
-    AerodromeV1 {
-        pool: Bytes,
-    },
+    /// A Curve pool. `pool_type` picks the `exchange` signature the router calls; `i` and `j` are
+    /// the input and output coins' positions in the pool's own coin list.
+    Curve { pool: Bytes, pool_type: u8, i: u8, j: u8 },
+    /// A Fluid V1 dex. `zero2one` is `true` when the swap's input is the dex's token0.
+    FluidV1 { dex: Bytes, zero2one: bool },
+    /// An Aerodrome V1 pool.
+    AerodromeV1 { pool: Bytes },
 }
 
 impl FallbackSwapData {
@@ -673,6 +679,40 @@ mod tests {
         .unwrap();
 
         assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}04{dex}01"));
+    }
+
+    /// A solver builds `FallbackSwapData` and serializes it; the encoder reads that JSON back into
+    /// the same value and packs the bytes the contract expects. Optional V4 hook fields serialize
+    /// as empty and are accepted as the zero hook.
+    #[test]
+    fn test_serialized_fallback_swap_data_round_trips_through_the_encoder() {
+        let pool = Bytes::from(format!("0x{USDC_WETH_USV3}").as_str());
+        let cases = [
+            (FallbackSwapData::UniswapV3 { pool: pool.clone() }, format!("01{USDC_WETH_USV3}")),
+            (
+                FallbackSwapData::UniswapV4 {
+                    fee: 500,
+                    tick_spacing: 10,
+                    hook: Bytes::default(),
+                    hook_data: Bytes::default(),
+                },
+                "020001f400000a0000000000000000000000000000000000000000".to_string(),
+            ),
+            (
+                FallbackSwapData::Curve { pool: pool.clone(), pool_type: 1, i: 0, j: 2 },
+                format!("03{USDC_WETH_USV3}010002"),
+            ),
+        ];
+        for (data, expected_tail) in cases {
+            let json = serde_json::to_string(&data).unwrap();
+
+            let hex_swap = encode_usdc_weth(Some(&json)).unwrap();
+
+            assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}{expected_tail}"), "{json}");
+            let decoded =
+                FallbackSwap::from_user_data(&Some(Bytes::from(json.as_bytes()))).unwrap();
+            assert_eq!(decoded.data, data);
+        }
     }
 
     #[test]

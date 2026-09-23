@@ -10,7 +10,7 @@ mod ekubo_v3;
 mod erc_4626;
 mod etherfi;
 mod fallback;
-pub use fallback::FallbackProtocol;
+pub use fallback::{FallbackProtocol, FallbackSwapData};
 mod fermiswap;
 mod fluid_v1;
 mod hashflow;

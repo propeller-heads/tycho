@@ -16,9 +16,6 @@ import {
 import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
 import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
 import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
-import {
-    PropAMMFallbackExecutor
-} from "../src/executors/PropAMMFallbackExecutor.sol";
 import {FallbackExecutor} from "../src/executors/FallbackExecutor.sol";
 import {TychoFallbackRouter} from "../src/fallback/TychoFallbackRouter.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
@@ -142,7 +139,6 @@ contract TychoRouterTestSetup is
     RingSwapV2Executor public ringSwapV2Executor;
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
-    PropAMMFallbackExecutor public propAMMFallbackExecutor;
     SkyExecutor public skyExecutor;
     TychoFallbackRouter public fallbackRouter;
     FallbackExecutor public fallbackExecutor;
@@ -269,7 +265,6 @@ contract TychoRouterTestSetup is
         ringSwapV2Executor =
             new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
         propAMMExecutor = new PropAMMExecutor();
-        propAMMFallbackExecutor = new PropAMMFallbackExecutor();
         // Every executor's address here is deterministic from its deploy order, and the
         // Rust-generated calldata.txt hardcodes those addresses, so inserting a deployment
         // invalidates every entry after it. Add new deployments at the end of this block.
@@ -308,7 +303,7 @@ contract TychoRouterTestSetup is
         lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
 
         address[] memory executors = new address[](
-            29 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            28 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -336,10 +331,9 @@ contract TychoRouterTestSetup is
         executors[23] = address(bopAMMExecutor);
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
-        executors[26] = address(propAMMFallbackExecutor);
-        executors[27] = address(fallbackExecutor);
-        executors[28] = address(lidoV4Executor);
-        uint256 nextExecutorIndex = 29;
+        executors[26] = address(fallbackExecutor);
+        executors[27] = address(lidoV4Executor);
+        uint256 nextExecutorIndex = 28;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;
