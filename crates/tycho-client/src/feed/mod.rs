@@ -170,8 +170,9 @@ type BlockSyncResult<T> = Result<T, BlockSynchronizerError>;
 ///
 /// ## Synchronization Logic
 ///
-/// To classify a synchronizer as delayed, we need to first define the current block. The highest
-/// block number of all ready synchronizers is considered the current block.
+/// To classify a synchronizer as delayed, we need to first define the current block. The round
+/// advances by the revert its synchronizers delivered this round, the deepest one if there are
+/// several, and otherwise by the highest block among this round's messages.
 ///
 /// Once we have the current block we can easily determine which block we expect next. And if a
 /// synchronizer delivers an older block we can classify it as delayed.
@@ -968,7 +969,7 @@ where
             .any(SynchronizerStream::is_advanced)
         {
             *block_history = Self::reinit_block_history(sync_streams, block_history)?;
-        } else if let Some(header) = Self::select_round_header(ready_sync_msgs) {
+        } else if let Some(header) = Self::select_round_header(ready_sync_msgs, block_history) {
             if header.revert {
                 info!(%header, "RevertApplied");
             }
@@ -1047,17 +1048,25 @@ where
     /// round brings the rebuilt block at the same height, so some stream is always above it.
     /// A revert therefore wins the round, the deepest one if there are several, and the
     /// highest block wins otherwise.
-    fn select_round_header(
-        ready_sync_msgs: &HashMap<String, StateSyncMessage<BlockHeader>>,
-    ) -> Option<&BlockHeader> {
+    ///
+    /// A revert already at the tip is passed over. It has nothing left to undo, and a lagging
+    /// stream re-delivers it a round later — the round where another stream usually carries the
+    /// rebuilt block. Letting it win would suppress that block and freeze the tip.
+    fn select_round_header<'a>(
+        ready_sync_msgs: &'a HashMap<String, StateSyncMessage<BlockHeader>>,
+        block_history: &BlockHistory,
+    ) -> Option<&'a BlockHeader> {
+        let tip_hash = block_history
+            .latest()
+            .map(|header| header.hash.clone());
         let headers = ready_sync_msgs
             .values()
             .map(|msg| &msg.header);
         headers
             .clone()
-            .filter(|h| h.revert)
+            .filter(|h| h.revert && Some(&h.hash) != tip_hash.as_ref())
             .min_by_key(|h| h.number)
-            .or_else(|| headers.max_by_key(|h| h.number))
+            .or_else(|| headers.max_by_key(|h| (h.number, h.partial_block_index)))
     }
 
     /// Startup check: fails if no synchronizer is active (all Stale or Ended at init time).
@@ -2724,6 +2733,56 @@ mod tests {
         // read on to the deadline.
         let feed = receive_message(&mut rx).await;
         assert_ready_at(&feed, "uniswap-v3", 3, None);
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A revert already at the tip must not win the round: it applies to nothing, and pushing it
+    /// instead of the round's real advance freezes the tip. The next block then classifies
+    /// Advanced, the reinit finds a height gap and collapses the history to one block, which is
+    /// the state a later revert dies on.
+    #[test(tokio::test)]
+    async fn test_redelivered_revert_does_not_suppress_the_round() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+
+        // v2 reverts to block 2; v3 is silent and falls behind holding the revert in its queue.
+        v2.send_header(revert_header_message(2))
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 2, None);
+
+        // v3 re-delivers the revert in the round where v2 delivers the new fork's block 3.
+        let mut new_3 = header_message(3);
+        new_3.header.hash = Bytes::from(vec![0x33]);
+        v3.send_header(revert_header_message(2))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(new_3.clone())
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, None);
+
+        let mut block_4 = header_message(4);
+        block_4.header.parent_hash = new_3.header.hash.clone();
+        v2.send_header(block_4)
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 4, None);
+
+        // Undo block 4. The fork point is only reachable if the round above kept the history.
+        let mut revert_3 = revert_header_message(3);
+        revert_3.header.hash = new_3.header.hash.clone();
+        revert_3.header.parent_hash = Bytes::from(vec![0x02]);
+        v2.send_header(revert_3)
+            .await
+            .expect("v2 send failed");
+        let feed = receive_message(&mut rx).await;
+        assert_ready_at(&feed, "uniswap-v2", 3, None);
 
         shutdown_block_synchronizer(nanny, rx).await;
     }

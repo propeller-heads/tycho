@@ -675,7 +675,8 @@ mod test {
     /// dropped-partial indices. Both are the block already at the tip: Latest, and a no-op.
     #[rstest]
     #[case::same_dropped_index(4)]
-    #[case::other_dropped_index(1)]
+    #[case::lower_dropped_index(1)]
+    #[case::higher_dropped_index(7)]
     fn test_revert_equal_to_tip_is_latest_and_noop(#[case] redelivered_idx: u32) {
         let mut history = BlockHistory::new(generate_blocks(4, 0, None), 15).unwrap();
         history
