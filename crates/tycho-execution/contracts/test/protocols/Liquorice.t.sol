@@ -11,16 +11,109 @@ import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/// @dev Mirrors the deployed settlement at LIQUORICE_SETTLEMENT. The tuple shapes are what the
+///      selectors are derived from, so they must match the deployed ABI field for field.
 interface ILiquoriceSettlement {
+    struct BaseTokenData {
+        address addr;
+        uint256 amount;
+        uint256 toRecipient;
+        uint256 toRepay;
+        uint256 toSupply;
+        bool lockedCollateral;
+    }
+
+    struct QuoteTokenData {
+        address addr;
+        uint256 amount;
+        uint256 toTrader;
+        uint256 toWithdraw;
+        uint256 toBorrow;
+        bool lockedCollateral;
+    }
+
+    struct Order {
+        string rfqId;
+        uint256 nonce;
+        address trader;
+        address effectiveTrader;
+        uint256 quoteExpiry;
+        address recipient;
+        uint256 minFillAmount;
+        uint8 makerFlags;
+        BaseTokenData baseTokenData;
+        QuoteTokenData quoteTokenData;
+    }
+
+    struct Single {
+        string rfqId;
+        uint256 nonce;
+        address trader;
+        address effectiveTrader;
+        address baseToken;
+        address quoteToken;
+        uint256 baseTokenAmount;
+        uint256 quoteTokenAmount;
+        uint256 minFillAmount;
+        uint256 quoteExpiry;
+        address recipient;
+    }
+
+    struct Interaction {
+        address target;
+        uint256 value;
+        bytes callData;
+    }
+
+    struct Hooks {
+        Interaction[] beforeSettle;
+        Interaction[] afterSettle;
+    }
+
+    struct TypedSignature {
+        uint8 signatureType;
+        uint8 transferCommand;
+        bytes signatureBytes;
+    }
+
     function BALANCE_MANAGER() external view returns (address);
 
     function AUTHENTICATOR() external view returns (address);
+
+    function hashOrder(Order calldata order) external view returns (bytes32);
+
+    function hashSingleOrder(Single calldata order)
+        external
+        view
+        returns (bytes32);
+
+    function settle(
+        address signer,
+        uint256 filledTakerAmount,
+        Order calldata order,
+        Interaction[] calldata interactions,
+        Hooks calldata hooks,
+        TypedSignature calldata makerSignature,
+        TypedSignature calldata takerSignature
+    ) external;
+
+    function settleSingle(
+        address signer,
+        Single calldata order,
+        TypedSignature calldata makerSignature,
+        uint256 filledTakerAmount,
+        TypedSignature calldata takerSignature
+    ) external payable;
 }
 
 interface IAllowListAuthentication {
     function addSolver(address _solver) external;
 
     function addMaker(address _maker) external;
+
+    function isMaker(address _addr) external view returns (bool);
+
+    function isSolver(address _addr) external view returns (bool);
 }
 
 contract LiquoriceExecutorExposed is LiquoriceExecutor {
@@ -60,15 +153,22 @@ contract LiquoriceExecutorTest is Constants, Permit2TestHelper, TestUtils {
     IAllowListAuthentication authenticator;
     LiquoriceExecutorExposed liquoriceExecutor;
 
-    address constant AUTH_MANAGER = 0x000438801500c89E225E8D6CB69D9c14dD05e000;
+    uint256 constant MAKER_PK = 0xA11CE;
+    address maker;
 
-    address constant MAKER = 0x06465bcEEaef280Bb7340A58D75dfc5E1F687058;
-    uint256 constant FORK_BLOCK = 24_392_845;
+    // Signature.Type.EIP712 and Signature.TransferCommand.SIMPLE_TRANSFER on the settlement.
+    uint8 constant SIG_EIP712 = 3;
+    uint8 constant TRANSFER_SIMPLE = 1;
+    // Signature.MakerFlags.NONE: no lending-pool leg, so the order settles as a plain swap.
+    uint8 constant MAKER_FLAGS_NONE = 0;
+
+    uint256 constant FORK_BLOCK = 25_900_000;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("mainnet"), FORK_BLOCK);
 
         liquoriceSettlement = ILiquoriceSettlement(LIQUORICE_SETTLEMENT);
+        maker = vm.addr(MAKER_PK);
 
         liquoriceExecutor = new LiquoriceExecutorExposed(
             LIQUORICE_SETTLEMENT, LIQUORICE_BALANCE_MANAGER
@@ -76,186 +176,224 @@ contract LiquoriceExecutorTest is Constants, Permit2TestHelper, TestUtils {
         authenticator =
             IAllowListAuthentication(liquoriceSettlement.AUTHENTICATOR());
 
-        vm.prank(AUTH_MANAGER);
-        authenticator.addSolver(address(liquoriceExecutor));
-        vm.prank(AUTH_MANAGER);
-        authenticator.addMaker(MAKER);
+        // The settlement gates callers and makers behind its own allowlist, which is governed by
+        // Liquorice. Neither this executor nor the test maker is on it.
+        vm.mockCall(
+            address(authenticator),
+            abi.encodeWithSelector(
+                IAllowListAuthentication.isSolver.selector,
+                address(liquoriceExecutor)
+            ),
+            abi.encode(true)
+        );
+        vm.mockCall(
+            address(authenticator),
+            abi.encodeWithSelector(
+                IAllowListAuthentication.isMaker.selector, maker
+            ),
+            abi.encode(true)
+        );
 
-        vm.prank(MAKER);
+        vm.prank(maker);
         IERC20(WETH_ADDR).approve(LIQUORICE_BALANCE_MANAGER, type(uint256).max);
     }
 
-    function testSettleSingle() public {
-        // 3000 USDC -> 1 WETH
-        bytes memory liquoriceCalldata =
-            hex"9935c86800000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f68705800000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000024000000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000000000000000320000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f0000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006985036700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058000000000000000000000000000000000000000000000000000000000000000131000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000041883a6506193307eebda0f3adf2cb81f84a073e030749055ebb18cbf98704eef100a03c307266527d706f9a5c3e08ed0988f5b130bc5327e0ad62dde6f3709d251b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000";
-
-        address tokenIn = USDC_ADDR;
-        address tokenOut = WETH_ADDR;
-        uint32 partialFillOffset = 96;
-        uint256 amountIn = 3000e6;
-        uint256 expectedAmountOut = 1 ether;
-
-        deal(tokenOut, MAKER, expectedAmountOut);
-        deal(tokenIn, address(liquoriceExecutor), amountIn);
-
-        bytes memory params = abi.encodePacked(
-            tokenIn,
-            tokenOut,
-            partialFillOffset,
-            amountIn, // originalBaseTokenAmount
-            amountIn, // minBaseTokenAmount (same for full fill)
-            liquoriceCalldata
-        );
-
-        uint256 initialTokenOutBalance =
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor));
-        vm.prank(address(liquoriceExecutor));
-        IERC20(tokenIn).approve(LIQUORICE_BALANCE_MANAGER, amountIn);
-
-        liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
-
+    /// @dev The balance manager the router approves must be the one this settlement pulls through.
+    function testBalanceManagerBelongsToSettlement() public view {
         assertEq(
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor))
-                - initialTokenOutBalance,
-            expectedAmountOut,
-            "WETH should be at receiver"
-        );
-        assertEq(
-            IERC20(tokenIn).balanceOf(address(liquoriceExecutor)),
-            0,
-            "USDC left in executor"
+            liquoriceSettlement.BALANCE_MANAGER(),
+            LIQUORICE_BALANCE_MANAGER,
+            "balance manager is not this settlement's"
         );
     }
 
-    function testSettleSingle_PartialFill() public {
-        bytes memory liquoriceCalldata =
-            hex"9935c86800000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f68705800000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000024000000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000000000000000320000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f0000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006985036700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058000000000000000000000000000000000000000000000000000000000000000131000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000041883a6506193307eebda0f3adf2cb81f84a073e030749055ebb18cbf98704eef100a03c307266527d706f9a5c3e08ed0988f5b130bc5327e0ad62dde6f3709d251b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000";
+    function _singleOrder(uint256 amountIn, uint256 amountOut)
+        internal
+        view
+        returns (ILiquoriceSettlement.Single memory order)
+    {
+        order = ILiquoriceSettlement.Single({
+            rfqId: "tycho-test",
+            nonce: uint256(keccak256("tycho-test-single")),
+            trader: address(liquoriceExecutor),
+            effectiveTrader: address(liquoriceExecutor),
+            baseToken: USDC_ADDR,
+            quoteToken: WETH_ADDR,
+            baseTokenAmount: amountIn,
+            quoteTokenAmount: amountOut,
+            minFillAmount: 0,
+            quoteExpiry: block.timestamp + 1 hours,
+            recipient: maker
+        });
+    }
 
-        address tokenIn = USDC_ADDR;
-        address tokenOut = WETH_ADDR;
-        uint32 partialFillOffset = 96;
-        uint256 originalAmountIn = 3000e6;
-        uint256 amountIn = 1500e6;
-        uint256 minAmountIn = 1500e6;
-        uint256 expectedAmountOut = 0.5 ether;
+    function _order(uint256 amountIn, uint256 amountOut)
+        internal
+        view
+        returns (ILiquoriceSettlement.Order memory order)
+    {
+        order = ILiquoriceSettlement.Order({
+            rfqId: "tycho-test",
+            nonce: uint256(keccak256("tycho-test-order")),
+            trader: address(liquoriceExecutor),
+            effectiveTrader: address(liquoriceExecutor),
+            quoteExpiry: block.timestamp + 1 hours,
+            recipient: maker,
+            minFillAmount: 0,
+            makerFlags: MAKER_FLAGS_NONE,
+            baseTokenData: ILiquoriceSettlement.BaseTokenData({
+                addr: USDC_ADDR,
+                amount: amountIn,
+                toRecipient: amountIn,
+                toRepay: 0,
+                toSupply: 0,
+                lockedCollateral: false
+            }),
+            quoteTokenData: ILiquoriceSettlement.QuoteTokenData({
+                addr: WETH_ADDR,
+                amount: amountOut,
+                toTrader: amountOut,
+                toWithdraw: 0,
+                toBorrow: 0,
+                lockedCollateral: false
+            })
+        });
+    }
 
-        deal(tokenOut, MAKER, expectedAmountOut);
-        deal(tokenIn, address(liquoriceExecutor), amountIn);
+    function _sign(bytes32 digest)
+        internal
+        pure
+        returns (ILiquoriceSettlement.TypedSignature memory)
+    {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(MAKER_PK, digest);
+        return ILiquoriceSettlement.TypedSignature({
+            signatureType: SIG_EIP712,
+            transferCommand: TRANSFER_SIMPLE,
+            signatureBytes: abi.encodePacked(r, s, v)
+        });
+    }
+
+    /// @dev The taker signature is empty: the settlement then requires the caller to be the
+    ///      effective trader, which the executor is here and the router is in production.
+    function _emptyTakerSignature()
+        internal
+        pure
+        returns (ILiquoriceSettlement.TypedSignature memory)
+    {
+        return ILiquoriceSettlement.TypedSignature({
+            signatureType: SIG_EIP712,
+            transferCommand: TRANSFER_SIMPLE,
+            signatureBytes: ""
+        });
+    }
+
+    function _encodeSettleSingle(uint256 amountIn, uint256 amountOut)
+        internal
+        view
+        returns (bytes memory)
+    {
+        ILiquoriceSettlement.Single memory order =
+            _singleOrder(amountIn, amountOut);
+        return abi.encodeCall(
+            ILiquoriceSettlement.settleSingle,
+            (
+                maker,
+                order,
+                _sign(liquoriceSettlement.hashSingleOrder(order)),
+                amountIn,
+                _emptyTakerSignature()
+            )
+        );
+    }
+
+    function _encodeSettle(uint256 amountIn, uint256 amountOut)
+        internal
+        view
+        returns (bytes memory)
+    {
+        ILiquoriceSettlement.Order memory order = _order(amountIn, amountOut);
+        return abi.encodeCall(
+            ILiquoriceSettlement.settle,
+            (
+                maker,
+                amountIn,
+                order,
+                new ILiquoriceSettlement.Interaction[](0),
+                ILiquoriceSettlement.Hooks({
+                    beforeSettle: new ILiquoriceSettlement.Interaction[](0),
+                    afterSettle: new ILiquoriceSettlement.Interaction[](0)
+                }),
+                _sign(liquoriceSettlement.hashOrder(order)),
+                _emptyTakerSignature()
+            )
+        );
+    }
+
+    function _runSwap(
+        bytes memory liquoriceCalldata,
+        uint256 amountIn,
+        uint256 expectedAmountOut
+    ) internal {
+        _runSwap(
+            liquoriceCalldata,
+            0,
+            amountIn,
+            amountIn,
+            amountIn,
+            expectedAmountOut
+        );
+    }
+
+    /// @dev `partialFillOffset` of 0 tells the executor the quote cannot be partially filled, so
+    ///      it forwards the calldata unchanged.
+    function _runSwap(
+        bytes memory liquoriceCalldata,
+        uint32 partialFillOffset,
+        uint256 originalAmountIn,
+        uint256 amountIn,
+        uint256 minAmountIn,
+        uint256 expectedAmountOut
+    ) internal {
+        deal(WETH_ADDR, maker, expectedAmountOut);
+        deal(USDC_ADDR, address(liquoriceExecutor), amountIn);
 
         bytes memory params = abi.encodePacked(
-            tokenIn,
-            tokenOut,
+            USDC_ADDR,
+            WETH_ADDR,
             partialFillOffset,
             originalAmountIn,
             minAmountIn,
             liquoriceCalldata
         );
 
-        uint256 initialTokenOutBalance =
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor));
+        uint256 before = IERC20(WETH_ADDR).balanceOf(address(liquoriceExecutor));
         vm.prank(address(liquoriceExecutor));
-        IERC20(tokenIn).approve(LIQUORICE_BALANCE_MANAGER, amountIn);
+        IERC20(USDC_ADDR).approve(LIQUORICE_BALANCE_MANAGER, amountIn);
 
         liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
 
         assertEq(
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor))
-                - initialTokenOutBalance,
+            IERC20(WETH_ADDR).balanceOf(address(liquoriceExecutor)) - before,
             expectedAmountOut,
             "WETH should be at receiver"
         );
         assertEq(
-            IERC20(tokenIn).balanceOf(address(liquoriceExecutor)),
+            IERC20(USDC_ADDR).balanceOf(address(liquoriceExecutor)),
             0,
             "USDC left in executor"
         );
+    }
+
+    function testSettleSingle() public {
+        uint256 amountIn = 3000e6;
+        uint256 amountOut = 1 ether;
+        _runSwap(_encodeSettleSingle(amountIn, amountOut), amountIn, amountOut);
     }
 
     function testSettle() public {
-        bytes memory liquoriceCalldata =
-            hex"cba673a700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f68705800000000000000000000000000000000000000000000000000000000b2d05e0000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000038000000000000000000000000000000000000000000000000000000000000003a0000000000000000000000000000000000000000000000000000000000000042000000000000000000000000000000000000000000000000000000000000005000000000000000000000000000448633eb8b0a42efed924c42069e0dcf08fb5520000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000026000000000000000000000000000000000000000000000000000000000000000010000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f0000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f000000000000000000000000000000000000000000000000000000006985036700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f6870580000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000b2d05e0000000000000000000000000000000000000000000000000000000000b2d05e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000131000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000411d85c337d0e071eb601d8a90e2e8dd0afb61db200a1614c4afe5d26ff0c11bd402e018ab5fdbf8386437d7594af4383cf020a75c96e02c0a208f0b06e86115401b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000";
-
-        address tokenIn = USDC_ADDR;
-        address tokenOut = WETH_ADDR;
-        uint32 partialFillOffset = 32;
         uint256 amountIn = 3000e6;
-        uint256 expectedAmountOut = 1 ether;
-
-        deal(tokenOut, MAKER, expectedAmountOut);
-        deal(tokenIn, address(liquoriceExecutor), amountIn);
-
-        bytes memory params = abi.encodePacked(
-            tokenIn,
-            tokenOut,
-            partialFillOffset,
-            amountIn,
-            amountIn,
-            liquoriceCalldata
-        );
-
-        uint256 initialTokenOutBalance =
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor));
-        vm.prank(address(liquoriceExecutor));
-        IERC20(tokenIn).approve(LIQUORICE_BALANCE_MANAGER, amountIn);
-
-        liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
-
-        assertEq(
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor))
-                - initialTokenOutBalance,
-            expectedAmountOut,
-            "WETH should be at receiver"
-        );
-        assertEq(
-            IERC20(tokenIn).balanceOf(address(liquoriceExecutor)),
-            0,
-            "USDC left in executor"
-        );
-    }
-
-    function testSettle_PartialFill() public {
-        bytes memory liquoriceCalldata =
-            hex"cba673a700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000038000000000000000000000000000000000000000000000000000000000000003a0000000000000000000000000000000000000000000000000000000000000042000000000000000000000000000000000000000000000000000000000000005000000000000000000000000000448633eb8b0a42efed924c42069e0dcf08fb5520000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000026000000000000000000000000000000000000000000000000000000000000000010000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f0000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f000000000000000000000000000000000000000000000000000000006985036700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f6870580000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000b2d05e0000000000000000000000000000000000000000000000000000000000b2d05e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000041e89ad636a6d749213b9339ac5218229adaa53bdf96d457ee2cebfd4fd02909bf678953c976ceca7307ef2e73c5687c33738a6a1e4130e378d220b68d9c59e18b1b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000";
-
-        address tokenIn = USDC_ADDR;
-        address tokenOut = WETH_ADDR;
-        uint32 partialFillOffset = 32;
-        uint256 originalAmountIn = 3000e6;
-        uint256 amountIn = 1500e6;
-        uint256 minAmountIn = 1500e6;
-        uint256 expectedAmountOut = 0.5 ether;
-
-        deal(tokenOut, MAKER, expectedAmountOut);
-        deal(tokenIn, address(liquoriceExecutor), amountIn);
-
-        bytes memory params = abi.encodePacked(
-            tokenIn,
-            tokenOut,
-            partialFillOffset,
-            originalAmountIn,
-            minAmountIn,
-            liquoriceCalldata
-        );
-
-        uint256 initialTokenOutBalance =
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor));
-        vm.prank(address(liquoriceExecutor));
-        IERC20(tokenIn).approve(LIQUORICE_BALANCE_MANAGER, amountIn);
-
-        liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
-
-        assertEq(
-            IERC20(tokenOut).balanceOf(address(liquoriceExecutor))
-                - initialTokenOutBalance,
-            expectedAmountOut,
-            "WETH should be at receiver"
-        );
-        assertEq(
-            IERC20(tokenIn).balanceOf(address(liquoriceExecutor)),
-            0,
-            "USDC left in executor"
-        );
+        uint256 amountOut = 1 ether;
+        _runSwap(_encodeSettle(amountIn, amountOut), amountIn, amountOut);
     }
 
     function testDecodeData() public view {
@@ -327,6 +465,56 @@ contract LiquoriceExecutorTest is Constants, Permit2TestHelper, TestUtils {
         liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
     }
 
+    /// @dev `settle` on the settlement deployment preceding LIQUORICE_SETTLEMENT. Its calldata
+    ///      is shaped for a different Order struct, so forwarding it would corrupt the trade.
+    /// @dev The offsets are where `_filledTakerAmount` sits in each call's head: the fourth word
+    ///      for `settleSingle`, the second for `settle`. The executor overwrites it in place, and
+    ///      the settlement fills pro rata.
+    function testSettleSingle_PartialFill() public {
+        uint256 originalAmountIn = 3000e6;
+        uint256 amountIn = 1500e6;
+        _runSwap(
+            _encodeSettleSingle(originalAmountIn, 1 ether),
+            96,
+            originalAmountIn,
+            amountIn,
+            amountIn,
+            0.5 ether
+        );
+    }
+
+    function testSettle_PartialFill() public {
+        uint256 originalAmountIn = 3000e6;
+        uint256 amountIn = 1500e6;
+        _runSwap(
+            _encodeSettle(originalAmountIn, 1 ether),
+            32,
+            originalAmountIn,
+            amountIn,
+            amountIn,
+            0.5 ether
+        );
+    }
+
+    function testRetiredSettleSelectorIsRejected() public {
+        bytes memory retiredCalldata = abi.encodePacked(
+            bytes4(0xcba673a7),
+            hex"0000000000000000000000000000000000000000000000000000000000000000"
+        );
+
+        uint256 amountIn = 1000e6;
+        bytes memory params = abi.encodePacked(
+            USDC_ADDR, WETH_ADDR, uint32(0), amountIn, amountIn, retiredCalldata
+        );
+
+        deal(USDC_ADDR, address(liquoriceExecutor), amountIn);
+
+        vm.expectRevert(
+            LiquoriceExecutor.LiquoriceExecutor__InvalidSelector.selector
+        );
+        liquoriceExecutor.swap(amountIn, params, address(liquoriceExecutor));
+    }
+
     function testConstructor_NotAContract_Settlement() public {
         vm.expectRevert(
             LiquoriceExecutor.LiquoriceExecutor__NotAContract.selector
@@ -366,11 +554,10 @@ contract LiquoriceExecutorTest is Constants, Permit2TestHelper, TestUtils {
 contract TychoRouterForLiquoriceTest is TychoRouterTestSetup {
     using SafeERC20 for IERC20;
 
-    address constant AUTH_MANAGER = 0x000438801500c89E225E8D6CB69D9c14dD05e000;
     address constant MAKER = 0x06465bcEEaef280Bb7340A58D75dfc5E1F687058;
 
     function getForkBlock() public pure override returns (uint256) {
-        return 24392845;
+        return 25900000;
     }
 
     function setUp() public override {
@@ -378,13 +565,24 @@ contract TychoRouterForLiquoriceTest is TychoRouterTestSetup {
 
         ILiquoriceSettlement settlement =
             ILiquoriceSettlement(LIQUORICE_SETTLEMENT);
-        IAllowListAuthentication authenticator =
-            IAllowListAuthentication(settlement.AUTHENTICATOR());
+        address authenticator = settlement.AUTHENTICATOR();
 
-        vm.prank(AUTH_MANAGER);
-        authenticator.addSolver(address(tychoRouter));
-        vm.prank(AUTH_MANAGER);
-        authenticator.addMaker(MAKER);
+        // The settlement gates callers and makers behind Liquorice's own allowlist, which
+        // neither this router nor the fixture maker is on.
+        vm.mockCall(
+            authenticator,
+            abi.encodeWithSelector(
+                IAllowListAuthentication.isSolver.selector, address(tychoRouter)
+            ),
+            abi.encode(true)
+        );
+        vm.mockCall(
+            authenticator,
+            abi.encodeWithSelector(
+                IAllowListAuthentication.isMaker.selector, MAKER
+            ),
+            abi.encode(true)
+        );
 
         vm.prank(MAKER);
         IERC20(WETH_ADDR).approve(LIQUORICE_BALANCE_MANAGER, type(uint256).max);

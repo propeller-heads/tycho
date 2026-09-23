@@ -12,7 +12,8 @@
       "wsteth_address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
     },
     "book:liquorice": {
-      "balance_manager_address": "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
+      "settlement_address": "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8",
+      "balance_manager_address": "0x56B4720e40dF52C560E520238E34e9C33d57E593"
     },
     "book:native": {
       "router_v6": "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"
